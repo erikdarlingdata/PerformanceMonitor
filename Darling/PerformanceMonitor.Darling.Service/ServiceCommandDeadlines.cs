@@ -573,19 +573,31 @@ public static class ServiceCommandDeadlines
     /// at <b>30.0 s</b> with <c>Exception while reading from stream</c>: the 300 s was never reached,
     /// and the value that decided was the undocumented one.</para>
     ///
-    /// <para><b>ABOVE the worst case, which for this regime means ABOVE Npgsql's default.</b> Both
-    /// reads are unbounded across retention on <c>query_store_stats</c>, and both are in #2795's
-    /// production cancellation census: the candidate scan's own form <b>631 times in one day</b>, and
-    /// the <c>MIN</c>'s shape-twin <c>MAX</c> <b>2,092 times</b>, measured at <b>40,743-50,560 ms
-    /// cold</b> and 9,279 ms warm on the 62.5 GB / 19-chunk table. The candidate scan's
-    /// <c>collection_time &gt; now() - CandidateWindow</c> predicate is INERT: <c>CandidateWindow</c>
-    /// is 7 days while <c>TimescaleSupport.RawRetentionSpan</c> is 4, so no chunk that exists is ever
-    /// excluded — which is why a nominally bounded read is in that census at all. And the <c>MIN</c>
-    /// cannot be bounded the way #2344 and #2795 bounded their <c>MAX</c> siblings: it exists to find
-    /// the OLDEST stored row, so a <c>collection_time</c> floor would hide exactly what it looks for.
-    /// 120 s clears the twin's 50.6 s cold worst with 2.4x headroom. Both failures are swallowed at
-    /// <c>LogDebug</c> and return "no candidates" / "skip this database", which reads as no backfill
-    /// work — the silent-degradation shape of #2795 and #2796, one loop over.</para>
+    /// <para><b>ABOVE the worst case, which for this regime means ABOVE Npgsql's default.</b> AT THE
+    /// TIME, both reads were unbounded across retention on <c>query_store_stats</c>, and both are in
+    /// #2795's production cancellation census: the candidate scan's own form <b>631 times in one
+    /// day</b>, and the <c>MIN</c>'s shape-twin <c>MAX</c> <b>2,092 times</b>, measured at
+    /// <b>40,743-50,560 ms cold</b> and 9,279 ms warm on the 62.5 GB / 19-chunk table. The candidate
+    /// scan's <c>collection_time &gt; now() - CandidateWindow</c> predicate WAS inert: <c>CandidateWindow</c>
+    /// was 7 days while <c>TimescaleSupport.RawRetentionSpan</c> is 4, so no chunk that existed was ever
+    /// excluded — which is why a nominally bounded read was in that census at all. And the <c>MIN</c>
+    /// could not be bounded the way #2344 and #2795 bounded their <c>MAX</c> siblings: it exists to find
+    /// the OLDEST stored row, so a plain <c>collection_time</c> floor would have hidden exactly what it
+    /// looks for. 120 s clears the twin's 50.6 s cold worst with 2.4x headroom. Both failures are
+    /// swallowed at <c>LogDebug</c> and return "no candidates" / "skip this database", which reads as no
+    /// backfill work — the silent-degradation shape of #2795 and #2796, one loop over.</para>
+    ///
+    /// <para><b>#4197: both reads are now bounded, and this budget is a safety margin rather than the
+    /// expected cost.</b> The candidate scan binds <c>floorLimit</c> (<c>HorizonFor</c> — 23 hours on a
+    /// store with continuous aggregates, 3 days without) instead of the inert 7-day window, so it plans
+    /// against only the newest 1-2 chunks; on a rig's heavy server this took the read from 206 ms /
+    /// 21,411 buffers to 1.7-2.1 ms / under 800 buffers (see the PR body's measured table). The <c>MIN</c>
+    /// no longer needs to stay unbounded either: an <c>EXISTS ... collection_time &lt;= floorLimit LIMIT
+    /// 1</c> answers "is this database done" without a scan, and only the miss path falls through to a
+    /// MIN bounded at <c>collection_time &gt; floorLimit</c> — exact, because
+    /// <c>last_execution_time</c> never exceeds its own row's <c>collection_time</c>. 120 s is left
+    /// unchanged: it is now far above the typical case, which is the right side to err on for a budget
+    /// that only matters when a store is unhealthy.</para>
     ///
     /// <para><b>BELOW the point where the loop walks away from a live statement.</b> Strictly under the
     /// 300 s <c>BackfillSliceDeadline</c>, so the statement dies before the step abandons it and the
