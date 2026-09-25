@@ -227,12 +227,17 @@ public sealed class ViewerQueryHeatmapSqlTests
     public void HeatmapSql_KeepsLitesMagnitudeBuckets_Filters_And_Preview()
     {
         var sql = ViewerDataService.BuildQueryHeatmapSql(HeatmapMetric.Duration);
-        /* v_query_stats, not the base table (#1767): the cell preview is LEFT(query_text, 120), and the
-           base table's inline query_text is NULL on every row written since the migration — the heatmap
-           would render with blank previews rather than fail. */
-        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
+        /* #4233: base reads the fact table directly, not v_query_stats (#1767) - no row in the window
+           pays for the query_text_dim join or a preview truncation it will never be shown. The preview
+           is resolved only for the rn = 1 row of each cell: inline query_text when the row predates
+           #1767, the query_text_dim lookup when it does not (post-#1767 rows leave the inline column
+           NULL), truncated last - the same resolution v_query_stats performs, just not for every row. */
+        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(query_text, 120) AS query_preview", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "LEFT(COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)), 120) AS top_query_text",
+            sql, StringComparison.Ordinal);
         /* The 7-way log-magnitude CASE (only the boundaries are pinned). */
         Assert.Contains("WHEN metric_value < 1 THEN 0", sql, StringComparison.Ordinal);
         Assert.Contains("WHEN metric_value < 100000 THEN 5", sql, StringComparison.Ordinal);
@@ -269,10 +274,21 @@ public sealed class ViewerQuerySnapshotsSqlTests
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("query_text NOT LIKE 'WAITFOR%'", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time DESC, cpu_time_ms DESC", sql, StringComparison.Ordinal);
-        /* The plan columns the Estimated / Actual buttons bind are selected. */
-        Assert.Contains("query_plan", sql, StringComparison.Ordinal);
-        Assert.Contains("live_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY collection_time DESC, cpu_time_ms DESC, session_id, request_id", sql, StringComparison.Ordinal);
+
+        /* #4239: the Estimated / Actual plan buttons now gate on has-plan FLAGS, not the full plan XML — a
+           naive Assert.DoesNotContain("query_plan") would be fooled by "has_query_plan" being a superstring,
+           so split into lines and check no line is exactly the bare (no-longer-selected) column name. */
+        var columnLines = sql.Split('\n').Select(l => l.Trim().TrimEnd(',')).ToArray();
+        Assert.DoesNotContain("query_plan", columnLines);
+        Assert.DoesNotContain("live_query_plan", columnLines);
+        Assert.Contains("query_plan IS NOT NULL AS has_query_plan", sql, StringComparison.Ordinal);
+        Assert.Contains("live_query_plan IS NOT NULL AS has_live_query_plan", sql, StringComparison.Ordinal);
+
+        /* #4239: the Active-Queries grid caps to the newest 1,000 rows of the matched window; the trailing
+           window-function total backs the "showing newest 1,000 of N" note. */
+        Assert.Contains("COUNT(*) OVER () AS total_count", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 1000", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -339,12 +355,19 @@ public sealed class ViewerQuerySnapshotsSqlTests
 public sealed class ViewerActiveQueriesDisplayTests
 {
     [Fact]
-    public void QuerySnapshotRow_HasPlanFlags_GateOnNonEmptyPlanXml()
+    public void QuerySnapshotRow_HasPlanFlags_AreIndependentOfPlanXml()
     {
+        /* #4239: HasQueryPlan/HasLiveQueryPlan are now plain settable flags, not computed from
+           QueryPlan/LiveQueryPlan — a stored-row read sets them from the store's has_query_plan /
+           has_live_query_plan presence columns while leaving QueryPlan/LiveQueryPlan null (fetched later,
+           on demand); only the live DMV path sets both the flag AND the XML together. So setting QueryPlan
+           alone must no longer imply HasQueryPlan, and the flags must be settable independently of the XML. */
         Assert.False(new ViewerQuerySnapshotRow().HasQueryPlan);
         Assert.False(new ViewerQuerySnapshotRow().HasLiveQueryPlan);
-        Assert.True(new ViewerQuerySnapshotRow { QueryPlan = "<ShowPlanXML/>" }.HasQueryPlan);
-        Assert.True(new ViewerQuerySnapshotRow { LiveQueryPlan = "<ShowPlanXML/>" }.HasLiveQueryPlan);
+        Assert.False(new ViewerQuerySnapshotRow { QueryPlan = "<ShowPlanXML/>" }.HasQueryPlan);
+        Assert.False(new ViewerQuerySnapshotRow { LiveQueryPlan = "<ShowPlanXML/>" }.HasLiveQueryPlan);
+        Assert.True(new ViewerQuerySnapshotRow { HasQueryPlan = true }.HasQueryPlan);
+        Assert.True(new ViewerQuerySnapshotRow { HasLiveQueryPlan = true }.HasLiveQueryPlan);
     }
 
     [Fact]
@@ -392,6 +415,8 @@ public sealed class ViewerQueriesRestLivePostgresTests
     private const int HeatmapServerId = -970812;
     private const int SnapshotServerId = -970813;
     private const int SlicerServerId = -970814;
+    private const int PlanFetchServerId = -970815;
+    private const int SnapshotCapServerId = -970816;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
@@ -490,6 +515,10 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal(1.0, result.Intensities[0, 0]);              /* bucket 0: 0xLOW */
             Assert.Equal("0xHOT", result.CellDetails[2, 0].TopQueryHash); /* ARG_MAX replacement: higher delta_exec wins */
             Assert.Equal("0xLOW", result.CellDetails[0, 0].TopQueryHash);
+            /* #4233: the preview still resolves end-to-end through the C# reader for the winning row,
+               even though base no longer carries a pre-truncated column. */
+            Assert.Equal("SELECT hot", result.CellDetails[2, 0].TopQueryText);
+            Assert.Equal("SELECT low", result.CellDetails[0, 0].TopQueryText);
             /* 0xZERO (delta_exec = 0) contributed to no cell. */
             Assert.Equal(0.0, result.Intensities[6, 0]);
 
@@ -527,9 +556,10 @@ public sealed class ViewerQueriesRestLivePostgresTests
             await InsertQuerySnapshotAsync(connection, SnapshotServerId, newer, spid: 52, cpu: 500, hash: "0xB2", queryText: "SELECT mid");
             await InsertQuerySnapshotAsync(connection, SnapshotServerId, newer, spid: 53, cpu: 900, hash: "0xB3", queryText: "SELECT hot");
 
-            var rows = await viewer.GetLatestQuerySnapshotsAsync(SnapshotServerId, start, end);
+            var (totalCount, rows) = await viewer.GetLatestQuerySnapshotsAsync(SnapshotServerId, start, end);
 
             Assert.Equal(3, rows.Count);                       /* WAITFOR excluded */
+            Assert.Equal(3, totalCount);                       /* #4239: pre-cap total matches row count (well under the 1,000 cap) */
             Assert.DoesNotContain(rows, r => r.QueryHash == "0xWAIT");
             Assert.Equal(53, rows[0].SessionId);               /* newest batch, highest cpu first */
             Assert.Equal(52, rows[1].SessionId);
@@ -548,6 +578,140 @@ public sealed class ViewerQueriesRestLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "query_snapshots", SnapshotServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4239's own live facts (the plan's "Tests" section): the has-plan flags read back exactly what was
+    /// seeded, and <see cref="ViewerDataService.GetQuerySnapshotPlanXmlAsync"/> round-trips byte-identical
+    /// XML for both the estimated and the live plan by each row's natural key — including row C, whose
+    /// <c>request_id</c> is NULL in the store. Row C is also the COALESCE fix's own regression pin: its
+    /// <c>RequestId</c> reads back as 0 (the reader's NULL-to-0 mapping), so the fetch below only finds it
+    /// if the SQL matches <c>COALESCE(request_id, 0) = $4</c> rather than a plain <c>request_id = $4</c>,
+    /// which can never match a NULL column.
+    /// </summary>
+    [Fact]
+    public async Task QuerySnapshotPlan_FlagsMatchSeeded_AndFetchRoundTripsByteIdentical_IncludingNullRequestId_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live plan-fetch test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_snapshots", PlanFetchServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        var end = TruncateToSeconds(DateTime.UtcNow);
+        var start = end.AddHours(-24);
+        var t = start.AddHours(1);
+
+        const string estimatedXmlA = "<ShowPlanXML><EstimatedA/></ShowPlanXML>";
+        const string estimatedXmlC = "<ShowPlanXML><EstimatedC/></ShowPlanXML>";
+        const string liveXmlC = "<ShowPlanXML><LiveC/></ShowPlanXML>";
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Row A: estimated plan only, an ordinary request_id. */
+            await InsertQuerySnapshotAsync(connection, PlanFetchServerId, t, spid: 71, cpu: 100, hash: "0xPA", queryText: "SELECT a",
+                queryPlan: estimatedXmlA, liveQueryPlan: null, requestId: 501);
+            /* Row B: no plan captured at all. */
+            await InsertQuerySnapshotAsync(connection, PlanFetchServerId, t, spid: 72, cpu: 200, hash: "0xPB", queryText: "SELECT b",
+                queryPlan: null, liveQueryPlan: null, requestId: 502);
+            /* Row C: both plans, NULL request_id. */
+            await InsertQuerySnapshotAsync(connection, PlanFetchServerId, t, spid: 73, cpu: 300, hash: "0xPC", queryText: "SELECT c",
+                queryPlan: estimatedXmlC, liveQueryPlan: liveXmlC, requestId: null);
+
+            var (totalCount, rows) = await viewer.GetLatestQuerySnapshotsAsync(PlanFetchServerId, start, end);
+
+            Assert.Equal(3, totalCount);
+            Assert.Equal(3, rows.Count);
+
+            var rowA = Assert.Single(rows, r => r.SessionId == 71);
+            Assert.True(rowA.HasQueryPlan);
+            Assert.False(rowA.HasLiveQueryPlan);
+            Assert.Null(rowA.QueryPlan);       /* a stored-row read never carries plan XML in-row (#4239) */
+            Assert.Null(rowA.LiveQueryPlan);
+            Assert.Equal(501, rowA.RequestId);
+
+            var rowB = Assert.Single(rows, r => r.SessionId == 72);
+            Assert.False(rowB.HasQueryPlan);
+            Assert.False(rowB.HasLiveQueryPlan);
+
+            var rowC = Assert.Single(rows, r => r.SessionId == 73);
+            Assert.True(rowC.HasQueryPlan);
+            Assert.True(rowC.HasLiveQueryPlan);
+            Assert.Equal(0, rowC.RequestId);   /* NULL request_id reads back as 0 (ReadQuerySnapshotRow, ordinal 34) */
+
+            var fetchedA_estimated = await viewer.GetQuerySnapshotPlanXmlAsync(PlanFetchServerId, rowA.CollectionTime, rowA.SessionId, rowA.RequestId, live: false);
+            Assert.Equal(estimatedXmlA, fetchedA_estimated);
+
+            /* #4239 regression pin: row C's request_id is NULL in the store; the fetch must
+               COALESCE(request_id, 0) to find it, since a plain "request_id = $4" bind (0) never matches NULL. */
+            var fetchedC_estimated = await viewer.GetQuerySnapshotPlanXmlAsync(PlanFetchServerId, rowC.CollectionTime, rowC.SessionId, rowC.RequestId, live: false);
+            Assert.Equal(estimatedXmlC, fetchedC_estimated);
+            var fetchedC_live = await viewer.GetQuerySnapshotPlanXmlAsync(PlanFetchServerId, rowC.CollectionTime, rowC.SessionId, rowC.RequestId, live: true);
+            Assert.Equal(liveXmlC, fetchedC_live);
+
+            /* Row B never captured a plan -- the fetch's own "AND <col> IS NOT NULL" guard returns null,
+               not an empty string. */
+            var fetchedB_estimated = await viewer.GetQuerySnapshotPlanXmlAsync(PlanFetchServerId, rowB.CollectionTime, rowB.SessionId, rowB.RequestId, live: false);
+            Assert.Null(fetchedB_estimated);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_snapshots", PlanFetchServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4239's cap live fact: seeding past <c>MaxLatestQuerySnapshotRows</c> (1,000) returns the FULL
+    /// pre-cap match count in <c>TotalCount</c> while <c>Rows</c> itself stays capped at 1,000, newest
+    /// first — the one-off case a string pin on the SQL text cannot prove (it cannot see how Postgres
+    /// actually orders and trims 1,001 rows).
+    /// </summary>
+    [Fact]
+    public async Task QuerySnapshots_SeedingPastTheCap_ReturnsFullTotalCount_AndTrimsToNewestThousand_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live snapshot-cap test.");
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "query_snapshots", SnapshotCapServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(cs!);
+        const int seedCount = 1_001;
+        var start = TruncateToSeconds(DateTime.UtcNow).AddHours(-1);
+        var end = start.AddSeconds(seedCount + 10);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* One INSERT .. generate_series, not 1,001 round trips: gs runs 1..1001, one second apart, so
+               collection_time DESC is a deterministic total order. session_id = 1000 + gs, so the newest row
+               (gs = 1001) is session 2001 and the oldest is session 1001. */
+            await InsertQuerySnapshotCapBatchAsync(connection, SnapshotCapServerId, start, seedCount);
+
+            var (totalCount, rows) = await viewer.GetLatestQuerySnapshotsAsync(SnapshotCapServerId, start, end);
+
+            Assert.Equal(seedCount, totalCount);                     /* total_count is the pre-cap match */
+            Assert.Equal(1_000, rows.Count);                         /* LIMIT 1000 caps the returned rows */
+            Assert.Equal(1000 + seedCount, rows[0].SessionId);       /* newest (gs = 1001) sorts first */
+            Assert.Equal(1_002, rows[^1].SessionId);                 /* oldest KEPT row is gs = 2 */
+            Assert.DoesNotContain(rows, r => r.SessionId == 1_001);  /* gs = 1, the very oldest, was trimmed */
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "query_snapshots", SnapshotCapServerId, cleanupCt));
         }
     }
 
@@ -620,16 +784,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", connection);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
+    /// <summary>Seeds one <c>query_snapshots</c> row. <paramref name="queryPlan"/> / <paramref name="liveQueryPlan"/>
+    /// / <paramref name="requestId"/> are optional (default NULL, matching a row with no captured plan or a
+    /// pre-request_id collector gap) — #4239's live facts pass them to prove the has-plan flags and the
+    /// on-demand fetch both round-trip what was seeded, including a NULL request_id (the #4239 COALESCE fix).</summary>
     private static async Task InsertQuerySnapshotAsync(
-        NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, int spid, long cpu, string hash, string queryText)
+        NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, int spid, long cpu, string hash, string queryText,
+        string? queryPlan = null, string? liveQueryPlan = null, int? requestId = null)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO query_snapshots
     (collection_id, collection_time, server_id, server_name,
      session_id, database_name, query_text, status,
      cpu_time_ms, total_elapsed_time_ms, reads, writes, logical_reads,
-     wait_type, query_hash)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)", connection);
+     wait_type, query_hash, query_plan, live_query_plan, request_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)", connection);
         command.Parameters.AddWithValue(1L);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(serverId);
@@ -645,6 +814,47 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)", conn
         command.Parameters.AddWithValue(20L);
         command.Parameters.AddWithValue("CXPACKET");
         command.Parameters.AddWithValue(hash);
+        command.Parameters.AddWithValue((object?)queryPlan ?? DBNull.Value);
+        command.Parameters.AddWithValue((object?)liveQueryPlan ?? DBNull.Value);
+        command.Parameters.AddWithValue((object?)requestId ?? DBNull.Value);
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>Seeds <paramref name="count"/> <c>query_snapshots</c> rows in one round trip (not <paramref
+    /// name="count"/> of them) — the #4239 cap live fact needs 1,001+ rows, and a round trip per row would
+    /// make that fact slow for no benefit — <see cref="InsertQuerySnapshotAsync"/>'s per-row helper already
+    /// exercises the ordinary insert path elsewhere. <c>gs</c> runs 1..<paramref name="count"/>, one second
+    /// apart starting at <paramref name="baseTimeUtc"/>, so <c>collection_time DESC</c> is a deterministic
+    /// total order with no ties to break; <c>session_id = 1000 + gs</c> lets a caller identify which row
+    /// survived the cap without re-deriving a timestamp.</summary>
+    private static async Task InsertQuerySnapshotCapBatchAsync(NpgsqlConnection connection, int serverId, DateTime baseTimeUtc, int count)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO query_snapshots
+    (collection_id, collection_time, server_id, server_name,
+     session_id, database_name, query_text, status,
+     cpu_time_ms, total_elapsed_time_ms, reads, writes, logical_reads,
+     wait_type, query_hash)
+SELECT
+    1,
+    $2 + (gs || ' seconds')::interval,
+    $1,
+    'viewer-snapshots-cap-e2e',
+    1000 + gs,
+    'StackOverflow',
+    'SELECT cap ' || gs,
+    'running',
+    gs,
+    gs * 2,
+    10,
+    0,
+    20,
+    'CXPACKET',
+    '0xCAP' || gs
+FROM generate_series(1, $3) AS gs", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(baseTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(count);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 

@@ -114,8 +114,9 @@ public partial class WaitDrillDownWindow : Window
     private async Task LoadCorrelatedDataAsync(WaitClassification classification)
     {
         /* Fetch ALL queries in the range (no wait-type filter) — the correlated waits are too brief to
-           show as the waiter's own wait_type. */
-        var data = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, _fromUtc, _toUtc);
+           show as the waiter's own wait_type. #4239: capped to the newest 1,000 of the window; TotalCount is
+           the pre-cap match count so the note below only appears when the cap actually trimmed something. */
+        var (totalCount, data) = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, _fromUtc, _toUtc);
         if (data.Count == 0)
         {
             SummaryText.Text = "No query snapshots found in the selected time range.";
@@ -124,7 +125,8 @@ public partial class WaitDrillDownWindow : Window
 
         data = SortByProperty(data, classification.SortProperty);
         _filterManager.UpdateData(data);
-        SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(data)}";
+        SummaryText.Text = $"{data.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(data)}" +
+            (data.Count < totalCount ? $" | showing newest 1,000 of {totalCount:N0}" : "");
         ApplyInitialSort(classification.SortProperty);
     }
 
@@ -137,14 +139,18 @@ public partial class WaitDrillDownWindow : Window
             return;
         }
 
-        var allSnapshots = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, _fromUtc, _toUtc);
+        /* #4239: allSnapshots is now capped to the newest 1,000 of the window (see LoadCorrelatedDataAsync) —
+           the chain walk below only sees those rows, so a head blocker whose own snapshot falls outside the
+           newest 1,000 is missed. truncationNote surfaces that instead of silently absorbing it. */
+        var (allTotalCount, allSnapshots) = await _dataService.GetLatestQuerySnapshotsAsync(_serverId, _fromUtc, _toUtc);
+        var truncationNote = allSnapshots.Count < allTotalCount ? $" | showing newest 1,000 of {allTotalCount:N0} snapshots" : "";
 
         var headBlockerInfos = WalkBlockingChains(waiters.Select(ToSnapshotInfo), allSnapshots.Select(ToSnapshotInfo));
 
         if (headBlockerInfos.Count == 0)
         {
             _filterManager.UpdateData(waiters);
-            SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(waiters)} | No blocking chains found, showing waiters";
+            SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(waiters)} | No blocking chains found, showing waiters{truncationNote}";
             return;
         }
 
@@ -167,13 +173,13 @@ public partial class WaitDrillDownWindow : Window
         if (headBlockerRows.Count == 0)
         {
             _filterManager.UpdateData(waiters);
-            SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(waiters)} | Head blockers not in snapshots, showing waiters";
+            SummaryText.Text = $"{waiters.Count} snapshot(s) | {classification.Description} | {GetTimeRangeDescription(waiters)} | Head blockers not in snapshots, showing waiters{truncationNote}";
             return;
         }
 
         InsertChainColumn();
         _filterManager.UpdateData(headBlockerRows);
-        SummaryText.Text = $"{headBlockerRows.Count} head blocker(s) from {waiters.Count} waiting session(s) | {classification.Description} | {GetTimeRangeDescription(headBlockerRows)}";
+        SummaryText.Text = $"{headBlockerRows.Count} head blocker(s) from {waiters.Count} waiting session(s) | {classification.Description} | {GetTimeRangeDescription(headBlockerRows)}{truncationNote}";
     }
 
     /// <summary>Inserts the "Blocking Path" chain column at the front (Lite's InsertChainColumns —
@@ -352,11 +358,21 @@ public partial class WaitDrillDownWindow : Window
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not ViewerQuerySnapshotRow row) return;
 
-        /* Prefer the stored ACTUAL (live) plan; fall through to the estimated plan on null OR empty (an empty
-           live_query_plan is "not captured", not a plan). Label names whichever one is actually shown —
-           mirrors the Active Queries grid's separate Estimated / Live buttons. */
-        var isActual = !string.IsNullOrEmpty(row.LiveQueryPlan);
-        var planXml = isActual ? row.LiveQueryPlan : row.QueryPlan;
+        string? planXml;
+        bool isActual;
+        try
+        {
+            (planXml, isActual) = await FetchSnapshotPlanAsync(row);
+        }
+        catch (Exception ex)
+        {
+            /* #4239: FetchSnapshotPlanAsync is a Postgres round-trip inside an async void handler — an
+               unguarded await here would let a store error (connection drop, timeout) reach the dispatcher
+               as an unhandled exception. Same fetch-failure idiom as ViewerServerTab.Plans.cs. */
+            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
         if (string.IsNullOrEmpty(planXml))
         {
             MessageBox.Show(this,
@@ -386,11 +402,33 @@ public partial class WaitDrillDownWindow : Window
         window.Closed += (_, _) => viewer.Cleanup();
     }
 
+    /// <summary>
+    /// Fetches this row's plan by its natural key, preferring the stored ACTUAL (live) plan and falling back
+    /// to the estimated plan — mirrors the original in-row preference (<c>row.LiveQueryPlan ?? row.QueryPlan</c>).
+    /// WaitDrillDownWindow's rows only ever come from the two store reads (<c>GetQuerySnapshotsByWaitTypeAsync</c>
+    /// / <c>GetLatestQuerySnapshotsAsync</c>), never the live DMV path, so — unlike the Active Queries grid's
+    /// live "Current Active Queries" sub-tab — there is no in-row plan to check first (#4239).
+    /// </summary>
+    private async Task<(string? PlanXml, bool IsActual)> FetchSnapshotPlanAsync(ViewerQuerySnapshotRow row)
+    {
+        if (row.HasLiveQueryPlan)
+        {
+            var live = await _dataService.GetQuerySnapshotPlanXmlAsync(_serverId, row.CollectionTime, row.SessionId, row.RequestId, live: true);
+            if (!string.IsNullOrEmpty(live)) return (live, true);
+        }
+        if (row.HasQueryPlan)
+        {
+            var est = await _dataService.GetQuerySnapshotPlanXmlAsync(_serverId, row.CollectionTime, row.SessionId, row.RequestId, live: false);
+            return (est, false);
+        }
+        return (null, false);
+    }
+
     /// <summary>"Get Actual Plan" — asks the SERVICE to RE-EXECUTE the RIGHT-CLICKED snapshot's captured query
     /// (SET STATISTICS XML) and floats the captured actual plan. Identifier-only: the service resolves the text
-    /// from query_snapshots by (collection_time, session_id). The snapshot carries its plan in-row, used for the
-    /// data-modification detection. Shared consent + flag + read-only guard via <see cref="ViewerActualPlanFlow"/>.
-    /// Re-executing a snapshot's mid-flight statement carries the usual side-effect risk — the consent gate owns it.</summary>
+    /// from query_snapshots by (collection_time, session_id). Shared consent + flag + read-only guard via
+    /// <see cref="ViewerActualPlanFlow"/>. Re-executing a snapshot's mid-flight statement carries the usual
+    /// side-effect risk — the consent gate owns it.</summary>
     private async void GetActualPlan_Click(object sender, RoutedEventArgs e)
     {
         if ((ResultsDataGrid.CurrentItem ?? ResultsDataGrid.SelectedItem) is not ViewerQuerySnapshotRow row) return;
@@ -401,9 +439,23 @@ public partial class WaitDrillDownWindow : Window
             return;
         }
 
-        /* The snapshot carries its plan in-row — use it for modification detection (the service re-resolves the
-           query text by the (collection_time, session_id) key when it executes). */
-        var estimatedPlanXml = row.LiveQueryPlan ?? row.QueryPlan;
+        /* #4239: fetch the row's stored plan BEFORE the modification-detection gate below — a stored-row read
+           no longer carries plan XML in-row, so without this fetch estimatedPlanXml would always be null and
+           every snapshot would show as "may modify data" regardless of what was actually captured. A null
+           RESULT here (truly no plan was captured for this request) still fails safe to "may modify" — the
+           one deliberate behavior change from before #4239, called out in the PR body. A thrown EXCEPTION
+           (store error) is different: it aborts the whole re-execute flow below rather than silently falling
+           through to "may modify", since the fetch failure means the modification check itself is unreliable. */
+        string? estimatedPlanXml;
+        try
+        {
+            (estimatedPlanXml, _) = await FetchSnapshotPlanAsync(row);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Failed to retrieve plan: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
         var argsJson = ViewerDataService.BuildActualPlanArgsForSnapshot(row.CollectionTime, row.SessionId, row.DatabaseName);
         var label = $"Actual Plan - SPID {row.SessionId}";
 

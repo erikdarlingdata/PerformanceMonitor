@@ -148,6 +148,19 @@ public sealed class ViewerPlanHostGatingTests
         Assert.True(new ViewerQueryStatsRow { HasQueryPlan = true }.HasQueryPlan);
     }
 
+    /// <summary>#4239: ViewerQuerySnapshotRow's plan flags now follow the same independently-settable pattern
+    /// as ViewerQueryStatsRow above (a stored-row read sets the flag from the store's presence column while
+    /// leaving the XML null; only the live DMV path sets both together) — this class had no snapshot-row
+    /// case before.</summary>
+    [Fact]
+    public void QuerySnapshotRow_PlanFlags_DefaultFalse_SettableIndependentlyOfPlanXml()
+    {
+        Assert.False(new ViewerQuerySnapshotRow().HasQueryPlan);
+        Assert.False(new ViewerQuerySnapshotRow().HasLiveQueryPlan);
+        Assert.True(new ViewerQuerySnapshotRow { HasQueryPlan = true }.HasQueryPlan);
+        Assert.True(new ViewerQuerySnapshotRow { HasLiveQueryPlan = true }.HasLiveQueryPlan);
+    }
+
     [Fact]
     public void BlockedProcessRow_PlanFlags_DefaultFalse_GateBlockedAndBlockingIndependently()
     {

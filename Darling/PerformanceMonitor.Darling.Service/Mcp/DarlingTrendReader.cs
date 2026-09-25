@@ -747,7 +747,7 @@ internal static class DarlingTrendReader
     /// denominator is the bucket width, known for every bucket.</para>
     /// </summary>
     public static readonly string QueryDurationTrendSql =
-        DurationTrendRouting.BuildBucketedRawTrendSql("query_stats");
+        DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false);
 
     /* ───────────── the tier ladder and the hourly-tier SQL: aliases of DurationTrendRouting (#3653) ─────────────
 
@@ -992,7 +992,7 @@ internal static class DarlingTrendReader
     /// builder's remarks carry it once for both tables.</para>
     /// </summary>
     public static readonly string ProcedureDurationTrendSql =
-        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats");
+        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: false);
 
     /// <summary>
     /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from

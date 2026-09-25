@@ -382,6 +382,12 @@ public sealed class AlertReadFailureSurfaceTests
 
         var counter = new AlertReadFailureCounter();
 
+        /* Seeded before the writers start, as TheNewestFailuresFactsAreNeverABlendOfTwo seeds its bucket
+           (#4312): every observation then sees both parts nonzero, so the liveness check below cannot fail on
+           a reader the scheduler starved until the writers had finished. */
+        counter.RecordReadFailure(Key, "deadlocks", 10);
+        counter.RecordReadFailure(null, "deadlocks", 20);
+
         var writers = new[] { "deadlocks", "mute-rule reload" }
             .Select(name => Task.Factory.StartNew(
                 () =>
@@ -403,7 +409,7 @@ public sealed class AlertReadFailureSurfaceTests
         var observations = 0;
         var observedBothParts = 0;
 
-        while (!writers.All(w => w.IsCompleted))
+        do
         {
             var reading = counter.ReadFor(Key);
             observations++;
@@ -423,12 +429,15 @@ public sealed class AlertReadFailureSurfaceTests
                 observedBothParts++;
             }
         }
+        while (!writers.All(w => w.IsCompleted));
 
         await Task.WhenAll(writers);
 
-        /* Liveness, so a silent pass cannot be the reader never running or never seeing a populated
-           reading: the subtraction has to have been exercised over two NONZERO parts, which is the only
-           state in which a wrong sampling order can show. */
+        /* The do makes the first observation certain, so a silent pass on that count cannot be the
+           reader never running. The seed above makes every observation, including that first one, see
+           both parts nonzero, so observedBothParts cannot fail on a reader the scheduler starves until
+           the writers finish: the subtraction has been exercised over two NONZERO parts on every
+           observation, which is the only state in which a wrong sampling order can show. */
         Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
         Assert.True(
             observedBothParts > 0,
@@ -444,8 +453,8 @@ public sealed class AlertReadFailureSurfaceTests
            population is empty. An exact equality here is what proves the total is the sum of the parts and
            not an independently-maintained number that happens to track them. */
         var settled = counter.ReadFor(Key);
-        Assert.Equal(2 * WritesPerWriter, settled.ServerReadFailures);
-        Assert.Equal(2 * WritesPerWriter, settled.FleetReadFailures);
+        Assert.Equal(2 * WritesPerWriter + 1, settled.ServerReadFailures);
+        Assert.Equal(2 * WritesPerWriter + 1, settled.FleetReadFailures);
         Assert.Equal(
             settled.ServerReadFailures + settled.FleetReadFailures,
             settled.InstanceReadFailures);
@@ -773,7 +782,7 @@ public sealed class AlertReadFailureSurfaceTests
         var blends = new List<string>();
         var observations = 0;
 
-        while (!writers.All(w => w.IsCompleted))
+        do
         {
             var reading = counter.ReadFor(Key);
             observations++;
@@ -795,11 +804,12 @@ public sealed class AlertReadFailureSurfaceTests
                 blends.Add($"'{reading.LastFailureRead}' with an elapsed and no stamp");
             }
         }
+        while (!writers.All(w => w.IsCompleted));
 
         await Task.WhenAll(writers);
 
-        /* Guaranteed rather than hoped for: the bucket was seeded, so the first iteration observed a
-           complete trio whatever the scheduler did. */
+        /* Guaranteed rather than hoped for: the do makes one observation certain, and the seeded bucket
+           makes that first observation a complete trio whatever the scheduler did. */
         Assert.True(observations > 0, "the reader observed nothing, so its silence proves nothing");
         Assert.True(
             blends.Count == 0,

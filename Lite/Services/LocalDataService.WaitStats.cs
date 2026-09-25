@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitorLite.Services;
@@ -297,14 +298,80 @@ ORDER BY wait_type, collection_time";
     /// </summary>
     public async Task<List<WaitStatsTrendPoint>> GetTotalWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
-        using var _q = TimeQuery("GetTotalWaitTrendAsync", "wait_stats total trend");
+        using var _q = TimeQuery("GetTotalWaitTrendAsync", "wait_stats total trend, bucketed");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
 
+        /* #4234: bucketed to TrendBudget.Chart's point budget — this is the Overview lane's single aggregated
+           wait line. seriesCount is always 1. */
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
-        command.CommandText = $@"
+        command.CommandText = TotalWaitTrendSql(exclude);
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
+        command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var rows = new List<(DateTime BucketStart, double Rate, DateTime FirstCollectionTime, long CollectionCount)>();
+        var everyBucketSingleton = true;
+
+        using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            /* A NULL rate is a bucket with no rated collection; HAVING already excludes it, so this can only
+               fire if that guard is ever loosened — kept as the same defensive drop the per-collection read
+               always applied (#3540). */
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
+            var collectionCount = reader.GetInt64(3);
+            if (collectionCount != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetDateTime(0),
+                ToDouble(reader.GetValue(1)),
+                reader.GetDateTime(2),
+                collectionCount));
+        }
+
+        /* Every bucket held exactly one rated collection: stamp at that collection's own clock, byte-identical
+           to the pre-#4234 per-collection read (see GetCpuUtilizationAsync for the same rule). */
+        var items = new List<WaitStatsTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
+            items.Add(new WaitStatsTrendPoint
+            {
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                WaitTimeMsPerSecond = row.Rate
+            });
+        }
+
+        return items;
+    }
+
+    /// <summary>
+    /// The bucketed total-wait trend statement text (#4234), pulled out of <see cref="GetTotalWaitTrendAsync"/>
+    /// so its shape is checkable without a live DuckDB. $1 server_id, $2/$3 the UTC window (also the GREATEST
+    /// clamp), $4 the bucket width in minutes. <paramref name="exclude"/> is the caller's own
+    /// <c>ignored_wait_types.json</c> exclusion clause (<see cref="IgnoredWaitTypes.BuildExclusionClause"/>),
+    /// safe-identifier literals rather than a parameter, exactly as the per-collection read always inlined it.
+    /// <para>A collection's rate is undefined (#3540) when EVERY wait type it reported that pass stored a 0
+    /// interval (a restart) — <c>rated</c> nulls that collection's contribution rather than reading it as 0 —
+    /// and a bucket's rate is its SUMMED rated wait over its SUMMED rated seconds (time-weighted, never an
+    /// average of per-collection rates); a bucket with no rated collection is dropped by <c>HAVING</c>, the
+    /// same as the per-collection read always dropped that one collection.</para>
+    /// </summary>
+    internal static string TotalWaitTrendSql(string exclude) => $@"
 WITH per_collection AS
 (
     SELECT
@@ -325,36 +392,24 @@ WITH per_collection AS
     AND   collection_time <= $3
     {exclude}
     GROUP BY collection_time
+),
+rated AS
+(
+    SELECT
+        collection_time,
+        CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS DOUBLE PRECISION) END AS rated_ms,
+        CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds
+    FROM per_collection
 )
 SELECT
-    collection_time,
-    CASE WHEN interval_seconds > 0 THEN CAST(total_delta_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
-FROM per_collection
-ORDER BY collection_time";
-
-        command.Parameters.Add(new DuckDBParameter { Value = serverId });
-        command.Parameters.Add(new DuckDBParameter { Value = startTime });
-        command.Parameters.Add(new DuckDBParameter { Value = endTime });
-
-        var items = new List<WaitStatsTrendPoint>();
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
-        {
-            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
-            if (reader.IsDBNull(1))
-            {
-                continue;
-            }
-
-            items.Add(new WaitStatsTrendPoint
-            {
-                CollectionTime = reader.GetDateTime(0),
-                WaitTimeMsPerSecond = reader.GetDouble(1)
-            });
-        }
-
-        return items;
-    }
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    SUM(rated_ms) / SUM(rated_seconds) AS wait_time_ms_per_second,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY 1
+HAVING COUNT(rated_seconds) > 0
+ORDER BY 1";
 
     /// <summary>
     /// Accumulated poison wait per wait type over the alert's window (#3539 A4) — the DuckDB twin of
@@ -449,8 +504,8 @@ SELECT
     q.transaction_isolation_level,
     q.dop,
     q.parallel_worker_count,
-    q.query_plan,
-    q.live_query_plan,
+    q.query_plan IS NOT NULL AS has_query_plan,
+    q.live_query_plan IS NOT NULL AS has_live_query_plan,
     q.collection_time,
     q.login_name,
     q.host_name,
@@ -507,8 +562,8 @@ LIMIT 500";
                 TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
                 Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
                 ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
-                QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
-                LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
+                HasQueryPlan = reader.IsDBNull(18) ? false : reader.GetBoolean(18),
+                HasLiveQueryPlan = reader.IsDBNull(19) ? false : reader.GetBoolean(19),
                 CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
                 LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
                 HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
@@ -573,8 +628,8 @@ SELECT
     q.transaction_isolation_level,
     q.dop,
     q.parallel_worker_count,
-    q.query_plan,
-    q.live_query_plan,
+    q.query_plan IS NOT NULL AS has_query_plan,
+    q.live_query_plan IS NOT NULL AS has_live_query_plan,
     q.collection_time,
     q.login_name,
     q.host_name,
@@ -629,8 +684,8 @@ LIMIT 2000";
                 TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
                 Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
                 ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
-                QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
-                LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
+                HasQueryPlan = reader.IsDBNull(18) ? false : reader.GetBoolean(18),
+                HasLiveQueryPlan = reader.IsDBNull(19) ? false : reader.GetBoolean(19),
                 CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
                 LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
                 HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),

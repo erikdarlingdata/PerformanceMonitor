@@ -134,10 +134,6 @@ public sealed class QueryStoreBackfill
     public static TimeSpan HorizonFor(bool hasContinuousAggregates)
         => hasContinuousAggregates ? RollupStoreHorizon : PlainStoreHorizon;
 
-    /// <summary>Candidate databases come from rows this window fresh — a database that stopped
-    /// shipping Query Store rows entirely ages out of the backfill scan with them.</summary>
-    private static readonly TimeSpan CandidateWindow = TimeSpan.FromDays(7);
-
     private readonly NpgsqlDataSource _postgres;
     private readonly DarlingCollectorRunner _runner;
     private readonly CollectorDeltaCalculator _deltas;
@@ -210,10 +206,15 @@ public sealed class QueryStoreBackfill
         }
 
         var state = await _runner.GetCollectorStateAsync(server.ServerId, StateCollectorName, cancellationToken);
-        var databases = await GetCandidateDatabasesAsync(server.ServerId, cancellationToken);
 
         var nowUtc = DateTime.UtcNow;
         var floorLimit = nowUtc - HorizonFor(_hasContinuousAggregates());
+
+        /* #4197: floorLimit is computed BEFORE the candidate read so it can bind the read's own lower
+           bound, then the store's list is unioned with every database a hole key already names (state
+           is loaded above, for free) — see GetCandidateDatabasesAsync and
+           QueryStoreBackfillState.MergeHoleDatabases for why the union is required, not just cheaper. */
+        var databases = await GetCandidateDatabasesAsync(server.ServerId, floorLimit, state, cancellationToken);
 
         foreach (var databaseName in databases)
         {
@@ -244,7 +245,7 @@ public sealed class QueryStoreBackfill
             /* The derived ceiling: everything at or above the stored MIN shipped complete. Null
                means the live path has not made first contact for this database yet — its 60-minute
                first window establishes the ceiling this worker digs below. */
-            var storedFloor = await GetStoredFloorAsync(server.ServerId, databaseName, cancellationToken);
+            var storedFloor = await GetStoredFloorAsync(server.ServerId, databaseName, floorLimit, cancellationToken);
             if (storedFloor is null)
             {
                 continue;
@@ -456,23 +457,40 @@ public sealed class QueryStoreBackfill
         => _runner.SaveCollectorStateAsync(
             serverId, StateCollectorName, new Dictionary<string, string>(StringComparer.Ordinal) { [key] = value }, cancellationToken);
 
-    /// <summary>Databases that shipped query_store rows recently — the backfill universe. The
-    /// store already knows them, so no live enumeration (and no probing of QS-ineligible
-    /// databases) is needed.</summary>
-    private async Task<List<string>> GetCandidateDatabasesAsync(int serverId, CancellationToken cancellationToken)
+    /// <summary>The candidate read's SQL text — a shared constant so the shape pin and the live plan
+    /// test assert the exact statement <see cref="GetCandidateDatabasesAsync"/> runs, not a copy that
+    /// can drift from it.</summary>
+    internal const string CandidateSql =
+        "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name";
+
+    /// <summary>Databases that shipped query_store rows since <paramref name="floorLimit"/>, unioned
+    /// with every database a hole key already names — the backfill universe.
+    ///
+    /// <para>#4197: bound at <paramref name="floorLimit"/> — the SAME boundary
+    /// <see cref="RunServerSliceAsync"/> uses to decide whether a database still needs digging —
+    /// rather than the old 7-day CandidateWindow, which sat wider than raw retention and so excluded
+    /// no chunk: on a heavy store that made this read decompress every retained chunk on every tick
+    /// (206 ms / 21,411 buffers measured; see the PR body). Bounding it can now make the predicate
+    /// hide a database that has gone fully quiet — all its rows are older than the horizon, even
+    /// though a recorded hole still needs servicing (case (a) in the design) — which is exactly what
+    /// <see cref="QueryStoreBackfillState.MergeHoleDatabases"/> restores below, from
+    /// <paramref name="state"/> the caller already loaded. A database with no hole key and nothing
+    /// newer than <paramref name="floorLimit"/> is either done or has never made first contact, and
+    /// either way this tick has nothing to do for it.</para>
+    /// </summary>
+    internal async Task<List<string>> GetCandidateDatabasesAsync(
+        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
     {
         var databases = new List<string>();
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name", connection);
+            using var command = new NpgsqlCommand(CandidateSql, connection);
             /* #2874: the enclosing BackfillSliceDeadline ABANDONS rather than cancels, so this is the only
-               bound that reaches the statement. CandidateWindow is wider than raw retention, which makes the
-               collection_time predicate inert — this read is unbounded across every chunk that exists. */
+               bound that reaches the statement. */
             command.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
             command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow - CandidateWindow, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -487,29 +505,58 @@ public sealed class QueryStoreBackfill
             _logger?.LogDebug(ex, "query_store backfill candidate read failed; skipping this tick");
         }
 
-        return databases;
+        return QueryStoreBackfillState.MergeHoleDatabases(databases, state);
     }
 
-    /// <summary>MIN(last_execution_time) stored for one database — the derived backfill ceiling,
-    /// the mirror of the runner's MAX() watermark reads. Null (no rows / failure) skips the
-    /// database this tick; failure never invents a boundary.</summary>
-    private async Task<DateTime?> GetStoredFloorAsync(int serverId, string databaseName, CancellationToken cancellationToken)
+    /// <summary>The derived backfill ceiling for one database, the mirror of the runner's MAX()
+    /// watermark reads. Null (no rows / failure) skips the database this tick; failure never invents
+    /// a boundary.
+    ///
+    /// <para>#4197: exact and bounded, in two steps, rather than an unbounded MIN. First, an EXISTS
+    /// at <paramref name="floorLimit"/> (LIMIT 1, so it stops at the first matching row): a hit means
+    /// the database is done, because <c>last_execution_time</c> never exceeds its own row's
+    /// <c>collection_time</c> — a row's stats can only describe activity through the moment it was
+    /// collected — so a row with <c>collection_time &lt;= floorLimit</c> also has
+    /// <c>last_execution_time &lt;= floorLimit</c>, which puts the TRUE unbounded MIN at or below
+    /// floorLimit too. The caller only compares the result against <paramref name="floorLimit"/> on
+    /// that branch (<c>storedFloor &lt;= floorLimit</c>) and never reads the value past it, so
+    /// returning <paramref name="floorLimit"/> itself keeps the caller's decision byte-identical.
+    /// Otherwise (no row that old exists) every stored row is strictly newer than floorLimit, so the
+    /// MIN bounded the same way — <c>collection_time &gt; floorLimit</c> — ranges over the exact same
+    /// rows the unbounded MIN would have, and returns the exact same value.</para>
+    /// </summary>
+    internal async Task<DateTime?> GetStoredFloorAsync(int serverId, string databaseName, DateTime floorLimit, CancellationToken cancellationToken)
     {
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                "SELECT MIN(last_execution_time) FROM query_store_stats WHERE server_id = $1 AND database_name = $2", connection);
-            /* #2874: unbounded by construction — the derived ceiling IS the oldest stored row, so the
-               collection_time floor #2344 and #2795 gave the MAX siblings would hide what this looks for.
-               The deadline is the whole bound, and the enclosing budget abandons rather than cancels. */
-            command.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
-            command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(databaseName);
-            var result = await command.ExecuteScalarAsync(cancellationToken);
-            if (result is DateTime dt)
+
+            using (var exists = new NpgsqlCommand(
+                "SELECT 1 FROM query_store_stats WHERE server_id = $1 AND database_name = $2 AND collection_time <= $3 LIMIT 1", connection))
             {
-                return dt;
+                exists.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
+                exists.Parameters.AddWithValue(serverId);
+                exists.Parameters.AddWithValue(databaseName);
+                exists.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
+                var hit = await exists.ExecuteScalarAsync(cancellationToken);
+                if (hit is not null)
+                {
+                    return floorLimit;
+                }
+            }
+
+            using (var min = new NpgsqlCommand(
+                "SELECT MIN(last_execution_time) FROM query_store_stats WHERE server_id = $1 AND database_name = $2 AND collection_time > $3", connection))
+            {
+                min.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
+                min.Parameters.AddWithValue(serverId);
+                min.Parameters.AddWithValue(databaseName);
+                min.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
+                var result = await min.ExecuteScalarAsync(cancellationToken);
+                if (result is DateTime dt)
+                {
+                    return dt;
+                }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

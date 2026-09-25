@@ -556,10 +556,11 @@ public class BaselineSupplyTests
     }
 
     /// <summary>
-    /// THE RETIREMENT CONDITION walked across time (#3653): a legacy continuous aggregate releases only once the
-    /// successor's oldest bucket reaches the tier horizon; an empty successor never releases it; a legacy plain
-    /// view releases at once. Day 0 after a backfill from a 30-day raw horizon is the case the brief asked to see
-    /// evaluate FALSE; day 5 is where it turns.
+    /// THE RETIREMENT CONDITION walked across time (#3653): a legacy continuous aggregate WITH ROWS releases only
+    /// once the successor's oldest bucket reaches the tier horizon; an empty successor never releases it; a legacy
+    /// plain view releases at once. Day 0 after a backfill from a 30-day raw horizon is the case the brief asked to
+    /// see evaluate FALSE; day 5 is where it turns. Every call here passes <c>legacyHoldsRows: true</c> — the
+    /// empty-legacy short-circuit is <see cref="RetirementCondition_EmptyLegacyAggregateDropsOnSight_RegardlessOfSuccessor"/>.
     /// </summary>
     [Fact]
     public void RetirementCondition_HoldsOnlyOnceTheSuccessorCoversTheTier()
@@ -567,20 +568,42 @@ public class BaselineSupplyTests
         var firstStart = new DateTime(2026, 9, 20, 4, 0, 0, DateTimeKind.Unspecified);
         var successorOldest = firstStart.AddDays(-30); // backfilled from raw's default 30-day horizon
 
-        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, successorOldest, firstStart));
-        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, successorOldest, firstStart.AddDays(4).AddHours(23)));
-        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, successorOldest, firstStart.AddDays(5)));
-        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, successorOldest, firstStart.AddDays(40)));
+        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, successorOldest, firstStart));
+        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, successorOldest, firstStart.AddDays(4).AddHours(23)));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, successorOldest, firstStart.AddDays(5)));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, successorOldest, firstStart.AddDays(40)));
 
         /* Exactly on the horizon counts as coverage (<=). */
-        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, firstStart - TimescaleSupport.BaselineRetentionSpan, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, firstStart - TimescaleSupport.BaselineRetentionSpan, firstStart));
 
         /* An un-backfilled successor covers nothing, whatever the clock says. */
-        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, null, firstStart.AddDays(400)));
+        Assert.False(TimescaleSupport.SupersededBaselineRelationDropsAt(true, true, null, firstStart.AddDays(400)));
 
-        /* A legacy PLAIN VIEW has nothing of its own to lose: drops as soon as a successor exists. */
-        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(false, null, firstStart));
-        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(false, successorOldest, firstStart));
+        /* A legacy PLAIN VIEW has nothing of its own to lose: drops as soon as a successor exists, whether or
+           not it "holds rows" is even asked (it never is, in JudgeSupersededBaselineRelationAsync, but the pure
+           predicate must not depend on that arg for this branch either). */
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(false, true, null, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(false, true, successorOldest, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(false, false, null, firstStart));
+    }
+
+    /// <summary>
+    /// THE #4289 SHORT-CIRCUIT, pure: a legacy CONTINUOUS AGGREGATE that holds no rows of its own drops on
+    /// sight, whatever the successor holds — an empty successor, a short one, or one that fully covers the tier
+    /// all give the same verdict, because an empty legacy aggregate has no history to protect regardless. Same
+    /// clock and successor-oldest fixtures as <see cref="RetirementCondition_HoldsOnlyOnceTheSuccessorCoversTheTier"/>,
+    /// with <c>legacyHoldsRows: false</c> flipping every one of them to Drop.
+    /// </summary>
+    [Fact]
+    public void RetirementCondition_EmptyLegacyAggregateDropsOnSight_RegardlessOfSuccessor()
+    {
+        var firstStart = new DateTime(2026, 9, 20, 4, 0, 0, DateTimeKind.Unspecified);
+        var successorOldest = firstStart.AddDays(-30);
+
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, false, null, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, false, successorOldest, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, false, firstStart - TimescaleSupport.BaselineRetentionSpan, firstStart));
+        Assert.True(TimescaleSupport.SupersededBaselineRelationDropsAt(true, false, null, firstStart.AddDays(400)));
     }
 
     /// <summary>

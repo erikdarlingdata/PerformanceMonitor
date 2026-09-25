@@ -286,15 +286,27 @@ public static class DurationTrendRouting
     ///
     /// <para><c>first_collection_time</c> is the bucket's first collection, rated or not, which is what
     /// <c>effective_start</c> reports: the point is stamped at its bucket's start (the first at the window's start,
-    /// <c>GREATEST</c>), and a bucket start is not a collection the store held. MCP only — no database filter.
-    /// $1 server_id, $2/$3 window (naive UTC), $4 the bucket width in minutes.</para>
+    /// <c>GREATEST</c>), and a bucket start is not a collection the store held. With <paramref name="withDatabaseFilter"/>,
+    /// $4 is the viewer's guarded <c>text[]</c> database filter (#1319), mirroring <see cref="BuildRawTrendSql"/>, and
+    /// the bucket width moves to $5 so the filter's own numbering never shifts; every MCP caller passes <c>false</c>,
+    /// so the text and its $4 width are exactly what #3897 always ran. <c>collection_count</c> (#4234) is
+    /// <c>COUNT(*)</c> over the same population as <c>first_collection_time</c> — every collection in the bucket,
+    /// rated or not — trailing so the MCP tools, which read this statement positionally and stop at
+    /// <c>unrated_collections</c>, are unaffected; the viewer's chart uses it to tell a true singleton bucket from
+    /// one the bucketing actually merged (see <c>ViewerDataService.QueryTrends.cs</c>'s bucketed reader).
+    /// $1 server_id, $2/$3 window (naive UTC), [$4 database filter], the last $ the bucket width in minutes.</para>
     /// </summary>
-    public static string BuildBucketedRawTrendSql(string rawTable)
+    public static string BuildBucketedRawTrendSql(string rawTable, bool withDatabaseFilter)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rawTable);
 
+        var filter = withDatabaseFilter
+            ? "\n    AND   ($4::text[] IS NULL OR database_name = ANY($4))"
+            : "";
+        var widthParam = withDatabaseFilter ? "$5" : "$4";
+
         return $"""
-            WITH {RawCollectionsCte(rawTable, "")},
+            WITH {RawCollectionsCte(rawTable, filter)},
             rated AS
             (
                 SELECT
@@ -307,12 +319,13 @@ public static class DurationTrendRouting
                 FROM raw
             )
             SELECT
-                GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+                GREATEST(date_bin(CAST({widthParam} AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
                 SUM(rated_elapsed_ms) / SUM(rated_seconds) AS elapsed_ms_per_second,
                 CAST(SUM(rated_executions) AS DOUBLE PRECISION) / SUM(rated_seconds) AS executions_per_second,
                 MAX(elapsed_ms_per_second) AS peak_elapsed_ms_per_second,
                 MIN(collection_time) AS first_collection_time,
-                COUNT(*) - COUNT(rated_seconds) AS unrated_collections
+                COUNT(*) - COUNT(rated_seconds) AS unrated_collections,
+                COUNT(*) AS collection_count
             FROM rated
             GROUP BY 1
             ORDER BY 1
