@@ -158,8 +158,14 @@ public sealed class AnalysisFactsReadRunsDetectorParityTests
     {
         var start = source.IndexOf(ReadEntry, StringComparison.Ordinal);
         Assert.True(start > 0, $"{sku}: the facts read's entry point has moved");
-        var end = source.IndexOf(ReadEnd, start, StringComparison.Ordinal);
-        Assert.True(end > start, $"{sku}: ComparePeriodsAsync no longer follows the facts read");
+        /* Stop at CollectConfigAuditFactsAsync when present (Darling only; #4206 added it between the two
+           reads), otherwise stop at ComparePeriodsAsync. Without this, the scorer added to the narrow pass
+           is counted twice — once from CollectAndScoreFactsAsync, once from CollectConfigAuditFactsAsync. */
+        var configAuditStart = source.IndexOf("CollectConfigAuditFactsAsync(", start, StringComparison.Ordinal);
+        var end = configAuditStart > start
+            ? configAuditStart
+            : source.IndexOf(ReadEnd, start, StringComparison.Ordinal);
+        Assert.True(end > start, $"{sku}: the end of the facts read no longer follows its entry point");
         return source[start..end];
     }
 
