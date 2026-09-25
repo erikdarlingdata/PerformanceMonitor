@@ -137,6 +137,44 @@ public sealed class DarlingStoreHostProfileLiveTests
     }
 
     /// <summary>
+    /// #4214 ruling 9, live: <see cref="DarlingStoreHostProfile.GatherStartupProfileAsync"/> against a REAL
+    /// running server still leaves <see cref="HostProfile.Store"/> at its not-gathered placeholder, even
+    /// though the very same connection could answer <c>pg_database_size</c> and the rest in milliseconds —
+    /// proving the exclusion is "never asked", not "asked and the answer was discarded". The settings side
+    /// is still real: a bring-your-own config against this connection reports every setting <c>not-managed</c>,
+    /// the same live <c>pg_settings</c> read <see cref="GatherAsync_ProducesEveryVerdict_EndToEnd_Gated"/>
+    /// exercises, so this is not merely a null check on an unreached code path.
+    /// </summary>
+    [Fact]
+    public async Task GatherStartupProfileAsync_NeverGathersStoreFacts_Gated()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live store host profile test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+
+        /* Read-only: no conf edit, no ALTER SYSTEM, nothing for LiveStoreCleanup to undo. A bring-your-own
+           config keeps this to the one pg_settings read GatherSettingProfilesAsync always issues, with no
+           managed data directory to resolve first. */
+        var byoPostgres = new PostgresConfig { Managed = false };
+        var profile = await DarlingStoreHostProfile.GatherStartupProfileAsync(byoPostgres, connection, ct);
+
+        Assert.Equal(string.Empty, profile.Store.PostgresVersion);
+        Assert.Null(profile.Store.TimescaleVersion);
+        Assert.Null(profile.Store.StoreSizeBytes);
+        Assert.Null(profile.Store.BufferHitRatioPercent);
+        Assert.Null(profile.Store.TempBytes);
+        Assert.Equal(0, profile.Store.UncompressedChunkBytes);
+        Assert.Equal(0, profile.Store.UncompressedChunkCount);
+
+        Assert.NotEmpty(profile.Settings);
+        Assert.All(profile.Settings, s => Assert.Equal(HostSettingVerdict.NotManaged, s.Verdict));
+    }
+
+    /// <summary>
     /// Polls <c>pg_settings</c> on the SAME session for up to five seconds until <paramref name="settingName"/>
     /// normalizes (<see cref="DarlingStoreHostProfile.NormalizePgSetting"/> — the identical normalization the
     /// profile itself applies) to <paramref name="expectedMb"/>. A backend picks up a pending

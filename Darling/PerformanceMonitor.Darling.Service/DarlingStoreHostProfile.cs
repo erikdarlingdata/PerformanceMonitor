@@ -330,8 +330,11 @@ internal static class DarlingStoreHostProfile
 
     /// <summary>Store size read LIVE, unlike <c>StoreSelfMetrics.LatestStoreSizeSql</c>'s hourly-sweep figure:
     /// that avoidance is sized against a 5-MINUTE collection-loop cadence (300+ executions/day), and this is a
-    /// one-shot CLI/once-per-start read, so paying <c>pg_database_size</c>'s real cost here is the honest
-    /// trade for a current number instead of a stale one.</summary>
+    /// one-shot, user-invoked <c>--check-settings</c> read, so paying <c>pg_database_size</c>'s real cost here
+    /// is the honest trade for a current number instead of a stale one. Ruling 9 (#4214) keeps this OUT of the
+    /// once-per-start profile log — <see cref="GatherStartupProfileAsync"/> never calls
+    /// <see cref="GatherStoreFactsAsync"/> — so <c>--check-settings</c> and the later MCP read are this SQL's
+    /// only callers, both off the serial loop (see <c>SerialLoopStoreSizeSourceTests</c>, #3199).</summary>
     public const string StoreSizeSql = "SELECT pg_database_size(current_database())";
 
     /// <summary>Lifetime buffer hit ratio and temp bytes for the current database — a single in-memory
@@ -676,6 +679,42 @@ WHERE NOT is_compressed";
         };
     }
 
+    /// <summary>The placeholder <see cref="HostStoreFacts"/> a <see cref="GatherStartupProfileAsync"/> profile
+    /// carries — never gathered, never read. <c>string.Empty</c> rather than <c>default</c> so
+    /// <see cref="HostStoreFacts.PostgresVersion"/> stays non-null even if some future caller misuses the
+    /// profile: a wrong-but-harmless empty string beats a nullability contract broken at runtime.</summary>
+    private static readonly HostStoreFacts s_storeFactsNotGatheredAtStartup = new(string.Empty, null, null, null, null, 0, 0);
+
+    /// <summary>
+    /// Ruling 9 (#4214): what the once-per-start log gathers — host facts, the live <c>pg_settings</c> read
+    /// and the managed conf-file attribution behind each setting's verdict. Deliberately never calls
+    /// <see cref="GatherStoreFactsAsync"/>: <c>StoreSizeSql</c> and <c>UncompressedChunkSizeSql</c> are reads
+    /// whose cost scales with the store (measured 3,177 ms on a 225 GiB store — see
+    /// <c>SerialLoopStoreSizeSourceTests</c>, #3199), and this runs once per process start rather than once
+    /// per CLI invocation. Those stay in <see cref="GatherAsync"/> (<c>--check-settings</c>) and the later
+    /// MCP read. The returned profile's <see cref="HostProfile.Store"/> is the not-gathered placeholder;
+    /// <see cref="FormatStartupProfileText"/> never reads it.
+    /// </summary>
+    internal static async Task<HostProfile> GatherStartupProfileAsync(
+        PostgresConfig postgres, NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var (platform, containerized, cpuCount, memory) = GatherHostFacts();
+        var dataVolume = GatherDataVolume(ResolveVolumeAnchor(postgres));
+        var settings = await GatherSettingProfilesAsync(connection, postgres, memory.EffectiveBytes, dataVolume.FreeBytes, cancellationToken);
+
+        return new HostProfile
+        {
+            Platform = platform,
+            IsContainerized = containerized,
+            ProcessorCount = cpuCount,
+            Memory = memory,
+            DataVolume = dataVolume,
+            IsManagedStore = postgres.Managed,
+            Store = s_storeFactsNotGatheredAtStartup,
+            Settings = settings,
+        };
+    }
+
     /* ============================================ Formatting ============================================= */
 
     internal static string DescribeVerdict(HostSettingVerdict verdict) => verdict switch
@@ -703,9 +742,12 @@ WHERE NOT is_compressed";
 
     private static string Truncate(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "…";
 
-    internal static string FormatProfileText(HostProfile profile)
+    /// <summary>The host lines both <see cref="FormatProfileText"/> (<c>--check-settings</c>) and
+    /// <see cref="FormatStartupProfileText"/> (the once-per-start log) print identically — platform, RAM,
+    /// data volume. Extracted so the two never drift (ruling 1): the only difference between the two
+    /// formatters is whether a Store section and a blank-line separator follow.</summary>
+    private static void AppendHostLines(StringBuilder sb, HostProfile profile)
     {
-        var sb = new StringBuilder();
         sb.Append("Host: ").Append(profile.Platform).Append(profile.IsContainerized ? " (containerized)" : "")
           .Append(", ").Append(profile.ProcessorCount).Append(" CPU(s)").Append('\n');
         sb.Append("RAM: ").Append(FormatBytes(profile.Memory.EffectiveBytes))
@@ -714,6 +756,24 @@ WHERE NOT is_compressed";
         sb.Append("Data volume: ").Append(FormatBytes(profile.DataVolume.TotalBytes)).Append(" total, ")
           .Append(FormatBytes(profile.DataVolume.FreeBytes)).Append(" free")
           .Append(profile.DataVolume.Filesystem is { } fs ? $" ({fs})" : "").Append('\n');
+    }
+
+    /// <summary>The per-setting table both formatters print identically — shared for the same reason as
+    /// <see cref="AppendHostLines"/>.</summary>
+    private static void AppendSettingsTable(StringBuilder sb, IReadOnlyList<HostSettingProfile> settings)
+    {
+        sb.Append(FormattableString.Invariant($"{"Setting",-38}{"Current",-14}{"Derived",-14}{"Source",-42}Verdict")).Append('\n');
+        foreach (var s in settings)
+        {
+            sb.Append(FormattableString.Invariant(
+                $"{s.Name,-38}{s.CurrentValueDisplay,-14}{s.DerivedValueDisplay,-14}{Truncate(s.SourceDescription, 40),-42}{DescribeVerdict(s.Verdict)}")).Append('\n');
+        }
+    }
+
+    internal static string FormatProfileText(HostProfile profile)
+    {
+        var sb = new StringBuilder();
+        AppendHostLines(sb, profile);
         sb.Append("Store: PostgreSQL ").Append(profile.Store.PostgresVersion)
           .Append(profile.Store.TimescaleVersion is { } tv ? $", TimescaleDB {tv}" : ", TimescaleDB not installed").Append('\n');
         if (profile.Store.StoreSizeBytes is { } size)
@@ -739,12 +799,23 @@ WHERE NOT is_compressed";
           .Append(ramPercent.ToString("0.0", CultureInfo.InvariantCulture)).Append("% of RAM").Append('\n');
         sb.Append('\n');
 
-        sb.Append(FormattableString.Invariant($"{"Setting",-38}{"Current",-14}{"Derived",-14}{"Source",-42}Verdict")).Append('\n');
-        foreach (var s in profile.Settings)
-        {
-            sb.Append(FormattableString.Invariant(
-                $"{s.Name,-38}{s.CurrentValueDisplay,-14}{s.DerivedValueDisplay,-14}{Truncate(s.SourceDescription, 40),-42}{DescribeVerdict(s.Verdict)}")).Append('\n');
-        }
+        AppendSettingsTable(sb, profile.Settings);
+
+        return sb.ToString();
+    }
+
+    /// <summary>The once-per-start log line's text (ruling 9, #4214): host facts and the per-setting verdict
+    /// table, with no Store section — a <see cref="GatherStartupProfileAsync"/> profile's
+    /// <see cref="HostProfile.Store"/> is a placeholder never gathered from the store, so this formatter
+    /// never reads it. Kept as its own function rather than a Store-optional branch inside
+    /// <see cref="FormatProfileText"/>: a caller cannot accidentally print a placeholder Store section by
+    /// passing a startup profile through the wrong formatter.</summary>
+    internal static string FormatStartupProfileText(HostProfile profile)
+    {
+        var sb = new StringBuilder();
+        AppendHostLines(sb, profile);
+        sb.Append('\n');
+        AppendSettingsTable(sb, profile.Settings);
 
         return sb.ToString();
     }
