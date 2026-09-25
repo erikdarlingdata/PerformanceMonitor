@@ -486,6 +486,11 @@
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="QueryStatsSlicer" Grid.Row="0"/>
                                 <StackPanel Grid.Row="1">
+                                    <!-- #4231: "Showing since <time>" when the raw query_stats floor cuts the window short. -->
+                                    <TextBlock x:Name="QueryStatsWindowTruncatedBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
                                     <TextBlock x:Name="QueryStatsComparisonBanner" Visibility="Collapsed"
                                                Padding="8,4" FontWeight="Bold"
                                                Foreground="{DynamicResource ForegroundBrush}"
@@ -787,10 +792,17 @@
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="ProcStatsSlicer" Grid.Row="0"/>
-                                <TextBlock x:Name="ProcStatsComparisonBanner" Grid.Row="1" Visibility="Collapsed"
-                                           Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#2244AAFF"/>
+                                <StackPanel Grid.Row="1">
+                                    <!-- #4231: "Showing since <time>" when the raw procedure_stats floor cuts the window short. -->
+                                    <TextBlock x:Name="ProcStatsWindowTruncatedBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
+                                    <TextBlock x:Name="ProcStatsComparisonBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#2244AAFF"/>
+                                </StackPanel>
                             <DataGrid Grid.Row="2" x:Name="ProcedureStatsGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridPlanRowStyle}"
@@ -987,10 +999,17 @@
                                     <RowDefinition Height="*"/>
                                 </Grid.RowDefinitions>
                                 <controls:TimeRangeSlicerControl x:Name="QueryStoreSlicer" Grid.Row="0"/>
-                                <TextBlock x:Name="QueryStoreComparisonBanner" Grid.Row="1" Visibility="Collapsed"
-                                           Padding="8,4" FontWeight="Bold"
-                                           Foreground="{DynamicResource ForegroundBrush}"
-                                           Background="#2244AAFF"/>
+                                <StackPanel Grid.Row="1">
+                                    <!-- #4231: "Showing since <time>" when the raw query_store_stats floor cuts the window short. -->
+                                    <TextBlock x:Name="QueryStoreWindowTruncatedBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#22FFAA00"/>
+                                    <TextBlock x:Name="QueryStoreComparisonBanner" Visibility="Collapsed"
+                                               Padding="8,4" FontWeight="Bold"
+                                               Foreground="{DynamicResource ForegroundBrush}"
+                                               Background="#2244AAFF"/>
+                                </StackPanel>
                             <DataGrid Grid.Row="2" x:Name="QueryStoreGrid"
                                       AutoGenerateColumns="False" IsReadOnly="True"
                                       RowStyle="{StaticResource GridPlanRowStyle}"

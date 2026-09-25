@@ -1067,6 +1067,79 @@ public sealed class DarlingAnomalyBaselineTests
     }
 
     /// <summary>
+    /// #4248: IoLatency reads the RAW file_io_stats hypertable at per-file grain over the 30-day window, so its
+    /// cache key is the UTC DAY, not the hour (PgBaselineProvider.IsDailyCacheMetric) — two calls hours apart on
+    /// the same UTC day share the one compute, and a call on the next UTC day recomputes. Proven by counting the
+    /// baseline reads Npgsql actually executes (CommandCapture), #3941's own live-pin technique.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_IoLatencyArm_TwoCallsHoursApartOnOneDay_ShareOneCompute_NextDayRecomputes_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live IO-arm day-cache test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 5; // own id — this test cleans its own rows
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var historyStart = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+
+            for (var i = 0; i < 5; i++)
+            {
+                await InsertAsync(connection,
+                    "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    (long)(200 + i), historyStart.AddMinutes(5 * i), ioServerId, "IO-DAILY-CACHE",
+                    10L, 0L, (long)(10 * (i + 1)));
+            }
+
+            var provider = new PgBaselineProvider(postgres);
+            var analysisDay = historyStart.AddDays(7).Date; // the 30-day window's end (#4248: midnight, not the hour)
+
+            var (morning, firstReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddHours(1), ct));
+            Assert.Equal(1, firstReads);
+            Assert.True(morning.SampleCount > 0, "the seed produced no baseline — the comparison would prove nothing");
+
+            /* Nineteen hours later (over CacheTtl's one hour), same UTC day: the #4248 pin — no second read. */
+            var (afternoon, secondReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddHours(20), ct));
+            Assert.Equal(0, secondReads);
+            Assert.Equal(morning.SampleCount, afternoon.SampleCount);
+            Assert.Equal(morning.Median, afternoon.Median);
+
+            /* The next UTC day is a different window end (midnight moved), so a fresh compute. */
+            var (_, nextDayReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddDays(1).AddHours(1), ct));
+            Assert.Equal(1, nextDayReads);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
     /// #3653 (A8, first slice) proven live through the PG detector: the I/O read hands the shared gate the
     /// per-file-row PEAK and MEAN, and the gate fires only when both clear. History: three Mondays at 10:00,
     /// four read-bearing rows each at exactly 2 ms (20 ms of stall over 10 reads) — 12 samples over 3 distinct
