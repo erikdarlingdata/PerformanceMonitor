@@ -141,28 +141,126 @@ public sealed class DarlingMcpCustomViewToolsSurfaceTests
     }
 
     [Fact]
-    public async Task DescribeCustomViewCatalog_ReturnsTheComposeVocabulary()
+    public async Task DescribeCustomViewCatalog_DefaultIsCompact_GroupedBySource()
     {
         /* The catalog tool exists so an LLM composes a valid panel WITHOUT reading source or guessing names — it
-           must surface every vocabulary a panel draws from, plus a known measure with its composable fields. */
+           must surface every vocabulary a panel draws from, plus a known measure with its composable fields.
+           #4198: the full catalog is 98 KB, so the DEFAULT call groups measures by source and keeps only the
+           fields a panel spec actually names (key/displayName/kind/unitFamily/validAggregates); source=/
+           full_detail= reach the rest. Byte-budget coverage of this default lives in
+           DarlingMcpCustomViewCatalogSizeTests (#4198 exempt from McpReadToolBudgetLiveTests — no server/store
+           argument to seed). */
         var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog();
         using var doc = JsonDocument.Parse(result);
         var root = doc.RootElement;
 
-        foreach (var section in new[] { "measures", "dimensions", "unitFamilies", "aggregates", "timeBuckets", "filterOps", "viz" })
+        foreach (var section in new[] { "sources", "annotationSources", "unitFamilies", "aggregates", "timeBuckets", "filterOps", "viz" })
         {
-            Assert.True(root.TryGetProperty(section, out _), $"catalog is missing the '{section}' vocabulary");
+            Assert.True(root.TryGetProperty(section, out _), $"compact catalog is missing the '{section}' vocabulary");
         }
 
-        /* A known measure is discoverable with the fields a panel binds from it (source + valid aggregates). */
-        var waitTime = root.GetProperty("measures").EnumerateArray()
-            .Single(m => m.GetProperty("key").GetString() == "wait_time_ms");
-        Assert.Equal("wait_stats", waitTime.GetProperty("source").GetString());
+        Assert.True(root.GetProperty("compact").GetBoolean());
+
+        /* A known measure is discoverable, grouped under its source, with the fields a panel binds from it. */
+        var waitStats = root.GetProperty("sources").EnumerateArray().Single(s => s.GetProperty("source").GetString() == "wait_stats");
+        var waitTime = waitStats.GetProperty("measures").EnumerateArray().Single(m => m.GetProperty("key").GetString() == "wait_time_ms");
+        Assert.Equal("scalar", waitTime.GetProperty("kind").GetString());
         Assert.Contains("sum", waitTime.GetProperty("validAggregates").EnumerateArray().Select(a => a.GetString()));
 
         /* The scalar vocabularies the panel's aggregate + viz fields draw from. */
         Assert.Contains("sum", root.GetProperty("aggregates").EnumerateArray().Select(a => a.GetString()));
         Assert.Contains("bar", root.GetProperty("viz").EnumerateArray().Select(v => v.GetString()));
+    }
+
+    [Fact]
+    public async Task DescribeCustomViewCatalog_FullDetail_ReturnsTodaysOriginalShape()
+    {
+        /* full_detail=true is the #4198 escape hatch: the exact flat shape (and every field) this tool always
+           returned, byte-for-byte what BuildComposeCatalogNode / the web /api/catalog compose section serve. */
+        var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(full_detail: true);
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+
+        foreach (var section in new[] { "measures", "dimensions", "annotationSources", "universalDimensions", "unitFamilies", "aggregates", "timeBuckets", "filterOps", "viz" })
+        {
+            Assert.True(root.TryGetProperty(section, out _), $"full_detail catalog is missing the '{section}' vocabulary");
+        }
+
+        Assert.False(root.TryGetProperty("compact", out _), "full_detail must not carry the compact-mode marker");
+
+        var waitTime = root.GetProperty("measures").EnumerateArray()
+            .Single(m => m.GetProperty("key").GetString() == "wait_time_ms");
+        Assert.Equal("wait_stats", waitTime.GetProperty("source").GetString());
+        Assert.Contains("sum", waitTime.GetProperty("validAggregates").EnumerateArray().Select(a => a.GetString()));
+        Assert.True(waitTime.TryGetProperty("appliesTo", out _), "full_detail must keep appliesTo per measure");
+        Assert.True(waitTime.TryGetProperty("allowedDimensions", out _), "full_detail must keep allowedDimensions per measure");
+    }
+
+    [Fact]
+    public async Task DescribeCustomViewCatalog_Source_DrillsIntoOneSource_FullDetail()
+    {
+        var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(source: "wait_stats");
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+
+        Assert.Equal("wait_stats", root.GetProperty("source").GetString());
+        var measures = root.GetProperty("measures").EnumerateArray().ToList();
+        Assert.NotEmpty(measures);
+        Assert.All(measures, m => Assert.Equal("wait_stats", m.GetProperty("source").GetString()));
+
+        var waitTime = measures.Single(m => m.GetProperty("key").GetString() == "wait_time_ms");
+        Assert.True(waitTime.TryGetProperty("appliesTo", out _), "source drill-down must keep appliesTo per measure");
+        Assert.True(waitTime.TryGetProperty("allowedDimensions", out _), "source drill-down must keep allowedDimensions per measure");
+
+        var dimensions = root.GetProperty("dimensions").EnumerateArray().ToList();
+        Assert.NotEmpty(dimensions);
+        Assert.All(dimensions, d => Assert.Equal("wait_stats", d.GetProperty("source").GetString()));
+
+        /* The small shared vocabularies still ride along, same as every other mode. */
+        Assert.Contains("sum", root.GetProperty("aggregates").EnumerateArray().Select(a => a.GetString()));
+    }
+
+    [Fact]
+    public async Task DescribeCustomViewCatalog_UnknownSource_ReturnsEmptyWithNote_NotAnError()
+    {
+        var result = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(source: "no_such_source");
+        using var doc = JsonDocument.Parse(result);
+        var root = doc.RootElement;
+
+        Assert.Empty(root.GetProperty("measures").EnumerateArray());
+        Assert.Empty(root.GetProperty("dimensions").EnumerateArray());
+        Assert.True(root.TryGetProperty("note", out var note), "an unmatched source should explain how to find the real names");
+        Assert.Contains("no_such_source", note.GetString());
+    }
+
+    [Fact]
+    public async Task DescribeCustomViewCatalog_CompactDefault_IsLosslessAndUnderBudget()
+    {
+        /* Every measure key the compact default advertises must be reachable, at full detail, either by drilling
+           into its source or by full_detail=true — the #4198 rule that a cut must never hide what an author
+           needs. Every source name the compact default lists must itself be a working source= filter. */
+        var compactResult = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog();
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(compactResult) < McpResponseBudget.DefaultBytes,
+            $"default describe_custom_view_catalog call is {System.Text.Encoding.UTF8.GetByteCount(compactResult):N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget");
+
+        using var compactDoc = JsonDocument.Parse(compactResult);
+        var compactKeys = compactDoc.RootElement.GetProperty("sources").EnumerateArray()
+            .SelectMany(s => s.GetProperty("measures").EnumerateArray().Select(m => m.GetProperty("key").GetString()!))
+            .ToHashSet();
+
+        var fullResult = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(full_detail: true);
+        using var fullDoc = JsonDocument.Parse(fullResult);
+        var fullKeys = fullDoc.RootElement.GetProperty("measures").EnumerateArray().Select(m => m.GetProperty("key").GetString()!).ToHashSet();
+
+        Assert.Equal(fullKeys, compactKeys);
+
+        foreach (var sourceElement in compactDoc.RootElement.GetProperty("sources").EnumerateArray())
+        {
+            var sourceName = sourceElement.GetProperty("source").GetString()!;
+            var drillResult = await DarlingMcpCustomViewTools.DescribeCustomViewCatalog(source: sourceName);
+            using var drillDoc = JsonDocument.Parse(drillResult);
+            Assert.NotEmpty(drillDoc.RootElement.GetProperty("measures").EnumerateArray());
+        }
     }
 
     [Fact]

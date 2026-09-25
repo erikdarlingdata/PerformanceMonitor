@@ -344,6 +344,17 @@ public sealed class McpQueryTools
         }
     }
 
+    /// <summary>
+    /// #4198: query_text is this tool's own wide field - up to 50 rows of numeric columns plus a full,
+    /// unbounded Query Store text each measured 211 KB at default arguments on a busy production store (the
+    /// Darling twin's own measurement; the read and its payload shape are identical). Previewed to this
+    /// length per row at default (<c>full_text: true</c> opts back in), the same preview-plus-opt-in shape
+    /// <c>get_store_query_stats</c> uses for its own <c>full_text</c>. Named apart from get_query_store_top's
+    /// preview constant in this class; the Darling twin is
+    /// <c>DarlingMcpQueryStoreRegressionTools.QueryTextPreviewLength</c>.
+    /// </summary>
+    private const int RegressionsQueryTextPreviewLength = 240;
+
     [McpServerTool(Name = "get_query_store_regressions"), Description("Finds queries whose Query Store performance got WORSE: recent window (hours_back, ending at as_of) vs a fixed 7-day baseline before it (see baseline_start/baseline_end). get_query_store_top ranks EXPENSIVE, this ranks CHANGED. Gated: average CPU regressed over 25%. duration_regression_percent, io_regression_percent and severity are null, not 0%, when their baseline is 0. additional_duration_ms is the ranking key. empty: no regression, or nothing yet in the baseline window. unavailable: no baseline exists yet. not_collected: this server's engine cannot run Query Store. <<GUIDE>> Finds queries whose Query Store performance got WORSE, by comparing each (database, query_id) group's averages inside a recent window against its baseline - a FIXED 7-day lookback ending at that window's start (before this it was every capture EVER collected before the window, so its cost tracked how much history the store still retained rather than the window asked for, and the comparison period silently grew on a server with more retention). baseline_start and baseline_end report exactly which period was compared - a regression against something older than the baseline lookback is not caught; a store retaining less than that is unaffected. Returns baseline vs recent duration, CPU and logical reads with the regression percent for each, the execution-count-weighted extra duration (the ranking key: a 5 ms regression executed a million times outranks a 5-second one executed twice), the plan counts on both sides, and a duration-driven severity band. get_query_store_top answers what is EXPENSIVE; the most expensive query is usually the one that always was. This answers what CHANGED. Rows are kept only where average CPU regressed by more than 25%. A regression percent whose BASELINE side is 0 has no denominator and is returned as null, with the reason under undefined_percents - never as 0, which would read as no change when the truth is the largest possible one; compare the two absolute figures instead. The ranking key is the absolute, execution-weighted duration delta, which exists whether or not a ratio does, so a null percent never sorts as 0. severity is banded from the duration percent and is null when that percent is.")]
     public static async Task<string> GetQueryStoreRegressions(
         LocalDataService dataService,
@@ -351,7 +362,8 @@ public sealed class McpQueryTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Size of the RECENT window, in hours back from now. Everything collected before it is the baseline. Default 24.")] int hours_back = 24,
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
-        [Description("Maximum rows to return, worst first. Default 50 (the number the desktop viewer shows).")] int limit = 50,
+        [Description("Maximum rows to return, worst first. Default 30, sized to keep a default call under the shared response budget. Read truncated to know whether the window held more.")] int limit = 30,
+        [Description("Return each row's full query text instead of a 240-character preview. Default false.")] bool full_text = false,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
@@ -400,21 +412,21 @@ public sealed class McpQueryTools
                        row with NO duration ratio is a verdict about a number that does not exist. Null there
                        (#3541 A12); the SQL's band is kept verbatim for the viewer it is shared with. */
                     severity = r.DurationRegressionPercent is null ? null : r.Severity,
-                    baseline_duration_ms = r.BaselineDurationMs,
-                    recent_duration_ms = r.RecentDurationMs,
-                    duration_regression_percent = r.DurationRegressionPercent,
-                    baseline_cpu_ms = r.BaselineCpuMs,
-                    recent_cpu_ms = r.RecentCpuMs,
-                    cpu_regression_percent = r.CpuRegressionPercent,
-                    baseline_reads = r.BaselineReads,
-                    recent_reads = r.RecentReads,
-                    io_regression_percent = r.IoRegressionPercent,
+                    baseline_duration_ms = Round(r.BaselineDurationMs),
+                    recent_duration_ms = Round(r.RecentDurationMs),
+                    duration_regression_percent = Round(r.DurationRegressionPercent),
+                    baseline_cpu_ms = Round(r.BaselineCpuMs),
+                    recent_cpu_ms = Round(r.RecentCpuMs),
+                    cpu_regression_percent = Round(r.CpuRegressionPercent),
+                    baseline_reads = Round(r.BaselineReads),
+                    recent_reads = Round(r.RecentReads),
+                    io_regression_percent = Round(r.IoRegressionPercent),
                     /* Null percents, and why (#3541 A12): a 0 baseline has no ratio, and the reader used to
                        publish that as 0 — "no change" — for the row that changed the most. */
                     undefined_percents = UndefinedPercentNotes(r),
                     /* The ranking key, and the one number that says whether this regression MATTERS. It is
                        an absolute delta, so it exists for every row and a null ratio never sorts as 0. */
-                    additional_duration_ms = r.AdditionalDurationMs,
+                    additional_duration_ms = Round(r.AdditionalDurationMs),
                     baseline_exec_count = r.BaselineExecCount,
                     recent_exec_count = r.RecentExecCount,
                     /* A plan count that moved between the two sides is the first thing to check: a query
@@ -422,7 +434,8 @@ public sealed class McpQueryTools
                     baseline_plan_count = r.BaselinePlanCount,
                     recent_plan_count = r.RecentPlanCount,
                     last_execution_time = r.LastExecutionTime?.ToString("o"),
-                    query_text = r.QueryTextSample,
+                    query_text = full_text ? r.QueryTextSample : McpHelpers.Truncate(r.QueryTextSample, RegressionsQueryTextPreviewLength),
+                    query_text_truncated = !full_text && r.QueryTextSample.Length > RegressionsQueryTextPreviewLength,
                 }),
             }, McpHelpers.JsonOptions);
         }
@@ -431,6 +444,17 @@ public sealed class McpQueryTools
             return McpHelpers.FormatError("get_query_store_regressions", ex);
         }
     }
+
+    /// <summary>
+    /// #4198: the reader's ms/percent/read figures come straight off an <c>AVG()</c> over microsecond
+    /// integers, so most rows serialize with a long, meaningless decimal tail (a double's round-trip
+    /// representation, not a display one) - real weight across ten numeric fields on up to 30 rows. Rounded
+    /// to 2 decimal places here, at the JSON edge only; every existing pin uses whole-number fixtures that
+    /// round trip unchanged.
+    /// </summary>
+    private static double Round(double value) => Math.Round(value, 2);
+
+    private static double? Round(double? value) => value is null ? null : Math.Round(value.Value, 2);
 
     /// <summary>
     /// Which of a row's three regression percents are undefined, and why (#3541 A12, contract rule 5). Each

@@ -221,7 +221,7 @@ public sealed class AnalysisAsOfAnchorLivePostgresTests
             Assert.DoesNotContain(HistoricStoryHash, findingsNow, StringComparison.Ordinal);
 
             var findingsAnchored = await DarlingMcpTools.GetAnalysisFindings(
-                service, postgres, ServerName, 4, false, Utc(historicRun.AddMinutes(30)).ToString("o"));
+                service, postgres, ServerName, hours_back: 4, include_drilldown: false, as_of: Utc(historicRun.AddMinutes(30)).ToString("o"));
             Assert.Contains(HistoricStoryHash, findingsAnchored, StringComparison.Ordinal);
 
             /* Exactly one: the anchored window's UPPER bound is what keeps step 4's now-stamped rows out.
@@ -264,7 +264,7 @@ public sealed class AnalysisAsOfAnchorLivePostgresTests
             Assert.DoesNotContain(
                 AheadStoryHash,
                 await DarlingMcpTools.GetAnalysisFindings(
-                    service, postgres, ServerName, 4, false, Utc(historicRun.AddMinutes(30)).ToString("o")),
+                    service, postgres, ServerName, hours_back: 4, include_drilldown: false, as_of: Utc(historicRun.AddMinutes(30)).ToString("o")),
                 StringComparison.Ordinal);
 
             /* ── 8. Refusals reach the caller as the tool's own message, on the persisting tool too — a

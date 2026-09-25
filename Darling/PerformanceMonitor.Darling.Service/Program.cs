@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -77,6 +78,16 @@ if (args.Length > 0 && DarlingCliCommands.IsValidateConfigVerb(args[0]))
 {
     var configPath = args.Length > 1 ? args[1] : null;
     return await DarlingCliCommands.ValidateConfigAsync(configPath, Console.Out, Console.Error, CancellationToken.None);
+}
+
+/* CLI verb: print the store host profile and a per-setting verdict table (#4214). --json for automation;
+   any other non-flag argument is an explicit config path. Exit code: see DarlingCliCommands.CheckSettingsExitCode. */
+if (args.Length > 0 && DarlingCliCommands.IsCheckSettingsVerb(args[0]))
+{
+    var rest = args.Skip(1).ToArray();
+    var wantsJson = rest.Any(a => string.Equals(a, "--json", StringComparison.OrdinalIgnoreCase));
+    var configPath = rest.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal));
+    return await DarlingCliCommands.CheckSettingsAsync(configPath, wantsJson, Console.Out, Console.Error, CancellationToken.None);
 }
 
 /* CLI verb: print a paste-ready remote-viewer connection string + the server TLS cert for the opt-in store

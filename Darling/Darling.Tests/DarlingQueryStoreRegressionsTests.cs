@@ -71,7 +71,7 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
             .Select(x => (x.Name!, x.HasDefaultValue))
             .ToArray();
 
-        Assert.Equal(new[] { "server_name", "hours_back", "database_name", "limit", "as_of" }, p.Select(x => x.Item1).ToArray());
+        Assert.Equal(new[] { "server_name", "hours_back", "database_name", "limit", "full_text", "as_of" }, p.Select(x => x.Item1).ToArray());
         Assert.All(p, x => Assert.True(x.Item2, $"{x.Item1} must be optional"));
     }
 
