@@ -290,6 +290,19 @@ public sealed class CollectorContext
     public Encoding? PgLogEncoding { get; set; }
 
     /// <summary>
+    /// Whether this target has granted read access to <c>pg_file_settings</c> (#4251), resolved by the host
+    /// through <see cref="PgFileSettingsCapability.IsReadableAsync"/> BEFORE <c>BuildQuery</c> runs, for
+    /// <see cref="PgServerConfigCollector"/> alone. False (the default) keeps today's query, which computes
+    /// <c>pending_restart</c> from <c>pg_settings</c> alone — the value that reads false from a connection
+    /// opened after a reload, because that column is backend-local. True switches
+    /// <c>PgServerConfigCollector.BuildQuery</c> to the query that also folds in
+    /// <c>pg_file_settings</c>, which is read from the file and does not have that blind spot. Settable
+    /// rather than init-only for the same reason <see cref="PgReadBinaryFileGranted"/> is: the host resolves
+    /// it on the connection it is about to hand the definition.
+    /// </summary>
+    public bool PgFileSettingsReadable { get; set; }
+
+    /// <summary>
     /// The store's log-hash key (#4004): the secret the <c>pg_log_events</c> collector keys its two stored identities
     /// with, <c>raw_line_hash</c> and <c>statement_fingerprint</c>. The host loads it once at start from outside the
     /// store and hands the same instance to every run. Null means the host has none (Lite never collects PostgreSQL
