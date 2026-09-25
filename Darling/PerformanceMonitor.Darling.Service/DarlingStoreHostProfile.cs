@@ -81,11 +81,13 @@ internal enum ConfSettingOrigin
     Unset,
 
     /// <summary>The winning line sits inside one of <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/>'s
-    /// blocks, in <c>postgresql.conf</c> itself.</summary>
+    /// blocks, in <c>postgresql.conf</c> itself, or anywhere in <see cref="ManagedConfFile.FileName"/>, the
+    /// service's own generated file (#4215), which is managed content from its first line to its last.</summary>
     ManagedBlock,
 
     /// <summary><c>postgresql.auto.conf</c> set it, or a <c>postgresql.conf</c> line outside every managed
-    /// block (an include, or a line spliced in after the last block) is what won.</summary>
+    /// block (a line spliced in after the last block, or after the include of
+    /// <see cref="ManagedConfFile.FileName"/>), or an operator's own included file, is what won.</summary>
     OperatorOverride,
 }
 
@@ -548,7 +550,10 @@ WHERE NOT is_compressed";
     /// One setting's file-based attribution on a MANAGED store (#4214): <c>postgresql.auto.conf</c> wins if
     /// it has an assignment (PostgreSQL reads it after all of postgresql.conf); otherwise the LAST assignment
     /// <c>postgresql.conf</c>'s own include chain carries (<see cref="DarlingManagedPostgres.ReadConfAssignments"/>
-    /// already returns them in PostgreSQL's own read order), classified managed/override by
+    /// already returns them in PostgreSQL's own read order). A winning line in
+    /// <see cref="ManagedConfFile.FileName"/> is managed (#4215: the file postgresql.conf includes last, so it
+    /// wins every key it sets on an untouched store); a winning line in any other included file is an
+    /// override; a winning line in postgresql.conf itself is classified managed/override by
     /// <see cref="IsLineInsideManagedBlock"/>. Never touches <c>pg_settings.sourcefile</c> — see
     /// <see cref="Mcp.DarlingStoreMetricsReader.JobExecutionLoggingSql"/>'s remarks for why that column cannot
     /// be relied on without escalating the connection's privileges.
@@ -572,10 +577,24 @@ WHERE NOT is_compressed";
         }
 
         var lastConf = confAssignments[^1];
-        if (!string.Equals(Path.GetFullPath(lastConf.File), confPath, StringComparison.OrdinalIgnoreCase))
+        var winningFile = Path.GetFullPath(lastConf.File);
+        if (string.Equals(winningFile, Path.GetFullPath(Path.Combine(dataDirectory, ManagedConfFile.FileName)), StringComparison.OrdinalIgnoreCase))
         {
-            /* The winning line lives in an INCLUDED file, not postgresql.conf itself. Every managed block is
-               appended directly to postgresql.conf, so an include can never carry one. */
+            /* #4215 (lane A1f): the winning line lives in darling-managed.conf, the service's OWN generated file.
+               postgresql.conf includes it at its end, after every versioned block, and it carries every managed
+               key, so on a fresh store it wins every one of them. The whole file is managed content, with no
+               blocks to find, so every line of it is managed. This check must come before the included-file
+               branch below: without it, every key the file sets read as an operator override on a store
+               nobody had touched. A hand edit of the file is reported by
+               ComputeAndStoreManagedConfVerdictsAsync, from the write result's changed keys, not here. */
+            return new ConfSettingAttribution(ConfSettingOrigin.ManagedBlock, lastConf.File, lastConf.Line, lastConf.Value);
+        }
+
+        if (!string.Equals(winningFile, confPath, StringComparison.OrdinalIgnoreCase))
+        {
+            /* The winning line lives in an operator's INCLUDED file, not postgresql.conf itself and not
+               darling-managed.conf. Every versioned managed block is appended directly to postgresql.conf, so
+               no other include can carry one. */
             return new ConfSettingAttribution(ConfSettingOrigin.OperatorOverride, lastConf.File, lastConf.Line, lastConf.Value);
         }
 
@@ -1072,22 +1091,26 @@ WHERE NOT is_compressed";
     /// them, same as any other key nothing here touches, rather than a fixed row regardless.</summary>
     internal static readonly string[] SslTrioKeys = ["ssl", "ssl_cert_file", "ssl_key_file"];
 
-    /// <summary>#4215 ruling M1's scope-cut item 2 (lane A1e, lane A1c's finding): <c>timezone</c> (v9's own
-    /// managed block) and <c>log_timezone</c> (deliberately never set by any managed block — see
-    /// <c>DarlingManagedPostgresTests</c>'s "not log_timezone" assertion) both read a NULL
-    /// <c>pg_settings.sourcefile</c> even when a file sets the value actually in force, confirmed empirically
-    /// alongside <c>port</c>/<c>listen_addresses</c> in <c>ManagedConfFileLiveTests</c> — a PostgreSQL
-    /// assign-hook quirk, not a Darling bug. <see cref="AttributeManagedSetting"/> already reads the file
-    /// directly rather than <c>pg_settings.sourcefile</c>, so it is unaffected; only the comparison differs
-    /// from the eight sizing keys' (<see cref="ClassifyValueVerdict"/> is a plain string equality, since
-    /// neither value is numeric — <see cref="NormalizePgSetting"/> would reject both). <c>pg_settings.name</c>
+    /// <summary>#4215 ruling M1's scope-cut item 2 (lane A1e, lane A1c's finding): <c>timezone</c> (v9's
+    /// managed block, and <see cref="ManagedConfFile.FileName"/>'s own line). Lane A1c saw a NULL
+    /// <c>pg_settings.sourcefile</c> for it in <c>ManagedConfFileLiveTests</c>, alongside
+    /// <c>port</c>/<c>listen_addresses</c>; lane A1f, reading as a superuser on a fresh store, saw
+    /// <c>darling-managed.conf</c> and its line. <see cref="AttributeManagedSetting"/> reads the file
+    /// directly rather than <c>pg_settings.sourcefile</c>, so it is unaffected either way; only the comparison differs
+    /// from the eight sizing keys' (<see cref="ClassifyValueVerdict"/> is a plain string equality, since the
+    /// value is not numeric — <see cref="NormalizePgSetting"/> would reject it). <c>pg_settings.name</c>
     /// for the session zone is <c>TimeZone</c> (mixed case, historical) even though the conf file and every
     /// other surface here spell it <c>timezone</c> — <c>PgSettingsName</c> carries the exact spelling the live
-    /// lookup needs; <c>FileKeyName</c> is what storage, file attribution and display all use instead.</summary>
+    /// lookup needs; <c>FileKeyName</c> is what storage, file attribution and display all use instead.
+    ///
+    /// <para><c>log_timezone</c> is deliberately NOT here (#4215, lane A1f, per the coordinator's ruling): the
+    /// service never sets it (<c>DarlingManagedPostgresTests</c> asserts the "not log_timezone" half), so
+    /// there is no managed value to compare against, and initdb's own line, outside every managed block, would
+    /// store <see cref="HostSettingVerdict.OperatorOverride"/> on every store, fresh ones included — an
+    /// override alert on every store for a key nobody overrode.</para></summary>
     internal static readonly (string PgSettingsName, string FileKeyName)[] ValueOnlyKeys =
     [
         ("TimeZone", "timezone"),
-        ("log_timezone", "log_timezone"),
     ];
 
     internal const string ManagedConfPgFileSettingsErrorSql = @"

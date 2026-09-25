@@ -1445,7 +1445,7 @@ public sealed class DarlingWorker : BackgroundService
            fold a hand edit's changed keys into the stored verdict rows without re-reading the file. Null on a
            BYO store (managedPostgres itself is null) and on the adopted-listener path (the write never ran). */
         var managedDataDirectory = managedPostgres?.DataDirectory;
-        var managedConfWriteResult = managedPostgres?.LastManagedConfWriteResult;
+        var managedConfWriteResult = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfWriteResult : null;
 
         try
         {

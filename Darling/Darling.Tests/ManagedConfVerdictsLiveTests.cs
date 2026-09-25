@@ -75,8 +75,9 @@ public sealed class ManagedConfVerdictsLiveTests
     /// from a NEW connection as the non-superuser viewer role; a reload-context invalid value
     /// (<c>max_wal_size</c>) reads <see cref="HostSettingVerdict.RejectedValue"/>, never PendingRestart; an
     /// <c>ALTER SYSTEM</c> on an owned key (<c>work_mem</c>) reads <see cref="HostSettingVerdict.OperatorOverride"/>
-    /// attributed to <c>postgresql.auto.conf</c>; and the baseline itself proves <c>timezone</c>/<c>log_timezone</c>
-    /// (#4215 ruling M1's second scope-cut item) and the ssl trio's absence on a loopback-only store.
+    /// attributed to <c>postgresql.auto.conf</c>; and the baseline itself proves every managed sizing key and
+    /// <c>timezone</c> read <see cref="HostSettingVerdict.Matches"/> from <c>darling-managed.conf</c> (lane A1f),
+    /// <c>log_timezone</c> stores no row, and the ssl trio is absent on a loopback-only store.
     /// </summary>
     [Fact]
     public async Task ComputeAndStoreManagedConfVerdicts_CoversRestartRejectedOverrideAndCommandLine_Gated()
@@ -131,22 +132,29 @@ public sealed class ManagedConfVerdictsLiveTests
             Assert.Equal(HostSettingVerdict.CommandLine, byName["port"].Verdict);
             Assert.Equal(HostSettingVerdict.CommandLine, byName["listen_addresses"].Verdict);
 
-            /* #4215/#4251 A1e FINDING, not yet root-caused (see PR body): a freshly-started managed store's
-               OWN sizing keys (shared_buffers here) come back OperatorOverride, not Matches, from this
-               test's independent AttributeManagedSetting/ClassifyVerdict call -- the file-attribution step
-               itself, not a value mismatch (StaleAfterHardwareChange would mean the values differ; this is
-               the ORIGIN classification landing outside ManagedBlock). Asserting the row exists and is ONE
-               of the two plausible verdicts keeps this test green while the real cause (this test's own
-               reconstruction of AttributeManagedSetting's inputs, or a genuine IsLineInsideManagedBlock gap
-               never exercised live before this lane) gets a follow-up. */
-            Assert.Contains(byName["shared_buffers"].Verdict, new[] { HostSettingVerdict.Matches, HostSettingVerdict.OperatorOverride });
+            /* #4215 lane A1f: on a store nobody has touched, every key the service manages reads Matches,
+               attributed to darling-managed.conf. The include of that file is postgresql.conf's LAST line, so
+               the file wins every key it sets; before A1f's fix, AttributeManagedSetting's included-file branch
+               called any winning line outside postgresql.conf an operator override, this file included, and
+               all eight sizing keys plus timezone read OperatorOverride here (lane A1e's finding). */
+            var sizingKeys = new[]
+            {
+                "shared_buffers", "effective_cache_size", "maintenance_work_mem", "work_mem",
+                "timescaledb.max_background_workers", "max_worker_processes", "max_connections", "max_wal_size",
+            };
+            foreach (var key in sizingKeys.Append("timezone"))
+            {
+                Assert.True(byName.TryGetValue(key, out var row), $"no stored verdict for {key}.");
+                Assert.True(row.Verdict == HostSettingVerdict.Matches,
+                    $"{key}: expected Matches on a fresh store, got {row.Verdict} ({row.SourceDescription}).");
+                Assert.NotNull(row.SourceFile);
+                Assert.EndsWith(ManagedConfFile.FileName, row.SourceFile, StringComparison.OrdinalIgnoreCase);
+            }
 
-            /* #4215 ruling M1's second scope-cut item (lane A1c's finding): log_timezone is deliberately never
-               set by any managed block, so the initdb-authored line outside every managed block should win --
-               OperatorOverride. timezone is v9's own managed block and is EXPECTED to match; left unasserted
-               here pending the same follow-up as shared_buffers above, since it shares the same attribution
-               path. */
-            Assert.Equal(HostSettingVerdict.OperatorOverride, byName["log_timezone"].Verdict);
+            /* log_timezone (the coordinator's ruling in lane A1f): the service never sets it, so there is no
+               managed value to compare, and initdb's own line would read OperatorOverride on every store. No
+               row is stored for it at all. */
+            Assert.False(byName.ContainsKey("log_timezone"), "log_timezone is never managed, so no verdict is stored for it.");
 
             /* A loopback-only store never passes the ssl trio on the command line -- nothing is stored for
                any of the three, same as any other key nothing here touches. */
