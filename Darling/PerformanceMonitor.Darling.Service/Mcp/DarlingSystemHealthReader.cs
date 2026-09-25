@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -42,7 +43,11 @@ internal static class DarlingSystemHealthReader
     /// <summary>
     /// Raw event_xml for one XE event type over the tab window, newest first — the viewer's
     /// <c>SystemHealthEventsByTypeSql</c>. Windows on <c>event_time</c> (the event's real time), and on the
-    /// category's own <c>event_type</c> ($4). $1 server_id, $2/$3 window (naive UTC), $4 event_type.
+    /// category's own <c>event_type</c> ($4). $1 server_id, $2/$3 window (naive UTC), $4 event_type. $5 is the
+    /// <see cref="EventWindowFloor"/> for $2 — <c>v_system_health_events</c> is a hypertable partitioned on
+    /// <c>collection_time</c>, which this event-time window alone gives the planner nothing to exclude a chunk
+    /// on (#4229); the floor lets it skip every chunk older than the window, without being able to drop a row
+    /// (an event is collected after it happens).
     /// </summary>
     public const string SystemHealthEventsByTypeSql = """
         SELECT
@@ -53,6 +58,7 @@ internal static class DarlingSystemHealthReader
         AND   event_time <= $3
         AND   event_type = $4
         AND   event_xml IS NOT NULL
+        AND   collection_time >= $5
         ORDER BY event_time DESC
         """;
 
@@ -83,6 +89,7 @@ internal static class DarlingSystemHealthReader
         DarlingMcpReadParameters.AddTimestamp(command, startUtc);
         DarlingMcpReadParameters.AddTimestamp(command, endUtc);
         DarlingMcpReadParameters.AddText(command, eventType);
+        DarlingMcpReadParameters.AddTimestamp(command, EventWindowFloor.For(startUtc));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

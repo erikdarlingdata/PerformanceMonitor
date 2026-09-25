@@ -1635,15 +1635,19 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
-    /// CONSTRAINT PIN 2 (#2845): the hardware block must never emit <c>work_mem</c>, at ANY host size.
-    /// The formula would take it 31 -> 63 MB on the resized boxes, and the only measurements above 31 MB on
-    /// this store's heaviest read are worse (PlanRegressionSql: default 26,565 ms, 31 MB 25,617 ms,
-    /// 512 MB 59,323 ms). It is also the wrong KIND of setting for this block — a per-sort, per-connection
-    /// ceiling that follows from the query mix, not from the machine.
+    /// PIN (#4207): the hardware block emits ALL FOUR <see cref="DarlingManagedPostgres.MemorySettings"/>
+    /// values, <c>work_mem</c> included, from the SAME <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>
+    /// call the block already uses for the other three. Before #4207 this was the opposite pin
+    /// (<c>HardwareSizingConfAppend_NeverEmitsWorkMem</c>): #2845 measured a regression at 512 MB — 8x this
+    /// formula's own 64 MB ceiling — and concluded to exclude work_mem altogether, so the actual clamped
+    /// value the formula derives was never measured. #4207 measured what excluding it cost instead: three
+    /// field stores stuck at the v3 block's 31 MB after a resize to 31.5 GB, one of them having spilled 33 TB
+    /// to temp files since creation. See <see cref="DarlingManagedPostgres.BuildHardwareSizingConfAppend"/>
+    /// for the full reversal.
     ///
-    /// <para>Note the theory covers 32 GB and above, where the formula clamps to the 64 MB ceiling: those
-    /// are precisely the sizes where a naive "apply the formula to the new RAM" change would have doubled
-    /// it.</para>
+    /// <para>Covers 32 GB and above, where the formula clamps to the 64 MB ceiling, on purpose: those are the
+    /// sizes where a resize can no longer move the value further, so a regression there would be the
+    /// permanent state of every sufficiently large store, not a transient one.</para>
     /// </summary>
     [Theory]
     [InlineData(4)]
@@ -1651,22 +1655,48 @@ public sealed class DarlingManagedPostgresTests
     [InlineData(32)]
     [InlineData(64)]
     [InlineData(512)]
-    public void HardwareSizingConfAppend_NeverEmitsWorkMem(long ramGb)
+    public void HardwareSizingConfAppend_EmitsAllFourMemorySettings(long ramGb)
     {
-        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramGb * 1024 * 1024 * 1024, 40);
+        var ramBytes = ramGb * 1024 * 1024 * 1024;
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramBytes, 40);
+        var expected = DarlingManagedPostgres.DeriveMemorySettings(DarlingManagedPostgres.QuantizeRam(ramBytes));
 
-        /* Anchored on the newline that starts every setting line. A bare "work_mem = " is a SUBSTRING of
-           "maintenance_work_mem = ", so the unanchored form fails against a correct block — caught by the
-           harness before this shipped, and the reason the positive assertion below is here as a guard. */
-        Assert.DoesNotContain("\nwork_mem = ", block, StringComparison.Ordinal);
-        Assert.Contains("\nmaintenance_work_mem = ", block, StringComparison.Ordinal);
+        /* Anchored on the newline that starts every setting line: a bare "work_mem = " is a SUBSTRING of
+           "maintenance_work_mem = ", so the unanchored form would pass even if this read the wrong line. */
+        Assert.Contains($"\neffective_cache_size = {expected.EffectiveCacheSizeMb}MB\n", block, StringComparison.Ordinal);
+        Assert.Contains($"\nmaintenance_work_mem = {expected.MaintenanceWorkMemMb}MB\n", block, StringComparison.Ordinal);
+        Assert.Contains($"\nwork_mem = {expected.WorkMemMb}MB\n", block, StringComparison.Ordinal);
+
+        /* shared_buffers stays excluded (CONSTRAINT PIN 1, #1559/#2845) — this pin is about the other three,
+           not a licence to re-derive every MemorySettings field. */
+        Assert.DoesNotContain("shared_buffers", block, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The exact field measurement from #4207: the reported host RAM, 33,788,809,216 bytes (the issue's
+    /// "31.5 GiB" — actually 31.47 GiB, which <see cref="DarlingManagedPostgres.QuantizeRam"/> rounds DOWN to
+    /// 31 GB, half a GB short of the 31.5 GB midpoint that would round up). At 31 GB, <c>work_mem</c> is
+    /// <b>62 MB</b>, not the issue's rough "63 MB" (63 is 31.5 GiB's OWN raw RAM/512, i.e. what you get by
+    /// skipping the quantization step) — and not the 31 MB the stale v3 block left in force after the resize
+    /// either way. Either figure is roughly double the stale value, which is the point; this pins the one the
+    /// code actually derives from the reported bytes.
+    /// </summary>
+    [Fact]
+    public void HardwareSizingConfAppend_MeasuredFieldRam_EmitsWorkMem62Mb()
+    {
+        const long measuredFieldRamBytes = 33_788_809_216L;
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(measuredFieldRamBytes, 40);
+
+        Assert.Contains("\nwork_mem = 62MB\n", block, StringComparison.Ordinal);
     }
 
     /// <summary>
     /// The block emits what it is for, at the values the resized fleet should have had. 31.5 GB is the
     /// m7i.2xlarge reading; 32 GB is used here for a round assertion. effective_cache_size 24576MB is the
     /// number #2845 was filed over — the boxes were sitting at 11.86 GB, which is 75% of the 16 GB they had
-    /// before the resize.
+    /// before the resize. work_mem 64MB is the #4207 addition — the 32 GB round number lands exactly on the
+    /// formula's ceiling; <see cref="HardwareSizingConfAppend_MeasuredFieldRam_EmitsWorkMem62Mb"/> covers the
+    /// field's actual reading, just under it.
     /// </summary>
     [Fact]
     public void HardwareSizingConfAppend_EmitsHostDerivedSettings()
@@ -1677,6 +1707,7 @@ public sealed class DarlingManagedPostgresTests
         Assert.Contains(DarlingManagedPostgres.ConfMarkerV8, block, StringComparison.Ordinal);
         Assert.Contains("effective_cache_size = 24576MB", block, StringComparison.Ordinal);  /* 75% of 32 GB (was 11.86 GB = 75% of 16 GB) */
         Assert.Contains("maintenance_work_mem = 1638MB", block, StringComparison.Ordinal);   /* 5% of 32 GB, past the 1536 floor, under the 2 GB cap */
+        Assert.Contains("work_mem = 64MB", block, StringComparison.Ordinal);                 /* RAM/512 = 64 MB, exactly the ceiling */
         Assert.Contains("timescaledb.max_background_workers = 42", block, StringComparison.Ordinal);  /* 40 hypertables + 2 */
         Assert.Contains("max_worker_processes = 53", block, StringComparison.Ordinal);       /* 3 + 42 + 8 */
     }
@@ -1722,6 +1753,170 @@ public sealed class DarlingManagedPostgresTests
         Assert.Equal(
             DarlingManagedPostgres.BuildHardwareFingerprint(fourGb, 40),
             DarlingManagedPostgres.BuildHardwareFingerprint(0, 40));
+    }
+
+    /* ===================== #4207 v8 replace-in-place (was append-only) ===================== */
+
+    /// <summary>
+    /// PIN (#4207): two successive fingerprint changes — the field's actual pattern, RAM then hypertable
+    /// count — leave exactly ONE v8 block, not a growing pile. Before this fix each call to the equivalent
+    /// append appended a fresh block, which is how the field stores reached three copies from three
+    /// fingerprint changes since creation.
+    /// </summary>
+    [Fact]
+    public void ReplaceOrAppendHardwareSizingBlock_TwoSuccessiveFingerprintChanges_LeaveExactlyOneBlock()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+
+        var conf = "shared_buffers = 1024MB\n";
+        conf = DarlingManagedPostgres.ReplaceOrAppendHardwareSizingBlock(
+            conf, DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, 40));
+        Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV8));
+
+        /* First change: a resize, 16 -> 32 GB. */
+        conf = DarlingManagedPostgres.ReplaceOrAppendHardwareSizingBlock(
+            conf, DarlingManagedPostgres.BuildHardwareSizingConfAppend(thirtyTwoGb, 40));
+        Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV8));
+
+        /* Second change: a hypertable count change with no resize, 32 GB stays but 40 -> 41. This is the
+           axis #2845 considered splitting into its own fingerprint; #4207 keeps it joined (see the
+           EnsureConfAppended v8 comment) because an in-place rewrite makes it exactly as cheap as a resize. */
+        conf = DarlingManagedPostgres.ReplaceOrAppendHardwareSizingBlock(
+            conf, DarlingManagedPostgres.BuildHardwareSizingConfAppend(thirtyTwoGb, 41));
+        Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV8));
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            conf, DarlingManagedPostgres.BuildHardwareFingerprint(thirtyTwoGb, 41)));
+
+        /* The unrelated line outside every block survived all three rewrites untouched. */
+        Assert.StartsWith("shared_buffers = 1024MB\n", conf, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// PIN (#4207): a conf carrying three v8 blocks — the exact shape #4207 measured on all three production
+    /// stores (72 -&gt; 73 -&gt; 74 background workers) — collapses to ONE on the next rewrite, at the
+    /// FIRST block's position. Rewriting the first position rather than the last is what keeps a manual
+    /// override positioned after the old last block still winning (see
+    /// <see cref="DarlingManagedPostgres.ReplaceOrAppendHardwareSizingBlock"/>): collapsing can only move the
+    /// v8 lines EARLIER in the file, never later, so nothing that used to lose to the last block can start
+    /// winning, and nothing that used to beat it can start losing.
+    /// </summary>
+    [Fact]
+    public void ReplaceOrAppendHardwareSizingBlock_ThreeExistingBlocks_CollapseToOneAtTheFirstPosition()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        const long sixtyFourGb = 64L * 1024 * 1024 * 1024;
+
+        var block1 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, 40);
+        var block2 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(thirtyTwoGb, 41);
+        var block3 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixtyFourGb, 42);
+        var conf = "port = 5432\n" + block1 + block2 + block3;
+        var firstMarkerPosition = conf.IndexOf(DarlingManagedPostgres.ConfMarkerV8, StringComparison.Ordinal);
+        Assert.Equal(3, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV8));  /* the broken shape, confirmed */
+
+        var newBlock = DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixtyFourGb, 43);
+        var rewritten = DarlingManagedPostgres.ReplaceOrAppendHardwareSizingBlock(conf, newBlock);
+
+        Assert.Equal(1, CountOccurrences(rewritten, DarlingManagedPostgres.ConfMarkerV8));
+        Assert.Equal(
+            firstMarkerPosition,
+            rewritten.IndexOf(DarlingManagedPostgres.ConfMarkerV8, StringComparison.Ordinal));
+        Assert.True(DarlingManagedPostgres.ConfHasCurrentHardwareFingerprint(
+            rewritten, DarlingManagedPostgres.BuildHardwareFingerprint(sixtyFourGb, 43)));
+    }
+
+    /// <summary>
+    /// PIN (#4207): every byte outside a v8 span is byte-identical after a rewrite that both updates the
+    /// first block and removes a second one — INCLUDING an operator's own line sitting BETWEEN the two
+    /// blocks, which a naive "keep the first block's text, drop everything from the second marker on" splice
+    /// would lose even though it is not part of either block.
+    /// </summary>
+    [Fact]
+    public void ReplaceOrAppendHardwareSizingBlock_LinesOutsideBlocks_AreByteIdenticalAfterRewrite()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        const long thirtyTwoGb = 32L * 1024 * 1024 * 1024;
+        const long sixtyFourGb = 64L * 1024 * 1024 * 1024;
+
+        const string before = "# operator header\nport = 5432\n";
+        /* Blank-line-led, like every block this file writes - see FindHardwareSizingBlockEnd's doc for why
+           an operator line with NO leading blank line is a known edge case this rule does not cover. */
+        const string between = "\nwork_mem = 999MB   # an operator override sitting between two v8 blocks\n";
+        const string after = "\n# trailing operator block\nlisten_addresses = '*'\n";
+
+        var conf = before
+            + DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, 40)
+            + between
+            + DarlingManagedPostgres.BuildHardwareSizingConfAppend(thirtyTwoGb, 41)
+            + after;
+
+        var rewritten = DarlingManagedPostgres.ReplaceOrAppendHardwareSizingBlock(
+            conf, DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixtyFourGb, 42));
+
+        Assert.StartsWith(before, rewritten, StringComparison.Ordinal);
+        Assert.Contains(between, rewritten, StringComparison.Ordinal);
+        Assert.EndsWith(after, rewritten, StringComparison.Ordinal);
+        Assert.Equal(1, CountOccurrences(rewritten, DarlingManagedPostgres.ConfMarkerV8));
+    }
+
+    /// <summary>
+    /// No existing v8 block falls back to a plain append — the v2-v7 shape — so a cluster's first-ever v8
+    /// write is unchanged by #4207.
+    /// </summary>
+    [Fact]
+    public void ReplaceOrAppendHardwareSizingBlock_NoExistingBlock_AppendsOne()
+    {
+        const long sixteenGb = 16L * 1024 * 1024 * 1024;
+        var conf = "port = 5432\n";
+        var block = DarlingManagedPostgres.BuildHardwareSizingConfAppend(sixteenGb, 40);
+
+        Assert.Equal(conf + block, DarlingManagedPostgres.ReplaceOrAppendHardwareSizingBlock(conf, block));
+    }
+
+    /// <summary>
+    /// The #4207 field defect end to end: a data directory whose postgresql.conf already carries three v8
+    /// blocks (the append-not-replace bug) collapses to one on the very next <c>EnsureConfAppended</c> call,
+    /// through the real heal path rather than the pure function directly, and the survivor carries
+    /// <c>work_mem</c>. A second heal is a no-op for v8: the fingerprint the first heal just wrote matches
+    /// this machine, so nothing is rewritten.
+    /// </summary>
+    [Fact]
+    public void EnsureConfAppended_ThreeExistingV8Blocks_CollapseToOneOnTheNextHeal()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v8collapse-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+
+            /* Fingerprints built from values no real test host will match (1-3 GB RAM, 1-3 hypertables), so
+               the v8 check is guaranteed to find the last one stale and act - exactly what the field stores
+               hit on every hypertable-count change once their RAM had already resized past the oldest
+               fingerprint. */
+            var stale1 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(1L * 1024 * 1024 * 1024, 1);
+            var stale2 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(2L * 1024 * 1024 * 1024, 2);
+            var stale3 = DarlingManagedPostgres.BuildHardwareSizingConfAppend(3L * 1024 * 1024 * 1024, 3);
+            File.WriteAllText(confPath, DarlingManagedPostgres.BuildConfAppend(5993) + stale1 + stale2 + stale3);
+
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5993, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+
+            var healed = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(healed, DarlingManagedPostgres.ConfMarkerV8));
+            Assert.Contains("\nwork_mem = ", healed, StringComparison.Ordinal);
+
+            pg.EnsureConfAppended(dataDirectory);
+            var healedAgain = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(healedAgain, DarlingManagedPostgres.ConfMarkerV8));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
     }
 
     /* ===================== v12 wal sizing (#3802) ===================== */

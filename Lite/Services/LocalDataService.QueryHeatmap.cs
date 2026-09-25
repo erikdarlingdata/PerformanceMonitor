@@ -23,6 +23,11 @@ public sealed class QueryHeatmapCellRow
     public long QueryCount { get; set; }
     public string TopQueryHash { get; set; } = "";
     public string TopQueryText { get; set; } = "";
+
+    /// <summary>True when <see cref="TopQueryText"/> is a preview shorter than the stored statement (#4198)
+    /// — the caller's only way to tell "this is the whole thing" from "this is cut off" without re-asking
+    /// with full_text.</summary>
+    public bool TopQueryTextTruncated { get; set; }
 }
 
 /*
@@ -61,7 +66,7 @@ public partial class LocalDataService
     public async Task<List<QueryHeatmapCellRow>> GetQueryHeatmapCellsAsync(
         int serverId, HeatmapMetric metric, int hoursBack = 24,
         int bucketMinutes = ViewerHeatmapBucketMinutes, int maxRows = 500,
-        IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
+        IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int previewLength = 120)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -71,14 +76,18 @@ public partial class LocalDataService
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var bucketIndex = 4 + dbValues.Count;
         var limitIndex = 5 + dbValues.Count;
+        var previewIndex = 6 + dbValues.Count;
 
+        /* Preview width is a bound parameter, not the literal 120 (#4198): fetched at previewLength + 1
+           characters (Darling's twin over-fetch-by-one idiom, DarlingQueryHeatmapReader), so the one extra
+           character IS the truncation signal read back in C# below rather than a second round trip. */
         command.CommandText = $@"
 WITH per_query AS (
     SELECT
         time_bucket(to_minutes(CAST(${bucketIndex} AS INTEGER)), collection_time, TIMESTAMP '1970-01-01 00:00:00') AS time_bin,
         {metricExpr} AS metric_value,
         query_hash,
-        LEFT(query_text, 120) AS query_preview,
+        LEFT(query_text, ${previewIndex}) AS query_preview,
         delta_execution_count
     FROM v_query_stats
     WHERE server_id = $1
@@ -122,18 +131,22 @@ LIMIT ${limitIndex}";
             command.Parameters.Add(new DuckDBParameter { Value = db });
         command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
         command.Parameters.Add(new DuckDBParameter { Value = maxRows });
+        command.Parameters.Add(new DuckDBParameter { Value = previewLength + 1 });
 
         var rows = new List<QueryHeatmapCellRow>();
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var fetchedText = reader.IsDBNull(4) ? "" : reader.GetString(4);
+            var truncated = fetchedText.Length > previewLength;
             rows.Add(new QueryHeatmapCellRow
             {
                 TimeBucket = reader.GetDateTime(0),
                 BucketIndex = reader.IsDBNull(1) ? 0 : (int)ToDouble(reader.GetValue(1)),
                 QueryCount = reader.IsDBNull(2) ? 0 : (long)ToDouble(reader.GetValue(2)),
                 TopQueryHash = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                TopQueryText = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                TopQueryText = truncated ? fetchedText[..previewLength] : fetchedText,
+                TopQueryTextTruncated = truncated,
             });
         }
 

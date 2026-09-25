@@ -52,11 +52,16 @@ public sealed class FreshStoreWatermarkTests
     /// And the guard's catch covers a value the client cannot convert, not only a server error: a guard read is
     /// allowed to fail, and a failed guard means the exact raw scan, never a failed overview. Pinned on the text
     /// because no guard read the SQL above lets through can produce one any more.
+    ///
+    /// <para>Reads <c>CollectionHealthRollupSupport.cs</c> in <c>PerformanceMonitor.Darling.Storage</c>, not
+    /// <c>DarlingFleetReader.cs</c> (#4226): the guard, and its catch, moved there so the viewer shares it
+    /// instead of carrying its own copy. <c>DarlingFleetReader.CollectionHealthRollupUsableAsync</c> is now a
+    /// thin wrapper with no catch of its own.</para>
     /// </summary>
     [Fact]
     public void AGuardReadTheClientCannotConvert_FallsBackToTheRawScan()
     {
-        var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingFleetReader.cs");
+        var reader = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Storage", "CollectionHealthRollupSupport.cs");
 
         Assert.Contains("catch (Exception ex) when (ex is PostgresException or InvalidCastException)", reader, StringComparison.Ordinal);
     }

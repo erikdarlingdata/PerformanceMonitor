@@ -47,6 +47,16 @@ public sealed class TrendPayloadBudgetLiveTests
     /// <summary>What any default answer may weigh: the heaviest measured on DARLING01 after the change was 63 KB.</summary>
     private const int DefaultCeilingBytes = 80 * 1024;
 
+    /// <summary>#4193: get_pg_cpu_utilization's own default ceiling. Its row is the widest in the family by
+    /// design (<see cref="TrendBuckets.PgCpuMaxPoints"/>'s own doc comment: "about 500 bytes/point" for the
+    /// CPU/ACU pair with peaks, the capacity trio and six V136 host-memory columns), so the SAME 200-point
+    /// auto-sizing target (<see cref="TrendBuckets.McpPointBudget"/>) every trend tool shares costs it
+    /// roughly 100 KB at the widest auto-sized window, not the ~63 KB the narrower rows in
+    /// <see cref="DefaultCeilingBytes"/> top out at. Measured 84,556 bytes / 169 points at 168h on this
+    /// fixture; sized with headroom above that rather than raising the shared ceiling and weakening what it
+    /// guards for the other ten tools.</summary>
+    private const int PgCpuDefaultCeilingBytes = 100 * 1024;
+
     /// <summary>What the largest answer a caller can ask for may weigh.</summary>
     private const int CapCeilingBytes = 320 * 1024;
 
@@ -91,6 +101,9 @@ public sealed class TrendPayloadBudgetLiveTests
                 Measure(measured, "get_lock_wait_trend", hours, await DarlingMcpBlockingTools.GetLockWaitTrend(postgres, ServerName, hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
                 Measure(measured, "get_pg_io_trend", hours, await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, hours_back: hours), "points", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
                 Measure(measured, "get_pg_database_trend", hours, await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, hours_back: hours), "points", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
+                /* #4193: get_pg_cpu_utilization joined the TrendBuckets family; roster it the same as its
+                   SQL Server twin get_cpu_utilization below. */
+                Measure(measured, "get_pg_cpu_utilization", hours, await DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(postgres, ServerName, hours_back: hours), "samples", PgCpuDefaultCeilingBytes, TrendBuckets.McpPointBudget);
                 if (hours <= 72)
                 {
                     Measure(measured, "get_query_duration_trend", hours, await DarlingMcpTrendTools.GetQueryDurationTrend(postgres, ServerName, hours_back: hours), "trend", DefaultCeilingBytes, TrendBuckets.McpPointBudget);
@@ -142,6 +155,10 @@ public sealed class TrendPayloadBudgetLiveTests
             Measure(measured, "get_pg_database_trend@" + pgDatabaseWidth, 168,
                 await DarlingMcpPgTrendTools.GetPgDatabaseTrend(postgres, ServerName, hours_back: 168, bucket_minutes: pgDatabaseWidth), "points", CapCeilingBytes, TrendBuckets.PgDatabaseMaxPoints);
 
+            var pgCpuWidth = TrendBuckets.NarrowestFitting(WeekMinutes, 1, TrendBuckets.PgCpuMaxPoints);
+            Measure(measured, "get_pg_cpu_utilization@" + pgCpuWidth, 168,
+                await DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(postgres, ServerName, hours_back: 168, bucket_minutes: pgCpuWidth), "samples", CapCeilingBytes, TrendBuckets.PgCpuMaxPoints);
+
             /* #3960: the rest of the family's largest answers, same recipe. */
             var waitWidth = TrendBuckets.NarrowestFitting(WeekMinutes, 1, TrendBuckets.WaitMaxPoints);
             Measure(measured, "get_wait_trend@" + waitWidth, 168,
@@ -172,6 +189,7 @@ public sealed class TrendPayloadBudgetLiveTests
             Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpPgTrendTools.GetPgIoTrend(postgres, ServerName, hours_back: 168, bucket_minutes: pgIoWidth - 1)));
             Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpDataTools.GetWaitTrend(postgres, "LCK_M_S", ServerName, 168, bucket_minutes: waitWidth - 1)));
             Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpPgTrendTools.GetPgQueryDurationTrend(postgres, ServerName, PgQueryIdText, 168, bucket_minutes: pgQueryDurationWidth - 1)));
+            Assert.True(McpHelpers.IsRefusalEnvelope(await DarlingMcpPgCpuUtilizationTools.GetPgCpuUtilization(postgres, ServerName, 168, bucket_minutes: pgCpuWidth - 1)));
 
             TestContext.Current.TestOutputHelper?.WriteLine(string.Join(Environment.NewLine, measured));
             bodySucceeded = true;
@@ -358,6 +376,19 @@ INSERT INTO pg_statement_stats
 SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, {PgQueryId},
        10 + (n % 20), (10 + (n % 20)) * 2.5, 60
 FROM generate_series(0, $5) AS n", 12_000_000L, weekStart, WeekMinutes);
+
+        /* #4193: get_pg_cpu_utilization's own table, one row/minute like the rest of the family, with the
+           V136 host-memory columns populated (not left NULL) since those are what doubled the pre-bucketing
+           row width the issue measured. */
+        await PlantAsync(connection, ct, @"
+INSERT INTO pg_cpu_utilization
+    (collection_id, collection_time, server_id, server_name, sample_time,
+     cpu_percent, acu_utilization_percent, serverless_capacity_acu, max_configured_acu,
+     memory_total_bytes, memory_free_bytes, memory_cached_bytes, memory_buffers_bytes, memory_active_bytes, configured_memory_bytes)
+SELECT $1 + n, $2 + n * interval '1 minute', $3, $4, $2 + n * interval '1 minute',
+       30 + (n % 50), 25 + (n % 40), 4 + (n % 8), 16,
+       17179869184, 2147483648 + (n % 1000) * 100000, 6442450944, 536870912, 8589934592 + (n % 1000) * 100000, 17179869184
+FROM generate_series(0, $5) AS n", 13_000_000L, weekStart, WeekMinutes);
     }
 
     /// <summary>One generate_series plant: $1 an id base past anything the generator has handed out, $2 the first
@@ -380,6 +411,8 @@ FROM generate_series(0, $5) AS n", 12_000_000L, weekStart, WeekMinutes);
             "file_io_stats", "wait_stats", "query_stats", "pg_io_stats", "pg_database_stats",
             /* #3960 */
             "cpu_utilization_stats", "tempdb_stats", "memory_stats", "memory_grant_stats", "perfmon_stats", "pg_statement_stats",
+            /* #4193 */
+            "pg_cpu_utilization",
             "servers",
         })
         {

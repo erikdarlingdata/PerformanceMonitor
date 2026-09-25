@@ -1475,6 +1475,12 @@ public sealed class McpPayloadContractCensusTests
     /// cut BEFORE the store, by the collector. They keep their names because they are true and different: a
     /// caller can do nothing about them by re-paging, and folding them into <c>truncated</c> would tell that
     /// caller to raise a limit that changes nothing.</item>
+        /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
+    /// each tool's DEFAULT answer under the shared 32 KB <c>McpResponseBudget.DefaultBytes</c> by previewing
+    /// one wide field (query text, a plan fragment, a deadlock graph) rather than the page — unlike a
+    /// source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
+    /// <c>full_graph</c>, the same shape <c>get_store_query_stats</c>' <c>full_text</c> already used) or by
+    /// narrowing the page to one named thing (a <c>dedup_key</c> call always gets the whole field).</item>
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
@@ -1519,6 +1525,16 @@ public sealed class McpPayloadContractCensusTests
             "the statement text cut at COLLECTION to the collector's per-row text cap (track_activity_query_size on the target is the other cutter) — the store never held the rest"),
     ];
 
+    public static readonly (string Key, string[] Files, string WhatWasCut)[] FieldPreviewCutKeys =
+    [
+        ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
+            "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
+        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "McpPlanCorrectionTools.cs"],
+            "the row's own query_text previewed at READ TIME to QueryTextPreviewLength (150 chars) for #4198's response-size budget - the full text IS in the store (plan_correction.query_text is not collector-capped the way SourceSideCutKeys' rows are) and a caller gets it back by passing full_text=true, the opt-in get_store_query_stats already offers for its own preview"),
+        ("top_query_text_truncated", ["DarlingMcpQueryHeatmapTools.cs", "McpQueryTools.cs"],
+            "get_query_heatmap's (#4198) per-cell top-query preview width (DefaultPreviewLength on both SKUs) — the full statement is already in the store; full_text opts back into it rather than re-paging, so this is not the page dialect's truncated and nothing was lost the way a source-side cut loses it"),
+    ];
+
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =
     [
         ("answered_rows_withheld", ["DarlingMcpPgIndexTools.cs"], "#3594's reach verdict: the answered-index summary is withheld rather than published as a count of the page"),
@@ -1530,6 +1546,7 @@ public sealed class McpPayloadContractCensusTests
         ("shown", ["DarlingMcpDefaultTraceTools.cs", "DarlingMcpHealthParserTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpDefaultTraceTools.cs", "McpHealthParserTools.cs"],
             "the page's count beside an honest WHOLE total (total_entries / total_events / total_facts, or a <noun>_count over the whole in-memory set) — the cut is exact and disclosed by the pair; the #3594 spelling is *_returned + truncated, and the rename is fenced tonight because four PgTarget* test files read shown off get_analysis_facts"),
     ];
+
 
     public static readonly (string Key, string[] Files, string WhatItActuallyIs)[] CutHomonyms =
     [
@@ -1567,6 +1584,7 @@ public sealed class McpPayloadContractCensusTests
         SecondBoundCutKeys.Select(k => (k.Key, k.Files))
             .Concat(CutNoteKeys.Select(k => (k.Key, k.Files)))
             .Concat(SourceSideCutKeys.Select(k => (k.Key, k.Files)))
+            .Concat(FieldPreviewCutKeys.Select(k => (k.Key, k.Files)))
             .Concat(WithheldSummaryKeys.Select(k => (k.Key, k.Files)))
             .Concat(PageCountsUnderANeutralNoun.Select(k => (k.Key, k.Files)))
             .Concat(CutHomonyms.Select(k => (k.Key, k.Files)));
@@ -1610,7 +1628,7 @@ public sealed class McpPayloadContractCensusTests
 
         var unclassified = found.Keys.Where(k => k != "truncated" && !classified.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();
         Assert.True(unclassified.Count == 0,
-            "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a homonym joins CutHomonyms with what it actually is: "
+            "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a wide field's own preview cut joins FieldPreviewCutKeys as <field>_truncated; a homonym joins CutHomonyms with what it actually is: "
             + string.Join("; ", unclassified.Select(k => $"{k} on {string.Join(", ", found[k])}")));
 
         var gone = classified.Keys.Where(k => !found.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();
