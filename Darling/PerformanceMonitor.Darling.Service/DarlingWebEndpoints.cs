@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -302,16 +303,27 @@ public static class DarlingWebEndpoints
         {
             app.MapGet("/api/read/" + name, async (HttpContext context) =>
             {
+                var stopwatch = Stopwatch.StartNew();
                 string result;
                 try
                 {
                     result = await handler(context, postgres, analysis);
                 }
+                catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+                {
+                    /* #4276: the browser left. Not a failure — no log line, and rethrown so the #4276
+                       top-of-pipeline backstop (which already owns this exact classification) sees the same
+                       exception rather than this catch turning it into a written body for a caller who is gone. */
+                    throw;
+                }
                 catch (Exception ex)
                 {
                     /* The tools swallow their own exceptions into McpHelpers.FormatError's envelope; this is only a
                        backstop for a binding-layer throw, built by the same helper so it maps the same way
-                       (-> HTTP 500) and no bare "Error during ..." sentence is produced anywhere any more. */
+                       (-> HTTP 500) and no bare "Error during ..." sentence is produced anywhere any more.
+                       #4276: also the one log line this surface was missing — through the same helper the
+                       top-of-pipeline backstop uses, so the wording and the timeout/error split cannot drift. */
+                    DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
                     result = McpHelpers.FormatError(name, ex);
                 }
 
