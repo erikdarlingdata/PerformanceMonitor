@@ -20,7 +20,9 @@ namespace Darling.Tests;
 /// Store backfill worker's two reads, and the control-plane reload beacon each carry an EXPLICIT command
 /// deadline, and each carries its OWN regime's deadline rather than a neighbour's (#2874).
 ///
-/// <para><b>Four constants for nine sites, because two of them have an enclosing budget that does not
+/// <para><b>Four constants for ten sites (#4197 added the tenth: <c>GetStoredFloorAsync</c>'s EXISTS
+/// pre-check sits beside its MIN fallback under the same regime), because two of them have an enclosing
+/// budget that does not
 /// bound them.</b> <c>DarlingWorker.BackfillSliceDeadline</c> is 300 s over the backfill slice, but
 /// <c>AbandonableStep</c> ABANDONS rather than cancels — it races the work against a <c>Task.Delay</c> and
 /// returns without signalling anything — so the enclosing budget stops WAITING while the statement keeps
@@ -35,7 +37,7 @@ namespace Darling.Tests;
 /// #2928 established member scoping for this project: <c>.Service</c>'s budget regimes do not respect file
 /// boundaries, and both of that group's own errors were boundary errors — one attributing sites to a regime
 /// by file, one excluding a site because of the method it appeared inside. This pin goes one step further
-/// and asserts WHICH constant each site takes, because four of this group's nine sites live in files that
+/// and asserts WHICH constant each site takes, because four of this group's ten sites live in files that
 /// hold other regimes' sites and two of them sit in the same method as each other's neighbours. A guard
 /// that only asked "is there a <c>CommandTimeout =</c> nearby" would pass on a site cross-wired to the
 /// wrong regime's number, which for the actual-plan resolver would mean a 5 s bound on a read whose floor
@@ -106,7 +108,10 @@ public sealed class CommandPlaneCommandTimeoutTests
     };
 
     /// <summary>This group's command sites, counted so a member that stops creating commands fails loudly.</summary>
-    private const int ExpectedSiteCount = 9;
+    /// <summary>#4197 bumped this from 9 to 10: <c>GetStoredFloorAsync</c> now builds TWO commands (an
+    /// EXISTS pre-check and a MIN fallback) under the one <c>QueryStoreBackfillReadSeconds</c> regime,
+    /// where every other member in <see cref="s_sites"/> still builds exactly one.</summary>
+    private const int ExpectedSiteCount = 10;
 
     /// <summary>
     /// All FIVE construction shapes this sweep now knows about. The bare method group is absent from this
@@ -192,7 +197,7 @@ public sealed class CommandPlaneCommandTimeoutTests
     }
 
     /// <summary>
-    /// The same nine sites, judged a SECOND way — through the shared
+    /// The same ten sites, judged a SECOND way — through the shared
     /// <see cref="CommandDeadlineScanner"/> that #2938 extracted and the command-timeout pins route
     /// through — the adopting set is enumerated and asserted in <see cref="CommandDeadlineScannerAdoptionTests"/>.
     ///
@@ -423,7 +428,7 @@ public sealed class CommandPlaneCommandTimeoutTests
     }
 
     /// <summary>
-    /// The scanner's own edges, because nine sites' correctness is asserted through it: a false positive
+    /// The scanner's own edges, because ten sites' correctness is asserted through it: a false positive
     /// fails a green build on correct code, and a false NEGATIVE reports success on the defect.
     ///
     /// <para>Every fixture is a shape that occurs in this group. The <c>using (...) { ...; }</c> form is how

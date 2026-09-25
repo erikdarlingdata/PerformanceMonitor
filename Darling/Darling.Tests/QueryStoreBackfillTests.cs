@@ -8,9 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Runtime.CompilerServices;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
@@ -263,7 +260,7 @@ public sealed class QueryStoreBackfillTests
     [Fact]
     public void Sql_CandidateAndFloorReadsAreBound_NotTheOldUnboundedShapes()
     {
-        var source = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/QueryStoreBackfill.cs");
+        var source = global::Darling.Tests.RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/QueryStoreBackfill.cs");
 
         Assert.DoesNotContain(
             "command.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow - CandidateWindow, DateTimeKind.Unspecified));",
@@ -284,7 +281,7 @@ public sealed class QueryStoreBackfillTests
     [Fact]
     public void Sql_LiteTwinCarriesTheSameBoundShapes()
     {
-        var source = ReadRepoFile("Lite/Services/RemoteCollectorService.QueryStoreBackfill.cs");
+        var source = global::Darling.Tests.RepoFile.ReadRepoFile("Lite/Services/RemoteCollectorService.QueryStoreBackfill.cs");
 
         Assert.Contains("cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });", source, StringComparison.Ordinal);
         Assert.DoesNotContain("DateTime.UtcNow.AddDays(-7)", source, StringComparison.Ordinal);
@@ -295,16 +292,4 @@ public sealed class QueryStoreBackfillTests
             source, StringComparison.Ordinal);
     }
 
-    private static string ReadRepoFile(string relativePath, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        var parts = relativePath.Split('/');
-        while (dir is not null && !File.Exists(Path.Combine(new[] { dir }.Concat(parts).ToArray())))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(new[] { dir! }.Concat(parts).ToArray()));
-    }
 }
