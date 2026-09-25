@@ -548,9 +548,10 @@ public static class DailySummarySql
     /// leaves out the restart row the legacy counted as a query seen that day. This overload's OWN daily tier is
     /// not parameterised — it always reads the legacy <c>query_stats_daily</c> unstitched, whatever
     /// <paramref name="hourlyRelation"/> carries; the daily's own stitch lives in the three-argument overload
-    /// below, which calls this one only with the legacy-only splice's name (never a daily successor). The
-    /// one-argument form keeps the legacy for callers that have not probed, which is what every pre-#3653 pin
-    /// reads.
+    /// below, which does not call this one for that case at all — it builds its own queries CTE directly off
+    /// <see cref="QueriesCteForCagg"/>, so a successor-only daily keeps its own name instead of being downgraded
+    /// back to the legacy here. The one-argument form keeps the legacy for callers that have not probed, which
+    /// is what every pre-#3653 pin reads.
     ///
     /// <para>#3653 A6: the routed text differs between the legacy and the successor in the relation name AND in
     /// the not-carried probe's source filter — the successor's own <c>WHERE</c>, read off its CREATE — so the
@@ -620,10 +621,10 @@ public static class DailySummarySql
                Built with QueriesCteForCagg directly (not the two-argument overload above, whose OWN daily
                branch always names the legacy — it exists for callers with no coverage to probe a successor
                with) so a successor-only daily answer is not silently downgraded back to the legacy. */
-            var legacyOnlySplice = coverage.StitchedRelationSql(legacy, "f", windowStartUtc, stitchTier);
+            var singleSplice = coverage.StitchedRelationSql(legacy, "f", windowStartUtc, stitchTier);
             var relationStart = "collect.".Length;
-            var relationEnd = legacyOnlySplice.IndexOf(" AS ", relationStart, StringComparison.Ordinal);
-            var relationName = legacyOnlySplice[relationStart..relationEnd];
+            var relationEnd = singleSplice.IndexOf(" AS ", relationStart, StringComparison.Ordinal);
+            var relationName = singleSplice[relationStart..relationEnd];
 
             var singleRouted = RangeSql.Replace(
                 QueriesCteRaw, QueriesCteForCagg(relationName), StringComparison.Ordinal);
