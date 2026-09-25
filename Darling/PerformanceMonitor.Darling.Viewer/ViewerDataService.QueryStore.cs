@@ -905,7 +905,7 @@ public sealed partial class ViewerDataService
     /// <see cref="PerformanceMonitor.Darling.Storage.StorageVersion.SchemaVersion"/> instead of probing the
     /// store live, for the reason documented on that constant.
     /// </summary>
-    private const int QueryStoreIntervalWideMinSchemaVersion = 144;
+    private const int QueryStoreIntervalWideMinSchemaVersion = 145;
 
     /// <summary>
     /// A defensive gate clause the grid does not need (#3953): does this server have ANY

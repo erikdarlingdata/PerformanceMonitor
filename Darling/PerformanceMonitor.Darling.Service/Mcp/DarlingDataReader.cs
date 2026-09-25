@@ -1558,7 +1558,7 @@ internal static class DarlingDataReader
     /// migrations up to <see cref="StorageVersion.SchemaVersion"/> before it starts serving MCP/web reads
     /// (<see cref="StorageVersion"/>: "a store at this version is fully migrated"), so the compiled constant IS
     /// the connected store's version for this surface; no extra round trip earns its keep here.</summary>
-    private const int QueryStoreTopTableMinSchemaVersion = 144;
+    private const int QueryStoreTopTableMinSchemaVersion = 145;
 
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,

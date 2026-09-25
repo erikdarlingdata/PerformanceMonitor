@@ -305,7 +305,7 @@ public class StartupFailureTriageTests
 
         var terminalArm = Slice(
             source,
-            "catch (Exception ex) when (ex is not OperationCanceledException)\n            {\n                _logger.LogCritical(\"Cannot reach or migrate the Postgres store: {Message}\"",
+            "catch (Exception ex) when (ex is not OperationCanceledException)\n            {\n                _logger.LogCritical(ex, \"Cannot reach or migrate the Postgres store: {Message}\"",
             "}");
 
         Assert.Contains("return;", terminalArm, StringComparison.Ordinal);
@@ -594,8 +594,8 @@ public class StartupFailureTriageTests
     /// declines still lands on the same critical line and the same stand-down.
     /// </summary>
     [Theory]
-    [InlineData("_logger.LogCritical(\"Cannot load configuration: {Message}\", ex.Message);")]
-    [InlineData("_logger.LogCritical(\"Managed Postgres bootstrap failed: {Message}\", ex.Message);")]
+    [InlineData("_logger.LogCritical(ex, \"Cannot load configuration: {Message}\", ex.Message);")]
+    [InlineData("_logger.LogCritical(ex, \"Managed Postgres bootstrap failed: {Message}\", ex.Message);")]
     public void TheNewSitesTerminalArmsStillLogCriticalAndStandDown(string criticalLine)
     {
         var terminalArm = Slice(ReadWorkerSource(), criticalLine, "}");

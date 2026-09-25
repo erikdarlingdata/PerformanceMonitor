@@ -485,7 +485,7 @@ WHERE t.server_id = $1;";
     /// <summary>
     /// The rule: read <c>query_store_interval_wide</c> for a grid/MCP/slicer read if and only if all five of
     /// these hold, otherwise run today's raw statement unchanged (ruling issuecomment-5836972848; review D4R
-    /// items H3, M1). A sixth clause — the viewer's store must report schema version 144 or later — is the
+    /// items H3, M1). A sixth clause — the viewer's store must report schema version 145 or later — is the
     /// caller's: it needs the viewer's own connection probe, which this pure function does not have.
     /// <list type="number">
     /// <item>Coverage exists (<paramref name="filledSince"/> is not null) and there is no pending batch.</item>

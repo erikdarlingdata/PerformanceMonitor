@@ -87,10 +87,13 @@ public static partial class TimescaleSupport
     /// 2.28.1, a hypertable with <see cref="ChunkIntervalDays"/> = 1 gets exactly <c>12:00:00</c>. The rule is
     /// half the chunk interval CAPPED at 12 hours, not floored at it: a 6-hour chunk interval gets
     /// <c>03:00:00</c>, while 2-day and 7-day intervals both get <c>12:00:00</c> rather than 24h or 84h. The cap
-    /// is what makes 12 hours the default on EVERY store shape this product can produce — the 1-day chunks it
-    /// creates today, and the 7-day-chunk hypertables an adopted store may still carry from before
-    /// <see cref="ChunkIntervalDays"/> was passed (existing chunks keep their original width). That is the
-    /// field's "twice-daily fixed tick": a chunk that had already aged
+    /// is what makes 12 hours the default on every DAY-OR-WIDER store shape this product can produce — the
+    /// 1-day chunks a fresh hypertable still starts at, and the 7-day-chunk hypertables an adopted store may
+    /// still carry from before <see cref="ChunkIntervalDays"/> was passed (existing chunks keep their original
+    /// width). Below a day the cap stops applying and the rule floors instead: since #4211, a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed to 12h or 6h chunks would compute a 6h or 3h
+    /// automatic default, one more reason this is passed explicitly rather than left to fall out of chunk
+    /// width. That is the field's "twice-daily fixed tick", from before narrowing existed: a chunk that had already aged
     /// past the delay still sat uncompressed for up to another half-day, and on a pre-dedup field store the
     /// newest closed chunk reached 81 GB before its scheduled compression ever reached it. The newest closed
     /// chunk is always the least-compressed data on disk, so the tick is the width of that exposure.</para>
@@ -4554,9 +4557,11 @@ WITH NO DATA";
     /// minutes a uniform refresh step left over, and how thinly 70 hypertables spread across them was a
     /// consequence nobody chose — a test asserted the resulting ceiling was 3 and would have accepted 4 or 5
     /// from a moved step. The thing that has an operational meaning is the spread: every hypertable's newest
-    /// 1-day chunk becomes eligible at the same UTC midnight (see <see cref="CompressionPhaseMinutes"/>), so
-    /// the count sharing a minute is the count of simultaneous chunk rewrites at that boundary. So the spread
-    /// is stated and the width follows from the catalog.</para>
+    /// chunk becomes eligible at a shared UTC boundary (see <see cref="CompressionPhaseMinutes"/>) — midnight
+    /// holds for every rung on the ladder, 1-day, 12h or 6h (#4211), since each divides a day evenly — so the
+    /// count sharing a minute is still the count of simultaneous chunk rewrites at that boundary; a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed only adds boundaries of its own besides it. So the
+    /// spread is stated and the width follows from the catalog.</para>
     ///
     /// <para><b>3 preserves the shipped behaviour rather than proposing new behaviour</b>, which is the
     /// reason to prefer it to any other number here: it is the spread the grid has always produced, so a
@@ -4614,10 +4619,13 @@ WITH NO DATA";
     /// <para><b>Why a spread rather than one shared minute.</b> All the compression policies would happily
     /// share a minute as far as LOCKS go — they compress different hypertables, so they do not contend with
     /// each other at all — but they would then do their real work simultaneously. <see cref="CompressAfterDays"/>
-    /// and <see cref="ChunkIntervalDays"/> are both 1 and TimescaleDB aligns 1-day chunks to the epoch, so
-    /// every hypertable's newest closed chunk becomes eligible at the same UTC midnight. Drifting policies
-    /// discover that eligibility at whatever minute they have drifted to, which spreads the daily rewrite
-    /// across the hour; collapsing them onto one minute would concentrate it into one. That is a burst this
+    /// is 1 day on every table (#4211 ruling decision 1) and TimescaleDB epoch-aligns every rung of the chunk
+    /// ladder — 1-day, 12h or 6h (#4211) — so every hypertable's newest closed chunk becomes eligible at the
+    /// same UTC midnight regardless of which rung it is on; a table <see cref="RawChunkIntervalPlanner"/> has
+    /// narrowed also becomes eligible at its OTHER chunk boundaries through the day, which is more spread to
+    /// account for, not less. Drifting policies discover eligibility at whatever minute they have drifted to,
+    /// which spreads the daily rewrite across the hour; collapsing them onto one minute would concentrate it
+    /// into one. That is a burst this
     /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.
     /// How thin the spread has to be is <see cref="CompressionPhaseMaxPerMinute"/>, and the band's width
     /// follows from it — so the re-derivation moves WHERE compression runs without changing how concentrated
@@ -6888,9 +6896,11 @@ AND   j.hypertable_name = '{relation}'";
     ///
     /// <para><b>What sits on either side, and why neither is a lock hazard.</b> The minute after this one is
     /// <see cref="CompressionPhaseMinutes"/>' first, where the raw compression policies start; they lock raw
-    /// chunks and this family locks materialization chunks, so the two cannot queue on each other, and on
-    /// twenty-three hours of the day those policies find nothing eligible and finish in tens of milliseconds.
-    /// The next refresh START is the next hour's <c>:00</c>, 25 minutes away — and a compression run cannot
+    /// chunks and this family locks materialization chunks, so the two cannot queue on each other, and on most
+    /// hours of the day those policies find nothing eligible and finish in tens of milliseconds — twenty-three
+    /// of twenty-four for a table still at the 1-day chunk ceiling, fewer for a table the reconcile has
+    /// narrowed to 12h or 6h chunks (#4211). The next refresh START is the next hour's <c>:00</c>, 25 minutes
+    /// away — and a compression run cannot
     /// block an aggregate's own refresh in any case: <c>compress_chunk</c> on 2.28.1 holds
     /// <c>AccessShareLock</c> on the materialization hypertable and escalates only on the CHUNK it is rewriting
     /// (<c>ShareLock</c>, <c>ExclusiveLock</c>, then <c>AccessExclusiveLock</c> at the swap — all three observed
@@ -6925,14 +6935,17 @@ AND   j.hypertable_name = '{relation}'";
     /// The hour of the day (UTC) the first registered aggregate compresses at; each later one takes the next
     /// hour (<see cref="AggregateCompressionBandHourFor"/>).
     ///
-    /// <para><b>One, and it is the hour AFTER the one that carries the raw tier's daily rewrite.</b>
-    /// <see cref="CompressAfterDays"/> and <see cref="ChunkIntervalDays"/> are both one, and 1-day chunks are
-    /// epoch-aligned, so every raw hypertable's newest closed chunk becomes eligible at the same UTC midnight and
-    /// the <c>00:</c> hour's compression band is the one that does a day's compressing (#3112's midnight band —
-    /// its largest run, <c>query_store_stats</c>, measured at 552 s from <c>:42</c>). The aggregates' chunks
-    /// become eligible at the same midnight, for the same epoch-alignment reason, so the earliest hour that both
-    /// sees the new eligibility and is clear of that rewrite is the next one. Later hours would only add
-    /// latency to the newest eligible chunk; earlier there is none.</para>
+    /// <para><b>One, and it is the hour AFTER the one that carries the raw tier's shared daily rewrite.</b>
+    /// <see cref="CompressAfterDays"/> is 1 day on every table (#4211 ruling decision 1) and TimescaleDB
+    /// epoch-aligns every rung of the chunk ladder, so every raw hypertable's newest closed chunk becomes
+    /// eligible at the same UTC midnight regardless of its own chunk width — a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed to 12h or 6h (#4211) shares that boundary too, plus
+    /// others through the day this hour does not try to clear — and the <c>00:</c> hour's compression band is
+    /// the one every raw table shares (#3112's midnight band — its largest run, <c>query_store_stats</c>,
+    /// measured at 552 s from <c>:42</c>). The aggregates' chunks become eligible at the same midnight, for the
+    /// same epoch-alignment reason, so the earliest hour that both sees the new eligibility and is clear of
+    /// that shared rewrite is the next one. Later hours would only add latency to the newest eligible chunk;
+    /// earlier there is none.</para>
     /// </summary>
     public const int AggregateCompressionBandFirstHour = 1;
 
@@ -10646,7 +10659,7 @@ WHERE j.proc_name LIKE '%compression%'
             {
                 case CompressionClearanceBand.RefreshOverrun when item.PercentOfClearance is not null:
                     logger.LogWarning(
-                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is the daily chunk close: every hypertable's newest {Days}d chunk becomes eligible at the same UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is a chunk close: a chunk becomes eligible {Days}d after it closes, and a hypertable still at the 1-day chunk ceiling closes only one a day, at UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing; a table the reconcile has narrowed to 12h or 6h chunks (#4211) closes more of them and carries that rewrite at each of its own chunk boundaries instead (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
                         item.HypertableName, duration.TotalSeconds, minute, clearance, -clear, CompressAfterDays);
                     break;
 
@@ -11190,8 +11203,9 @@ public sealed record CompressionActivity(
     /// <para><b>Null for the continuous aggregates' compression jobs too, deliberately (#3581).</b> Those jobs
     /// are on <see cref="TimescaleSupport.AggregateCompressionBandMinute"/> once a day rather than on this
     /// hourly grid, and the clearance findings below reason from the raw tier's geometry — the #3112 overrun
-    /// text explains a run by the daily chunk close of a 1-day raw chunk, which is not what an aggregate's
-    /// run is. Reporting an aggregate job through that text would name the wrong mechanism; a watch over the
+    /// text explains a run by a raw chunk's own close, daily for a table still at the 1-day ceiling and more
+    /// often for a table the reconcile has narrowed (#4211), which is not what an aggregate's run is. Reporting
+    /// an aggregate job through that text would name the wrong mechanism; a watch over the
     /// daily band's own clearance (25 minutes to the next hour's first refresh) is a separate instrument, and
     /// until it exists these jobs are silent here the way a foreign hypertable is, rather than misdescribed.
     /// The #1778 backlog count above DOES cover them, at their own delay.</para>

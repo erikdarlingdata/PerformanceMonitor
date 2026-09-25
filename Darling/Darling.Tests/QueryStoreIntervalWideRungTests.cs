@@ -17,7 +17,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins Darling rung V144 (#3953): the wide interval table beside V143's — three more tables, all engine-plain,
+/// Pins Darling rung V145 (#3953): the wide interval table beside V143's — three more tables, all engine-plain,
 /// nothing on an existing table (V143's three included). The writer and the retention are pinned where they live
 /// (<see cref="QueryStoreIntervalWideWriterTests"/>); this file is the RUNG: the ladder, the DDL, and the viewer
 /// probe. Mirrors <c>QueryStoreIntervalLatestRungTests</c> (V143's own rung file) column for column.
@@ -27,11 +27,11 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class QueryStoreIntervalWideRungTests
 {
-    private const int RungVersion = 144;
-    private const int PreviousVersion = 143;
+    private const int RungVersion = 145;
+    private const int PreviousVersion = 144;
 
     /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
-    private const int ProbeOrdinal = 119;
+    private const int ProbeOrdinal = 120;
 
     private static PgMigrations.Migration V144 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
@@ -60,7 +60,8 @@ public sealed class QueryStoreIntervalWideRungTests
 
         Assert.Equal(3, CountOf(sql, "CREATE TABLE IF NOT EXISTS collect."));
         Assert.Equal(1, CountOf(sql, "CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_wide"));
-        Assert.Equal(4, CountOf(sql, "CREATE "));
+        Assert.Equal(1, CountOf(sql, "CREATE INDEX IF NOT EXISTS ix_query_store_interval_wide_null_start"));
+        Assert.Equal(5, CountOf(sql, "CREATE "));
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide\n", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_coverage\n", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending\n", sql, StringComparison.Ordinal);
@@ -68,7 +69,8 @@ public sealed class QueryStoreIntervalWideRungTests
         Assert.Contains("NULLS NOT DISTINCT;", sql, StringComparison.Ordinal);
         Assert.Contains("first_execution_time timestamp NOT NULL,", sql, StringComparison.Ordinal);
 
-        /* No secondary index (F1, measured: a window index took HOT updates to 0%). */
+        /* No secondary index on the full table (F1, measured: a window index took HOT updates to 0%) beyond
+           B4's own near-empty partial index for the slicer's legacy-row probe. */
         Assert.DoesNotContain("btree", sql, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, CountOf(sql, "CREATE UNIQUE INDEX"));
 
@@ -124,16 +126,16 @@ public sealed class QueryStoreIntervalWideRungTests
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
         var thisArm = viewer.IndexOf("if (hasQueryStoreIntervalWide)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasQueryStoreIntervalLatest)", StringComparison.Ordinal);
-        Assert.True(thisArm >= 0, "the viewer has no V144 sentinel arm — a fully-migrated store would map one rung low");
-        Assert.True(thisArm < previousArm, "the V144 arm sits below V143's, so a current store maps one rung low");
+        var previousArm = viewer.IndexOf("if (hasRawChunkIntervalRungHistory)", StringComparison.Ordinal);
+        Assert.True(thisArm >= 0, "the viewer has no V145 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm < previousArm, "the V145 arm sits below V144's, so a current store maps one rung low");
         Assert.Contains(
             "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */
-        var armProseStart = viewer.LastIndexOf("/* V144 (#3953)", thisArm, StringComparison.Ordinal);
-        Assert.True(armProseStart >= 0, "the V144 arm has no comment block saying why it exists");
+        var armProseStart = viewer.LastIndexOf("/* V145 (#3953)", thisArm, StringComparison.Ordinal);
+        Assert.True(armProseStart >= 0, "the V145 arm has no comment block saying why it exists");
         Assert.DoesNotContain("query_store_interval_wide", viewer[armProseStart..thisArm], StringComparison.Ordinal);
     }
 

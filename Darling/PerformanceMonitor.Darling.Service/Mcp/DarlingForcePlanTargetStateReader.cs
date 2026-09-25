@@ -13,8 +13,10 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Analysis;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -196,6 +198,10 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
     /// </summary>
     public static async Task<(IReadOnlyDictionary<ForcePlanTargetKey, ForcePlanTargetState>? States, string? UnavailableReason)> TryReadAsync(
         NpgsqlDataSource postgres, int serverId, IEnumerable<AnalysisFinding> findings, DateTime? nowUtc = null,
+        /* Before cancellationToken so that stays the last parameter (CA1068). DI-resolved like postgres in
+           an MCP tool method (no [Description] there); null is the accepted degraded state for a caller
+           with no host logger behind it, same as get_sweep_reports's logger seat (#3473 review, #4316). */
+        ILogger? logger = null,
         CancellationToken cancellationToken = default)
     {
         var targets = new List<ForcePlanTarget>();
@@ -218,7 +224,14 @@ ORDER BY t.database_name, t.query_id, t.plan_id";
         }
         catch (Exception ex)
         {
-            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}: {ex.Message}); eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.");
+            /* #4316: nothing logged this failure before this line — the read degraded silently into
+               UnavailableReason and the only trace of WHY was ex.Message riding along in that reason, which
+               a payload then exposed to whoever could reach analyze_server or get_analysis_findings. Now the
+               full exception goes to the service log once, at Warning, and the reason a caller sees carries
+               only the type and (for a Postgres fault) the SQLSTATE. */
+            logger?.LogWarning(ex, "The forcing and automatic-plan-correction state read failed for server {ServerId}.", serverId);
+
+            return (null, $"the forcing and automatic-plan-correction state read failed ({CollectionFailure.Describe(ex, CollectionFailureOutcome.Error)}); eligible reflects only the finding's own evidence. Check get_plan_corrections and sys.query_store_plan before forcing.");
         }
     }
 

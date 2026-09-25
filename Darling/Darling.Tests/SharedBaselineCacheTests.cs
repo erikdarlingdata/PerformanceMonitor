@@ -144,7 +144,7 @@ public sealed class SharedBaselineCacheTests
         var web = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
         Assert.Contains("DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig);", web, StringComparison.Ordinal);
         var endpoints = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        Assert.Contains("new DarlingAnalysisService(postgres, baselineCache: baselineCache)", endpoints, StringComparison.Ordinal);
+        Assert.Contains("new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache)", endpoints, StringComparison.Ordinal);
 
         /* And no other production site builds an analysis service at all (a new one must be wired, or say why not). */
         var sites = new[] { worker, mcp, endpoints }.Sum(code => CountOf(code, "new DarlingAnalysisService("));
@@ -241,9 +241,17 @@ public sealed class SharedBaselineCacheLiveTests
 
         await provider.GetBaselineAsync(ServerId, MetricNames.PgTps, h.AddMinutes(5), ct);
 
+        /* #4298: PgTps is a daily-cache arm through PgTargetBaselineProvider, so the next HOUR — still the same
+           UTC day — is a shared hit, not a recompute. */
         var (_, nextHour) = await CommandCapture.CountBaselineReadsAsync(
             () => new PgTargetBaselineProvider(store.Postgres, null, shared).GetBaselineAsync(ServerId, MetricNames.PgTps, h.AddMinutes(65), ct));
-        Assert.Equal(1, nextHour);
+        Assert.Equal(0, nextHour);
+
+        /* The next UTC day is a different day-grain key (midnight moved), so a fresh compute. */
+        var (_, nextDay) = await CommandCapture.CountBaselineReadsAsync(
+            () => new PgTargetBaselineProvider(store.Postgres, null, shared).GetBaselineAsync(
+                ServerId, MetricNames.PgTps, PgBaselineProvider.RoundedDay(h).AddDays(1).AddHours(1), ct));
+        Assert.Equal(1, nextDay);
 
         provider.InvalidateCache(ServerId);
         var (_, afterInvalidate) = await CommandCapture.CountBaselineReadsAsync(
@@ -254,7 +262,9 @@ public sealed class SharedBaselineCacheLiveTests
     /// <summary>
     /// A long-lived provider (the MCP and web hosts' singletons) forgets the series no lookup can take any more: its own
     /// cache is swept like the shared tier, so the keyed series it was asked for on earlier passes — keys that follow each
-    /// server's top statements — stop counting toward the keyed-cardinality note's bar once they are a TTL old.
+    /// server's top statements — stop counting toward the keyed-cardinality note's bar once they are dead. PgStatementShare
+    /// is a daily-cache arm (#4298), so an entry here is fresh until its FreshUntilUtc — a rolling 24 hours from when it
+    /// was computed — not until CacheTtl, and the sweep proves both bounds: alive at CacheTtl's own mark, gone a day on.
     /// </summary>
     [Fact]
     public async Task Live_ALongLivedProvider_SweepsItsDeadSeries()
@@ -270,7 +280,11 @@ public sealed class SharedBaselineCacheLiveTests
         provider.SweepIfDue(DateTime.UtcNow + PgBaselineProvider.CacheTtl / 2);
         Assert.Equal(store.StatementKeys.Length, provider.KeyedEntryCount);
 
+        /* Past CacheTtl but still well inside FreshUntilUtc's rolling day: still alive under the daily tier. */
         provider.SweepIfDue(DateTime.UtcNow + PgBaselineProvider.CacheTtl + TimeSpan.FromMinutes(1));
+        Assert.Equal(store.StatementKeys.Length, provider.KeyedEntryCount);
+
+        provider.SweepIfDue(DateTime.UtcNow + TimeSpan.FromDays(1) + TimeSpan.FromMinutes(1));
         Assert.Equal(0, provider.KeyedEntryCount);
     }
 

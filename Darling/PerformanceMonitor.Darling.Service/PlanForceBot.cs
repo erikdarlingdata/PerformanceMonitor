@@ -120,6 +120,7 @@ public sealed class PlanForceBot
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(
+                ex,
                 "[{Server}] Force-plan bot evaluation pass failed: {Message}",
                 runtime.Config.DisplayName, ex.Message);
         }
