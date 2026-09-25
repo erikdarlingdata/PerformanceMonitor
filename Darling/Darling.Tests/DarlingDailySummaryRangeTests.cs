@@ -46,6 +46,15 @@ public sealed class DarlingDailySummaryRangeTests
     private const int ServerId = -949578;
     private const string ServerName = "daily-summary-range";
 
+    /// <summary>#4232: the "nothing ever collected" preamble below needs its OWN server — reading it through
+    /// <see cref="ServerId"/> would populate <c>DarlingHealthReader.RangeCache</c>'s closed-day block for that
+    /// exact range from an EMPTY store, and the seeded read moments later (same range, same cache key, same
+    /// hour) would then see that stale empty block instead of the rows just seeded. That staleness is the
+    /// closed-day cache working as designed against a store that already had data — not a substitute for a
+    /// server nobody has ever collected from.</summary>
+    private const int NeverCollectedServerId = -949579;
+    private const string NeverCollectedServerName = "daily-summary-range-never-collected";
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     [Fact]
@@ -67,13 +76,16 @@ public sealed class DarlingDailySummaryRangeTests
         try
         {
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            await DarlingMcpTestData.RegisterServerAsync(connection, NeverCollectedServerId, NeverCollectedServerName, ct);
 
             var today = DateTime.UtcNow.Date;
             var twoDaysAgo = today.AddDays(-2);
             var tenDaysAgo = today.AddDays(-10);
 
-            /* ── nothing collected at all: an empty calendar is a collection fault, not a quiet fortnight ── */
-            var never = await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, ServerName, 3);
+            /* ── nothing collected at all: an empty calendar is a collection fault, not a quiet fortnight ──
+               A dedicated server (see NeverCollectedServerId) so this empty read does not warm ServerId's
+               closed-day cache block from a store that has not been seeded yet. */
+            var never = await DarlingMcpHealthTools.GetDailySummaryRange(dataSource, NeverCollectedServerName, 3);
             var neverDoc = JsonDocument.Parse(never);
             Assert.Equal("unavailable", neverDoc.RootElement.GetProperty("status").GetString());
             var neverText = neverDoc.RootElement.GetProperty("message").GetString()!;
@@ -192,7 +204,79 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM collection_log WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM wait_stats WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", ServerId);
         await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", ServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM servers WHERE server_id = $1", NeverCollectedServerId);
+        await DarlingMcpTestData.ExecAsync(connection, ct, "DELETE FROM config_monitored_servers WHERE server_id = $1", NeverCollectedServerId);
     }
+
+    /// <summary>
+    /// #4232: the closed-day cache, end to end against a real store. A closed day (two days ago) is seeded,
+    /// read once (populating the cache's block), then seeded with a SECOND wait row before a second read. If
+    /// the closed day were re-read from the store, the second read would see the new row; it must not — that
+    /// is exactly what "the closed portion is cached for an hour" means. Today (open) picks up its own second
+    /// row every time, because it is never in the cached block.
+    /// </summary>
+    [Fact]
+    public async Task GetDailySummaryRangeAsync_ClosedDayCache_SecondReadDoesNotSeeANewRowOnAClosedDay_ButDoesOnToday()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live daily-summary range cache test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var dataSource = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+
+            var today = DateTime.UtcNow.Date;
+            var twoDaysAgo = today.AddDays(-2); // well past the two-hour grace -- closed on every read below
+            var fromDate = today.AddDays(-3);
+            var toDate = today.AddDays(1);
+
+            await PlantWaitAsync(connection, twoDaysAgo.AddHours(10), 1000, ct);
+            await PlantWaitAsync(connection, today.AddHours(1), 500, ct);
+
+            var first = await DarlingHealthReader.GetDailySummaryRangeAsync(dataSource, ServerId, fromDate, toDate, cancellationToken: ct);
+            var firstClosedDay = first.Rows.Single(r => r.SummaryDate.Date == twoDaysAgo);
+            var firstToday = first.Rows.Single(r => r.SummaryDate.Date == today);
+            Assert.Equal(1000m, firstClosedDay.TotalWaitTimeSec * 1000m); // 1000 ms of wait, as seeded
+            Assert.Equal(500m, firstToday.TotalWaitTimeSec * 1000m);
+
+            /* Land a second row on EACH day after the first read -- the closed day's cached block must not
+               see this; today, never cached, must. */
+            await PlantWaitAsync(connection, twoDaysAgo.AddHours(11), 4000, ct);
+            await PlantWaitAsync(connection, today.AddHours(2), 2000, ct);
+
+            var second = await DarlingHealthReader.GetDailySummaryRangeAsync(dataSource, ServerId, fromDate, toDate, cancellationToken: ct);
+            var secondClosedDay = second.Rows.Single(r => r.SummaryDate.Date == twoDaysAgo);
+            var secondToday = second.Rows.Single(r => r.SummaryDate.Date == today);
+
+            Assert.Equal(1000m, secondClosedDay.TotalWaitTimeSec * 1000m); // unchanged: served from the cached block
+            Assert.Equal(2500m, secondToday.TotalWaitTimeSec * 1000m); // 500 + 2000: today is never cached
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    private static async Task PlantWaitAsync(NpgsqlConnection connection, DateTime atUtc, long waitMs, CancellationToken ct) =>
+        await DarlingMcpTestData.ExecAsync(connection, ct, @"
+INSERT INTO wait_stats
+    (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms)
+VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(atUtc), ServerId, ServerName, "CXPACKET", 5L, waitMs);
 }
