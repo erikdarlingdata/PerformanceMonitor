@@ -527,23 +527,24 @@ internal static class DarlingObjectStatsReader
         ORDER BY database_name, file_type_desc, file_name
         """;
 
-    /// <summary>The windowed half of <see cref="GetLatestSnapshotTimeAsync"/>: bounded so the planner can
-    /// exclude every chunk outside the window at plan time. $1 server_id, $2 window start, $3 asOf (now).</summary>
+    /// <summary>The windowed half of <see cref="GetLatestSnapshotTimeAsync"/>: bounded below so the planner can
+    /// exclude every chunk outside the window at plan time. $1 server_id, $2 window start. No upper bound: this
+    /// is a *latest* read, and bounding above by "now" would hide a snapshot the collector host stamped a few
+    /// minutes ahead of this reader's own clock (#4245 follow-up).</summary>
     public const string DatabaseSizeLatestSnapshotWindowedProbeSql = """
         SELECT MAX(collection_time)
         FROM v_database_size_stats
         WHERE server_id = $1
         AND   collection_time >= $2
-        AND   collection_time <= $3
         """;
 
-    /// <summary>The unbounded fallback half of <see cref="GetLatestSnapshotTimeAsync"/>, reached only when the
-    /// windowed probe finds nothing. $1 server_id, $2 asOf.</summary>
+    /// <summary>The fully unbounded fallback half of <see cref="GetLatestSnapshotTimeAsync"/>, reached only
+    /// when the windowed probe finds nothing. $1 server_id. No bound at all — the same shape the pre-#4245
+    /// correlated subquery had, reached only for the rare stale-or-empty-server case.</summary>
     public const string DatabaseSizeLatestSnapshotFallbackProbeSql = """
         SELECT MAX(collection_time)
         FROM v_database_size_stats
         WHERE server_id = $1
-        AND   collection_time <= $2
         """;
 
     public static async Task<List<DatabaseSizeRow>> GetLatestDatabaseSizesAsync(
@@ -589,19 +590,18 @@ internal static class DarlingObjectStatsReader
     /// retention that runs to 70+ daily chunks in the field. Correctness: the windowed probe's MAX, when it
     /// finds any row, IS the true unbounded MAX — no row older than the window can be newer than a row inside
     /// it — so the fallback only ever fires when the window is genuinely empty. Null when the server has no
-    /// database-size history at all.</summary>
+    /// database-size history at all. <b>Neither probe bounds above by "now"</b> — this is a latest read, and
+    /// the collector host's clock is not this reader's clock; a snapshot stamped a few minutes into this
+    /// reader's future is still the latest snapshot that exists (#4245 follow-up).</summary>
     private static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
     {
-        var now = DateTime.UtcNow;
-        var windowStart = DateTime.SpecifyKind(now.AddDays(-2), DateTimeKind.Unspecified);
-        var asOf = DateTime.SpecifyKind(now, DateTimeKind.Unspecified);
+        var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
 
         await using (var probe = postgres.CreateCommand(DatabaseSizeLatestSnapshotWindowedProbeSql))
         {
             probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             DarlingMcpReadParameters.AddInt(probe, serverId);
             DarlingMcpReadParameters.AddTimestamp(probe, windowStart);
-            DarlingMcpReadParameters.AddTimestamp(probe, asOf);
             var windowed = await probe.ExecuteScalarAsync(cancellationToken);
             if (windowed is DateTime windowedStamp)
             {
@@ -612,7 +612,6 @@ internal static class DarlingObjectStatsReader
         await using var fallback = postgres.CreateCommand(DatabaseSizeLatestSnapshotFallbackProbeSql);
         fallback.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(fallback, serverId);
-        DarlingMcpReadParameters.AddTimestamp(fallback, asOf);
         var unbounded = await fallback.ExecuteScalarAsync(cancellationToken);
         return unbounded is DateTime unboundedStamp ? unboundedStamp : null;
     }

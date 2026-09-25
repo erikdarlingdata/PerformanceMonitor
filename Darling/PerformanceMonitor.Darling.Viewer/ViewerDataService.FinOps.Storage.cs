@@ -29,11 +29,16 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// correlated <c>collection_time = (SELECT MAX(collection_time) ...)</c> costs DuckDB nothing extra to plan.
 /// On a <c>database_size_stats</c> hypertable it costs the PostgreSQL planner one subplan per retained
 /// chunk, unconditionally, because nothing in the query lets it exclude any chunk before walking it — the
-/// field measurement was 148 ms of planning against 2.6 ms of execution, over 71 chunks. Both single-server
-/// "latest snapshot" reads below (<see cref="GetDatabaseSizeLatestAsync"/>, <see cref="GetDatabaseSizeSummaryAsync"/>)
-/// go through <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> instead: a windowed probe the planner CAN
-/// bound, read as its own round trip so the snapshot's <c>collection_time</c> comes back as a literal value
-/// the main read can bind an equality to, rather than a subquery the planner must re-derive per chunk.</para>
+/// field measurement was 148 ms of planning against 2.6 ms of execution, over 71 chunks. The single-server
+/// "latest snapshot" reads below (<see cref="GetDatabaseSizeLatestAsync"/>, <see cref="GetDatabaseSizeSummaryAsync"/>,
+/// and <see cref="GetStorageGrowthAsync"/>'s current-size CTE) go through <see cref="GetLatestDatabaseSizeSnapshotAsync"/>
+/// instead: a windowed probe the planner CAN bound, read as its own round trip so the snapshot's
+/// <c>collection_time</c> comes back as a literal value the main read can bind an equality to, rather than a
+/// subquery the planner must re-derive per chunk. <see cref="GetStorageGrowthAsync"/>'s 7-day-ago and
+/// 30-day-ago comparison points go through <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> instead — same
+/// two-step shape, but genuinely bounded above, since "at or before a past cutoff" is what they mean. A
+/// *latest* read must not carry that upper bound: nothing should hide a snapshot merely because the collector
+/// host's clock ran ahead of the reader's own <c>DateTime.UtcNow</c> (#4245 follow-up).</para>
 /// </summary>
 public sealed partial class ViewerDataService
 {
@@ -101,13 +106,66 @@ FROM v_database_size_stats
 WHERE server_id = $1
 AND   collection_time <= $2";
 
+    /// <summary>The newest <c>database_size_stats</c> snapshot for one server, full stop — no upper bound
+    /// (#4245 follow-up). A windowed probe first — <c>collection_time &gt;= asOf minus two days</c>, letting
+    /// the planner exclude every chunk outside that span before it builds a subplan for it — falling back to
+    /// a fully unbounded probe only when the window is empty (a server whose collection stopped more than two
+    /// days ago). <b>Unlike <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/>, neither probe here bounds
+    /// above by <c>DateTime.UtcNow</c>.</b> The viewer machine's clock and the collector host's clock are not
+    /// the same clock; a snapshot the collector stamped a few minutes ahead of the viewer's "now" is still the
+    /// latest snapshot that exists, and an upper bound at "now" would silently skip it — the original bug this
+    /// PR fixes (an unbounded MAX with no bound at all) never had that failure mode, so the windowed
+    /// replacement must not introduce one. Correctness: the windowed probe's MAX, when it finds any row, IS
+    /// the true unbounded MAX — no row older than the window can be newer than a row inside it — so the
+    /// fallback only ever fires when the window is genuinely empty. Null when the server has no
+    /// database-size history at all.</summary>
+    private async Task<DateTime?> GetLatestDatabaseSizeSnapshotAsync(int serverId, CancellationToken cancellationToken)
+    {
+        var windowStart = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified);
+
+        await using (var probe = _dataSource.CreateCommand(DatabaseSizeLatestSnapshotWindowedProbeSql))
+        {
+            probe.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            probe.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            probe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            var windowed = await probe.ExecuteScalarAsync(cancellationToken);
+            if (windowed is DateTime windowedStamp)
+            {
+                return windowedStamp;
+            }
+        }
+
+        await using var fallback = _dataSource.CreateCommand(DatabaseSizeLatestSnapshotFallbackProbeSql);
+        fallback.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        fallback.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        var unbounded = await fallback.ExecuteScalarAsync(cancellationToken);
+        return unbounded is DateTime unboundedStamp ? unboundedStamp : null;
+    }
+
+    /// <summary>The windowed half of <see cref="GetLatestDatabaseSizeSnapshotAsync"/>. $1 server_id, $2 window
+    /// start. No upper bound — see the method doc for why a latest read must not have one.</summary>
+    public const string DatabaseSizeLatestSnapshotWindowedProbeSql = @"
+SELECT MAX(collection_time)
+FROM v_database_size_stats
+WHERE server_id = $1
+AND   collection_time >= $2";
+
+    /// <summary>The fully unbounded fallback half of <see cref="GetLatestDatabaseSizeSnapshotAsync"/>, reached
+    /// only when the windowed probe finds nothing. $1 server_id. No <c>asOf</c> bound at all: this IS the old
+    /// pre-#4245 statement's semantics (an unqualified <c>MAX(collection_time)</c>), reached only for the rare
+    /// stale-or-empty-server case.</summary>
+    public const string DatabaseSizeLatestSnapshotFallbackProbeSql = @"
+SELECT MAX(collection_time)
+FROM v_database_size_stats
+WHERE server_id = $1";
+
     /// <summary>Latest database size snapshot per file for one server, biggest files first (a capacity view —
     /// you hunt the largest files, not browse alphabetically; files can interleave across databases by design).
     /// The <c>total_size_mb DESC</c> lead is display-only and safe to change: the grid is the sole order-sensitive
     /// consumer — the other two callers (<c>GetUtilizationEfficiencyAsync</c>'s free-space math and the dormant-DB
     /// recommendation's cost share) only <c>Sum</c> the rows, and the "Allocated vs Used" chart is a separate read
     /// (<c>GetDatabaseSizeSummaryAsync</c>). $1 server_id, $2 collection_time (resolved by
-    /// <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> — see #4245 on the type doc).</summary>
+    /// <see cref="GetLatestDatabaseSizeSnapshotAsync"/> — see #4245 on the type doc).</summary>
     public const string DatabaseSizeLatestSql = @"
 SELECT
     database_name,
@@ -131,7 +189,7 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, CancellationToken cancellationToken = default)
     {
         var items = new List<DatabaseSizeRow>();
-        var snapshotTime = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, DateTime.UtcNow, cancellationToken);
+        var snapshotTime = await GetLatestDatabaseSizeSnapshotAsync(serverId, cancellationToken);
         if (snapshotTime is null)
         {
             return items;
@@ -166,7 +224,7 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
     }
 
     /// <summary>Per-database allocated + used space for the Utilization size chart. $1 server_id,
-    /// $2 collection_time (resolved by <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> — see #4245 on
+    /// $2 collection_time (resolved by <see cref="GetLatestDatabaseSizeSnapshotAsync"/> — see #4245 on
     /// the type doc), $3 topN.</summary>
     public const string DatabaseSizeSummarySql = @"
 SELECT
@@ -183,7 +241,7 @@ LIMIT $3";
     public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10, CancellationToken cancellationToken = default)
     {
         var items = new List<DatabaseSizeSummaryRow>();
-        var snapshotTime = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, DateTime.UtcNow, cancellationToken);
+        var snapshotTime = await GetLatestDatabaseSizeSnapshotAsync(serverId, cancellationToken);
         if (snapshotTime is null)
         {
             return items;
@@ -337,9 +395,11 @@ FROM latest l CROSS JOIN peak p";
     }
 
     /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid). #4245: all three
-    /// snapshot times are resolved by <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> before this runs,
-    /// the same windowed-probe-then-fallback each single-snapshot read here uses, so this statement only ever
-    /// binds three literal <c>collection_time</c> values (never a bound-free chunk scan). A cutoff with no
+    /// snapshot times are resolved before this runs — the <c>latest</c> CTE's from the unbounded
+    /// <see cref="GetLatestDatabaseSizeSnapshotAsync"/>, <c>past_7d</c>/<c>past_30d</c>'s from the upper-bounded
+    /// <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> (their cutoff IS a past "at or before" point, so
+    /// they keep the upper bound the latest read must not have) — so this statement only ever binds three
+    /// literal <c>collection_time</c> values (never a bound-free chunk scan). A cutoff with no
     /// qualifying snapshot (a database younger than 7 or 30 days) binds SQL NULL, which the CTE's equality
     /// turns into zero rows — the LEFT JOIN below already treats that as "no prior snapshot", unchanged from
     /// before this fix. $1 server_id, $2 latest collection_time, $3 collection_time at or before 7d ago,
@@ -401,7 +461,7 @@ ORDER BY growth_30d_mb DESC";
         var items = new List<StorageGrowthRow>();
         var now = DateTime.UtcNow;
 
-        var latestSnapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, now, cancellationToken);
+        var latestSnapshot = await GetLatestDatabaseSizeSnapshotAsync(serverId, cancellationToken);
         if (latestSnapshot is null)
         {
             return items;

@@ -430,6 +430,8 @@ public sealed class ViewerFinOpsSqlTests
     [InlineData(nameof(ViewerDataService.StorageGrowthSql))]
     [InlineData(nameof(ViewerDataService.DatabaseSizeSnapshotWindowedProbeSql))]
     [InlineData(nameof(ViewerDataService.DatabaseSizeSnapshotFallbackProbeSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSnapshotWindowedProbeSql))]
+    [InlineData(nameof(ViewerDataService.DatabaseSizeLatestSnapshotFallbackProbeSql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthSummarySql))]
     [InlineData(nameof(ViewerDataService.ObjectGrowthSeriesSql))]
     [InlineData(nameof(ViewerDataService.ObjectIndexDetailSql))]
