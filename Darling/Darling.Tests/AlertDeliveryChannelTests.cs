@@ -1127,4 +1127,36 @@ public sealed class AlertDeliveryChannelTests
 
         return count;
     }
+
+    /* ---------------- #4220: TriageBaseUrl gates on Web.Enabled ONLY ---------------- */
+
+    /// <summary>Ruled (#4220, 2026-09-25): the dashboard disabled is the ONLY reason to omit the link —
+    /// there is nothing to open. This is the byte-identity pin the coordinator asked for: a set
+    /// publicBaseUrl with Web.Enabled false must read exactly like an unset one.</summary>
+    [Fact]
+    public void TriageBaseUrl_IsEmpty_WhenTheDashboardIsDisabled_EvenWithAPublicBaseUrlConfigured()
+    {
+        var config = new DarlingConfig();
+        config.Web.Enabled = false;
+        config.Web.PublicBaseUrl = "http://10.0.0.5:5153";
+
+        var settings = new DarlingAlertSettings(config);
+
+        Assert.Equal("", settings.TriageBaseUrl);
+    }
+
+    /// <summary>The other half: enabled, the base is returned unchanged — including a DNS host, a
+    /// loopback-only deployment, or a base shaped like it carries a credential, none of which are this
+    /// seam's to second-guess per the ruling.</summary>
+    [Fact]
+    public void TriageBaseUrl_ReturnsTheConfiguredValue_WhenTheDashboardIsEnabled()
+    {
+        var config = new DarlingConfig();
+        config.Web.Enabled = true;
+        config.Web.PublicBaseUrl = "http://10.0.0.5:5153";
+
+        var settings = new DarlingAlertSettings(config);
+
+        Assert.Equal("http://10.0.0.5:5153", settings.TriageBaseUrl);
+    }
 }

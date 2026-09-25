@@ -55,6 +55,53 @@ public class TriageLinkTests
         Assert.Null(TriageLink.Build(baseUrl, "S", "M", Fired, "k"));
     }
 
+    /* ---------------- TriageLink.TryGetHost (pure, #4220) ---------------- */
+
+    [Theory]
+    [InlineData("http://10.0.0.5:5153", "10.0.0.5")]
+    [InlineData("https://monitor.example.com/", "monitor.example.com")]
+    [InlineData("http://h:5153/?token=x", "h")]      // the host, even when the base carries a token
+    public void TryGetHost_ReturnsTheHost_ForAnAbsoluteHttpOrHttpsBase(string baseUrl, string expectedHost)
+    {
+        Assert.Equal(expectedHost, TriageLink.TryGetHost(baseUrl));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("box:5153")]
+    [InlineData("ftp://box:5153")]
+    public void TryGetHost_ReturnsNull_ForAnUnsetOrInvalidBase(string? baseUrl)
+    {
+        Assert.Null(TriageLink.TryGetHost(baseUrl));
+    }
+
+    /* ---------------- TriageLink.DescribeCredentialShapedBaseWarning (pure, #4220) ---------------- */
+
+    [Theory]
+    [InlineData("http://h:5153/?token=abc123")]
+    [InlineData("http://h:5153/#access_token=abc123")]
+    [InlineData("http://user:pw@h:5153")]
+    public void DescribeCredentialShapedBaseWarning_WarnsButNeverEchoesTheValue(string baseUrl)
+    {
+        var warning = TriageLink.DescribeCredentialShapedBaseWarning(baseUrl);
+
+        Assert.NotNull(warning);
+        Assert.DoesNotContain("abc123", warning, StringComparison.Ordinal);
+        Assert.DoesNotContain("pw", warning, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("http://box:5153")]
+    [InlineData("https://box:5153/")]
+    [InlineData("ftp://user:pw@box:5153")]  // not http(s) -> Build never carries it -> nothing to warn about
+    public void DescribeCredentialShapedBaseWarning_ReturnsNull_WhenNothingToWarnAbout(string? baseUrl)
+    {
+        Assert.Null(TriageLink.DescribeCredentialShapedBaseWarning(baseUrl));
+    }
+
     /* ---------------- per-channel wiring: link present when passed ---------------- */
 
     [Fact]

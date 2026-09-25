@@ -166,9 +166,20 @@ public sealed class EmailSendCore
 
                 var titleName = string.IsNullOrEmpty(displayName) ? metricName : displayName;
                 var subject = $"[SQL Monitor Alert] {titleName} on {serverName}";
+
+                /* #4220: the same triage-page link the webhook channels carry (WebhookAlertService's own
+                   #2710 comment explains the key) — email was the one channel without it. The dedup key
+                   reuses DerivePagerDutyDedupKey so the link correlates with the SAME incident PagerDuty
+                   names for this firing, keyed off the RENDERED context like the webhook fan-out reads. Null
+                   (base URL unset, or the dashboard disabled) renders neither body's link, same as today. */
+                var triageUrl = TriageLink.Build(
+                    _settings.TriageBaseUrl, serverName, metricName, DateTime.UtcNow,
+                    WebhookAlertService.DerivePagerDutyDedupKey(
+                        string.IsNullOrEmpty(serverId) ? serverName : serverId, metricName, render.Context));
+
                 var (htmlBody, plainTextBody) = EmailTemplateBuilder.BuildAlertEmail(
                     metricName, serverName, currentValue, thresholdValue, _settings.EmailCooldownMinutes, _branding,
-                    render.Context, render.Prose, displayName);
+                    render.Context, render.Prose, displayName, triageUrl);
 
                 /* #3598: WHO receives this firing — an exact-metric route's recipients, else its family route's,
                    else the parent's list, which is what `smtpConfigured` above already required to be non-empty,
