@@ -72,17 +72,15 @@ public sealed class TimeHonestyRungTests
     private const string PropertiesTable = "server_properties";
     private const string PropertiesColumn = "time_zone_id";
 
-    /// <summary>The projection both windowed CPU readers spell, byte-identical: the stored UTC instant first,
-    /// the #1262 per-batch de-skew of the local stamp as the fallback, under the pre-rung alias so the ORDER BY
-    /// and the reader's ordinal did not move.</summary>
+    /// <summary>The projection both windowed CPU readers spell, identical modulo whitespace: the stored UTC
+    /// instant first, the #1262 per-batch de-skew of the local stamp as the fallback, under the pre-rung alias
+    /// so the reader's ordinal did not move. Compared against each SQL string with whitespace runs collapsed
+    /// (see <see cref="BothWindowedCpuReads_PreferTheStoredUtcInstant_AndKeepTheDeSkewAsTheFallback"/>) since
+    /// #4234 nested the viewer's copy one indent level deeper than the MCP twin's flat SELECT.</summary>
     private const string PreferredUtcProjection =
-        "COALESCE(\n" +
-        "        sample_time_utc,\n" +
-        "        sample_time\n" +
-        "            - INTERVAL '15 minutes'\n" +
-        "              * ROUND(EXTRACT(EPOCH FROM (\n" +
-        "                    MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time\n" +
-        "                )) / 900.0)::double precision) AS sample_time,";
+        "COALESCE( sample_time_utc, sample_time - INTERVAL '15 minutes' * ROUND(EXTRACT(EPOCH FROM ( " +
+        "MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time " +
+        ")) / 900.0)::double precision) AS sample_time,";
 
     private static PgMigrations.Migration V134 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
@@ -275,9 +273,12 @@ public sealed class TimeHonestyRungTests
 
     /// <summary>
     /// The two windowed per-sample CPU reads — the viewer's and the MCP <c>get_cpu_utilization</c>'s — prefer the
-    /// stored UTC instant and fall back to the #1262 de-skew, byte-identical to each other, under the pre-rung
-    /// alias; both still window on <c>collection_time</c>. The de-skew text the consumed-frame census cites as
-    /// this read's evidence is still there, inside the fallback.
+    /// stored UTC instant and fall back to the #1262 de-skew, structurally identical to each other (whitespace
+    /// aside) under the pre-rung alias; both still window on <c>collection_time</c>. The de-skew text the
+    /// consumed-frame census cites as this read's evidence is still there, inside the fallback.
+    /// <para>#4234 wrapped the viewer's copy in a <c>raw</c> CTE (an outer query buckets it), nesting the
+    /// projection one indent level deeper than the MCP twin's still-flat SELECT — so the comparison collapses
+    /// whitespace runs instead of pinning exact column positions; a real wording drift still fails it.</para>
     /// </summary>
     [Fact]
     public void BothWindowedCpuReads_PreferTheStoredUtcInstant_AndKeepTheDeSkewAsTheFallback()
@@ -287,17 +288,28 @@ public sealed class TimeHonestyRungTests
 
         foreach (var sql in new[] { viewer, mcp })
         {
-            Assert.Contains(PreferredUtcProjection, Dedent(sql), StringComparison.Ordinal);
+            Assert.Contains(PreferredUtcProjection, Regex.Replace(sql, @"\s+", " "), StringComparison.Ordinal);
             Assert.Contains("MAX(sample_time) OVER (PARTITION BY server_id, collection_time) - collection_time", sql, StringComparison.Ordinal);
             Assert.Contains("FROM cpu_utilization_stats", sql, StringComparison.Ordinal);
             Assert.Contains("AND   collection_time >= $2", sql, StringComparison.Ordinal);
-            Assert.Contains("ORDER BY sample_time", sql, StringComparison.Ordinal);
             Assert.Single(Regex.Matches(sql, "sample_time_utc"));
             Assert.DoesNotContain("sample_time_utc >=", sql, StringComparison.Ordinal);   /* the window stays on collection_time */
         }
 
-        /* The viewer's read has no upper bound (since $2 to now); the MCP's has both. Otherwise the same. */
-        Assert.DoesNotContain("$3", viewer, StringComparison.Ordinal);
+        /* The MCP twin is still the flat, unbucketed per-sample read (#3960's separate CPU-BUCKETED sibling
+           wraps it for its own bucketed tool), so it still orders the raw rows by sample_time directly. */
+        Assert.Contains("ORDER BY sample_time", mcp, StringComparison.Ordinal);
+
+        /* #4234: the viewer's copy now buckets, so the outer query orders the bucket rows by the bucket_start
+           ordinal instead of the (no longer projected at top level) sample_time column. */
+        Assert.Contains("ORDER BY 1", viewer, StringComparison.Ordinal);
+
+        /* The viewer's read still has no upper TIME bound (since $2 to the caller's endUtc, start-only
+           server-side); the MCP's has both $2 and $3 as time bounds. #4234 gave the viewer a $3 too, but for
+           a different reason — the bucket width in minutes, not a time bound — so it's asserted present here
+           rather than absent. */
+        Assert.DoesNotContain("collection_time <=", viewer, StringComparison.Ordinal);
+        Assert.Contains("CAST($3 AS integer) * INTERVAL '1 minute'", viewer, StringComparison.Ordinal);
         Assert.Contains("AND   collection_time <= $3", mcp, StringComparison.Ordinal);
     }
 
@@ -682,8 +694,8 @@ SELECT deskewed FROM (
             /* The viewer's CPU read, same rows, same preference. */
             await using (var viewer = new ViewerDataService(cs!))
             {
-                var samples = await viewer.GetCpuUtilizationAsync(ServerId, now.AddHours(-1), ct);
-                Assert.Equal(new[] { (pre1Utc, 21), (pre2Utc, 22), (straddleUtc, 31), (newestUtc, 32) },
+                var samples = await viewer.GetCpuUtilizationAsync(ServerId, now.AddHours(-1), now, ct);
+                Assert.Equal(new (DateTime, double)[] { (pre1Utc, 21), (pre2Utc, 22), (straddleUtc, 31), (newestUtc, 32) },
                     samples.Select(s => (s.SampleTime, s.SqlServerCpu)).ToArray());
             }
 
