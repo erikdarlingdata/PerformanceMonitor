@@ -459,6 +459,7 @@ function renderStoreHostPayload(box, p) {
   const facts = table(["Host", "Value"], [
     [cellText("Platform"), cellText((p.platform || "—") + (p.containerized ? " (containerized)" : ""))],
     [cellText("CPUs"), cellText(fmtInt(p.processor_count))],
+    [cellText("Cloud"), cellText(p.cloud && p.cloud.provider ? p.cloud.provider + " (" + fmtText(p.cloud.instance_type) + ")" : "not detected")],
     [cellText("RAM"), cellText(fmtMb(bytesToMb(ram.effective_bytes)) + " effective of " + fmtMb(bytesToMb(ram.total_bytes)) + " total (" + fmtText(ram.source) + ")")],
     [cellText("Data volume"), cellText(fmtMb(bytesToMb(vol.free_bytes)) + " free of " + fmtMb(bytesToMb(vol.total_bytes)) + " (" + fmtText(vol.filesystem) + ")" + (vol.note ? " — " + vol.note : ""))],
     [cellText("Managed store"), cellText(fmtBool(p.managed))],

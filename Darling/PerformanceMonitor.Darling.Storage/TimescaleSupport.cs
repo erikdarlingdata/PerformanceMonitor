@@ -60,12 +60,20 @@ public static partial class TimescaleSupport
     /// Compress chunks older than this many days — hardcoded (defaults over speculative config).
     /// Compressed chunks remain fully queryable, just columnar and ~10-20x smaller: this IS
     /// Darling's archival tier, the centralized-store answer to Lite's parquet archive, keeping the
-    /// full retention horizon cheap instead of splitting hot/cold stores. Kept short (1 day) to
-    /// match <see cref="ChunkIntervalDays"/>: at the collectors' 1-minute cadence a longer lag left
-    /// the whole store uncompressed (a chunk cannot compress until it closes AND then ages past
-    /// this), so even a near-idle fleet grew ~1 GB in a couple of days of hot data. Collectors only
-    /// ever append current-time rows, so a day-old chunk never takes another write — safe to
-    /// compress. Measured on this data: perfmon ~16.7x, plan-XML-heavy query_stats ~6.4x.
+    /// full retention horizon cheap instead of splitting hot/cold stores. Kept short (1 day):
+    /// at the collectors' 1-minute cadence a longer lag left the whole store uncompressed (a chunk
+    /// cannot compress until it closes AND then ages past this), so even a near-idle fleet grew
+    /// ~1 GB in a couple of days of hot data. Collectors only ever append current-time rows, so a
+    /// day-old chunk never takes another write — safe to compress. Measured on this data: perfmon
+    /// ~16.7x, plan-XML-heavy query_stats ~6.4x.
+    ///
+    /// <para><b>Fixed at 1 day on EVERY table, even where <see cref="RawChunkIntervalPlanner"/> narrows a raw
+    /// table's <c>chunk_time_interval</c> below a day (#4211).</b> This is the ladder's CEILING now, not "the"
+    /// delay tied one-for-one to chunk width: the #4211 ruling (issuecomment-5836205190, decision 1) keeps
+    /// <c>compress_after</c> here regardless of I, because a shorter delay below
+    /// <see cref="HourlyRefreshStartOffset"/> removes the gap the product's lock safety relies on, and
+    /// lowering it needs its own design built from field reads. Pinned at least
+    /// <see cref="HourlyRefreshStartOffset"/> by <c>TimescaleSupportTests</c> for exactly that reason.</para>
     /// </summary>
     public const int CompressAfterDays = 1;
 
@@ -108,11 +116,22 @@ public static partial class TimescaleSupport
     public static readonly TimeSpan CompressScheduleSpan = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// Hypertable chunk width in days. TimescaleDB's 7-day default is far too coarse for
-    /// 1-minute-cadence monitoring data: a chunk stays open (and uncompressible) for its whole
-    /// span, so 7-day chunks meant nothing compressed for ~2 weeks. 1-day chunks close daily and
-    /// become compressible within <see cref="CompressAfterDays"/>, keeping the store compact.
-    /// Applies at hypertable creation (fresh stores); existing chunks keep their original width.
+    /// Hypertable chunk width in days at CREATION (fresh stores; existing chunks keep their original width).
+    /// TimescaleDB's 7-day default is far too coarse for 1-minute-cadence monitoring data: a chunk stays open
+    /// (and uncompressible) for its whole span, so 7-day chunks meant nothing compressed for ~2 weeks. 1-day
+    /// chunks close daily and become compressible within <see cref="CompressAfterDays"/>, keeping the store
+    /// compact.
+    ///
+    /// <para><b>Since #4211, this is the ladder's CEILING, not every raw table's actual width.</b>
+    /// <see cref="RawChunkIntervalPlanner"/> derives a narrower <c>chunk_time_interval</c> — 12 or 6 hours —
+    /// for whichever raw hypertables' own ingest rate needs it to keep the store's open-chunk bytes under a
+    /// RAM budget, using this constant only as the widest rung. Every OTHER dependent still reads this as a
+    /// safe upper bound / margin rather than an exact width, and stays correct as chunks narrow:
+    /// <c>DarlingDimensionGcBound</c>, <c>QueryStorePlanMap.MarginOrderingHolds</c>,
+    /// <c>RollupBackfill.SliceWidth</c> and the aggregate compress margin. <see cref="CompressAfterDays"/>
+    /// does NOT follow the derived width down — it stays fixed at 1 day on every table (#4211 ruling decision
+    /// 1). <see cref="EventWindowFloor.SkewAllowance"/> has its own 1-day constant rather than reading this
+    /// one, since it is a clock-skew tolerance that only happens to equal this value today.</para>
     /// </summary>
     public const int ChunkIntervalDays = 1;
 

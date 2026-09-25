@@ -239,6 +239,7 @@ public sealed class DarlingFileLoggerProviderTests : IDisposable
             [
                 new HostSettingProfile("shared_buffers", "2048MB", 2048, "v8 (#4214 managed block)", "2048MB", 2048, HostSettingVerdict.Matches),
             ],
+            Cloud = CloudIdentity.None,
         };
 
         var logDir = Path.Combine(_tempRoot, "logs");

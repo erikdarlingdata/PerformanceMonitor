@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -74,39 +75,90 @@ LIMIT 1";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
-        command.CommandText = @"
-SELECT
-    collection_time,
-    total_server_memory_mb,
-    target_server_memory_mb,
-    buffer_pool_mb,
-    plan_cache_mb
-FROM v_memory_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-ORDER BY collection_time";
+        /* #4234: bucketed to TrendBudget.Chart's point budget — this read feeds the Overview lane (buffer pool
+           only) and the Memory tab's own chart (all four gauges), so every caller wants the same bucketing.
+           seriesCount is always 1: the four gauges ride the same row/bucket, not separate series. */
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = MemoryTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<MemoryTrendPoint>();
+        var rows = new List<(DateTime BucketStart, double Total, double Target, double Buffer, double Plan, DateTime FirstCollectionTime, long CollectionCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var collectionCount = reader.GetInt64(6);
+            if (collectionCount != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetDateTime(0),
+                ToDouble(reader.GetValue(1)),
+                ToDouble(reader.GetValue(2)),
+                ToDouble(reader.GetValue(3)),
+                ToDouble(reader.GetValue(4)),
+                reader.GetDateTime(5),
+                collectionCount));
+        }
+
+        /* Every bucket held exactly one collection: stamp at that collection's own clock, byte-identical to
+           the pre-#4234 per-collection read (see GetCpuUtilizationAsync for the same rule). */
+        var items = new List<MemoryTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new MemoryTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                TotalServerMemoryMb = reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
-                TargetServerMemoryMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
-                BufferPoolMb = reader.IsDBNull(3) ? 0 : ToDouble(reader.GetValue(3)),
-                PlanCacheMb = reader.IsDBNull(4) ? 0 : ToDouble(reader.GetValue(4))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                TotalServerMemoryMb = row.Total,
+                TargetServerMemoryMb = row.Target,
+                BufferPoolMb = row.Buffer,
+                PlanCacheMb = row.Plan
             });
         }
 
         return items;
     }
+
+    /// <summary>
+    /// The bucketed memory trend statement text (#4234), pulled out of <see cref="GetMemoryTrendAsync"/> so its
+    /// shape is checkable without a live DuckDB. $1 server_id, $2/$3 the UTC window (also the GREATEST clamp so
+    /// the first bucket never renders earlier than the window), $4 the bucket width in minutes. A NULL gauge
+    /// counts as 0 in the average, exactly as the per-collection read always counted it in C#.
+    /// </summary>
+    internal static string MemoryTrendSql => $@"
+WITH raw AS
+(
+    SELECT
+        collection_time,
+        total_server_memory_mb,
+        target_server_memory_mb,
+        buffer_pool_mb,
+        plan_cache_mb
+    FROM v_memory_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(COALESCE(total_server_memory_mb, 0)) AS total_server_memory_mb,
+    AVG(COALESCE(target_server_memory_mb, 0)) AS target_server_memory_mb,
+    AVG(COALESCE(buffer_pool_mb, 0)) AS buffer_pool_mb,
+    AVG(COALESCE(plan_cache_mb, 0)) AS plan_cache_mb,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM raw
+GROUP BY 1
+ORDER BY 1";
 
     /// <summary>
     /// Whether this server has EVER recorded a memory sample, ignoring any window.

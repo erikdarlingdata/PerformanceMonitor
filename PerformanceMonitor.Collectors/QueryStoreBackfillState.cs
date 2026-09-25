@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 
 namespace PerformanceMonitor.Collectors;
@@ -149,5 +150,34 @@ public static class QueryStoreBackfillState
         }
 
         return (fromUtc, toUtc);
+    }
+
+    /// <summary>
+    /// #4197: the candidate-database union both SKUs' workers apply after their bounded store read —
+    /// one rule, shared, so the two backfills cannot drift onto separate merge behavior the way their
+    /// separate SQL texts already do.
+    ///
+    /// <para>The bounded candidate read (<c>collection_time &gt; floorLimit</c>) finds every database
+    /// whose first contact came after the horizon (case (b) in the design), but it CANNOT find a
+    /// database that has gone fully quiet — its rows are all older than <c>floorLimit</c> now, so the
+    /// bound excludes them, even though a hole key still names it as needing service (case (a)). That
+    /// key is already loaded into <paramref name="state"/> before the candidate read runs, so the union
+    /// costs nothing extra to compute. Sorted ordinal, matching the store's own
+    /// <c>ORDER BY database_name</c>, so a database named only by a hole key does not change the walk
+    /// order the worker's loop depends on for determinism.</para>
+    /// </summary>
+    public static List<string> MergeHoleDatabases(IEnumerable<string> candidateDatabases, IReadOnlyDictionary<string, string> state)
+    {
+        var merged = new SortedSet<string>(candidateDatabases, StringComparer.Ordinal);
+
+        foreach (var key in state.Keys)
+        {
+            if (key.StartsWith(HoleKeyPrefix, StringComparison.Ordinal))
+            {
+                merged.Add(key.Substring(HoleKeyPrefix.Length));
+            }
+        }
+
+        return new List<string>(merged);
     }
 }

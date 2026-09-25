@@ -127,6 +127,12 @@ internal sealed class HostProfile
     public required bool IsManagedStore { get; init; }
     public required HostStoreFacts Store { get; init; }
     public required IReadOnlyList<HostSettingProfile> Settings { get; init; }
+
+    /// <summary>The EC2 instance type or Azure VM size (#4214 part 2b), or <see cref="CloudIdentity.None"/>
+    /// when this host is not on either cloud, the probe failed, or (a <see cref="GatherStartupProfileAsync"/>
+    /// profile) the probe was never run at all — see <see cref="DarlingCloudIdentityProbe"/>'s remarks for why
+    /// that distinction never needs to reach a caller: nothing reads this field off a startup profile.</summary>
+    public required CloudIdentity Cloud { get; init; }
 }
 
 /// <summary>
@@ -745,6 +751,11 @@ WHERE NOT is_compressed";
         var store = await GatherStoreFactsAsync(connection, cancellationToken);
         var settings = await GatherSettingProfilesAsync(connection, postgres, memory.EffectiveBytes, dataVolume.FreeBytes, cancellationToken);
 
+        /* Ruling 3 (#4214 part 2b): the cloud identity probe is reached from HERE only — never from
+           GatherStartupProfileAsync below, so a service start never pays an outbound HTTP call on every host,
+           managed or not. DarlingCloudIdentityProbeSourcePinTests pins that claim against the source text. */
+        var cloud = await DarlingCloudIdentityProbe.ProbeAsync(cancellationToken);
+
         return new HostProfile
         {
             Platform = platform,
@@ -755,6 +766,7 @@ WHERE NOT is_compressed";
             IsManagedStore = postgres.Managed,
             Store = store,
             Settings = settings,
+            Cloud = cloud,
         };
     }
 
@@ -791,6 +803,10 @@ WHERE NOT is_compressed";
             IsManagedStore = postgres.Managed,
             Store = s_storeFactsNotGatheredAtStartup,
             Settings = settings,
+            /* Ruling 3: never probed at startup — see GatherAsync's comment above. CloudIdentity.None reads
+               identically to "probed, found nothing", but nothing ever prints this field off a startup
+               profile (FormatStartupProfileText never reads HostProfile.Cloud), so that is never observable. */
+            Cloud = CloudIdentity.None,
         };
     }
 
@@ -820,6 +836,14 @@ WHERE NOT is_compressed";
     }
 
     private static string Truncate(string text, int max) => text.Length <= max ? text : text[..(max - 1)] + "…";
+
+    /// <summary>The <c>--check-settings</c>-only "Cloud:" line (ruling 5) — never printed by
+    /// <see cref="FormatStartupProfileText"/>, whose profile never probes (ruling 3), so there is no "probed,
+    /// found nothing" versus "never probed" line to confuse. <paramref name="cloud"/>'s instance type/VM size
+    /// is whatever the link-local metadata service reported, not verified against anything this host
+    /// actually runs on.</summary>
+    internal static string DescribeCloud(CloudIdentity cloud) =>
+        cloud.Provider is null ? "not detected" : $"{cloud.Provider} ({cloud.InstanceType})";
 
     /// <summary>The host lines both <see cref="FormatProfileText"/> (<c>--check-settings</c>) and
     /// <see cref="FormatStartupProfileText"/> (the once-per-start log) print identically — platform, RAM,
@@ -853,6 +877,7 @@ WHERE NOT is_compressed";
     {
         var sb = new StringBuilder();
         AppendHostLines(sb, profile);
+        sb.Append("Cloud: ").Append(DescribeCloud(profile.Cloud)).Append('\n');
         sb.Append("Store: PostgreSQL ").Append(profile.Store.PostgresVersion)
           .Append(profile.Store.TimescaleVersion is { } tv ? $", TimescaleDB {tv}" : ", TimescaleDB not installed").Append('\n');
         if (profile.Store.StoreSizeBytes is { } size)
@@ -906,6 +931,8 @@ WHERE NOT is_compressed";
             platform = profile.Platform,
             containerized = profile.IsContainerized,
             processorCount = profile.ProcessorCount,
+            cloudProvider = profile.Cloud.Provider,
+            cloudInstanceType = profile.Cloud.InstanceType,
             ramTotalBytes = profile.Memory.TotalBytes,
             ramCgroupLimitBytes = profile.Memory.CgroupLimitBytes,
             ramEffectiveBytes = profile.Memory.EffectiveBytes,

@@ -10,11 +10,15 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>#4234: TTL memoization for <see cref="GetDistinctPerfmonCountersForPickerAsync"/> — see <see cref="LiteNameListCache"/>.</summary>
+    private readonly LiteNameListCache _distinctPerfmonCountersCache = new();
+
     /// <summary>
     /// Gets the latest perfmon counters for a server.
     /// </summary>
@@ -58,6 +62,9 @@ ORDER BY counter_name";
 
     /// <summary>
     /// Gets the distinct perfmon counter names for a server.
+    /// <para>Uncached: MCP's perfmon-counter tool calls this directly so an MCP answer is never stale by
+    /// <see cref="LiteNameListCache.Ttl"/>. The picker's memoized entry point is
+    /// <see cref="GetDistinctPerfmonCountersForPickerAsync"/>.</para>
     /// </summary>
     public async Task<List<string>> GetDistinctPerfmonCountersAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
@@ -84,6 +91,35 @@ ORDER BY counter_name";
         {
             items.Add(reader.GetString(0));
         }
+
+        return items;
+    }
+
+    /// <summary>
+    /// Picker-only entry point for <see cref="GetDistinctPerfmonCountersAsync"/>: checks
+    /// <see cref="_distinctPerfmonCountersCache"/> first, falls back to the shared uncached read, then
+    /// memoizes it.
+    /// <para>#4234: keyed on (server, window length) for <see cref="LiteNameListCache.Ttl"/>, so the
+    /// full-window <c>DISTINCT</c> behind this runs at most once per 15 minutes rather than on every 1-minute
+    /// auto-refresh. Only <c>ServerTab</c>'s picker goes through this cache — MCP shares the same underlying
+    /// read but calls <see cref="GetDistinctPerfmonCountersAsync"/> directly so it never sees a cached answer.
+    /// <paramref name="nowUtc"/> is the cache's clock seam — null uses the wall clock; a test passes an
+    /// explicit time to fast-forward past the TTL without sleeping.</para>
+    /// </summary>
+    public async Task<List<string>> GetDistinctPerfmonCountersForPickerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, DateTime? nowUtc = null)
+    {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var windowLength = endTime - startTime;
+        if (_distinctPerfmonCountersCache.TryGet(serverId, windowLength, endTime, effectiveNow, out var cached))
+        {
+            return cached;
+        }
+
+        var items = await GetDistinctPerfmonCountersAsync(serverId, hoursBack, fromDate, toDate, asOfUtc);
+
+        _distinctPerfmonCountersCache.Set(serverId, windowLength, endTime, items, effectiveNow);
         return items;
     }
 
@@ -137,12 +173,64 @@ ORDER BY collection_time";
     }
 
     /// <summary>
+    /// The bucketed batched-trend statement text (#4234), pulled out of <see cref="GetPerfmonTrendsByCountersAsync"/>
+    /// so its shape (the bucket width in its own trailing parameter, after the dynamic <c>counter_name IN (...)</c>
+    /// list so that list's numbering does not shift) is checkable without a live DuckDB. Darling's twin is
+    /// <c>ViewerDataService.PerfmonTrendsSql</c>.
+    /// </summary>
+    internal static string PerfmonTrendsSql(int counterCount)
+    {
+        var nameParams = string.Join(", ", Enumerable.Range(0, counterCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (counterCount + 4);
+        return $@"
+SELECT
+    counter_name,
+    GREATEST(time_bucket(to_minutes(CAST({widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    CAST(ROUND(AVG(cntr_value)) AS BIGINT) AS cntr_value,
+    SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds > 0) AS delta_cntr_value,
+    SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS sample_interval_seconds,
+    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM (
+    SELECT
+        counter_name,
+        collection_time,
+        SUM(cntr_value) AS cntr_value,
+        SUM(delta_cntr_value) AS delta_cntr_value,
+        MAX(sample_interval_seconds) AS sample_interval_seconds,
+        CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+    FROM v_perfmon_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    AND   counter_name IN ({nameParams})
+    GROUP BY counter_name, collection_time
+) AS collections
+GROUP BY counter_name, 2
+ORDER BY counter_name, 2";
+    }
+
+    /// <summary>
     /// Batched sibling of <see cref="GetPerfmonTrendAsync"/>: fetches the trend for ALL selected
     /// counters in ONE query (replacing an N+1 query-per-counter loop), grouped by counter name.
+    /// <para>#4234: wraps the unchanged per-collection SUM as a subquery and re-aggregates into buckets sized
+    /// to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c> always 1 into
+    /// <see cref="TrendBuckets.AutoMinutes"/>, the ruling's own wording). <see cref="PerfmonTrendPoint"/>'s
+    /// fields keep their per-collection MEANING: <c>Value</c> is the bucket's rounded GAUGE average (the
+    /// ruling's rule for a gauge); <c>DeltaValue</c>/<c>SampleIntervalSeconds</c> are summed only over rated
+    /// collections (a stored interval &gt; 0), so <c>DeltaValue / SampleIntervalSeconds</c> downstream is
+    /// still the ruling's rate (summed deltas over summed intervals), and both are NULL together for a bucket
+    /// with no rated collection — the same "no delta" state an unrated per-collection row always carried;
+    /// <c>CntrType</c> keeps the per-collection MIN=MAX-agreement rule, now double-aggregated. When EVERY
+    /// bucket the whole call returned holds exactly one physical collection, each point is stamped at its
+    /// bucket's raw <c>first_collection_time</c> instead of the <c>time_bucket</c> grid line; a single merged
+    /// bucket anywhere (any counter) keeps <c>bucket_start</c> throughout. Darling's twin is
+    /// <c>ViewerDataService.PerfmonTrendsSql</c> / <c>GetPerfmonTrendsByCountersAsync</c> (#4234, PR #4304).</para>
     /// </summary>
     public async Task<Dictionary<string, List<PerfmonTrendPoint>>> GetPerfmonTrendsByCountersAsync(int serverId, List<string> counterNames, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
-        using var _q = TimeQuery("GetPerfmonTrendsByCountersAsync", "v_perfmon_stats trends batched by counter");
+        using var _q = TimeQuery("GetPerfmonTrendsByCountersAsync", "v_perfmon_stats trends batched by counter, bucketed");
         var result = new Dictionary<string, List<PerfmonTrendPoint>>();
         if (counterNames.Count == 0) return result;
 
@@ -150,46 +238,59 @@ ORDER BY collection_time";
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
-        var nameParams = string.Join(", ", counterNames.Select((_, i) => "$" + (i + 4)));
 
-        command.CommandText = $@"
-SELECT
-    counter_name,
-    collection_time,
-    SUM(cntr_value) AS cntr_value,
-    SUM(delta_cntr_value) AS delta_cntr_value,
-    MAX(sample_interval_seconds) AS sample_interval_seconds,
-    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
-FROM v_perfmon_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   counter_name IN ({nameParams})
-GROUP BY counter_name, collection_time
-ORDER BY counter_name, collection_time";
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = PerfmonTrendsSql(counterNames.Count);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var cn in counterNames)
             command.Parameters.Add(new DuckDBParameter { Value = cn });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var rows = new List<(string CounterName, DateTime BucketStart, DateTime FirstCollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType)>();
+        var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            var cn = reader.GetString(0);
-            if (!result.TryGetValue(cn, out var list))
+            if (reader.GetInt64(7) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(6),
+                /* ToInt64, not GetInt64/Convert.ToInt64: DuckDB's SUM over an INTEGER column (sample_interval_seconds)
+                   promotes to HUGEINT, which the driver hands back as a boxed BigInteger that Convert.ToInt64 cannot
+                   cast — the same reason GetPerfmonBucketsAsync's own FILTER-summed columns route through this helper. */
+                reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2)),
+                /* NULL stays NULL: a gauge's instance rows store no delta (v62), so the SUM is NULL, not 0. */
+                reader.IsDBNull(3) ? null : ToInt64(reader.GetValue(3)),
+                reader.IsDBNull(4) ? null : ToInt64(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : (int)ToInt64(reader.GetValue(5))));
+        }
+
+        foreach (var row in rows)
+        {
+            if (!result.TryGetValue(row.CounterName, out var list))
             {
                 list = new List<PerfmonTrendPoint>();
-                result[cn] = list;
+                result[row.CounterName] = list;
             }
+
             list.Add(new PerfmonTrendPoint
             {
-                CollectionTime = reader.GetDateTime(1),
-                Value = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                DeltaValue = reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                SampleIntervalSeconds = reader.IsDBNull(4) ? null : Convert.ToInt64(reader.GetValue(4)),
-                CntrType = reader.IsDBNull(5) ? null : Convert.ToInt32(reader.GetValue(5))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                Value = row.Value,
+                DeltaValue = row.DeltaValue,
+                SampleIntervalSeconds = row.SampleIntervalSeconds,
+                CntrType = row.CntrType
             });
         }
 

@@ -13,17 +13,21 @@ using PerformanceMonitor.Analysis.Baselines;
 namespace PerformanceMonitor.Darling.Analysis;
 
 /// <summary>
-/// Baselines for a PostgreSQL-target pass (#3542): <see cref="PgBaselineProvider"/> with THREE things swapped —
+/// Baselines for a PostgreSQL-target pass (#3542): <see cref="PgBaselineProvider"/> with FOUR things swapped —
 /// which SQL computes a metric's hour×day-of-week buckets, where the target's clock is read from (#3691,
-/// <c>PgTargetBaselineProvider.Clock.cs</c>), and which SQL computes a metric's buckets for the MEMBERS of a
+/// <c>PgTargetBaselineProvider.Clock.cs</c>), which SQL computes a metric's buckets for the MEMBERS of a
 /// population the caller passes keys for — one read for the whole set since #3901 (#3691 lane 33,
-/// <c>PgTargetBaselineProvider.Statements.cs</c>).
+/// <c>PgTargetBaselineProvider.Statements.cs</c>) — and, since #4298, whether an arm belongs in the daily cache
+/// tier: EVERY arm here does, because every one reads a raw PostgreSQL-target hypertable at full grain over the
+/// 30-day window, so an hourly recompute bought nothing a once-a-day one does not (measured up to 2.45 s and
+/// 262 MB of temp, <c>pg_statement_mean_ms</c> keyed).
 /// Everything else is inherited by construction rather than copied:
 /// the bucket cache, the naive-UTC parameter binding, the eight-column robust reader, the timeout
 /// classification (<see cref="PgBaselineProvider.IsCommandTimeout"/> — one definition,
 /// <c>BaselineTimeoutIsNamedTests</c>) and the degrade-to-<c>BaselineBucket.Empty</c> posture. The base
-/// class's <see cref="PgBaselineProvider.ResolveBaselineQuery"/>, <see cref="PgBaselineProvider.ReadServerClockAsync"/>
-/// and <see cref="PgBaselineProvider.ResolveKeyedBaselineQuery"/> are the seams.
+/// class's <see cref="PgBaselineProvider.ResolveBaselineQuery"/>, <see cref="PgBaselineProvider.ReadServerClockAsync"/>,
+/// <see cref="PgBaselineProvider.ResolveKeyedBaselineQuery"/> and <see cref="PgBaselineProvider.IsDailyCacheArm"/> are
+/// the seams.
 ///
 /// <para><b>The clock the buckets key on (#3749 Q6, then #3691).</b> Since #3749 the base binds six parameters, not
 /// three: <c>$1</c> server_id, <c>$2</c> window start and <c>$3</c> analysis time as before, then <c>$4..$6</c> —
@@ -282,4 +286,11 @@ WITH clean AS (
     protected override string? ResolveBaselineQuery(string metricName) => GetPgTargetBaselineQuery(metricName);
 
     protected override string? ResolveKeyedBaselineQuery(string metricName) => GetPgTargetKeyedBaselineQuery(metricName);
+
+    /// <summary>The fourth seam (#4298): every arm declared above — keyed or not — reads a raw PostgreSQL-target
+    /// hypertable at full grain over the 30-day window (the class doc's retention-dependency paragraph), so unlike
+    /// the base class (where only Cpu and IoLatency earn the day-grain key) EVERY metric name here does, without
+    /// needing to name them: an arm added to either switch above is a daily-cache arm from its first commit, not
+    /// an opt-in a later lane has to remember.</summary>
+    protected override bool IsDailyCacheArm(string metricName) => true;
 }
