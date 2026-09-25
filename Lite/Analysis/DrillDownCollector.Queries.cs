@@ -569,6 +569,9 @@ compared AS
         b.plan_id AS best_plan_id,
         b.cpu_per_exec AS best_cpu,
         b.dur_per_exec AS best_dur,
+        -- #3953 parity with Darling: when the best plan last ran, which the shared force-plan remediation and
+        -- advice read. Lite already reads a true 14-day window, so its best plans could always be this old.
+        b.last_exec AS best_plan_last_seen,
         l.query_text,
         -- #2138: the SAME CPU-primary scoring as the PLAN_REGRESSION fact (DuckDbFactCollector.QueryPerf.cs,
         -- where the rationale lives). The drill-down must agree with the fact that displays it: under the
@@ -614,7 +617,8 @@ SELECT
     regression_factor,
     LEFT(query_text, 500) AS query_text,
     replica_role,
-    parameter_sensitivity_cofired
+    parameter_sensitivity_cofired,
+    best_plan_last_seen
 FROM compared
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
@@ -668,7 +672,10 @@ LIMIT 5";
                 replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11),
                 /* #2138 gap 3: the plan-cache PSP signature co-fired for this query's hash. Steers the
                    force-plan caution text; the future bot never auto-forces a flagged target. */
-                parameter_sensitivity_cofired = !reader.IsDBNull(12) && Convert.ToBoolean(reader.GetValue(12))
+                parameter_sensitivity_cofired = !reader.IsDBNull(12) && Convert.ToBoolean(reader.GetValue(12)),
+                /* #3953 parity with Darling: when the best plan last ran, appended so the ordinals above are
+                   untouched. */
+                best_plan_last_seen = reader.IsDBNull(13) ? (DateTime?)null : Convert.ToDateTime(reader.GetValue(13))
             });
         }
 

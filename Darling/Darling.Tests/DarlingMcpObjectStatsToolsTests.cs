@@ -231,7 +231,19 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
         Assert.Contains("total_size_mb", sql, StringComparison.Ordinal);
         Assert.Contains("max_size_mb", sql, StringComparison.Ordinal);
         Assert.Contains("volume_free_mb", sql, StringComparison.Ordinal);
-        SqlTextPin.AssertExpresses("MAX(collection_time)", sql, "the read is no longer the latest snapshot");
+
+        /* #4245: the MAX(collection_time) anchor moved OFF this statement and onto the probe
+           GetLatestSnapshotTimeAsync runs first (a windowed probe, falling back to an unbounded one) - this
+           statement now binds the resolved stamp as a literal $2, which is what lets the planner exclude
+           every other chunk at plan time instead of re-deriving the anchor per call. The "still the latest
+           snapshot" guarantee this pin protects now lives on the probes: both still compute MAX(collection_time),
+           and the windowed probe's correctness (its MAX, when found, IS the true unbounded MAX) is what makes
+           relocating the anchor safe. */
+        Assert.Contains("collection_time = $2", sql, StringComparison.Ordinal);
+        SqlTextPin.AssertExpresses("MAX(collection_time)", DarlingObjectStatsReader.DatabaseSizeLatestSnapshotWindowedProbeSql,
+            "the windowed probe is no longer anchored to the latest snapshot in its window");
+        SqlTextPin.AssertExpresses("MAX(collection_time)", DarlingObjectStatsReader.DatabaseSizeLatestSnapshotFallbackProbeSql,
+            "the fallback probe is no longer anchored to the latest snapshot");
     }
 
     [Theory]
@@ -239,6 +251,8 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
     [InlineData(nameof(DarlingObjectStatsReader.IndexUsageSql))]
     [InlineData(nameof(DarlingObjectStatsReader.IndexLockingSql))]
     [InlineData(nameof(DarlingObjectStatsReader.DatabaseSizeLatestSql))]
+    [InlineData(nameof(DarlingObjectStatsReader.DatabaseSizeLatestSnapshotWindowedProbeSql))]
+    [InlineData(nameof(DarlingObjectStatsReader.DatabaseSizeLatestSnapshotFallbackProbeSql))]
     public void Reads_ArePostgresDialect_NoTsqlIsms(string sqlName)
     {
         var sql = sqlName switch
@@ -246,6 +260,8 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
             nameof(DarlingObjectStatsReader.ObjectSizeGrowthSql) => DarlingObjectStatsReader.ObjectSizeGrowthSql,
             nameof(DarlingObjectStatsReader.IndexUsageSql) => DarlingObjectStatsReader.IndexUsageSql,
             nameof(DarlingObjectStatsReader.IndexLockingSql) => DarlingObjectStatsReader.IndexLockingSql,
+            nameof(DarlingObjectStatsReader.DatabaseSizeLatestSnapshotWindowedProbeSql) => DarlingObjectStatsReader.DatabaseSizeLatestSnapshotWindowedProbeSql,
+            nameof(DarlingObjectStatsReader.DatabaseSizeLatestSnapshotFallbackProbeSql) => DarlingObjectStatsReader.DatabaseSizeLatestSnapshotFallbackProbeSql,
             _ => DarlingObjectStatsReader.DatabaseSizeLatestSql,
         };
         var lower = sql.ToLowerInvariant();

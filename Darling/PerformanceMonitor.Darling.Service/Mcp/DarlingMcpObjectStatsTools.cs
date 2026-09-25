@@ -34,7 +34,15 @@ public sealed class DarlingMcpObjectStatsTools
     /// <summary>Lite's default result caps (get_table_index_sizes takes no top parameter; get_index_usage and
     /// get_object_locking do, and these are the DEFAULT each falls back to, not a hard cap).</summary>
     private const int TableSizesTop = 100;
-    private const int IndexUsageTop = 200;
+
+    /// <summary>
+    /// #4198: <c>get_index_usage</c>'s caller-optional <c>limit</c> DEFAULT (#2636 made it optional; this lane
+    /// sizes what it falls back to). 200 rows measured 69,290 bytes at default arguments on a busy production
+    /// store -- more than double <see cref="McpResponseBudget.DefaultBytes"/>, at roughly 346 bytes/row. 75
+    /// rows leaves headroom under the budget even for wider index/table names than the measuring store's. An
+    /// explicit <c>limit</c> still gets what it asks for, up to <see cref="McpHelpers.MaxTop"/>.
+    /// </summary>
+    private const int IndexUsageTop = 75;
 
     /// <summary>
     /// #4198: was a 200-row hard cap with no override and no truncation signal. Measured 71,332 bytes at
@@ -155,7 +163,7 @@ public sealed class DarlingMcpObjectStatsTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Limit to one database. Strongly recommended: without it, unused-first ordering can fill the whole result from one database.")] string? database_name = null,
-        [Description("Maximum rows to return. Default 200.")] int limit = IndexUsageTop)
+        [Description("Maximum rows to return. Default 75.")] int limit = IndexUsageTop)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
         if (error != null) return error;

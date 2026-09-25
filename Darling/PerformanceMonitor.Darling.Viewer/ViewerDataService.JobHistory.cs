@@ -139,6 +139,25 @@ public sealed partial class ViewerDataService
     /// <c>run_datetime</c> window alone gives the planner nothing to exclude a chunk on (#4229). The
     /// de-skewed run time is always ≤ <c>collection_time</c> (store UTC at collection, and a job's history row
     /// is collected after the run it reports), so the floor cannot drop a qualifying row.
+    /// <para>
+    /// <b>job_stats replaces a window function over every step row (#4229).</b> The pre-fix text ran
+    /// <c>AVG</c>/<c>MAX</c> <c>OVER (PARTITION BY server_id, job_id)</c> against every row the window CTE
+    /// produced — every step of every job run, not just the ~2,000 the tab shows — so Postgres had to sort
+    /// and aggregate the WHOLE windowed set (measured: 21.7M-row table, 980 MB, 0.9M window rows) before the
+    /// final <c>ORDER BY ... LIMIT</c> could trim it. The average/max a row needs only ever depends on its
+    /// job's step_id-0 SUCCESS rows, so <c>job_stats</c> computes that once per (server_id, job_id) with a
+    /// plain <c>GROUP BY</c> over just that (much smaller) subset, filtered by the SAME window/floor/server
+    /// predicates as <c>base</c>. <c>base</c> itself now carries none of the analytic columns, so its own
+    /// <c>ORDER BY run_datetime_utc DESC, instance_id DESC LIMIT</c> can run — and the planner can pick a
+    /// top-N heapsort for it — before any aggregation happens at all; the join to <c>job_stats</c> below
+    /// attaches the per-job figures to only the (at most <c>limit</c>) rows that survive. Row selection is
+    /// unchanged: the LIMIT/ORDER BY in the old text never depended on avg_success_duration or
+    /// last_success_run_utc, so trimming to the newest rows first and joining the aggregate in after picks
+    /// the identical rows, in the identical order, with identical values (same GROUP BY filter as the old
+    /// CASE-gated window frame) — <c>job_stats</c> LEFT JOINs so a job with no successful step-0 row in the
+    /// window still surfaces its other rows, with NULL avg/last-success exactly as the window function gave
+    /// it (AVG/MAX of an empty/all-NULL partition is also NULL).
+    /// </para>
     /// </summary>
     internal static string BuildJobHistorySql(bool scopedToServer)
     {
@@ -154,6 +173,21 @@ WITH svr AS (
     FROM server_properties
     WHERE utc_offset_minutes IS NOT NULL
     ORDER BY server_id, collection_time DESC
+),
+job_stats AS (
+    SELECT
+        jh.server_id,
+        jh.job_id,
+        AVG(jh.run_duration_seconds) AS avg_success_duration,
+        MAX(jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0))) AS last_success_run_utc
+    FROM job_history AS jh
+    LEFT JOIN svr ON svr.server_id = jh.server_id
+    WHERE jh.step_id = 0
+    AND   jh.run_status = 1
+    AND   jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) >= $1
+    AND   jh.collection_time >= {floorParam}
+    {serverFilter}
+    GROUP BY jh.server_id, jh.job_id
 ),
 base AS (
     SELECT
@@ -171,48 +205,47 @@ base AS (
         jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) AS run_datetime_utc,
         jh.run_duration_seconds,
         jh.retries_attempted,
-        jh.message,
-        AVG(CASE WHEN jh.step_id = 0 AND jh.run_status = 1 THEN jh.run_duration_seconds END)
-            OVER (PARTITION BY jh.server_id, jh.job_id) AS avg_success_duration,
-        MAX(CASE WHEN jh.step_id = 0 AND jh.run_status = 1
-                 THEN jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) END)
-            OVER (PARTITION BY jh.server_id, jh.job_id) AS last_success_run_utc
+        jh.message
     FROM job_history AS jh
     LEFT JOIN svr ON svr.server_id = jh.server_id
     LEFT JOIN servers AS reg ON reg.server_id = jh.server_id
     WHERE jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) >= $1
     AND   jh.collection_time >= {floorParam}
     {serverFilter}
+    ORDER BY run_datetime_utc DESC, instance_id DESC
+    LIMIT {limitParam}
 )
 SELECT
-    server_id,
-    server_name,
-    instance_id,
-    job_id,
-    job_name,
-    job_enabled,
-    category_name,
-    step_id,
-    step_name,
-    run_status,
-    run_status_desc,
-    run_datetime_utc,
-    run_duration_seconds,
-    retries_attempted,
-    message,
-    last_success_run_utc,
+    base.server_id,
+    base.server_name,
+    base.instance_id,
+    base.job_id,
+    base.job_name,
+    base.job_enabled,
+    base.category_name,
+    base.step_id,
+    base.step_name,
+    base.run_status,
+    base.run_status_desc,
+    base.run_datetime_utc,
+    base.run_duration_seconds,
+    base.retries_attempted,
+    base.message,
+    job_stats.last_success_run_utc,
     CASE
-        WHEN step_id = 0
-        AND  avg_success_duration IS NOT NULL
-        AND  avg_success_duration > 0
-        AND  run_duration_seconds > avg_success_duration * 2
-        AND  run_duration_seconds > 60
+        WHEN base.step_id = 0
+        AND  job_stats.avg_success_duration IS NOT NULL
+        AND  job_stats.avg_success_duration > 0
+        AND  base.run_duration_seconds > job_stats.avg_success_duration * 2
+        AND  base.run_duration_seconds > 60
         THEN true
         ELSE false
     END AS is_long_running
 FROM base
-ORDER BY run_datetime_utc DESC, instance_id DESC
-LIMIT {limitParam}";
+LEFT JOIN job_stats
+    ON  job_stats.server_id = base.server_id
+    AND job_stats.job_id = base.job_id
+ORDER BY base.run_datetime_utc DESC, base.instance_id DESC";
     }
 
     /// <summary>Maps one row of <see cref="BuildJobHistorySql"/>'s result set.</summary>
