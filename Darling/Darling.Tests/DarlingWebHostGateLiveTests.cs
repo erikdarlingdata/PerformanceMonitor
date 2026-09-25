@@ -150,6 +150,38 @@ public sealed class DarlingWebHostGateLiveTests
         Assert.True(ctx.Response.Headers.SetCookie.Count > 0, "a valid token must be exchanged for a session cookie");
     }
 
+    /// <summary>
+    /// #4221: an alert link is a hash route, and the token form's hidden <c>return</c> field (populated by
+    /// <c>pathname + search + hash</c>) rides along as an ordinary query parameter on the token-strip 302 —
+    /// <c>BuildPathWithoutToken</c> strips only <c>token</c> and preserves everything else untouched. This
+    /// proves the LIVE pipeline (real ASP.NET Core query parsing/redirect, not just the pure
+    /// <c>SanitizeRedirectPath</c>/<c>BuildPathWithoutToken</c> functions in isolation) round-trips a
+    /// fragment-bearing <c>return</c> value byte for byte, with no token left lingering.
+    /// </summary>
+    [Fact]
+    public async Task NetworkMode_RightTokenWithHashReturn_KeepsFragmentInReturnValue()
+    {
+        using var server = await BuildServer(networkMode: true);
+        const string returnValue = "/#/triage?server=a&metric=b";
+        var target = $"/?token={Uri.EscapeDataString(Token)}&return={Uri.EscapeDataString(returnValue)}";
+
+        var ctx = await server.SendAsync(req =>
+        {
+            req.Request.Method = "GET";
+            req.Request.Path = "/";
+            req.Request.QueryString = new QueryString(target[target.IndexOf('?')..]);
+            req.Request.Headers.Host = ListenIp;
+            req.Connection.RemoteIpAddress = InCidrRemote;
+        });
+
+        Assert.Equal(StatusCodes.Status302Found, ctx.Response.StatusCode);
+        var location = ctx.Response.Headers.Location.ToString();
+        Assert.DoesNotContain("token=", location, StringComparison.Ordinal);
+
+        var parsed = Microsoft.AspNetCore.WebUtilities.QueryHelpers.ParseQuery(location[location.IndexOf('?')..]);
+        Assert.Equal(returnValue, parsed["return"].ToString());
+    }
+
     /// <summary>Network mode, the right token, but the remote is OUTSIDE <c>allowFrom</c>: the CIDR gate is
     /// outermost (#2550) and forbids before the token is even considered.</summary>
     [Fact]
