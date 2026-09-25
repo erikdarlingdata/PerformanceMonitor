@@ -558,6 +558,25 @@ public sealed class FleetSweepWebFeedTests
         Assert.DoesNotContain("update_alert_settings", src, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The Store host section (#4214 part 2): the sweeps page's own "is the STORE sized right" panel, below
+    /// Watch items. Reads <c>get_store_host</c> through <c>/api/read</c> (never a raw fetch, never a second
+    /// implementation of the verdict math #4214 part 1 already owns) and highlights every stale-* verdict —
+    /// source pins, the file's own convention for a branch there is no JS runner to execute.
+    /// </summary>
+    [Fact]
+    public void TheSweepPage_HasAStoreHostSection_AndHighlightsEveryStaleVerdict()
+    {
+        var src = FrontendSource("js/pages/sweeps.js");
+
+        Assert.Contains("el(\"h3\", { class: \"section-title\", text: \"Store host\" })", src, StringComparison.Ordinal);
+        Assert.Contains("readTool(\"get_store_host\", {})", src, StringComparison.Ordinal);
+
+        /* Every stale-* verdict highlighted, not just the exact stale_after_hardware_change string — a
+           future fifth verdict named "stale_something_else" must not silently fall through unhighlighted. */
+        Assert.Contains("v.startsWith(\"stale\")", src, StringComparison.Ordinal);
+    }
+
     /// <summary>The page is reachable: the shell carries the nav entry and the router routes the hash
     /// to the renderer — the two wiring points a new page can silently miss.</summary>
     [Fact]
@@ -567,7 +586,9 @@ public sealed class FleetSweepWebFeedTests
 
         var app = FrontendSource("js/app.js");
         Assert.Contains("import { renderSweeps } from \"./pages/sweeps.js\";", app, StringComparison.Ordinal);
-        Assert.Contains("renderSweeps(main)", app, StringComparison.Ordinal);
+        /* renderSweeps(main, opts) (#4214 round-1 review), not renderSweeps(main) — opts carries the poll
+           tick's { poll: true } through to the store host card, so it replays instead of re-fetching. */
+        Assert.Contains("renderSweeps(main, opts)", app, StringComparison.Ordinal);
         Assert.Contains("#/sweeps", app, StringComparison.Ordinal);
     }
 
@@ -606,7 +627,7 @@ public sealed class FleetSweepWebFeedTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
         Assert.Contains("builder.Logging.ClearProviders();", host, StringComparison.Ordinal);
         Assert.Contains(
-            "DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache);",
+            "DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig);",
             host, StringComparison.Ordinal);
     }
 

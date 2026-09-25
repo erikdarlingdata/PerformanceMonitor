@@ -167,6 +167,11 @@ public sealed class McpToolsListBudgetTests
        shared 32 KB budget and is not a served description either. */
     /* #4198 (qs-top, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266+#4268+#4272);
        combined total with qs-top (#4273) changes on top. */
+    /* #4214 part 2: +616 bytes for the new get_store_host tool (no parameters - a store-level snapshot, like
+       get_store_metrics), pinned at McpToolsListBudget/DarlingMcpStoreHostTools.txt. Merged with origin/dev's
+       own analysis-findings/collection-health/custom-view-catalog bump above (174,236); the constant below is
+       that base plus this PR's own +616, not the two deltas added by hand. */
+    /* #4214 part 2 (merge after #4273): re-measured on the merged tree, dev (#4272+#4273) plus get_store_host. */
     /* #4231 (merge): re-measured after merging origin/dev (dev now includes #4267+#4264 on top of the base
        #4231 branched from); combined total unchanged from the merge base since #4231 added no head bytes. */
     /* #4231 (merge after #4273): re-measured after merging origin/dev (dev now includes #4272+#4273); #4231
@@ -175,7 +180,11 @@ public sealed class McpToolsListBudgetTests
        same disclosure. get_query_store_top's head drops the old Darling/Lite split for the shared sentence
        (422 -> 351, banking 71 bytes); get_top_queries_by_cpu and get_top_procedures_by_cpu each gain that same
        sentence (474 -> 600 and 406 -> 532, +126 bytes apiece). Net +181, matching Lite's twin change exactly. */
-    private const int TotalCeilingBytes = 174_554;
+    /* #4214/#4282 (merge with #4279): re-measured on the tree combining both independent #4273-based branches -
+       this PR's own get_store_host (+616) and dev's #4279 Lite-parity head change (+181). Constant set to the
+       value McpToolsListBudgetTests itself measured on the merged tree, not the two deltas added by hand. */
+    private const int TotalCeilingBytes = 175_170;
+
 
 
     private const int ConvertedHeadCap = 1_000;
