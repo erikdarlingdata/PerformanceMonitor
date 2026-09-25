@@ -196,6 +196,75 @@ public sealed class WebExceptionTextCensusTests
         Assert.False(old.IsMatch("$\"{e}\""), "the pre-L2 pattern was expected to miss a bare interpolated exception with no property access");
     }
 
+    /// <summary>#4293 round 2 (R2-L3): an allow-list snippet vouches only for the MATCH it actually contains on
+    /// its line — the retired <c>line.Contains(snippet)</c> check waved through ANY other exception-text
+    /// access sharing a line with an allow-listed one (see the revert-proof below). Scans every occurrence of
+    /// <paramref name="snippet"/> on <paramref name="line"/> (not just the first) and accepts if the match's
+    /// span (<paramref name="column"/>, <paramref name="length"/>) falls entirely inside one of them.</summary>
+    private static bool SnippetCovers(string line, string snippet, int column, int length)
+    {
+        for (var at = line.IndexOf(snippet, StringComparison.Ordinal); at >= 0; at = line.IndexOf(snippet, at + 1, StringComparison.Ordinal))
+        {
+            if (column >= at && column + length <= at + snippet.Length)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The per-file half of the census (#4293 round 2, R2-L3), pulled out of
+    /// <see cref="NoWebEndpoint_BuildsAnAnswerFromExMessage_ExceptTheNamedAllowList"/> so
+    /// <see cref="SnippetCovers_RealAllowList_OnASyntheticLine_LeavesExDetailUnaccounted"/> can run the SAME
+    /// check against one fabricated line instead of the whole roster. Returns one description per
+    /// <see cref="s_exMessagePattern"/> match that no <paramref name="relativePath"/> allow-list entry
+    /// covers.</summary>
+    private static List<string> ComputeUnaccounted(string relativePath, string code)
+    {
+        var unaccounted = new List<string>();
+        var lines = code.Split('\n');
+        var matches = s_exMessagePattern.Matches(code);
+
+        foreach (Match match in matches)
+        {
+            // #4283 review round 1 (L2): match against the OFFENDING LINE, not a ±60-char window — a
+            // window can spill the allow-listed snippet from a neighboring statement onto a line that
+            // never contains it, silently marking a real hit accounted for.
+            var lineIndex = 0;
+            for (var i = 0; i < match.Index; i++)
+            {
+                if (code[i] == '\n')
+                {
+                    lineIndex++;
+                }
+            }
+
+            var line = lines[lineIndex];
+            // #4293 round 2 (R2-L3): the match's column ON THAT LINE, so SnippetCovers can bound-check it
+            // against a snippet occurrence instead of asking only whether the snippet appears SOMEWHERE on
+            // the line.
+            var lineStart = match.Index == 0 ? 0 : code.LastIndexOf('\n', match.Index - 1) + 1;
+            var column = match.Index - lineStart;
+            var accounted = false;
+            foreach (var (file, snippet, _) in s_allowList)
+            {
+                if (string.Equals(file, relativePath, StringComparison.Ordinal) && SnippetCovers(line, snippet, column, match.Length))
+                {
+                    accounted = true;
+                    break;
+                }
+            }
+
+            if (!accounted)
+            {
+                unaccounted.Add($"{relativePath}: ...{line.Trim()}...");
+            }
+        }
+
+        return unaccounted;
+    }
+
     [Fact]
     public void NoWebEndpoint_BuildsAnAnswerFromExMessage_ExceptTheNamedAllowList()
     {
@@ -207,45 +276,65 @@ public sealed class WebExceptionTextCensusTests
             var path = Path.Combine(root, relative);
             Assert.True(File.Exists(path), $"#4283 census target not found: {path}");
 
-            var code = StripComments(File.ReadAllText(path));
-            var lines = code.Split('\n');
-            var matches = s_exMessagePattern.Matches(code);
-
-            foreach (Match match in matches)
-            {
-                // #4283 review round 1 (L2): match against the OFFENDING LINE, not a ±60-char window — a
-                // window can spill the allow-listed snippet from a neighboring statement onto a line that
-                // never contains it, silently marking a real hit accounted for.
-                var lineIndex = 0;
-                for (var i = 0; i < match.Index; i++)
-                {
-                    if (code[i] == '\n')
-                    {
-                        lineIndex++;
-                    }
-                }
-
-                var line = lines[lineIndex];
-                var accounted = false;
-                foreach (var (file, snippet, _) in s_allowList)
-                {
-                    if (string.Equals(file, relative, StringComparison.Ordinal) && line.Contains(snippet, StringComparison.Ordinal))
-                    {
-                        accounted = true;
-                        break;
-                    }
-                }
-
-                if (!accounted)
-                {
-                    unaccounted.Add($"{relative}: ...{line.Trim()}...");
-                }
-            }
+            unaccounted.AddRange(ComputeUnaccounted(relative, StripComments(File.ReadAllText(path))));
         }
 
         Assert.True(unaccounted.Count == 0,
             "#4283: an ex.Message/ex.MessageText reached web-surface code outside the named allow-list:\n"
             + string.Join("\n", unaccounted));
+    }
+
+    /// <summary>#4293 round 2 (R2-L3): SnippetCovers itself — a match is covered when it sits inside SOME
+    /// occurrence of the snippet on the line, not only the first one SnippetCovers happens to find.</summary>
+    [Fact]
+    public void SnippetCovers_CoveredAndUncoveredAndSecondOccurrence()
+    {
+        const string line = "foo bar foo";
+
+        // Covered: the match sits inside the FIRST occurrence of "foo" (columns 0-2).
+        Assert.True(SnippetCovers(line, "foo", 0, 3));
+
+        // Uncovered: "bar" (columns 4-6) is not inside ANY occurrence of "foo".
+        Assert.False(SnippetCovers(line, "foo", 4, 3));
+
+        // A second occurrence: the match sits inside the SECOND "foo" (columns 8-10) only - SnippetCovers must
+        // keep scanning past the first occurrence rather than stopping there.
+        Assert.True(SnippetCovers(line, "foo", 8, 3));
+    }
+
+    /// <summary>#4293 round 2 (R2-L3): the real allow-list's "Query failed: {ex.MessageText}" entry
+    /// (DarlingWebEndpoints.cs) covers the ex.MessageText match on this synthetic line, but ex.Detail - a
+    /// SECOND exception-text access sharing the same line - is not part of that snippet at all and must come
+    /// back unaccounted. The retired whole-line check could not tell the two apart (see the revert-proof
+    /// below).</summary>
+    [Fact]
+    public void SnippetCovers_RealAllowList_OnASyntheticLine_LeavesExDetailUnaccounted()
+    {
+        var relative = Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        const string code = "$\"Query failed: {ex.MessageText} {ex.Detail}\"";
+
+        var unaccounted = ComputeUnaccounted(relative, code);
+
+        var single = Assert.Single(unaccounted);
+        Assert.Contains("ex.Detail", single, StringComparison.Ordinal);
+    }
+
+    /// <summary>Revert-proof for R2-L3 (run once, by hand, against SnippetCovers deleted and
+    /// ComputeUnaccounted's per-match check reverted to the pre-round-2
+    /// <c>line.Contains(snippet, StringComparison.Ordinal)</c>): the retired whole-line check finds the
+    /// allow-listed snippet ANYWHERE on <see cref="SnippetCovers_RealAllowList_OnASyntheticLine_LeavesExDetailUnaccounted"/>'s
+    /// synthetic line and would have marked BOTH matches accounted - including ex.Detail, which the snippet has
+    /// nothing to do with - so it would have reported zero unaccounted where the round-2 check correctly
+    /// reports one.</summary>
+    [Fact]
+    public void SnippetCovers_OldLineContainsCheck_WouldHaveMarkedExDetailAccountedToo()
+    {
+        const string line = "$\"Query failed: {ex.MessageText} {ex.Detail}\"";
+        const string snippet = "Query failed: {ex.MessageText}";
+
+        Assert.True(line.Contains(snippet, StringComparison.Ordinal),
+            "the retired whole-line check was expected to find the allow-listed snippet anywhere on the line, " +
+            "which is exactly the false-accounting R2-L3 fixes");
     }
 
     /// <summary>The allow-list's OTHER direction: every entry's snippet must still be found (a snippet that
