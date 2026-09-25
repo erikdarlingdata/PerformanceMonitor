@@ -55,6 +55,21 @@ namespace PerformanceMonitor.Darling.Storage;
 /// business and are never touched here; buckets past the last materialized one are the live edge the policy
 /// owns.</para>
 ///
+/// <para><b>The seam case (#4186): a successor with a frozen legacy is scanned from the LEGACY's last bucket,
+/// not its own floor.</b> The three interval-honest successors (<c>SupersededHourlyRollups</c>) can each have
+/// an un-materialized TAIL below their own floor: an outage that outlasts <see cref="HourlyRefreshStartOffset"/>
+/// before the successor's first refresh leaves raw rows between the frozen legacy's last bucket and the
+/// successor's floor that neither side ever materialized (the outage shape worked through above). Those rows
+/// sit BELOW the successor's floor, so the ordinary "floor up to ceiling" scan never reaches them — a hole, by
+/// this pass's own definition, has to be inside the materialized span. For a successor found through
+/// <c>LegacyOf</c>, the scan's lower bound is extended down to the legacy's last bucket (plus one bucket width,
+/// so the legacy's own last bucket is not re-scanned as if it were the successor's) whenever that reaches
+/// further back than the successor's floor already does. The seam tail then reads as an ordinary hole and the
+/// existing machinery repairs it: bounded per start, oldest first, filter-aware. Once repaired, the successor's
+/// floor covers the seam on its own and <see cref="RetentionArmSafetySql"/>'s seam probe — which exists because
+/// this stitch is NOT gap-free by construction — finds nothing there and releases the raw purge gate with no
+/// manual step.</para>
+///
 /// <para><b>Bounded, and the bound is stated.</b> Per aggregate per start, at most one refresh policy window's
 /// worth of buckets (<see cref="MaterializationHoleRepairCapBuckets"/>: 24 hourly, 3 daily) is refreshed,
 /// OLDEST FIRST — the oldest hole is the one the source's retention is about to make permanent. Anything past
@@ -439,8 +454,34 @@ ORDER BY c.bucket";
                     continue;
                 }
 
+                /* #4186 seam fix: a successor whose legacy is frozen (LegacyOf, non-null only for the three
+                   SupersededHourlyRollups successors) can hold an un-materialized tail BELOW its own floor —
+                   the seam an outage opens between the legacy's last bucket and the successor's first refresh
+                   (see this class's doc, and RetentionArmSafetySql's, for the full shape). A hole is defined as
+                   a gap INSIDE the materialized span, so scanning from the successor's own floor never reaches
+                   that tail. Extend the lower bound down to the legacy's last bucket (+ one bucket width, so
+                   the legacy's own already-materialized last bucket is not rescanned) whenever that reaches
+                   further back than the successor's own floor; min() is a no-op once the successor's floor
+                   overtakes the legacy's boundary on its own, so this converges to plain floor scanning as the
+                   successor accumulates history. A legacy with nothing materialized (max(bucket) is NULL, a
+                   frozen-but-empty legacy) leaves the floor untouched. */
+                var seamFloor = floor.Value;
+                var legacy = LegacyOf(target.View);
+                if (legacy is not null)
+                {
+                    using var legacyCeiling = new NpgsqlCommand($"SELECT max(bucket) FROM collect.{legacy}", connection) { CommandTimeout = SetupTimeoutSeconds };
+                    if (await legacyCeiling.ExecuteScalarAsync(cancellationToken) is DateTime legacyMaxBucket)
+                    {
+                        var seamBound = legacyMaxBucket + target.BucketWidth;
+                        if (seamBound < seamFloor)
+                        {
+                            seamFloor = seamBound;
+                        }
+                    }
+                }
+
                 var horizon = AlignDown(utcNow - MaterializationHoleScanSpanFor(target.Source), target.BucketWidth);
-                var from = floor.Value > horizon ? floor.Value : horizon;
+                var from = seamFloor > horizon ? seamFloor : horizon;
                 var to = ceiling.Value;
                 if (from > to)
                 {

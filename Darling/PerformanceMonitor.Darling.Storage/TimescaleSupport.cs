@@ -6017,16 +6017,29 @@ AND   j.hypertable_name = '{relation}'";
     /// An empty new rollup would vanish from the comparison and the gate would pass on the old rollup alone —
     /// which is the whole failure this exists to prevent.</para>
     ///
-    /// <para><b>Stitched coverage for frozen-legacy + successor pairs (#3653 high-fix, Option 4).</b>
-    /// When a coverage relation is an interval-honest successor (a member of
-    /// <see cref="SupersededHourlyRollups"/>), the SQL for that coverage slot is
-    /// <c>COALESCE(LEAST(legacy.min, successor.min), legacy.min, successor.min)</c> rather than
-    /// <c>min(successor.bucket)</c> alone.  This lets an upgrading store whose successor is still empty
-    /// fall back to the frozen legacy's floor — the legacy was refreshing up to the freeze point and
-    /// covers all of raw's history, so the stitch is gap-free by construction (successor was started from
-    /// <see cref="HourlyRefreshStartOffset"/>, which overlaps the freeze). Once the successor accumulates
-    /// enough history to cover raw on its own, the legacy term becomes the minimum anyway and the result is
-    /// unchanged. Both empty → <c>NULL</c> → <c>Short</c> (correct: fresh install, no history yet).</para>
+    /// <para><b>Stitched coverage for frozen-legacy + successor pairs (#3653 high-fix, Option 4; seam-checked
+    /// since #4186).</b> When a coverage relation is an interval-honest successor (a member of
+    /// <see cref="SupersededHourlyRollups"/>), the SQL for that coverage slot stitches the legacy's floor with
+    /// the successor's so an upgrading store whose successor is still empty can fall back to the frozen
+    /// legacy's floor rather than reading Short forever.</para>
+    ///
+    /// <para><b>The stitch is NOT gap-free by construction — an earlier version of this comment claimed it
+    /// was, and that was false.</b> A store stopped longer than <see cref="HourlyRefreshStartOffset"/> before
+    /// the successor's first refresh leaves raw rows between the legacy's last bucket and the successor's
+    /// floor that NEITHER side ever materializes (the outage shape <c>MaterializationHoles.cs</c>'s class doc
+    /// works through in full). An unconditional stitch reports that seam Covered right up to the moment the
+    /// raw purge destroys it. So the SQL probes raw itself, filtered the same way <see cref="IntervalHonestSourceFilter"/>
+    /// filters everything else here, for a row at or after the legacy's last bucket and before the successor's
+    /// floor (or +infinity when the successor is empty): none found → <c>LEAST(legacy.min, successor.min)</c>,
+    /// the stitched floor, honest because the seam really is empty; a row found → the successor's OWN
+    /// <c>min(bucket)</c> alone (NULL when empty, giving <c>Short</c>), because the legacy cannot vouch for
+    /// history it never covered. Once the successor's own floor reaches back past the legacy's last bucket,
+    /// there is no seam left to hold a row, the probe always comes back empty, and the two branches converge —
+    /// the same steady state the old unconditional stitch reached, just no longer assumed along the way. Both
+    /// empty → <c>NULL</c> → <c>Short</c> (correct: fresh install, no history yet). The seam is what
+    /// <see cref="RepairMaterializationHolesAsync"/> repairs, by scanning a stitched successor from the
+    /// legacy's last bucket instead of its own floor; once that repair runs, the seam is empty and this gate's
+    /// fallback releases on its own, no manual step.</para>
     ///
     /// <para><b>Source filter for 0-interval rows.</b> For <c>query_stats</c> and <c>procedure_stats</c> the
     /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude
@@ -6050,14 +6063,39 @@ AND   j.hypertable_name = '{relation}'";
 
         /* Coverage SQL: for a coverage relation that is an interval-honest successor, stitch it with
            its frozen legacy so an empty successor on an upgrading store falls back to the legacy's
-           floor. LegacyOf() returns null for any relation that is not in SupersededHourlyRollups
-           (dailies, query_store_stats, baseline aggregates), keeping those as simple min(bucket). */
+           floor — BUT ONLY WHEN THE SEAM IS EMPTY (#4186). The legacy stopped refreshing at the
+           freeze; if the store was down past HourlyRefreshStartOffset before the successor's first
+           refresh, the raw rows collected between the legacy's last bucket and the successor's floor
+           were never materialized by either side (see MaterializationHoles.cs's class doc for the
+           shape). A stitch that ignores that seam reports Covered over history nobody holds.
+           So: probe raw for a filter-admitted row at or after the legacy's last bucket (+ one hour, so
+           the legacy's own last bucket is not re-counted as seam) and before the successor's floor (or
+           +infinity when the successor is empty). Any such row means the seam is NOT gap-free, so the
+           slot falls back to the successor's OWN min(bucket) — NULL when empty, which reports Short
+           honestly instead of the false Covered the unconditional stitch gave. LEGACY.mx is NULL for a
+           legacy that never materialized anything; the comparison against it is then UNKNOWN for every
+           row, EXISTS is false, and the stitch behaves exactly as it did before this seam probe existed.
+           LegacyOf() returns null for any relation that is not in SupersededHourlyRollups (dailies,
+           query_store_stats, baseline aggregates), keeping those as simple min(bucket). PostgreSQL's
+           LEAST ignores NULL arguments (returns NULL only when EVERY argument is NULL), so
+           LEAST(l.mn, s.mn) already is what COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn) computed. */
         var columns = coverageRelations.Select((c, i) =>
         {
             var legacy = LegacyOf(c);
             var subquery = legacy is not null
-                ? $"(SELECT COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn){Environment.NewLine}"
-                + $"     FROM (SELECT min(bucket) AS mn FROM collect.{legacy}) l{Environment.NewLine}"
+                ? $"(SELECT CASE{Environment.NewLine}"
+                + $"                WHEN EXISTS ({Environment.NewLine}"
+                + $"                    SELECT 1{Environment.NewLine}"
+                + $"                    FROM collect.{relation} AS seam{Environment.NewLine}"
+                + $"                    WHERE seam.{sourceTimeColumn} >= l.mx + INTERVAL '1 hour'{Environment.NewLine}"
+                + $"                    AND   seam.{sourceTimeColumn} < COALESCE(s.mn, 'infinity'::timestamp){Environment.NewLine}"
+                + $"                    AND   {IntervalHonestSourceFilter}{Environment.NewLine}"
+                + $"                    ORDER BY seam.{sourceTimeColumn}{Environment.NewLine}"
+                + $"                    LIMIT 1){Environment.NewLine}"
+                + $"                THEN s.mn{Environment.NewLine}"
+                + $"                ELSE LEAST(l.mn, s.mn){Environment.NewLine}"
+                + $"           END{Environment.NewLine}"
+                + $"     FROM (SELECT min(bucket) AS mn, max(bucket) AS mx FROM collect.{legacy}) l{Environment.NewLine}"
                 + $"     CROSS JOIN (SELECT min(bucket) AS mn FROM collect.{c}) s)"
                 : $"(SELECT min(bucket) FROM collect.{c})";
             return $"    {subquery} AS coverage_oldest_{i}";

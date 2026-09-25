@@ -459,6 +459,158 @@ public sealed class FrozenRollupLiveTests
     /// row older than any materialized bucket must not hold the gate open permanently.</para>
     /// </summary>
     [Fact]
+    public async Task Outage_SeamBetweenFrozenLegacyAndSuccessor_HoleWalkRepairsItAndGateReleases()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* #4186: S is the stop. The legacy is refreshed through S-2h only (its own end_offset lag, the
+               same reason every hourly rollup trails "now" by roughly an hour). Raw carries admitted rows
+               through S — the 2-hour tail [S-1h, S] is the seam: collected, but never materialized by
+               either side — plus one interval-0 restart row just after S that the filter must reject, then
+               a genuine 2-day outage (no rows at all) before the successor's first post-upgrade refresh at
+               U = S+2d, whose own floor (U-1h) starts long after the seam. */
+            var s = D0.AddDays(3);
+
+            for (var hour = 0; hour <= 6; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"seam_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await InsertProcedureStatsAsync(connection, s.AddMinutes(30), "seam_proc_restart", 0, 0, 0, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-6), s.AddHours(-1), ct);
+
+            var u = s.AddDays(2);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seam_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            /* The seam holds raw rows the stitch cannot see through unconditionally — Short, not Covered. */
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            /* The product's own start-path entry point (DarlingWorker calls this exact method). */
+            var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
+            Assert.True(summary.BucketsRepaired >= 2, $"expected the 2-bucket seam tail to be repaired, got {summary.BucketsRepaired}");
+
+            await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
+            {
+                var newFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
+                Assert.Equal(s.AddHours(-1), newFloor);
+            }
+
+            /* The seam is now empty (the successor's own floor reaches the legacy's boundary) — Covered. */
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4186: the no-deadlock twin of <see cref="Outage_SeamBetweenFrozenLegacyAndSuccessor_HoleWalkRepairsItAndGateReleases"/> —
+    /// same frozen-legacy-plus-outage shape, but the seam itself holds NO raw rows (an outage that began
+    /// right at a legacy refresh, or a tail already purged before this fix existed). A FLOOR-only
+    /// contiguity test (<c>successor.min &lt;= legacy.max + 1h</c>) would read this as a permanent gap and
+    /// hold the purge forever with nothing left to repair it — the deadlock the brief for this fix rules
+    /// out. Probing raw directly must report Covered here with no hole walk at all.
+    /// </summary>
+    [Fact]
+    public async Task Outage_EmptySeam_GateReportsCoveredWithNoHoleWalk()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Same S and U as the outage-shape twin, but NOTHING is inserted in (S-2h, S] — the outage began
+               exactly at the legacy's last refresh, so there is no un-materialized tail to find. */
+            var s = D0.AddDays(3);
+
+            for (var hour = 2; hour <= 6; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"nogap_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-6), s.AddHours(-1), ct);
+
+            var u = s.AddDays(2);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "nogap_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    [Fact]
     public async Task FieldUpgrade_EmptySuccessors_LegacyFilled_ReportsRawPurgeCovered()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
@@ -501,11 +653,15 @@ public sealed class FrozenRollupLiveTests
                 await InsertProcedureStatsAsync(connection, at, $"fu_ps{day}", 900, 9, 3600, ct);
             }
 
-            /* Pre-freeze state: legacy hourlies refreshed to cover all of the interval-1 rows (days 1-5).
-               The 0-interval row at day 0 is NOT materialized by either legacy or successor (both filter
-               it out via their respective CREATE predicates or the source_oldest filter). */
+            /* Pre-freeze state: EVERY legacy hourly refreshed to cover all of the interval-1 rows (days
+               1-5) — query_stats has TWO (query-grain and db-grain, #1849/LC-a4), and both must be filled
+               or the db-grain slot reads NULL (empty legacy AND empty successor) and reports Short on its
+               own, independent of anything this test means to exercise. The 0-interval row at day 0 is NOT
+               materialized by either legacy or successor (both filter it out via their respective CREATE
+               predicates or the source_oldest filter). */
             var d6 = D0.AddDays(6);
             await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, D0.AddDays(1), d6, ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsDbHourlyView, D0.AddDays(1), d6, ct);
             await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, D0.AddDays(1), d6, ct);
 
             /* Successors are intentionally NOT refreshed — simulating an upgrading store where LC just

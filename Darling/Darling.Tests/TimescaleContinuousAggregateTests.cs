@@ -1255,6 +1255,57 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
+    /// WATCHED (mutation, #4186): a stitched slot (a coverage relation with a frozen legacy, found through
+    /// <c>LegacyOf</c>) must probe raw for a seam row before it falls back to the legacy's floor — an
+    /// UNCONDITIONAL stitch is the #4186 data-loss defect: a raw tail between the legacy's last bucket and
+    /// the successor's floor, never materialized by either side, read Covered and the purge dropped it. A
+    /// non-stitched slot (no <c>LegacyOf</c> match) must stay the plain <c>min(bucket)</c> form untouched.
+    /// </summary>
+    [Fact]
+    public void RetentionArmSafetySql_StitchedSlot_ProbesSeamBeforeFallingBackToLegacyFloor()
+    {
+        var sql = TimescaleSupport.RetentionArmSafetySql(
+            "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsIntervalHourlyView });
+
+        /* The seam probe: raw, bounded between the legacy's last bucket (+1h, so the legacy's own last
+           bucket is not re-counted) and the successor's floor (or infinity when it is empty). */
+        Assert.Contains("EXISTS (", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats AS seam", sql, StringComparison.Ordinal);
+        Assert.Contains("l.mx + INTERVAL '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(s.mn, 'infinity'::timestamp)", sql, StringComparison.Ordinal);
+
+        /* The filter must appear TWICE: once for source_oldest (every relation with a filter gets that
+           already) and once more inside the seam probe itself — a seam probe with no filter would let a
+           post-restart interval-0 row hold the gate open forever, exactly like source_oldest without it. */
+        var filterOccurrences = sql.Split(new[] { TimescaleSupport.IntervalHonestSourceFilter }, StringSplitOptions.None).Length - 1;
+        Assert.True(filterOccurrences >= 2,
+            $"expected the seam probe to carry its own {nameof(TimescaleSupport.IntervalHonestSourceFilter)} in addition to source_oldest's, found {filterOccurrences} occurrence(s) in: {sql}");
+
+        /* Seam empty -> the stitched floor. PostgreSQL's LEAST already ignores NULLs, so the old
+           COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn) wrapper was redundant; it must not come back. */
+        Assert.Contains("LEAST(l.mn, s.mn)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(LEAST(", sql, StringComparison.Ordinal);
+
+        /* Seam NOT empty -> the successor's own floor alone, never the legacy's — the legacy cannot vouch
+           for raw history it never covered. */
+        Assert.Contains("THEN s.mn", sql, StringComparison.Ordinal);
+
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsHourlyView}", sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView}", sql, StringComparison.Ordinal);
+
+        /* A non-stitched slot (query_store_stats' two consumers have no LegacyOf match) stays the plain
+           form — none of the seam machinery leaks into a slot that never needed it. */
+        var plainSql = TimescaleSupport.RetentionArmSafetySql(
+            "query_store_stats", "collection_time",
+            new[] { TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsIntervalHourlyView });
+
+        Assert.DoesNotContain("EXISTS (", plainSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("seam", plainSql, StringComparison.Ordinal);
+        Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsHourlyView}) AS coverage_oldest_0", plainSql, StringComparison.Ordinal);
+        Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}) AS coverage_oldest_1", plainSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The map both purge paths read (#1784) must name BOTH Query Store rollup families as raw's coverage.
     /// query_store_stats is the only raw table with two consumers; naming just one would let raw purge over
     /// history the other never materialized, which is the #1790-class race the corrected rollups introduce.
