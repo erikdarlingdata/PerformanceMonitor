@@ -446,10 +446,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
     /// <summary>
     /// #4279 revert-proof: text-scans SOURCE (matching <see cref="QueriesTabGridReads_RouteThroughSharedWindowFloorHelper"/>'s
-    /// mechanism) so a future edit that quietly goes back to feeding the banner server-local
-    /// fromServer/toServer or cStart/cStart2/cStart3 fails a test even though those names still compile fine
-    /// (they are plain <c>DateTime</c>s either way). Confirmed by reverting ServerTab.Slicers.cs and
-    /// ServerTab.Refresh.cs to 3b8d9e12 (pre-fix): both assertions below failed before the fix.
+    /// mechanism) so a future edit that quietly goes back to feeding the banner server-local fromServer/toServer
+    /// fails a test even though those names still compile fine (they are plain <c>DateTime</c>s either way).
+    /// Confirmed by reverting ServerTab.Slicers.cs and ServerTab.Refresh.cs to 3b8d9e12 (pre-#4279-fix): both
+    /// assertions below failed before that fix.
+    ///
+    /// <para>#4284 updated the ServerTab.Refresh.cs half: the banner call now shares its windowStart/windowEnd
+    /// tuple (formerly bannerStart/bannerEnd) with the comparison call beside it, rather than the comparison
+    /// keeping its own server-local cStart -- see <see cref="ComparisonWindowUtcTests.ComparisonCallSites_TakeUtcBounds_NotServerLocalOnes"/>
+    /// for that half's pin.</para>
     /// </summary>
     [Fact]
     public void WindowTruncatedBannerCallSites_TakeUtcBounds_NotServerLocalOnes()
@@ -466,12 +471,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 
         var refreshSource = File.ReadAllText(ControlsFile("ServerTab.Refresh.cs"));
         var refreshBannerCallsOnHelperOutput = Regex.Matches(refreshSource,
-            @"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*bannerStart\d?,\s*bannerEnd\d?\)").Count;
+            @"RefreshWindowTruncatedBannerAsync\(\s*QueryWindowRelation\.\w+,\s*\w+,\s*windowStart\d?,\s*windowEnd\d?\)").Count;
         Assert.True(refreshBannerCallsOnHelperOutput == 6,
             $"expected all 6 ServerTab.Refresh.cs banner calls to pass a GetQueriesTabWindowUtc result " +
-            $"(bannerStart/bannerEnd) (found {refreshBannerCallsOnHelperOutput}) -- cStart/cStart2/cStart3 are " +
-            "server-local under a custom range and feed the (deliberately untouched -- see ServerTab.Comparison.cs) " +
-            "comparison calls on the same lines, not the banner (#4279).");
+            $"(windowStart/windowEnd) (found {refreshBannerCallsOnHelperOutput}) -- a server-local cStart must " +
+            "not feed the banner (#4279/#4284).");
         Assert.Equal(6, Regex.Matches(refreshSource, @"LocalDataService\.GetQueriesTabWindowUtc\(").Count);
     }
 
