@@ -227,12 +227,17 @@ public sealed class ViewerQueryHeatmapSqlTests
     public void HeatmapSql_KeepsLitesMagnitudeBuckets_Filters_And_Preview()
     {
         var sql = ViewerDataService.BuildQueryHeatmapSql(HeatmapMetric.Duration);
-        /* v_query_stats, not the base table (#1767): the cell preview is LEFT(query_text, 120), and the
-           base table's inline query_text is NULL on every row written since the migration — the heatmap
-           would render with blank previews rather than fail. */
-        Assert.Contains("FROM v_query_stats", sql, StringComparison.Ordinal);
+        /* #4233: base reads the fact table directly, not v_query_stats (#1767) - no row in the window
+           pays for the query_text_dim join or a preview truncation it will never be shown. The preview
+           is resolved only for the rn = 1 row of each cell: inline query_text when the row predates
+           #1767, the query_text_dim lookup when it does not (post-#1767 rows leave the inline column
+           NULL), truncated last - the same resolution v_query_stats performs, just not for every row. */
+        Assert.Contains("FROM query_stats", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("v_query_stats", sql, StringComparison.Ordinal);
         Assert.Contains("delta_execution_count > 0", sql, StringComparison.Ordinal);
-        Assert.Contains("LEFT(query_text, 120) AS query_preview", sql, StringComparison.Ordinal);
+        Assert.Contains(
+            "LEFT(COALESCE(query_text, (SELECT d.query_text FROM query_text_dim d WHERE d.digest = ranked.query_text_digest)), 120) AS top_query_text",
+            sql, StringComparison.Ordinal);
         /* The 7-way log-magnitude CASE (only the boundaries are pinned). */
         Assert.Contains("WHEN metric_value < 1 THEN 0", sql, StringComparison.Ordinal);
         Assert.Contains("WHEN metric_value < 100000 THEN 5", sql, StringComparison.Ordinal);
@@ -490,6 +495,10 @@ public sealed class ViewerQueriesRestLivePostgresTests
             Assert.Equal(1.0, result.Intensities[0, 0]);              /* bucket 0: 0xLOW */
             Assert.Equal("0xHOT", result.CellDetails[2, 0].TopQueryHash); /* ARG_MAX replacement: higher delta_exec wins */
             Assert.Equal("0xLOW", result.CellDetails[0, 0].TopQueryHash);
+            /* #4233: the preview still resolves end-to-end through the C# reader for the winning row,
+               even though base no longer carries a pre-truncated column. */
+            Assert.Equal("SELECT hot", result.CellDetails[2, 0].TopQueryText);
+            Assert.Equal("SELECT low", result.CellDetails[0, 0].TopQueryText);
             /* 0xZERO (delta_exec = 0) contributed to no cell. */
             Assert.Equal(0.0, result.Intensities[6, 0]);
 
