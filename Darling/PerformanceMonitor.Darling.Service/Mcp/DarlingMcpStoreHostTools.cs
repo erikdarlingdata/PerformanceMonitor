@@ -48,7 +48,9 @@ public sealed class DarlingMcpStoreHostTools
         + "setting not-managed. stale_after_hardware_change means a managed block still sets a value this host's "
         + "CURRENT RAM/disk would size differently today - the #4207/#4211 class of drift. <<GUIDE>> Reports the "
         + "host PostgreSQL/TimescaleDB runs on and whether the settings in force still match it: platform "
-        + "(OS, containerized, processor_count), ram (total_bytes, cgroup_limit_bytes if any, effective_bytes, "
+        + "(OS, containerized, processor_count), cloud (provider - aws or azure - and instance_type, the EC2 "
+        + "instance type or Azure VM size; both null when this host is not on either cloud or the metadata "
+        + "probe found nothing), ram (total_bytes, cgroup_limit_bytes if any, effective_bytes, "
         + "authoritative, source), data_volume (total_bytes, free_bytes, filesystem, ready; on a bring-your-own "
         + "store this is the SERVICE's own disk, not necessarily the store's - data_volume.note says so when "
         + "managed is false), managed, and store (postgres_version, timescale_version, size_bytes, "
@@ -113,6 +115,11 @@ public sealed class DarlingMcpStoreHostTools
                 platform = profile.Platform,
                 containerized = profile.IsContainerized,
                 processor_count = profile.ProcessorCount,
+                cloud = new
+                {
+                    provider = profile.Cloud.Provider,
+                    instance_type = profile.Cloud.InstanceType,
+                },
                 ram = new
                 {
                     total_bytes = profile.Memory.TotalBytes,

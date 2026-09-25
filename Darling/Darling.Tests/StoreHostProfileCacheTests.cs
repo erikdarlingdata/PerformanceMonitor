@@ -37,6 +37,7 @@ public sealed class StoreHostProfileCacheTests
         IsManagedStore = false,
         Store = new HostStoreFacts("17.4", "2.99.0", 1_000_000, 99.0, 0, 0, 0),
         Settings = Array.Empty<HostSettingProfile>(),
+        Cloud = CloudIdentity.None,
     };
 
     /// <summary>Two callers racing a cold cache cost ONE gather. Deterministic, no <c>Task.Delay</c>: call 1's
