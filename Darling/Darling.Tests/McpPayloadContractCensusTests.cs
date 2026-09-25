@@ -1482,7 +1482,6 @@ public sealed class McpPayloadContractCensusTests
     /// <c>full_graph</c>; <c>get_active_queries</c> and <c>get_store_query_stats</c> both take
     /// <c>full_text</c>, the same name — get_active_queries' own was renamed from <c>full_query_text</c> to
     /// match; <c>get_collection_log</c> uses <c>full_text</c> for its <c>error_message</c> preview).</item>
-
     /// <item><b>The withheld summary</b> — <see cref="WithheldSummaryKeys"/>: #3594's own vocabulary for a
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
