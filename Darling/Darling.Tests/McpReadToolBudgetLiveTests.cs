@@ -87,11 +87,6 @@ public sealed class McpReadToolBudgetLiveTests
         "update_alert_settings", "update_custom_alert_rule", "update_custom_view", "update_mute_rule",
     };
 
-    /// <summary>
-    /// #4198's per-tool backlog, measured on THIS fixture: name -&gt; bytes at the time the row was added, "#4198
-    /// per-tool lane". A row is removed by whichever lane fixes that tool's defaults; the test fails if a listed
-    /// tool now fits (a stale exemption hiding a real fix) as loudly as it fails for a new, un-exempted offender.
-    /// </summary>
     /// <summary>Empty since get_collection_health's per-field cut (the last #4198 row on this list, like Lite's
     /// twin): every other #4198 per-tool lane had already merged and fit here (get_blocking #4267,
     /// get_collection_log #4265, get_query_store_regressions #4264, describe_custom_view_catalog #4272,
