@@ -41,7 +41,11 @@ public sealed class McpToolGuideHeadsDataTests
         ("get_perfmon_stats", "LATEST IS A TIME: the newest snapshot, not a window"),
         ("get_server_properties", "LATEST IS A TIME: the newest snapshot, not a window"),
         ("get_top_procedures_by_cpu", "LIFETIME extremes, not windowed"),
+        ("get_top_procedures_by_cpu", "window_truncated"),
+        ("get_top_procedures_by_cpu", "not a page cut"),
         ("get_top_queries_by_cpu", "LIFETIME extremes, not windowed"),
+        ("get_top_queries_by_cpu", "window_truncated"),
+        ("get_top_queries_by_cpu", "not a page cut"),
         ("get_wait_stats", "Bounded by limit"),
         ("list_servers", "Lite's status IS a live connection check"),
     ];
@@ -64,16 +68,14 @@ public sealed class McpToolGuideHeadsDataTests
         }
     }
 
-    /// <summary>
-    /// #4231: the topic no longer ends either tail -- McpHelpers.WindowTruncatedDescription now trails it on
-    /// both tools (both raw-tier reads gained the window-floor disclosure), so this checks presence, not
-    /// position.
-    /// </summary>
+    /// <summary>#4231: the shared cpu-extremes/attribution topic is the last thing appended to both tails again
+    /// (McpHelpers.WindowTruncatedDescription now sits before it, not after), so this is back to checking
+    /// position, matching Darling's twin.</summary>
     [Fact]
     public void CpuTimeExtremesTopic_RidesOnBothTopByCpuTools()
     {
-        Assert.Contains(McpToolGuideTopics.CpuTimeExtremesAndAttribution, McpToolGuideTests.Served("get_top_procedures_by_cpu").Tail!, StringComparison.Ordinal);
-        Assert.Contains(McpToolGuideTopics.CpuTimeExtremesAndAttribution, McpToolGuideTests.Served("get_top_queries_by_cpu").Tail!, StringComparison.Ordinal);
+        Assert.EndsWith(McpToolGuideTopics.CpuTimeExtremesAndAttribution, McpToolGuideTests.Served("get_top_procedures_by_cpu").Tail!, StringComparison.Ordinal);
+        Assert.EndsWith(McpToolGuideTopics.CpuTimeExtremesAndAttribution, McpToolGuideTests.Served("get_top_queries_by_cpu").Tail!, StringComparison.Ordinal);
     }
 
     /// <summary>Lite's list_servers has no fleet/engine concept; its tail is just the original "use this first"
