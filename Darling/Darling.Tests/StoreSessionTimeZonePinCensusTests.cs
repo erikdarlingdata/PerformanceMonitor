@@ -30,16 +30,15 @@ namespace Darling.Tests;
 /// fully qualified <c>new Npgsql.NpgsqlConnection(</c> — the same list #4277's own PR body used to find the 25
 /// STORE and 4 MONITORED-target call sites this test holds to a floor.</para>
 ///
-/// <para><b>Direct and indirect pins, both verified.</b> Most call sites pass
+/// <para><b>Every pin is direct, on the call line itself.</b> Every call site passes
 /// <c>DarlingStoreConnection.PinSessionTimeZoneUtc(...)</c> straight into the constructor argument, which the
-/// scan finds textually. One call site (<c>DarlingWorker.RunCollectionLoopAsync</c>) reassigns its
-/// <c>storeConnectionString</c> parameter through the pin, layered underneath <c>EnsureStoreSearchPath</c>,
-/// two lines above where it opens the data source from the bare identifier — the two cannot be written as one
-/// expression because the search path has to sit UNDER the pin (see that method's own remarks). The scan
-/// follows that indirection rather than allow-listing it blind: an argument that is a single bare identifier
-/// counts as pinned only if THAT identifier is assigned from a <c>PinSessionTimeZoneUtc(...)</c> call
-/// somewhere else in the same file, so a future edit that drops the assignment or renames the identifier still
-/// fails this test rather than passing on trust.</para>
+/// scan finds textually. Round-1 review on #4285's PR found that an earlier version of this scan also
+/// accepted an INDIRECT pin — a bare identifier argument counted as pinned if it was assigned from a
+/// <c>PinSessionTimeZoneUtc(...)</c> call anywhere else in the same file, which let an unrelated unpinned
+/// reassignment or a second same-named variable pass on trust (<c>DarlingWorker.cs</c> has two
+/// <c>storeConnectionString</c> variables). <c>DarlingWorker.RunCollectionLoopAsync</c> now writes the pin
+/// inline on the <c>NpgsqlDataSource.Create(...)</c> line itself, so every STORE site the scan finds must show
+/// the pin on its own line, with no indirection rule left to fool.</para>
 /// </summary>
 public sealed class StoreSessionTimeZonePinCensusTests
 {
@@ -159,7 +158,7 @@ public sealed class StoreSessionTimeZonePinCensusTests
                     name,
                     line,
                     Collapse(argument),
-                    ArgumentIsPinned(text, argument)));
+                    ArgumentIsPinned(argument)));
             }
         }
 
@@ -167,31 +166,13 @@ public sealed class StoreSessionTimeZonePinCensusTests
     }
 
     /// <summary>Whether <paramref name="argument"/> (the balanced-paren span passed to the connection
-    /// constructor) is pinned — directly, by calling <c>PinSessionTimeZoneUtc</c> inline, or indirectly, by
-    /// being a bare identifier that <paramref name="fileText"/> assigns from that same call somewhere
-    /// else in the SAME file.</summary>
-    private static bool ArgumentIsPinned(string fileText, string argument)
+    /// constructor) is pinned — DIRECTLY, by calling <c>PinSessionTimeZoneUtc</c> inline on the same call. No
+    /// indirect form counts (round-1 review on #4285's PR): a bare identifier used to pass if it was assigned
+    /// from a pin call anywhere else in the file, which couldn't tell that assignment apart from an unrelated
+    /// same-named variable or a later unpinned reassignment of the same one.</summary>
+    private static bool ArgumentIsPinned(string argument)
     {
-        if (argument.Contains("PinSessionTimeZoneUtc", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        var inner = argument.Trim();
-
-        if (inner.Length >= 2 && inner[0] == '(' && inner[^1] == ')')
-        {
-            inner = inner[1..^1].Trim();
-        }
-
-        if (!Regex.IsMatch(inner, @"^[A-Za-z_][A-Za-zA-Z0-9_]*$"))
-        {
-            return false;
-        }
-
-        var indirectPin = new Regex(@"\b" + Regex.Escape(inner) + @"\s*=\s*DarlingStoreConnection\.PinSessionTimeZoneUtc\s*\(");
-
-        return indirectPin.IsMatch(fileText);
+        return argument.Contains("PinSessionTimeZoneUtc", StringComparison.Ordinal);
     }
 
     /// <summary>The balanced-paren span starting at <paramref name="openParen"/> (which must hold <c>(</c>),

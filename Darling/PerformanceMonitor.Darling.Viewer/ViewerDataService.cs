@@ -544,17 +544,21 @@ public sealed partial class ViewerDataService : IAsyncDisposable
     /// caller clamps it to 5–60). Pure + string-only, so it is unit-tested without a live Postgres. Detection
     /// uses the base <see cref="DbConnectionStringBuilder"/>, whose <c>ContainsKey</c> reflects exactly the keys
     /// present in the string (NpgsqlConnectionStringBuilder overrides ContainsKey to answer for every KNOWN
-    /// keyword, which can't tell "set" from "settable").
+    /// keyword, which can't tell "set" from "settable"). When the keyword is absent, the preference is APPENDED
+    /// to the caller's own string rather than emitted through a builder round trip — round-1 review on #4285's
+    /// PR measured the base builder's round trip changing 17 of 24 test strings, because its writer erases a
+    /// keyword the caller set to an explicit empty value the same way <see cref="DarlingStoreConnection"/>'s
+    /// remarks describe for <c>PinSessionTimeZoneUtc</c>; appending leaves every other keyword untouched.
     /// </summary>
     internal static string ApplyConnectionTimeout(string connectionString, int timeoutSeconds)
     {
         var builder = new DbConnectionStringBuilder { ConnectionString = connectionString };
         if (!builder.ContainsKey("Timeout"))
         {
-            builder["Timeout"] = timeoutSeconds;
+            return connectionString + ";Timeout=" + timeoutSeconds.ToString(CultureInfo.InvariantCulture);
         }
 
-        return builder.ConnectionString;
+        return connectionString;
     }
 
     /// <summary>
