@@ -128,22 +128,24 @@ public sealed class PgTargetClockTests
     }
 
     /// <summary>
-    /// The seam count the anomaly tests' "one protected override" pin grew by one here, and by one more for the
-    /// keyed seam (#3691 lane 33: <c>ResolveKeyedBaselineQuery</c>, a metric → SQL map like the first) — exactly
-    /// three, and nothing else of the base machinery is redeclared: no instance state (the resolved clock and every
-    /// bucket map, keyed or not, live in the base's cache entries), no second resolver, no second bind. Each override
-    /// is a read or a map, and the base does the rest.
+    /// The seam count the anomaly tests' "one protected override" pin grew by one here, by one more for the
+    /// keyed seam (#3691 lane 33: <c>ResolveKeyedBaselineQuery</c>, a metric → SQL map like the first), and by one
+    /// more for #4298's cache-grain seam (<c>IsDailyCacheArm</c>) — exactly four, and nothing else of the base
+    /// machinery is redeclared: no instance state (the resolved clock and every bucket map, keyed or not, live in
+    /// the base's cache entries), no second resolver, no second bind. Each override is a read, a map or (for
+    /// #4298) a constant answer, and the base does the rest.
     /// </summary>
     [Fact]
-    public void ThePostgresProvider_RedeclaresExactlyTheThreeSeams_AndNoState()
+    public void ThePostgresProvider_RedeclaresExactlyTheFourSeams_AndNoState()
     {
         var declared = typeof(PgTargetBaselineProvider)
             .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly);
         var overrides = Array.FindAll(declared, m => m.GetBaseDefinition().DeclaringType == typeof(PgBaselineProvider));
-        Assert.Equal(3, overrides.Length);
+        Assert.Equal(4, overrides.Length);
         Assert.Contains(overrides, m => m.Name == "ResolveBaselineQuery");
         Assert.Contains(overrides, m => m.Name == "ReadServerClockAsync");
         Assert.Contains(overrides, m => m.Name == "ResolveKeyedBaselineQuery");
+        Assert.Contains(overrides, m => m.Name == "IsDailyCacheArm");
         Assert.Empty(typeof(PgTargetBaselineProvider).GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.DeclaredOnly));
 
         var clock = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgTargetBaselineProvider.Clock.cs"));
