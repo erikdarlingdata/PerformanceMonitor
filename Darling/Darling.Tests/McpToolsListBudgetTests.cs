@@ -105,6 +105,10 @@ public sealed class McpToolsListBudgetTests
     /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
        and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
        preview by default). */
+    /* #4198 (lane TC): +472 bytes for describe_custom_view_catalog's default-is-compact note in its served
+       description and its two new opt-ins, source and full_detail (the catalog, 98,173 bytes at default
+       arguments, is now grouped-by-source with most per-measure fields dropped by default; source drills
+       into one source's full detail, full_detail returns the original shape). */
     /* #4198 (lane TK): +240 bytes for get_collection_health's new full_detail opt-in parameter (the head is
        unchanged; the compaction rule lives in the tail get_tool_guide serves, not the served head). Default
        calls now compact HEALTHY collectors with nothing to report, which took the default response from
@@ -146,7 +150,10 @@ public sealed class McpToolsListBudgetTests
        combined total with analysis-findings (#4266) changes on top. */
     /* #4198 (collection-health, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266);
        combined total with collection-health (#4268) changes on top. */
-    private const int TotalCeilingBytes = 173_763;
+    /* #4198 (custom-view-catalog, merge): re-measured after merging origin/dev (dev includes #4261+#4258+#4265+#4267+#4264+#4266+#4268);
+       combined total with custom-view-catalog (#4272) changes on top. */
+    private const int TotalCeilingBytes = 174_236;
+
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
