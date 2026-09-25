@@ -137,8 +137,15 @@ public sealed class McpHostService : BackgroundService
                    an answer to a different question with nothing anywhere saying so; for a surface whose
                    callers are language models, a silently dropped key is a confidently wrong answer.
                    The SAME filter object Darling's host registers (shared from
-                   PerformanceMonitor.Common), so the two SKUs cannot refuse differently. */
-                .WithRequestFilters(filters => filters.AddCallToolFilter(McpUnknownArgumentGuard.Instance));
+                   PerformanceMonitor.Common), so the two SKUs cannot refuse differently.
+
+                   McpResponseBudgetCallToolFilter (#4198) runs next, after the guard: the shared
+                   default response-size budget, trimming any tool's oversized JSON result down to a
+                   byte budget with an explicit truncated marker, never silently. The SAME filter
+                   object Darling's host registers, so the two SKUs enforce the same budget. */
+                .WithRequestFilters(filters => filters
+                    .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+                    .AddCallToolFilter(McpResponseBudgetCallToolFilter.Instance));
 
             _app = builder.Build();
 

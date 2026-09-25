@@ -690,6 +690,15 @@ public sealed class McpHealthTools
         */
         [Description("Limit to runs with this status, matched case-insensitively against the log's own vocabulary: SUCCESS, SKIPPED, YIELDED, ABANDONED, ERROR, PERMISSIONS, EXTENSION_MISSING, SESSION_MISSING, WARNING.")] string? status = null)
     {
+        /* #4199, matching Darling's twin exactly: server_name omitted, blank or "*" means every enabled
+           server merged and ranked together, each row carrying server_name, instead of "auto-select the
+           lone server" or "which server did you mean". Lite has no (fleet) maintenance sentinel to protect
+           here (that population is Darling-only), so this check is unconditional. */
+        if (string.IsNullOrWhiteSpace(server_name) || server_name.Trim() == "*")
+        {
+            return await GetCollectionLogFleetAsync(dataService, serverManager, hours_back, limit, as_of, collector_name, min_duration_ms, status);
+        }
+
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
@@ -854,6 +863,110 @@ public sealed class McpHealthTools
                    this tool's miss word on the other branch (McpHelpers.Status: empty / unavailable) -- one
                    key meaning two unrelated things by branch is the collision the name avoids. Each ROW
                    keeps its own `status`, where nothing collides. */
+                status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
+                runs = result,
+            }, McpHelpers.JsonOptions);
+        }
+        catch (Exception ex)
+        {
+            return McpHelpers.FormatError("get_collection_log", ex);
+        }
+    }
+
+    /// <summary>
+    /// The FLEET-WIDE form of <see cref="GetCollectionLog"/> (#4199), Darling's twin exactly: same
+    /// validations, same filters, same truncated/ordering contract, merged across every ENABLED server
+    /// instead of scoped to one, each row carrying which server it came from.
+    /// </summary>
+    private static async Task<string> GetCollectionLogFleetAsync(
+        LocalDataService dataService,
+        ServerManager serverManager,
+        int hours_back,
+        int limit,
+        string? as_of,
+        string? collector_name,
+        double? min_duration_ms,
+        string? status)
+    {
+        var invalidLimit = McpHelpers.ValidateTop(limit);
+        if (invalidLimit != null) return invalidLimit;
+
+        var invalidFloor = McpHelpers.ValidateMinMs(min_duration_ms, "min_duration_ms");
+        if (invalidFloor != null) return invalidFloor;
+
+        var invalidStatus = McpHelpers.ValidateChoice(
+            status, EnumeratedCollectorDriver.CollectionLogStatuses, "status");
+        if (invalidStatus != null) return invalidStatus;
+
+        var anchorError = McpHelpers.ValidateUncappedWindow(hours_back, as_of, out var windowEnd);
+        if (anchorError != null) return anchorError;
+
+        try
+        {
+            var hours = hours_back;
+            var serverIds = serverManager.GetEnabledServers()
+                .Select(s => RemoteCollectorService.GetDeterministicHashCode(RemoteCollectorService.GetServerNameForStorage(s)))
+                .ToList();
+
+            var rows = await dataService.GetRecentCollectionLogFleetAsync(
+                serverIds, hours, asOfUtc: windowEnd, maxRows: limit + 1,
+                collectorName: collector_name, minDurationMs: min_duration_ms, status: status);
+            var truncated = rows.Count > limit;
+            if (truncated) rows = rows.Take(limit).ToList();
+
+            var filtered = !string.IsNullOrWhiteSpace(collector_name)
+                || min_duration_ms is not null
+                || !string.IsNullOrWhiteSpace(status);
+
+            if (rows.Count == 0)
+            {
+                var everCollected = serverIds.Count > 0 && await dataService.HasAnyCollectionLogFleetAsync(serverIds);
+
+                if (!everCollected)
+                {
+                    return McpHelpers.Status(
+                        "unavailable",
+                        "No collector runs have EVER been recorded for any enabled server. This is not an empty window — either no server is enabled yet, or collection has not run at all. Check that at least one server is enabled and that collection is running.");
+                }
+
+                if (filtered)
+                {
+                    return McpHelpers.Status(
+                        "empty",
+                        $"No collector runs fleet-wide in the last {hours} hour(s) matched {McpHelpers.DescribeCollectionLogFilters(collector_name, min_duration_ms, status)}. This says nothing about the window as a whole — the filters were applied, so unfiltered runs may well exist. Drop them to see what the window holds.");
+                }
+
+                return McpHelpers.Status(
+                    "empty",
+                    $"No collector runs recorded fleet-wide in the last {hours} hour(s). At least one enabled server has collected before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent runs.");
+            }
+
+            var result = rows.Select(r => new
+            {
+                server_name = r.ServerName,
+                collector = r.CollectorName,
+                collection_time = r.CollectionTime.ToString("o"),
+                duration_ms = r.DurationMs,
+                sql_duration_ms = r.SqlDurationMs,
+                store_duration_ms = r.DuckDbDurationMs,
+                rows_collected = r.RowsCollected,
+                status = r.Status,
+                error_message = r.ErrorMessage,
+            });
+
+            return JsonSerializer.Serialize(new
+            {
+                scope = "fleet",
+                hours_back = hours,
+                run_count = rows.Count,
+                truncated,
+                oldest_returned_collection_time = rows.Min(r => r.CollectionTime).ToString("o"),
+                newest_returned_collection_time = rows.Max(r => r.CollectionTime).ToString("o"),
+                order = min_duration_ms is null
+                    ? McpHelpers.CollectionLogOrderNewestFirst
+                    : McpHelpers.CollectionLogOrderSlowestFirst,
+                collector_name = string.IsNullOrWhiteSpace(collector_name) ? null : collector_name.Trim(),
+                min_duration_ms,
                 status_filter = string.IsNullOrWhiteSpace(status) ? null : status.Trim().ToUpperInvariant(),
                 runs = result,
             }, McpHelpers.JsonOptions);

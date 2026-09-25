@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -74,13 +75,25 @@ public sealed class DarlingMcpFleetTools
         "host — 0 means this call ran it, anything up to 59 means a scan that many seconds before generated_at " +
         "did. Everything else on the payload was read for this call. Racing several calls with different " +
         "hours_back values buys nothing on that half and costs the window-bound reads N times over: call once " +
-        "with the widest window and derive, or sequence the calls.")]
+        "with the widest window and derive, or sequence the calls. " +
+        "detail defaults to \"summary\" (#4198): the rollup, band counts and worst_servers, WITHOUT the " +
+        "per-server cards array — #4198 measured that array at 67-81 KB on a fleet this size, large enough " +
+        "that Claude Code refused it inline outright. Pass detail=\"cards\" for the full per-server detail " +
+        "this tool returned before #4198, once you already know which server needs it; cards_included says " +
+        "which shape you got, and a summary response's cards_note repeats the lever.")]
     public static async Task<string> GetFleetOverview(
         NpgsqlDataSource postgres,
-        [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1)
+        [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1,
+        [Description("\"summary\" (default): the rollup, band counts and worst_servers, without the per-server cards array. \"cards\": additionally include every server's full pre-banded card, like this tool returned before #4198 — bigger, and usually a follow-up call once you know which server to drill into.")] string detail = "summary")
     {
         var validation = McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
+
+        var wantsCards = string.Equals(detail, "cards", StringComparison.OrdinalIgnoreCase);
+        if (!wantsCards && !string.Equals(detail, "summary", StringComparison.OrdinalIgnoreCase))
+        {
+            return McpHelpers.Status("invalid", $"detail must be \"summary\" or \"cards\" (got \"{detail}\").");
+        }
 
         try
         {
@@ -94,7 +107,26 @@ public sealed class DarlingMcpFleetTools
                     "No servers are registered yet. The service registers each monitored server on its first successful connection.");
             }
 
-            return JsonSerializer.Serialize(result, DarlingFleetReader.JsonOptions);
+            /* Both branches serialize the SAME result (so a rollup field added later reaches both shapes
+               with no second edit site) and then add cards_included explicitly — true/false, never left
+               for a client to infer from whether "cards" is present or empty, which is indistinguishable
+               from "no servers have cards". */
+            var node = JsonSerializer.SerializeToNode(result, DarlingFleetReader.JsonOptions)!.AsObject();
+
+            if (wantsCards)
+            {
+                node["cards_included"] = true;
+                return node.ToJsonString(DarlingFleetReader.JsonOptions);
+            }
+
+            /* #4198 summary mode: strip the heavy cards array — measured at 67-81 KB on a fleet this size,
+               large enough that Claude Code refused it inline outright. */
+            node.Remove("cards");
+            node["cards_included"] = false;
+            node["cards_note"] =
+                "Per-server cards were left out of this summary to keep the response small. Call again with "
+                + "detail=\"cards\" for the full per-server detail.";
+            return node.ToJsonString(DarlingFleetReader.JsonOptions);
         }
         catch (Exception ex)
         {
