@@ -124,6 +124,31 @@ public static partial class TimescaleSupport
             .ToArray();
 
     /// <summary>
+    /// #3653 A6, lane LC-a4: the same per-relation descriptor as <see cref="MaterializationHoleTargets"/>, but
+    /// over EVERY member of <see cref="RollupViews"/> — including the six the freeze (LC) took out of
+    /// <see cref="RollupBackfill.Targets"/>, and so out of <see cref="MaterializationHoleTargets"/> too. The
+    /// daily summary's not-carried probe (<c>DailySummarySql.QueriesCteForCagg</c> and
+    /// <c>QueriesCteForStitchedCagg</c>) still names a frozen legacy rollup long after LC stops it advancing —
+    /// under <c>RollupCoverage.Unknown</c>, and below a successor's stitch floor — so it needs a lookup that
+    /// still knows one, while the repair walk (<see cref="RepairMaterializationHolesAsync"/>) must never see a
+    /// frozen view among ITS targets: refreshing one is the one thing the freeze forbids. Kept as a SEPARATE
+    /// list rather than folded into <see cref="MaterializationHoleTargets"/> so that list's membership and
+    /// dependency order — a repair-walk invariant — stay exactly as the freeze left them. Its CREATE text comes
+    /// from <see cref="HourlyAggregates"/>, <see cref="DailyAggregates"/> OR <see cref="FrozenRollupAggregates"/>
+    /// — together the three hold exactly one entry per <see cref="RollupViews"/> member, frozen or not, so the
+    /// lookup below cannot go ambiguous or come up empty for any relation this file knows by name.
+    /// </summary>
+    public static IReadOnlyList<MaterializationHoleTarget> RollupCoverageProbeTargets =>
+        RollupViews
+            .Select(r => new MaterializationHoleTarget(
+                r.View, r.Source, r.SourceTimeColumn, r.BucketWidth,
+                HourlyAggregates.Concat(DailyAggregates).Concat(FrozenRollupAggregates)
+                    .Single(a => string.Equals(a.View, r.View, StringComparison.Ordinal)).CreateSql))
+            .Concat(BaselineAggregates.Select(a => new MaterializationHoleTarget(
+                a.View, SourceTableFor(a.View), "collection_time", HourlyBucket, a.CreateSql)))
+            .ToArray();
+
+    /// <summary>
     /// How many buckets one aggregate may have repaired per start: its own refresh policy's window in buckets —
     /// <see cref="HourlyRefreshStartSpan"/> over <see cref="HourlyBucket"/> (24) for an hourly aggregate,
     /// <see cref="DailyRefreshStartSpan"/> over <see cref="DailyBucket"/> (3) for a daily. So a start never does
