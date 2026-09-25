@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+// Window contract tests for get_query_store_top.
 using System;
 using System.IO;
 using System.Text.RegularExpressions;
