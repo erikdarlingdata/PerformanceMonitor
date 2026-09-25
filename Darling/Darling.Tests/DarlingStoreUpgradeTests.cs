@@ -218,6 +218,32 @@ public sealed class DarlingStoreUpgradeTests
     }
 
     [Fact]
+    public void ParseAutoConf_ANameValueLineSeparatedByNbspOnly_IsSkippedNotCarried()
+    {
+        /* U+00A0 (NBSP) satisfies char.IsWhiteSpace but is neither ' ' nor '\t' — guc-file.l's own
+           tokenizer would not split a line on it, so this parser must not either (#4280 round-2 Low 2).
+           Before the fix this split into name "work_mem" and value "128MB" and was carried; now nothing
+           separates name from value, so the whole line is unparseable and only its line number is
+           reported — never silently carried as work_mem. */
+        var settings = DarlingStoreUpgrade.ParseAutoConf("work_mem 128MB\n", out var skippedLines);
+
+        Assert.Empty(settings);
+        Assert.Equal(new[] { 1 }, skippedLines);
+    }
+
+    [Fact]
+    public void ParseAutoConf_ANameValueLineSplitByABareCarriageReturn_SkipsBothResultingLines()
+    {
+        /* StringReader.ReadLine treats a bare '\r' as its own line terminator, so "work_mem\r128MB" reads
+           back as two separate lines — neither "work_mem" nor "128MB" has a space/tab left to split on, so
+           BOTH land in skippedLines under their own line number, not just the first (#4280 round-2 Low 2). */
+        var settings = DarlingStoreUpgrade.ParseAutoConf("work_mem\r128MB\n", out var skippedLines);
+
+        Assert.Empty(settings);
+        Assert.Equal(new[] { 1, 2 }, skippedLines);
+    }
+
+    [Fact]
     public void DecideTransferMode_CopyWhenTheVolumeHasRoomForTwoCopies()
     {
         const long tenGb = 10L * 1024 * 1024 * 1024;
@@ -861,6 +887,46 @@ public sealed class DarlingStoreUpgradeTests
             Assert.Contains("primary_conninfo", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("hunter2", logText, StringComparison.Ordinal);
             Assert.DoesNotContain("host=x", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>Round-2 Q3 hardening: an extension-qualified name withholds the reason even when it also
+    /// matches one of the new secret fragments ("auth", "token") — PostgreSQL's own reject reason for an
+    /// out-of-range value often repeats the offending value verbatim, and an unrecognized extension's own
+    /// wording is not something this class can vouch for either way.</summary>
+    [Fact]
+    public async Task CarryAutoConfAsync_RejectedDotQualifiedSecretNamedSetting_NeverLogsItsValueOrReason()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-autoconf-dotsecretreject-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            File.WriteAllText(
+                Path.Combine(oldDataDirectory, "postgresql.auto.conf"),
+                "myext.auth_token = 'topsecrettoken'\n");
+
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan timeout, CancellationToken token)
+                => Task.FromResult((1, "invalid value for parameter \"myext.auth_token\": \"topsecrettoken\""));
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            var result = await upgrade.CarryAutoConfAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", 0, Probe, CancellationToken.None);
+
+            Assert.Empty(result.CarriedNames);
+            Assert.Contains("myext.auth_token", result.RejectedNames);
+
+            var logText = log.ToString();
+            Assert.Contains("myext.auth_token", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("topsecrettoken", logText, StringComparison.Ordinal);
         }
         finally
         {

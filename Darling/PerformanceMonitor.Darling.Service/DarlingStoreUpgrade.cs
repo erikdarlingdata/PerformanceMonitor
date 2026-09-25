@@ -2635,11 +2635,13 @@ internal sealed class DarlingStoreUpgrade
     /// resolves repeated assignments within one config file, and how this class already describes its own
     /// v1-v5 postgresql.conf blocks ("last-occurrence-wins override").</para>
     ///
-    /// <para>A line whose name fails <see cref="s_validGucName"/> is skipped, and its 1-based line number
-    /// (never its text) is returned in <paramref name="skippedLines"/>, for <see cref="CarryAutoConfAsync"/>
-    /// to log as not carried. Line number, not name: with the <c>=</c> optional, the text before the point
-    /// this parser treats as the name/value boundary can actually be part of the VALUE, so nothing about a
-    /// skipped line's own text is safe to log (round-1 security review, #4280 Medium 1).</para>
+    /// <para>A line whose name fails <see cref="s_validGucName"/> is skipped, and so is a <c>name value</c>
+    /// line (the <c>=</c>-less form) with no space or tab to split on — either way, only the 1-based line
+    /// number (never its text) is returned in <paramref name="skippedLines"/>, for
+    /// <see cref="CarryAutoConfAsync"/> to log as not carried. Line number, not name: with the <c>=</c>
+    /// optional, the text before the point this parser treats as the name/value boundary can actually be
+    /// part of the VALUE, so nothing about a skipped line's own text is safe to log (round-1 security
+    /// review, #4280 Medium 1).</para>
     /// </summary>
     internal static IReadOnlyList<AutoConfSetting> ParseAutoConf(string content, out IReadOnlyList<int> skippedLines)
     {
@@ -2653,7 +2655,10 @@ internal sealed class DarlingStoreUpgrade
         while ((line = reader.ReadLine()) is not null)
         {
             lineNumber++;
-            var trimmed = line.Trim();
+            /* PostgreSQL's guc-file.l tokenizer treats only ' ' and '\t' as whitespace — NOT the full
+               Unicode set string.Trim() strips (e.g. U+00A0 NBSP). Matching that keeps a line PostgreSQL
+               itself would not split on from being mis-split here (#4280 round-2 Low 2). */
+            var trimmed = line.Trim(' ', '\t');
             if (trimmed.Length == 0 || trimmed[0] == '#')
             {
                 continue;
@@ -2669,14 +2674,17 @@ internal sealed class DarlingStoreUpgrade
             if (eq < 0)
             {
                 var ws = 0;
-                while (ws < trimmed.Length && !char.IsWhiteSpace(trimmed[ws]))
+                while (ws < trimmed.Length && trimmed[ws] != ' ' && trimmed[ws] != '\t')
                 {
                     ws++;
                 }
 
                 if (ws >= trimmed.Length)
                 {
-                    /* A bare token with nothing after it — no value to carry. */
+                    /* A bare token with nothing after it — no space/tab for guc-file.l to split on, so
+                       there is no value to carry. Not a silent continue: the line could not be parsed,
+                       so it is reported the same way an invalid name is (line number only). */
+                    skipped.Add(lineNumber);
                     continue;
                 }
 
@@ -2685,8 +2693,8 @@ internal sealed class DarlingStoreUpgrade
             }
             else
             {
-                name = trimmed[..eq].Trim();
-                valueField = trimmed[(eq + 1)..].Trim();
+                name = trimmed[..eq].Trim(' ', '\t');
+                valueField = trimmed[(eq + 1)..].Trim(' ', '\t');
             }
 
             if (!s_validGucName.IsMatch(name))
@@ -2943,13 +2951,17 @@ internal sealed class DarlingStoreUpgrade
                 else
                 {
                     rejected.Add(setting.Name);
-                    if (NameMayHoldASecret(setting.Name))
+                    if (NameMayHoldASecret(setting.Name) || setting.Name.Contains('.'))
                     {
                         /* PostgreSQL's own reject reason often repeats the offending value verbatim, so a
-                           setting name that looks like it carries a credential gets no reason logged at all. */
+                           setting name that looks like it carries a credential gets no reason logged at all —
+                           and neither does any extension-qualified name (anything with a dot): we cannot
+                           enumerate every extension's own reject-reason wording well enough to know none of
+                           them ever echoes a value either (#4280 round-2 Q3 hardening). */
                         _logger.LogWarning(
                             "NOT carried: {Name} — the new PostgreSQL binaries reject it (reason withheld: " +
-                            "the name suggests it may hold a credential). The original setting is kept at {Path}.",
+                            "the name suggests it may hold a credential, or names an extension setting whose " +
+                            "reason could). The original setting is kept at {Path}.",
                             setting.Name, preUpgradeCopy);
                     }
                     else
@@ -3100,7 +3112,7 @@ internal sealed class DarlingStoreUpgrade
         => s_secretNameFragments.Any(fragment => name.Contains(fragment, StringComparison.OrdinalIgnoreCase));
 
     private static readonly string[] s_secretNameFragments =
-        { "conninfo", "command", "password", "passphrase", "secret", "key" };
+        { "conninfo", "command", "password", "passphrase", "secret", "key", "token", "credential", "auth" };
 
     /// <summary>
     /// The in-place major upgrade, start to finish. Each step is labelled, and ANY failure before the commit
