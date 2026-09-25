@@ -24,6 +24,7 @@ namespace Darling.Tests;
 /// #4214's CLI-level coverage: the exit codes <c>--check-settings</c> and <c>--validate-config</c> actually
 /// return for each outcome the issue names, not just the pure pieces underneath them.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class DarlingCliCommandsHostCheckTests
 {
     /// <summary>A TCP port nothing is listening on, freshly proven closed by bind-then-release — a connection
