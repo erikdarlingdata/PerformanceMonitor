@@ -315,9 +315,14 @@ public sealed class EngineCapabilityReadWiringTests
 
     /* The collector argument of a NotCollectedStatusAsync call: a quoted collector name, or a const that names
        one, optionally followed by the call's cancellation token (#4203) and nothing else. No argument in these
-       calls contains a parenthesis, so the non-greedy [^)]* is safe. */
+       calls contains a parenthesis, so the non-greedy [^)]* is safe. The negative lookahead on the bare-identifier
+       branch keeps a call whose collector argument is a TYPE-QUALIFIED const (e.g. SomeReader.CollectorName,
+       which this file's own `consts` lookup cannot resolve — it only sees `private const string X = "..."`
+       declared in the SAME file) from backtracking past the dot and mis-capturing the trailing token word itself
+       as the collector name; it falls back to not matching that call at all, its behavior before #4203 added the
+       token argument, rather than asserting a wrong name. */
     private static readonly Regex WiringCall = new(
-        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|([A-Za-z_][A-Za-z0-9_]*))(?:\s*,\s*(?:cancellationToken|ct|CancellationToken\.None))?\s*\)",
+        @"NotCollectedStatusAsync\([^)]*?,\s*(?:""([a-z_0-9]+)""|(?!cancellationToken\b|ct\b|CancellationToken\.None\b)([A-Za-z_][A-Za-z0-9_]*))(?:\s*,\s*(?:cancellationToken|ct|CancellationToken\.None))?\s*\)",
         RegexOptions.Compiled);
 
     private static readonly Regex CollectorConst = new(

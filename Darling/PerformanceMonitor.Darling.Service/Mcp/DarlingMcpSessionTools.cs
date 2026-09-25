@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -123,9 +124,10 @@ public sealed class DarlingMcpSessionTools
         [Description("Show only queries involved in blocking: rows with blocking_session_id > 0, plus the head blockers those rows name in the same capture.")] bool blocking_only = false,
         [Description("Maximum number of rows to return. Default 25 (#4198, down from 50 — sized to fit the response budget). The page is bounded by limit, not hours_back — truncated says whether the window held more.")] int limit = DefaultLimit,
         [Description("Return each row's full query text instead of a 500-character preview. Default false.")] bool full_text = false,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null) =>
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default) =>
         GetActiveQueries(postgres, server_name, hours_back, database_name, blocking_only, limit,
-            full_text ? null : QueryTextPreviewLength, as_of);
+            full_text ? null : QueryTextPreviewLength, as_of, cancellationToken);
 
     /// <summary>
     /// get_active_queries under an explicit query-text preview length (#4198 lane W2): the MCP tool above
@@ -138,9 +140,9 @@ public sealed class DarlingMcpSessionTools
     /// </summary>
     internal static async Task<string> GetActiveQueries(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? database_name, bool blocking_only,
-        int limit, int? queryTextPreviewLength, string? as_of)
+        int limit, int? queryTextPreviewLength, string? as_of, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -158,7 +160,7 @@ public sealed class DarlingMcpSessionTools
                the page. total_snapshots is the SQL's COUNT(*) OVER () of that same population — the number
                used to be rows.Count of an unfiltered window read, a different population from the rows. */
             var page = await DarlingSessionReader.GetActiveQueriesAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, filter, blocking_only);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, filter, blocking_only, cancellationToken);
             var rows = page.Rows;
 
             if (rows.Count == 0)
@@ -174,7 +176,7 @@ public sealed class DarlingMcpSessionTools
                         + ". The filters were applied in SQL over the whole window, so unfiltered snapshots may well exist — drop them to see what the window holds.");
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_snapshots", cancellationToken)
                     ?? McpHelpers.Status("empty", "No active query snapshots found in the requested time range.");
             }
 
@@ -234,7 +236,7 @@ public sealed class DarlingMcpSessionTools
                 queries = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_active_queries", ex);
         }

@@ -137,7 +137,6 @@ public static class DarlingWebEndpoints
         "compare_analysis",
         "get_analysis_facts",
         "get_analysis_findings",
-        "get_active_queries",
         "get_session_stats",
         "get_waiting_tasks",
         "get_alert_history",
@@ -152,7 +151,6 @@ public static class DarlingWebEndpoints
         "get_deadlock_trend",
         "get_deadlocks",
         "get_lock_wait_trend",
-        "get_plan_corrections",
         "get_database_config_changes",
         "get_database_scoped_config",
         "get_server_config_changes",
@@ -166,9 +164,7 @@ public static class DarlingWebEndpoints
         "get_memory_clerks",
         "get_memory_stats",
         "get_perfmon_stats",
-        "get_query_heatmap",
         "get_query_store_regressions",
-        "get_query_store_clutter",
         "get_query_store_top",
         "get_long_query_completions",
         "get_tempdb_trend",
@@ -2959,7 +2955,7 @@ public static class DarlingWebEndpoints
             ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c)),
 
             /* ── sessions ── */
-            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c)),
+            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c), c.RequestAborted),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c)),
             ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c)),
 
@@ -3007,7 +3003,7 @@ public static class DarlingWebEndpoints
                keeps a busy production server's default call under the shared response budget), but the
                web viewer has always shown the whole query text. The row pins its OWN default to true so
                #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
-            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), full_text: QueryBool(c, "full_text", true)),
+            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), full_text: QueryBool(c, "full_text", true), cancellationToken: c.RequestAborted),
 
             /* ── config (current + history) ── */
             ["get_database_config"] = (c, pg, an) => DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
@@ -3044,13 +3040,13 @@ public static class DarlingWebEndpoints
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c)),
             ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c)),
             ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name")),
-            ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c)),
+            ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4198: full_text defaults false on the MCP signature (a 240-character preview keeps a busy
                production store's default call under the shared response budget), but the web viewer has
                always shown the whole query text. The row pins its OWN default to true so the MCP-side
                budget cut does not silently shrink what the viewer renders. */
             ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c)),
-            ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c)),
+            ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c), c.RequestAborted),
             /* #4198: query_text already had a 2000-character cap before this tool had a full_text opt-in at
                all, so the viewer keeps that exact number through the previewLength overload -- QueryBool
                still lets an operator ask for the whole statement via ?full_text=true, but the default (no
