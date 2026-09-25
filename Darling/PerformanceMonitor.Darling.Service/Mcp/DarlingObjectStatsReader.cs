@@ -498,7 +498,15 @@ internal static class DarlingObjectStatsReader
     /// <summary>
     /// The latest per-file database-size snapshot — the viewer's <c>DatabaseSizeLatestSql</c> projected to
     /// the columns Lite's get_database_sizes surfaces (plus <c>collection_time</c> for the envelope and
-    /// <c>max_size_mb</c>). MB columns are <c>numeric(19,2)</c> → double precision. $1 server_id.
+    /// <c>max_size_mb</c>). MB columns are <c>numeric(19,2)</c> → double precision. $1 server_id,
+    /// $2 collection_time (the snapshot <see cref="GetLatestSnapshotTimeAsync"/> resolved).
+    ///
+    /// <para>#4245: this used to bind <c>collection_time</c> to a correlated <c>MAX(collection_time)</c>
+    /// subquery with no bound of its own, so TimescaleDB had to build a subplan for every retained
+    /// <c>database_size_stats</c> chunk before it could even start deciding which one held the answer — 148 ms
+    /// of planning against 2.6 ms of execution in the field, over 71 chunks. <see cref="GetLatestSnapshotTimeAsync"/>
+    /// resolves the snapshot as its own round trip first, so this statement only ever binds a literal
+    /// <c>collection_time</c> the planner can exclude every other chunk against at plan time.</para>
     /// </summary>
     public const string DatabaseSizeLatestSql = """
         SELECT
@@ -515,17 +523,43 @@ internal static class DarlingObjectStatsReader
             CAST(volume_free_mb AS double precision) AS volume_free_mb
         FROM v_database_size_stats
         WHERE server_id = $1
-        AND   collection_time = (SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1)
+        AND   collection_time = $2
         ORDER BY database_name, file_type_desc, file_name
+        """;
+
+    /// <summary>The windowed half of <see cref="GetLatestSnapshotTimeAsync"/>: bounded so the planner can
+    /// exclude every chunk outside the window at plan time. $1 server_id, $2 window start, $3 asOf (now).</summary>
+    public const string DatabaseSizeLatestSnapshotWindowedProbeSql = """
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        """;
+
+    /// <summary>The unbounded fallback half of <see cref="GetLatestSnapshotTimeAsync"/>, reached only when the
+    /// windowed probe finds nothing. $1 server_id, $2 asOf.</summary>
+    public const string DatabaseSizeLatestSnapshotFallbackProbeSql = """
+        SELECT MAX(collection_time)
+        FROM v_database_size_stats
+        WHERE server_id = $1
+        AND   collection_time <= $2
         """;
 
     public static async Task<List<DatabaseSizeRow>> GetLatestDatabaseSizesAsync(
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<DatabaseSizeRow>();
+        var snapshotTime = await GetLatestSnapshotTimeAsync(postgres, serverId, cancellationToken);
+        if (snapshotTime is null)
+        {
+            return rows;
+        }
+
         await using var command = postgres.CreateCommand(DatabaseSizeLatestSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
+        DarlingMcpReadParameters.AddTimestamp(command, snapshotTime.Value);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -544,5 +578,42 @@ internal static class DarlingObjectStatsReader
         }
 
         return rows;
+    }
+
+    /// <summary>The newest <c>database_size_stats</c> snapshot for one server (#4245): a windowed probe first
+    /// — <c>collection_time</c> bound to the last two days, letting the planner exclude every other chunk at
+    /// plan time — falling back to an unbounded probe only when the window is empty (a server whose
+    /// collection stopped more than two days ago, which the windowed probe alone cannot tell apart from
+    /// "never collected"). Two days is generous headroom over the roughly hourly collection cadence
+    /// (<c>CollectorScheduleDefaults["database_size_stats"]</c>) while still excluding nearly all of a
+    /// retention that runs to 70+ daily chunks in the field. Correctness: the windowed probe's MAX, when it
+    /// finds any row, IS the true unbounded MAX — no row older than the window can be newer than a row inside
+    /// it — so the fallback only ever fires when the window is genuinely empty. Null when the server has no
+    /// database-size history at all.</summary>
+    private static async Task<DateTime?> GetLatestSnapshotTimeAsync(NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        var windowStart = DateTime.SpecifyKind(now.AddDays(-2), DateTimeKind.Unspecified);
+        var asOf = DateTime.SpecifyKind(now, DateTimeKind.Unspecified);
+
+        await using (var probe = postgres.CreateCommand(DatabaseSizeLatestSnapshotWindowedProbeSql))
+        {
+            probe.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(probe, serverId);
+            DarlingMcpReadParameters.AddTimestamp(probe, windowStart);
+            DarlingMcpReadParameters.AddTimestamp(probe, asOf);
+            var windowed = await probe.ExecuteScalarAsync(cancellationToken);
+            if (windowed is DateTime windowedStamp)
+            {
+                return windowedStamp;
+            }
+        }
+
+        await using var fallback = postgres.CreateCommand(DatabaseSizeLatestSnapshotFallbackProbeSql);
+        fallback.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        DarlingMcpReadParameters.AddInt(fallback, serverId);
+        DarlingMcpReadParameters.AddTimestamp(fallback, asOf);
+        var unbounded = await fallback.ExecuteScalarAsync(cancellationToken);
+        return unbounded is DateTime unboundedStamp ? unboundedStamp : null;
     }
 }

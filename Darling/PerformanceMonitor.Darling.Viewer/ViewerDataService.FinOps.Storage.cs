@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -23,15 +24,90 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>EXCEPT</c>, <c>GREATEST</c>, <c>date_trunc('day', ...)</c>, and date subtraction all run identically
 /// on PG. The object-growth heatmap's two DuckDB commands (DuckDB returns one result set per command)
 /// become two pooled Npgsql commands. SQL kept in <c>public const</c> so tests pin it.
+///
+/// <para><b>#4245: the one place the DuckDB port stops being verbatim.</b> DuckDB has no chunks, so a
+/// correlated <c>collection_time = (SELECT MAX(collection_time) ...)</c> costs DuckDB nothing extra to plan.
+/// On a <c>database_size_stats</c> hypertable it costs the PostgreSQL planner one subplan per retained
+/// chunk, unconditionally, because nothing in the query lets it exclude any chunk before walking it — the
+/// field measurement was 148 ms of planning against 2.6 ms of execution, over 71 chunks. Both single-server
+/// "latest snapshot" reads below (<see cref="GetDatabaseSizeLatestAsync"/>, <see cref="GetDatabaseSizeSummaryAsync"/>)
+/// go through <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> instead: a windowed probe the planner CAN
+/// bound, read as its own round trip so the snapshot's <c>collection_time</c> comes back as a literal value
+/// the main read can bind an equality to, rather than a subquery the planner must re-derive per chunk.</para>
 /// </summary>
 public sealed partial class ViewerDataService
 {
+    /// <summary>The newest <c>database_size_stats</c> snapshot at or before <paramref name="asOf"/> for one
+    /// server (#4245). A windowed probe first — <c>collection_time</c> bound between <paramref name="asOf"/>
+    /// minus two days and <paramref name="asOf"/>, letting the planner exclude every chunk outside that
+    /// span before it builds a subplan for it — falling back to an unbounded "at or before" probe only when
+    /// the window is empty, which is exactly the case a windowed probe cannot itself distinguish from "never
+    /// collected": a server whose collection stopped more than two days before <paramref name="asOf"/>. The
+    /// two-day width is generous headroom over <c>database_size_stats</c>' roughly hourly cadence
+    /// (<c>CollectorScheduleDefaults["database_size_stats"]</c>) — enough to absorb a missed cycle or two —
+    /// while still excluding nearly all of a retention that runs to 70+ daily chunks in the field.
+    ///
+    /// <para>Correctness: the windowed probe's MAX, when it finds any row, IS the true unbounded MAX — no row
+    /// outside a "collection_time &gt;= cutoff" window can be newer than a row inside it. So the fallback only
+    /// ever fires when the window is genuinely empty, never as an approximation. Returns null when there is no
+    /// row at or before <paramref name="asOf"/> at all.</para>
+    /// </summary>
+    private async Task<DateTime?> GetDatabaseSizeSnapshotAtOrBeforeAsync(int serverId, DateTime asOf, CancellationToken cancellationToken)
+    {
+        var asOfBound = DateTime.SpecifyKind(asOf, DateTimeKind.Unspecified);
+        var windowStart = DateTime.SpecifyKind(asOf.AddDays(-2), DateTimeKind.Unspecified);
+
+        await using (var probe = _dataSource.CreateCommand(DatabaseSizeSnapshotWindowedProbeSql))
+        {
+            probe.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            probe.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            probe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            probe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = asOfBound });
+            var windowed = await probe.ExecuteScalarAsync(cancellationToken);
+            if (windowed is DateTime windowedStamp)
+            {
+                return windowedStamp;
+            }
+        }
+
+        await using var fallback = _dataSource.CreateCommand(DatabaseSizeSnapshotFallbackProbeSql);
+        fallback.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        fallback.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        fallback.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = asOfBound });
+        var unbounded = await fallback.ExecuteScalarAsync(cancellationToken);
+        return unbounded is DateTime unboundedStamp ? unboundedStamp : null;
+    }
+
+    /// <summary>Binds a nullable snapshot time — SQL NULL when there is none, which every caller here uses to
+    /// mean "no snapshot in range" (an equality against NULL matches no row, same as the old correlated
+    /// subquery returning no row).</summary>
+    private static NpgsqlParameter TimestampOrNull(DateTime? value) =>
+        new() { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = value.HasValue ? DateTime.SpecifyKind(value.Value, DateTimeKind.Unspecified) : DBNull.Value };
+
+    /// <summary>The windowed half of <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/>. $1 server_id,
+    /// $2 window start, $3 asOf.</summary>
+    public const string DatabaseSizeSnapshotWindowedProbeSql = @"
+SELECT MAX(collection_time)
+FROM v_database_size_stats
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3";
+
+    /// <summary>The unbounded fallback half of <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/>, reached
+    /// only when the windowed probe finds nothing. $1 server_id, $2 asOf.</summary>
+    public const string DatabaseSizeSnapshotFallbackProbeSql = @"
+SELECT MAX(collection_time)
+FROM v_database_size_stats
+WHERE server_id = $1
+AND   collection_time <= $2";
+
     /// <summary>Latest database size snapshot per file for one server, biggest files first (a capacity view —
     /// you hunt the largest files, not browse alphabetically; files can interleave across databases by design).
     /// The <c>total_size_mb DESC</c> lead is display-only and safe to change: the grid is the sole order-sensitive
     /// consumer — the other two callers (<c>GetUtilizationEfficiencyAsync</c>'s free-space math and the dormant-DB
     /// recommendation's cost share) only <c>Sum</c> the rows, and the "Allocated vs Used" chart is a separate read
-    /// (<c>GetDatabaseSizeSummaryAsync</c>). $1 server_id.</summary>
+    /// (<c>GetDatabaseSizeSummaryAsync</c>). $1 server_id, $2 collection_time (resolved by
+    /// <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> — see #4245 on the type doc).</summary>
     public const string DatabaseSizeLatestSql = @"
 SELECT
     database_name,
@@ -49,20 +125,23 @@ SELECT
     vlf_count
 FROM v_database_size_stats
 WHERE server_id = $1
-AND   collection_time = (
-    SELECT MAX(collection_time)
-    FROM v_database_size_stats
-    WHERE server_id = $1
-)
+AND   collection_time = $2
 ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
 
     public async Task<List<DatabaseSizeRow>> GetDatabaseSizeLatestAsync(int serverId, CancellationToken cancellationToken = default)
     {
+        var items = new List<DatabaseSizeRow>();
+        var snapshotTime = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, DateTime.UtcNow, cancellationToken);
+        if (snapshotTime is null)
+        {
+            return items;
+        }
+
         await using var command = _dataSource.CreateCommand(DatabaseSizeLatestSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = snapshotTime.Value });
 
-        var items = new List<DatabaseSizeRow>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -86,7 +165,9 @@ ORDER BY total_size_mb DESC, database_name, file_type_desc, file_name";
         return items;
     }
 
-    /// <summary>Per-database allocated + used space for the Utilization size chart. $1 server_id, $2 topN.</summary>
+    /// <summary>Per-database allocated + used space for the Utilization size chart. $1 server_id,
+    /// $2 collection_time (resolved by <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> — see #4245 on
+    /// the type doc), $3 topN.</summary>
     public const string DatabaseSizeSummarySql = @"
 SELECT
     database_name,
@@ -94,21 +175,26 @@ SELECT
     SUM(used_size_mb) AS used_mb
 FROM v_database_size_stats
 WHERE server_id = $1
-AND   collection_time = (
-    SELECT MAX(collection_time) FROM v_database_size_stats WHERE server_id = $1
-)
+AND   collection_time = $2
 GROUP BY database_name
 ORDER BY total_mb DESC
-LIMIT $2";
+LIMIT $3";
 
     public async Task<List<DatabaseSizeSummaryRow>> GetDatabaseSizeSummaryAsync(int serverId, int topN = 10, CancellationToken cancellationToken = default)
     {
+        var items = new List<DatabaseSizeSummaryRow>();
+        var snapshotTime = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, DateTime.UtcNow, cancellationToken);
+        if (snapshotTime is null)
+        {
+            return items;
+        }
+
         await using var command = _dataSource.CreateCommand(DatabaseSizeSummarySql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = snapshotTime.Value });
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = topN });
 
-        var items = new List<DatabaseSizeSummaryRow>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -250,7 +336,14 @@ FROM latest l CROSS JOIN peak p";
         return items;
     }
 
-    /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid). $1 server_id, $2 cutoff7d, $3 cutoff30d.</summary>
+    /// <summary>Per-database storage growth vs 7d/30d ago (Storage Growth parent grid). #4245: all three
+    /// snapshot times are resolved by <see cref="GetDatabaseSizeSnapshotAtOrBeforeAsync"/> before this runs,
+    /// the same windowed-probe-then-fallback each single-snapshot read here uses, so this statement only ever
+    /// binds three literal <c>collection_time</c> values (never a bound-free chunk scan). A cutoff with no
+    /// qualifying snapshot (a database younger than 7 or 30 days) binds SQL NULL, which the CTE's equality
+    /// turns into zero rows — the LEFT JOIN below already treats that as "no prior snapshot", unchanged from
+    /// before this fix. $1 server_id, $2 latest collection_time, $3 collection_time at or before 7d ago,
+    /// $4 collection_time at or before 30d ago (either of the last two may be null).</summary>
     public const string StorageGrowthSql = @"
 WITH latest AS (
     SELECT
@@ -258,11 +351,7 @@ WITH latest AS (
         SUM(total_size_mb) AS current_size_mb
     FROM v_database_size_stats
     WHERE server_id = $1
-    AND   collection_time = (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-    )
+    AND   collection_time = $2
     GROUP BY database_name
 ),
 past_7d AS (
@@ -271,12 +360,7 @@ past_7d AS (
         SUM(total_size_mb) AS size_mb
     FROM v_database_size_stats
     WHERE server_id = $1
-    AND   collection_time = (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-        AND   collection_time <= $2
-    )
+    AND   collection_time = $3
     GROUP BY database_name
 ),
 past_30d AS (
@@ -285,12 +369,7 @@ past_30d AS (
         SUM(total_size_mb) AS size_mb
     FROM v_database_size_stats
     WHERE server_id = $1
-    AND   collection_time = (
-        SELECT MAX(collection_time)
-        FROM v_database_size_stats
-        WHERE server_id = $1
-        AND   collection_time <= $3
-    )
+    AND   collection_time = $4
     GROUP BY database_name
 )
 SELECT
@@ -319,17 +398,25 @@ ORDER BY growth_30d_mb DESC";
 
     public async Task<List<StorageGrowthRow>> GetStorageGrowthAsync(int serverId, CancellationToken cancellationToken = default)
     {
+        var items = new List<StorageGrowthRow>();
         var now = DateTime.UtcNow;
-        var cutoff7d = now.AddDays(-7);
-        var cutoff30d = now.AddDays(-30);
+
+        var latestSnapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, now, cancellationToken);
+        if (latestSnapshot is null)
+        {
+            return items;
+        }
+
+        var past7Snapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, now.AddDays(-7), cancellationToken);
+        var past30Snapshot = await GetDatabaseSizeSnapshotAtOrBeforeAsync(serverId, now.AddDays(-30), cancellationToken);
 
         await using var command = _dataSource.CreateCommand(StorageGrowthSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff7d, DateTimeKind.Unspecified) });
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(cutoff30d, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = latestSnapshot.Value });
+        command.Parameters.Add(TimestampOrNull(past7Snapshot));
+        command.Parameters.Add(TimestampOrNull(past30Snapshot));
 
-        var items = new List<StorageGrowthRow>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
