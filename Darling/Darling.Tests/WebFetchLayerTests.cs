@@ -116,6 +116,20 @@ public sealed class WebFetchLayerTests
         Assert.True(refreshCheck >= 0 && refreshCheck < refreshGuard + 1000, "refresh() does not check isSessionExpired() near its start");
     }
 
+    /// <summary>
+    /// #4221: an alert link is a hash route, and a stale session is the normal way to click one — the session
+    /// dies while the tab is open, the takeover fires, and "Sign in again" has to land back on the same route.
+    /// The link reloads THIS BROWSER's own current location (never the server-supplied <c>login</c> value —
+    /// that stays untrusted per #4187), so pathname/search/hash all survive.
+    /// </summary>
+    [Fact]
+    public void AppJs_SignInAgainLink_ReloadsCurrentLocationWithHash()
+    {
+        Assert.Contains(
+            "el(\"a\", { href: location.pathname + location.search + location.hash, text: \"Sign in again\" }),",
+            AppJs, StringComparison.Ordinal);
+    }
+
     /* ---------------------------------------------------------------------------------------------------
        #4191 — cancel per render (never the shared /api/fleet read), and skip an overlapping poll tick.
        --------------------------------------------------------------------------------------------------- */
