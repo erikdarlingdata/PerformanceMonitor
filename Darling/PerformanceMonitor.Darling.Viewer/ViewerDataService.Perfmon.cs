@@ -81,8 +81,7 @@ public sealed partial class ViewerDataService
     /// equality is what stops a mixed sum (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) from being classified by whichever instance's id happened to
     /// sort first. Byte-identical to Lite's expression.</para>
-    /// </summary>
-    /// <summary>
+    /// <para>
     /// #4234: the per-collection SUM above, BUCKETED — the per-collection read this replaced kept every row,
     /// up to 102,012 for 12 counters over 7 days (the issue's measured number). Wraps the unchanged
     /// per-collection statement as a subquery and re-aggregates into <c>date_bin</c> buckets, generalizing
@@ -98,6 +97,7 @@ public sealed partial class ViewerDataService
     /// same way the MCP twin re-aggregates its own per-collection subquery. Neither perfmon chart plots a peak
     /// value, so unlike the MCP twin there is no peak column. The width is its own trailing parameter, after the
     /// dynamic <c>counter_name IN (...)</c> list, so that list's existing numbering does not shift.
+    /// </para>
     /// <para>#4234 review (item 3): <c>first_collection_time</c> (<c>MIN(collection_time)</c> over the
     /// per-collection subquery, mirroring <c>DurationTrendRouting.BuildBucketedRawTrendSql</c>'s column of the
     /// same name) and <c>collection_count</c> (<c>COUNT(*)</c> over that same subquery) ride along so the

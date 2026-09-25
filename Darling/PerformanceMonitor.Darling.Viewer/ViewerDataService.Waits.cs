@@ -70,8 +70,7 @@ public sealed partial class ViewerDataService
     /// dynamically from <c>$4</c> onward (server_id/start/end take <c>$1</c>/<c>$2</c>/<c>$3</c>),
     /// exactly like Lite; a caller passing <paramref name="waitTypeCount"/> = 0 is a bug the
     /// <see cref="GetWaitStatsTrendsByTypesAsync"/> guard prevents.
-    /// </summary>
-    /// <summary>
+    /// <para>
     /// #4234: BUCKETED (the per-collection read this replaced kept every row, up to 170,020 for 20 wait types
     /// over 7 days — the issue's measured number). Same raw CTE, same three-state interval and "unrated
     /// collection contributes to neither sum" rule as before; new is the <c>rated</c> CTE and the final
@@ -87,6 +86,7 @@ public sealed partial class ViewerDataService
     /// answer for that case. The width is appended as its OWN trailing parameter, after the dynamic
     /// <c>wait_type IN (...)</c> list, so that list's existing <c>$4..</c> numbering does not shift. Neither
     /// wait-stats chart series plots a peak, so unlike the MCP twin there is no peak column.
+    /// </para>
     /// <para>#4234 review (item 3): <c>first_collection_time</c> (<c>MIN(collection_time)</c>, every row in
     /// <c>rated</c> — rated or not, mirroring <c>DurationTrendRouting.BuildBucketedRawTrendSql</c>'s own
     /// column of the same name) and <c>collection_count</c> (<c>COUNT(*)</c> over that same population) ride
