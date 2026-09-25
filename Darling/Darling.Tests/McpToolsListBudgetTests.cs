@@ -84,7 +84,10 @@ public sealed class McpToolsListBudgetTests
        get_collection_log's fleet-form server_name/limit descriptions, after trimming both to the D2 200-char
        parameter cap and moving the rest to each tool's tail (get_tool_guide), which is not served in
        tools/list and so is not counted here. */
-    private const int TotalCeilingBytes = 171_637;
+    /* #4198 (lane TB): +364 bytes for get_deadlock_detail's default-preview note in its served description
+       and its new full_graph opt-in parameter (deadlock_graph_xml, the wide field, is now a 2000-char
+       preview by default). */
+    private const int TotalCeilingBytes = 172_001;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
