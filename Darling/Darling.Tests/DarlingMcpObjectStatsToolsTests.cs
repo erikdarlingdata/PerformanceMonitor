@@ -70,13 +70,28 @@ public sealed class DarlingMcpObjectStatsToolsSurfaceAndSqlTests
 
     [Theory]
     [InlineData("get_table_index_sizes")]
-    [InlineData("get_object_locking")]
     [InlineData("get_database_sizes")]
     public void ParamContract_ServerNameOnly_Optional(string toolName)
     {
         var p = McpParams(toolName);
         Assert.Equal(new[] { "server_name" }, p.Select(x => x.Name).ToArray());
         Assert.True(p.Single().Optional);
+    }
+
+    /// <summary>
+    /// #4198 moved <c>get_object_locking</c> off the server-name-only contract, the same way #2636 moved
+    /// <c>get_index_usage</c> off it above: a hardcoded 200-row cap with no override measured at 71,332 bytes
+    /// at default arguments on a busy production store, more than double <see cref="McpResponseBudget.DefaultBytes"/>.
+    /// <c>limit</c> stays OPTIONAL (default lowered to 75) so every existing caller behaves as before; an
+    /// explicit <c>limit</c> still gets what it asks for.
+    /// </summary>
+    [Fact]
+    public void ObjectLocking_TakesALimit_Optional()
+    {
+        var p = McpParams("get_object_locking");
+
+        Assert.Equal(new[] { "server_name", "limit" }, p.Select(x => x.Name).ToArray());
+        Assert.All(p, x => Assert.True(x.Optional, $"{x.Name} must stay optional — existing callers pass neither"));
     }
 
     /// <summary>

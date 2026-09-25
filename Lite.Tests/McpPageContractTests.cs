@@ -620,6 +620,85 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         Assert.StartsWith("Invalid hours_back value '-1'", McpHelpers.ErrorMessageOf(await McpHealthTools.GetBlockingStats(_dataService, _serverManager, ServerName, -1)), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4198: get_active_queries' own response-budget pin. Darling's twin
+    /// (<c>DarlingMcpActiveQueriesBudgetLiveTests</c>) measured 81,489 bytes for a synthetic 50-row page
+    /// shaped like a busy server (every optional field populated, a fifth of the rows carrying a long
+    /// literal list) — this tool has TWENTY-THREE fields per row rather than one dominant wide field, so the
+    /// fixed columns add up across the page even before query_text is counted. Plants the same shape and
+    /// asserts the default call (limit down to 25) stays under <see cref="McpResponseBudget.DefaultBytes"/>,
+    /// and that <c>full_text: true</c> (renamed from <c>full_query_text</c> to match
+    /// <c>get_store_query_stats</c>) opts back into the whole text.
+    /// </summary>
+    [Fact]
+    public async Task GetActiveQueries_Default_StaysUnderResponseBudget_WithFiftyRealisticRows()
+    {
+        var baseTime = WholeSecondsNow().AddMinutes(-49);
+        var wideText = BuildQueryText(seed: 999, approxLength: 2_800);
+
+        for (var i = 0; i < 50; i++)
+        {
+            var t = baseTime.AddMinutes(i);
+            var db = i % 3 == 0 ? "StackOverflow" : i % 3 == 1 ? "AdventureWorks" : "ReportingDW";
+            var text = i >= 40 ? wideText : BuildQueryText(seed: i, approxLength: 700);
+            var hasWait = i % 4 == 0;
+
+            await ExecAsync(@"
+INSERT INTO query_snapshots
+    (collection_id, collection_time, server_id, server_name, session_id, database_name, elapsed_time_formatted, query_text, status,
+     blocking_session_id, wait_type, wait_time_ms, cpu_time_ms, total_elapsed_time_ms, reads, writes, logical_reads,
+     granted_query_memory_gb, transaction_isolation_level, dop, parallel_worker_count, login_name, host_name, program_name, open_transaction_count)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
+                _nextId--, Naive(t), _serverId, ServerName, 100 + i, db,
+                "00 00:00:05.125", text, i % 5 == 0 ? "suspended" : "running", 0,
+                hasWait ? "PAGEIOLATCH_SH" : null, hasWait ? 250L + i : 0L, 1000L + (i * 37), 1500L + (i * 37),
+                10_000L + (i * 123), 50L + i, i % 7, i % 6 == 0 ? 0.75 : 0,
+                i % 2 == 0 ? "Read Committed" : "Repeatable Read", i % 6 == 0 ? 8 : 1, i % 6 == 0 ? 4 : 0,
+                i % 2 == 0 ? "app_svc_prod" : @"CONTOSO\svc_reporting", $"APPSRV{i % 5:D2}",
+                i % 2 == 0 ? ".Net SqlClient Data Provider" : "MyOrderService.Worker", i % 3 == 0 ? 1 : 0);
+        }
+
+        /* Not AssertPage: get_active_queries' total_snapshots is a deliberate exception to "no total_* key"
+           (#3541 A13) — the FILTERED population's own size, not a window count. */
+        var defaultJson = await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName);
+        var root = Parse(defaultJson);
+        Assert.Equal(25, root.GetProperty("queries").GetArrayLength());
+        Assert.Equal(25, root.GetProperty("snapshots_returned").GetInt32());
+        Assert.Equal(50, root.GetProperty("total_snapshots").GetInt64());
+        Assert.True(root.GetProperty("truncated").GetBoolean());
+
+        var defaultBytes = System.Text.Encoding.UTF8.GetByteCount(defaultJson);
+        Assert.True(defaultBytes < McpResponseBudget.DefaultBytes,
+            $"get_active_queries' default call is {defaultBytes:N0} bytes over 50 planted rows, at or over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+
+        var wideRow = root.GetProperty("queries")[0];
+        Assert.True(wideRow.GetProperty("query_text").GetString()!.Length < wideText.Length);
+        Assert.True(wideRow.GetProperty("query_text_truncated").GetBoolean());
+
+        var fullJson = await McpSessionTools.GetActiveQueries(_dataService, _serverManager, ServerName, full_text: true);
+        var fullRoot = Parse(fullJson);
+        Assert.False(fullRoot.GetProperty("queries")[0].GetProperty("query_text_truncated").GetBoolean());
+        Assert.Equal(wideText, fullRoot.GetProperty("queries")[0].GetProperty("query_text").GetString());
+    }
+
+    /// <summary>Builds ASCII SQL text (a big literal IN-list, a realistic cause of an outsized capture) near
+    /// <paramref name="approxLength"/> characters, so its length and its UTF-8 byte count stay close.</summary>
+    private static string BuildQueryText(int seed, int approxLength)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("SELECT o.OrderId, o.CustomerId, o.OrderDate, o.TotalAmount, c.CustomerName, c.Region FROM dbo.Orders o JOIN dbo.Customers c ON c.CustomerId = o.CustomerId WHERE o.OrderDate >= '2026-01-01' AND o.Status IN (");
+        var i = 0;
+        while (sb.Length < approxLength)
+        {
+            sb.Append(seed * 100_000 + i);
+            sb.Append(',');
+            i++;
+        }
+
+        sb.Append(") ORDER BY o.OrderDate DESC;");
+        return sb.ToString();
+    }
+
     /* ───────────────────────── #3739: a refusal carries a status word ───────────────────────── */
 
     /// <summary>

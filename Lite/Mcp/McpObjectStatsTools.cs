@@ -21,6 +21,14 @@ public sealed class McpObjectStatsTools
     /// </summary>
     private const int IndexUsageTop = 75;
 
+    /// <summary>
+    /// #4198: get_object_locking's default row cap, mirroring Darling's own — was a 200-row hard cap with no
+    /// override and no truncation signal, measured at 71,332 bytes at default arguments on a busy production
+    /// store (more than double <see cref="McpResponseBudget.DefaultBytes"/>). Now the caller's <c>limit</c>
+    /// default; an explicit <c>limit</c> still gets what it asks for, up to <see cref="McpHelpers.MaxTop"/>.
+    /// </summary>
+    private const int ObjectLockingTop = 75;
+
     [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist, never re-labelled from a nearer one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
     public static async Task<string> GetTableIndexSizes(
         LocalDataService dataService,
@@ -229,14 +237,23 @@ public sealed class McpObjectStatsTools
     public static async Task<string> GetObjectLocking(
         LocalDataService dataService,
         ServerManager serverManager,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
 
+        var validation = McpHelpers.ValidateTop(limit);
+        if (validation != null) return validation;
+
         try
         {
-            var rows = await dataService.GetIndexLockingAsync(resolved.ServerId);
+            /* #4198: limit + 1 as the fetch, the extra row as the OBSERVED truncation signal (#3653's
+               dialect) -- McpHelpers.BoundPage trims the page back to `limit`, so objects_returned below is
+               always a count of the page and never of the over-fetch. Darling's twin mirrors this. */
+            var fetched = await dataService.GetIndexLockingAsync(resolved.ServerId, limit + 1);
+            var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
+
             if (rows.Count == 0)
             {
                 return await McpEngineCapability.NotCollectedStatusAsync(dataService, resolved.ServerId, resolved.ServerName, "index_object_stats")
@@ -271,6 +288,16 @@ public sealed class McpObjectStatsTools
                    each other field-for-field, and #3876/#3877 fixed this half's anchor first. Every row
                    comes from ONE capture, so rows[0] is the stamp for all of them. */
                 captured_at = rows[0].CollectionTime.ToString("o"),
+                objects_returned = rows.Count,
+                truncated,
+                /* #4198: no separate match-count query (unlike get_index_usage) -- BoundPage's over-fetch
+                   only OBSERVES "more than limit", not how many more, so the note says that and no more. */
+                note = truncated
+                    ? $"TRUNCATED: more than {rows.Count:N0} indexes have lock/latch contention at the latest "
+                      + "snapshot. Rows are ordered by total wait time (row lock + page lock + page latch + "
+                      + "page I/O latch) descending, so the highest-contention indexes are returned first; "
+                      + "raise limit to see more."
+                    : "Complete: every index with lock/latch contention at the latest snapshot is included.",
                 objects = result
             }, McpHelpers.JsonOptions);
         }
