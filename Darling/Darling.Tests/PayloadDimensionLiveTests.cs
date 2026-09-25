@@ -727,12 +727,21 @@ public sealed class PayloadDimensionLiveTests
     /// against a real server, three ways:
     ///
     /// <para>(1) A second upsert of the SAME still-fresh batch, 30 minutes later, leaves every
-    /// row's <c>xmax</c> at 0 (never locked) and advances <c>pg_current_wal_lsn()</c> by under 1
-    /// KB for a 50-row batch — effectively a read-only transaction. This is the pin: reverting the
-    /// <c>WHERE NOT EXISTS</c> pre-filter (restoring the pre-#4249 shape) turns it red. Confirmed
-    /// once by hand with a raw-SQL rehearsal of both shapes against this rig: the OLD shape left a
-    /// real transaction id (781) in <c>xmax</c> on a row whose content and <c>last_seen</c> were
-    /// both unchanged; the NEW shape left <c>xmax</c> at 0. See PR #4288.</para>
+    /// row's <c>xmax</c> at 0 (never locked) and its <c>last_seen</c> unchanged — effectively a
+    /// read-only transaction. This is the pin: reverting the <c>WHERE NOT EXISTS</c> pre-filter
+    /// (restoring the pre-#4249 shape) turns it red. Confirmed once by hand with a raw-SQL
+    /// rehearsal of both shapes against this rig: the OLD shape left a real transaction id (781)
+    /// in <c>xmax</c> on a row whose content and <c>last_seen</c> were both unchanged; the NEW
+    /// shape left <c>xmax</c> at 0. See PR #4288.
+    ///
+    /// <para>An earlier revision of this test also asserted a near-zero <c>pg_wal_lsn_diff</c> for
+    /// the same batch. <c>pg_current_wal_lsn()</c> is cluster-wide, not relation-scoped, so any
+    /// other session on the same server — the ~39 own-store classes that create scratch databases
+    /// on this cluster and run in parallel under xunit, plus autovacuum and checkpoints — can push
+    /// the delta well past the bar even when this test's own transaction touched nothing. The
+    /// <c>xmax</c> and <c>last_seen</c> checks above already pin "no lock taken, no row touched"
+    /// directly against the rows this test wrote, with no exposure to unrelated WAL traffic, so
+    /// the WAL assertion was dropped as redundant and flaky (#4354).</para>
     ///
     /// <para>(2) A row stamped two hours ago is still refreshed — the pre-filter's own staleness
     /// read uses the same one-hour boundary the <c>ON CONFLICT ... WHERE</c> guard always used, so
@@ -807,28 +816,17 @@ public sealed class PayloadDimensionLiveTests
                 return (long)(await command.ExecuteScalarAsync(ct))!;
             }
 
-            async Task<string> CurrentWalLsnAsync()
-                => (string)(await ScalarAsync(connection, "SELECT pg_current_wal_lsn()::text", ct))!;
-
-            /* pg_wal_lsn_diff returns numeric, which Npgsql maps to decimal, not a bigint type. */
-            async Task<long> WalBytesSinceAsync(string beforeLsn)
-                => (long)(decimal)(await ScalarAsync(
-                    connection, "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), $1::text::pg_lsn)", ct, beforeLsn))!;
-
             // The initial collection cycle: 50 "hot" plans plus one that will go stale.
             await FlushAsync(freshPairs.Append((staleDigest, stalePayload)), t0);
             Assert.Equal(0, await LockedRowCountAsync(freshDigests));
 
             // (1) Same batch, same digests, 30 minutes later -- still inside the one-hour
             // freshness window. The pre-filter excludes every one of them before the statement
-            // ever reaches INSERT/ON CONFLICT: no lock taken, no last_seen change, near-zero WAL.
-            var lsnBefore = await CurrentWalLsnAsync();
+            // ever reaches INSERT/ON CONFLICT: no lock taken, no last_seen change.
             await FlushAsync(freshPairs, t0.AddMinutes(30));
-            var walBytes = await WalBytesSinceAsync(lsnBefore);
 
             Assert.Equal(0, await LockedRowCountAsync(freshDigests));
             Assert.Equal(0, await ChangedLastSeenCountAsync(freshDigests, t0));
-            Assert.True(walBytes < 1024, $"expected a near-zero WAL delta for an all-fresh batch, saw {walBytes} bytes");
 
             // (2) and (3): two hours after t0, the stale row is refreshed and a brand-new digest
             // is inserted, in the same flush.
