@@ -1475,7 +1475,7 @@ public sealed class McpPayloadContractCensusTests
     /// cut BEFORE the store, by the collector. They keep their names because they are true and different: a
     /// caller can do nothing about them by re-paging, and folding them into <c>truncated</c> would tell that
     /// caller to raise a limit that changes nothing.</item>
-    /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
+        /// <item><b>A field-level response-budget preview</b> — <see cref="FieldPreviewCutKeys"/>: #4198 sizes
     /// each tool's DEFAULT answer under the shared 32 KB <c>McpResponseBudget.DefaultBytes</c> by previewing
     /// one wide field (query text, a plan fragment, a deadlock graph) rather than the page — unlike a
     /// source-side cut, a caller CAN get the rest, with an opt-in argument (<c>get_deadlock_detail</c>'s
@@ -1529,6 +1529,8 @@ public sealed class McpPayloadContractCensusTests
     [
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
+        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "McpPlanCorrectionTools.cs"],
+            "the row's own query_text previewed at READ TIME to QueryTextPreviewLength (150 chars) for #4198's response-size budget - the full text IS in the store (plan_correction.query_text is not collector-capped the way SourceSideCutKeys' rows are) and a caller gets it back by passing full_text=true, the opt-in get_store_query_stats already offers for its own preview"),
     ];
 
     public static readonly (string Key, string[] Files, string WhatIsWithheld)[] WithheldSummaryKeys =
@@ -1623,7 +1625,7 @@ public sealed class McpPayloadContractCensusTests
 
         var unclassified = found.Keys.Where(k => k != "truncated" && !classified.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();
         Assert.True(unclassified.Count == 0,
-            "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a homonym joins CutHomonyms with what it actually is: "
+            "a cut spelling with no class — a page cut is spelled `truncated` (observed, beside *_returned); a second bound joins SecondBoundCutKeys as <bound>_truncated; a cut made before the store joins SourceSideCutKeys with what was cut; a wide field's own preview cut joins FieldPreviewCutKeys as <field>_truncated; a homonym joins CutHomonyms with what it actually is: "
             + string.Join("; ", unclassified.Select(k => $"{k} on {string.Join(", ", found[k])}")));
 
         var gone = classified.Keys.Where(k => !found.ContainsKey(k)).Order(StringComparer.Ordinal).ToList();
