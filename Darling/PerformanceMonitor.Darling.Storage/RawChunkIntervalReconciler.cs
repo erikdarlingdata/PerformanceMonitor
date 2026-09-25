@@ -110,9 +110,10 @@ SELECT $1, wal_bytes FROM pg_stat_wal";
     /// Runs one reconcile pass: gathers every raw hypertable's ingest rate, current interval and last-moved
     /// stamp; calls <see cref="RawChunkIntervalPlanner.Plan"/>; applies every changing decision; records the
     /// rung history and the WAL-bytes run row; logs. Returns the number of tables changed, for the caller and
-    /// for tests. Never throws for a planning or apply failure on one table — the CALLER (the daily tick)
-    /// decides whether a hard failure here should stop anything else; this method's own contract is "do
-    /// everything the inputs allow, report what happened."
+    /// for tests. A planning or apply failure on one table throws out of this method — there is no catch
+    /// in the per-table loop. That table's transaction rolls back; the tables already applied earlier in
+    /// the same pass stay applied and recorded; the remaining tables and the run row wait for the next
+    /// daily pass. The CALLER (the daily tick) catches the exception and logs it at Error.
     /// </summary>
     public static async Task<int> ReconcileAsync(
         NpgsqlConnection connection,

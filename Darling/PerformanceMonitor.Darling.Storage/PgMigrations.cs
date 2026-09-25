@@ -2049,10 +2049,13 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
     /// volume (ruling decision 8, review finding L4: stage 1 records WAL volume so a later stage can correlate
     /// it against interval moves). Two engine-plain tables, the <c>collect.store_log_events</c> /
     /// <c>collect.store_log_captures</c> shape (V111): plain tables, no serial id, a time index, naive-UTC
-    /// <c>timestamp</c> columns per the store's cross-engine contract, purged by the reconciler's own caller
-    /// rather than the catalog-driven retention purge — like store_log's tables, these are self-telemetry
-    /// about the store's OWN tuning, not collected monitoring data, so they are deliberately outside
-    /// <c>CollectorCatalog.All</c>.
+    /// <c>timestamp</c> columns per the store's cross-engine contract. Neither table is purged — the run
+    /// table gains one row per daily pass (about 365 a year) and the history one row per move, and the
+    /// history has to keep at least
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.MinimumDaysBetweenMoves"/> days
+    /// anyway, because the next pass reads <c>MAX(changed_at)</c> from it. Like store_log's tables, these are
+    /// self-telemetry about the store's OWN tuning, not collected monitoring data, so they are deliberately
+    /// outside <c>CollectorCatalog.All</c>.
     ///
     /// <para><b><c>raw_chunk_interval_rung_history</c></b>: one row per rung CHANGE (not per table per run) —
     /// table, when, the interval it moved from and to, the reason text
