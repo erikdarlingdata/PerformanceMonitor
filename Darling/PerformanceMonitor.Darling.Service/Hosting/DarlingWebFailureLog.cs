@@ -8,6 +8,7 @@
 
 using System;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -52,6 +53,42 @@ internal static class DarlingWebFailureLog
         || exception is TimeoutException
         || (exception is NpgsqlException && exception.InnerException is TimeoutException);
 
+    /// <summary>
+    /// <see cref="IsStatementTimeout(Exception)"/>'s twin for a tool that has already caught its own exception
+    /// and stringified it (#4283): a tool catches internally and returns <c>McpHelpers.FormatError</c>'s
+    /// envelope, so by the time the web mapping sees the failure there is no <see cref="Exception"/> left to
+    /// inspect — only the sentence <c>ErrorSentence</c> built, <c>"Error during {op}: {ex.Message}"</c>. That
+    /// throws away <see cref="PostgresException.SqlState"/> as a structured field, but NOT as text: verified
+    /// against Npgsql 10.0.3, <see cref="PostgresException"/> never overrides <c>Message</c> (it stays
+    /// <see cref="Exception"/>'s own property, set from the base constructor), and the base constructor is
+    /// called with <c>$"{SqlState}: {MessageText}"</c> — so <c>ex.Message</c> for a statement_timeout always
+    /// starts with the literal, un-translated <c>57014</c> token even though the text after it
+    /// (<c>MessageText</c>) is <c>lc_messages</c>-dependent. Matching the CODE rather than the prose keeps this
+    /// out of the message-text-matching trap <c>PgBaselineProvider.IsCommandTimeout</c>'s own doc warns against.
+    ///
+    /// <para>A client-side Npgsql <c>CommandTimeout</c> (the <see cref="NpgsqlException"/>/<see
+    /// cref="TimeoutException"/> arm of <see cref="IsStatementTimeout(Exception)"/>) carries no SQLSTATE and so
+    /// is NOT matched here — it falls through to the generic 500. Accepted: <c>McpCommandDeadlines</c>'s own
+    /// comment says the store's statement_timeout deliberately fires first on an MCP/web read, so a tool-caught
+    /// timeout reaches this classifier as a real 57014 in practice (the shape <c>McpReadCommandTimeoutTests</c>
+    /// pins), not as the client-side race.</para>
+    ///
+    /// <para>Anchored to a known prefix, not a bare word-boundary (#4283 L1): a word boundary alone still lets
+    /// <c>57014</c> match anywhere in the tail text — a repeated value, a port number, an identifier that merely
+    /// contains the digits — the same trap <c>MigrationDataMovingRungCensusPins</c>'s <c>s_cancelTrap</c> guards
+    /// against for a different sentence shape. Anchoring to the START of the sentence and requiring the token
+    /// immediately after one of the three known prefixes (<c>ErrorSentence</c>'s <c>"Error during {op}: "</c>,
+    /// the compose route's <c>"Error running query: "</c>, and the resolver's own
+    /// <see cref="Mcp.DarlingServerResolver.RegistryReadFaultPrefix"/>) means the token can only match where a
+    /// real SQLSTATE sits, not wherever the digits happen to recur later in the same sentence.</para>
+    /// </summary>
+    private static readonly Regex s_sentenceTimeoutToken = new(
+        $@"^(Error during [^:]+: |Error running query: |{Regex.Escape(Mcp.DarlingServerResolver.RegistryReadFaultPrefix)})57014: ",
+        RegexOptions.Compiled);
+
+    internal static bool IsStatementTimeoutSentence(string sentence) =>
+        sentence is not null && s_sentenceTimeoutToken.IsMatch(sentence);
+
     /// <summary>The SQLSTATE named in the log line, or "(none)" for anything that isn't a
     /// <see cref="PostgresException"/> — a client-side timeout and a plain bug both carry none.</summary>
     private static string SqlState(Exception exception) =>
@@ -85,14 +122,48 @@ internal static class DarlingWebFailureLog
             safeRoute, elapsedMs, "error", exception.GetType().Name, SqlState(exception));
     }
 
+    /// <summary>
+    /// <see cref="Report(ILogger,string,long,Exception)"/>'s twin for a tool-caught failure (#4283): no
+    /// <see cref="Exception"/> survives, so the log line carries the sentence itself (the same text a
+    /// pre-#4283 response would have put on the wire) instead of an exception object and its type name.
+    /// <paramref name="route"/> is sanitized exactly as the exception overload sanitizes it; the sentence is
+    /// NOT — it is our own <c>McpHelpers.ErrorSentence</c> output, not request-supplied.
+    /// </summary>
+    internal static void Report(ILogger logger, string route, long elapsedMs, string sentence)
+    {
+        var safeRoute = DarlingHttpRefusalLog.Sanitize(route, 256);
+
+        if (IsStatementTimeoutSentence(sentence))
+        {
+            logger.LogWarning(
+                "Web dashboard read {Route} timed out after {ElapsedMs} ms ({Kind}): {Sentence}",
+                safeRoute, elapsedMs, "timeout", sentence);
+            return;
+        }
+
+        logger.LogError(
+            "Web dashboard read {Route} failed after {ElapsedMs} ms ({Kind}): {Sentence}",
+            safeRoute, elapsedMs, "error", sentence);
+    }
+
     /// <summary>The HTTP status a failure answers with: 503 for a timeout (tell-apart-from-a-bug, per the
     /// issue), 500 for anything else.</summary>
-    internal static int StatusCode(Exception exception) =>
-        IsStatementTimeout(exception) ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status500InternalServerError;
+    internal static int StatusCode(Exception exception) => StatusCodeFor(IsStatementTimeout(exception));
+
+    /// <summary><see cref="StatusCode(Exception)"/>'s twin over the tool-caught sentence.</summary>
+    internal static int StatusCode(string sentence) => StatusCodeFor(IsStatementTimeoutSentence(sentence));
+
+    private static int StatusCodeFor(bool isTimeout) =>
+        isTimeout ? StatusCodes.Status503ServiceUnavailable : StatusCodes.Status500InternalServerError;
 
     /// <summary>The response body: <c>{"error": "…"}</c>, the same shape
     /// <c>DarlingWebEndpoints.ErrorResult</c> already writes, so the viewer's existing error display handles
     /// it without a new code path.</summary>
-    internal static JsonObject Body(Exception exception) =>
-        new() { ["error"] = IsStatementTimeout(exception) ? TimeoutMessage : GenericMessage };
+    internal static JsonObject Body(Exception exception) => BodyFor(IsStatementTimeout(exception));
+
+    /// <summary><see cref="Body(Exception)"/>'s twin over the tool-caught sentence.</summary>
+    internal static JsonObject Body(string sentence) => BodyFor(IsStatementTimeoutSentence(sentence));
+
+    private static JsonObject BodyFor(bool isTimeout) =>
+        new() { ["error"] = isTimeout ? TimeoutMessage : GenericMessage };
 }

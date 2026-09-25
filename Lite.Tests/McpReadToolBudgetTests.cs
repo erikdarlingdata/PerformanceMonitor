@@ -126,14 +126,13 @@ public sealed class McpReadToolBudgetTests : IClassFixture<SharedDuckDbFixture>,
     /// #4198's per-tool backlog, measured on THIS fixture: name -&gt; bytes at the time the row was added. A
     /// row is removed by whichever lane fixes that tool's defaults; the test fails if a listed tool now fits
     /// (a stale exemption hiding a real fix) as loudly as it fails for a new, un-exempted offender.
+    ///
+    /// <para>Empty since get_collection_health's per-field cut (the last #4198 row on this list, like Darling's
+    /// twin): its old ~30-field fallback shape used to keep every field on every row this fixture's mixed
+    /// SUCCESS/ERROR collectors could not compact away, and now the rows that need a look carry the leaner
+    /// partial_detail shape instead.</para>
     /// </summary>
-    private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal)
-    {
-        /* #4268 (merged) compacts only HEALTHY collectors with nothing to report; this fixture's collectors are
-           deliberately not healthy (mixed SUCCESS/ERROR), so nothing compacts and the reply is still over.
-           Measured on this fixture at 43,115 B. Stays open under #4198, like Darling's twin row. */
-        ["get_collection_health"] = 43_115,          // #4198
-    };
+    private static readonly Dictionary<string, int> ExemptOffenders = new(StringComparer.Ordinal);
 
     [Fact]
     public async Task EveryReadToolAnswersUnderTheDefaultBudget_UnlessListedAsA4198Offender()
