@@ -47,10 +47,23 @@ public sealed class ViewerOverviewLanesSqlTests
         Assert.Contains("CASE WHEN MAX(sample_interval_seconds) IS NULL", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("LAG(collection_time)", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("ELSE NULLIF(MAX(sample_interval_seconds), 0)", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
-        Assert.Contains("CAST(total_delta_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_delta_ms) AS double precision) / SUM(rated_seconds) AS wait_time_ms_per_second", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4234: the source check ruling item 6 asks for — every bucketed WPF trend statement carries
+    /// a width parameter and buckets via the shared origin, so the width the C# picks (<c>TrendBuckets.AutoMinutes</c>)
+    /// is the width the SQL actually bins on.</summary>
+    [Fact]
+    public void TotalWaitTrendSql_CarriesABucketWidth_AndTheSingletonColumnsForRawPassthrough()
+    {
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.OriginSql, ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_collection_time", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS collection_count", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("HAVING COUNT(rated_seconds) > 0", ViewerDataService.TotalWaitTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -68,14 +81,24 @@ public sealed class ViewerOverviewLanesSqlTests
         Assert.Contains("WHERE server_id = $1", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
 
         /* Every MB column is numeric(18,2) in the store; without the cast the typed GetDouble reader
            throws (the same numeric→double reason the CPU/File-IO reads cast). */
         foreach (var column in new[] { "total_server_memory_mb", "target_server_memory_mb", "buffer_pool_mb", "plan_cache_mb" })
         {
-            Assert.Contains($"CAST({column} AS double precision)", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
+            Assert.Contains($"AVG(CAST({column} AS double precision))", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
         }
+    }
+
+    /// <summary>#4234: the source check ruling item 6 asks for.</summary>
+    [Fact]
+    public void MemoryTrendSql_CarriesABucketWidth_AndTheSingletonColumnsForRawPassthrough()
+    {
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.OriginSql, ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_collection_time", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS collection_count", ViewerDataService.MemoryTrendSql, StringComparison.Ordinal);
     }
 
     [Theory]
