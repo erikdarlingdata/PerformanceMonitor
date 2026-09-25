@@ -390,7 +390,7 @@ public sealed partial class ViewerDataService
         DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
         var schemaVersion = await GetStoreSchemaVersionAsync(cancellationToken);
-        if (schemaVersion is int version && version >= 144)
+        if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
         {
             var tableRows = await TryGetQueryStoreTopQueriesFromTableAsync(
                 serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, cancellationToken);
@@ -894,6 +894,20 @@ public sealed partial class ViewerDataService
     public static readonly TimeSpan QueryStoreSlicerMinWindow = TimeSpan.FromHours(12);
 
     /// <summary>
+    /// The store schema version both <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) and
+    /// <see cref="GetQueryStoreSlicerDataAsync"/> (the slicer) require before either will even attempt
+    /// <c>query_store_interval_wide</c> (#3953 B4): must equal the version of the <c>PgMigrations</c> migration
+    /// that creates the table. Named, rather than the two sites each carrying their own literal, so
+    /// <c>QueryStoreIntervalWideMinSchemaVersionPinTests</c> can assert both against that migration's own
+    /// version in one place and a renumber cannot miss one. B3a's separate
+    /// <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/> constant for the MCP top read is
+    /// pinned the same way but stays its own symbol: that surface compares the compiled
+    /// <see cref="PerformanceMonitor.Darling.Storage.StorageVersion.SchemaVersion"/> instead of probing the
+    /// store live, for the reason documented on that constant.
+    /// </summary>
+    private const int QueryStoreIntervalWideMinSchemaVersion = 144;
+
+    /// <summary>
     /// A defensive gate clause the grid does not need (#3953): does this server have ANY
     /// <c>query_store_interval_wide</c> row whose <c>interval_start_time_utc</c> is NULL (a legacy, pre-#1841
     /// tier-2 snapshot)? For such a row the table keeps only the interval's OVERALL latest snapshot (the
@@ -931,7 +945,7 @@ public sealed partial class ViewerDataService
         DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
         var schemaVersion = await GetStoreSchemaVersionAsync(cancellationToken);
-        if (schemaVersion is int version && version >= 144)
+        if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
         {
             var tableRows = await TryGetQueryStoreSlicerDataFromTableAsync(serverId, startUtc, endUtc, literalEndUtc, databaseNames, cancellationToken);
             if (tableRows is not null)
