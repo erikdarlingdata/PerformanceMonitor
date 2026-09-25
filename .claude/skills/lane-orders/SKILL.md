@@ -135,6 +135,10 @@ census, one of them introduced by that night's own wave).
    - `port = <RIG_PORT>`
    - `listen_addresses = '127.0.0.1'`
    - `timescaledb.max_background_workers` and `max_worker_processes`, as CI's `darling-pg` job sets them.
+   - `timezone = 'UTC'` and `log_timezone = 'UTC'`. initdb takes the machine's time zone, but CI's runners run
+     in UTC. On 2026-09-25, three live tests failed on every America/New_York rig and passed in CI:
+     `ServerListAndSummaryPlanShapeTests`, `CaptureDownChunkOrderTests` and `ViewerW2aLivePostgresTests`.
+     Lanes spent turns chasing them.
 4. Check the port is free. Start the server in the background, because `pg_ctl -w start` hangs a tool call, and
    confirm "ready to accept connections" in the log.
 5. Create `darlingtest` for the suite, and a separate `probe` database for hand-run SQL. A suite database reused
