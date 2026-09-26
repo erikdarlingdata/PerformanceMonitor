@@ -29,12 +29,17 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="ConfLineClassification.HandEdit"/> (left in place, never migrated as ours) until this
 /// classifier covers that block version too.</para>
 ///
-/// <para><b>Coverage today: v13, v14, v15 only</b> (<see cref="CoveredMarkers"/>). Those three are the
-/// newest blocks and the only ones with either a fixed, constant rebuild (v14, v15) or a builder whose
-/// output round-trips through a pure parse/format pair the codebase already has (v13's preload-library
-/// merge). v1-v12 need more per-version rebuild machinery — v8 and v12 carry a fingerprint/stamp that
-/// records their derivation inputs, v2/v3/v5/v7 only have a "within the formula's range" test available —
-/// and are left for a follow-up lane; their marker and content lines classify as
+/// <para><b>Coverage today: v4, v6, v9, v10, v11, v13, v14, v15</b> (<see cref="CoveredMarkers"/>). Each
+/// of these writes only FIXED constants with no derivation input at all — a block appended once with
+/// the same bytes on every store, so the rebuild test is a plain string comparison (v14, v15, and v13's
+/// <c>track_utility</c> line), or a round trip through a pure parse/format pair the codebase already has
+/// (v13's preload-library merge). v1 is NOT covered despite writing mostly-fixed text, because its
+/// <c>port = &lt;port&gt;</c> line depends on the store's configured port, an input this classifier is
+/// never given (it takes only the conf text) — rebuilding it would require guessing or threading a new
+/// parameter through every caller, which the design does not ask for. v2, v3, v5, v7, v8 and v12 are
+/// RAM- or disk-derived and need more per-version rebuild machinery — v8 and v12 carry a
+/// fingerprint/stamp that records their derivation inputs, v2/v3/v5/v7 only have a "within the formula's
+/// range" test available — and are left for a follow-up lane; their marker and content lines classify as
 /// <see cref="ConfLineClassification.Unclassified"/> here, never as ours.</para>
 ///
 /// <para><b>The "older store" case (review M6).</b> A store built before v9-v15 existed has no line for
@@ -102,6 +107,11 @@ internal static class ManagedConfMigration
     /// <see cref="ConfLineClassification.Unclassified"/>.</summary>
     internal static readonly string[] CoveredMarkers =
     [
+        DarlingManagedPostgres.ConfMarkerV4,
+        DarlingManagedPostgres.ConfMarkerV6,
+        DarlingManagedPostgres.ConfMarkerV9,
+        DarlingManagedPostgres.ConfMarkerV10,
+        DarlingManagedPostgres.ConfMarkerV11,
         DarlingManagedPostgres.ConfMarkerV13,
         DarlingManagedPostgres.ConfMarkerV14,
         DarlingManagedPostgres.ConfMarkerV15,
@@ -170,6 +180,15 @@ internal static class ManagedConfMigration
         var (key, value) = assignment;
         var (isOurs, reason) = span.Marker switch
         {
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV4 => ClassifyV4Line(key, text),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV6 => ClassifyV6Line(key, text),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV9 => ClassifyFixedLine(
+                key, text, "timezone", "timezone = 'UTC'"),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV10 => ClassifyFixedLine(
+                key, text, "lc_messages", "lc_messages = 'C'"),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV11 => ClassifyFixedLine(
+                key, text, PerformanceMonitor.Darling.Storage.StoreSelfMetrics.JobExecutionLoggingSetting,
+                PerformanceMonitor.Darling.Storage.StoreSelfMetrics.JobExecutionLoggingSetting + " = on"),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV13 => ClassifyV13Line(key, value, text),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV14 => ClassifyFixedLine(
                 key, text, DarlingManagedPostgres.MaintenanceWorkMemSetting,
@@ -182,6 +201,36 @@ internal static class ManagedConfMigration
         return new ClassifiedConfLine(
             lineNumber, text, isOurs ? ConfLineClassification.Ours : ConfLineClassification.HandEdit, span.Marker, key, isOurs ? HandEditReason.None : reason);
     }
+
+    /// <summary>v4's two fixed constants (#4214, BuildWriteThroughputConfAppend): <c>max_connections</c> at
+    /// <see cref="DarlingManagedPostgres.TargetMaxConnections"/> and a fixed <c>max_wal_size = 4GB</c>.
+    /// Neither depends on host RAM or disk, so both rebuild as plain constants.</summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV4Line(string key, string text)
+    {
+        if (string.Equals(key, "max_connections", StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyFixedLine(
+                key, text, "max_connections",
+                FormattableString.Invariant($"max_connections = {DarlingManagedPostgres.TargetMaxConnections}"));
+        }
+
+        return ClassifyFixedLine(key, text, "max_wal_size", "max_wal_size = 4GB");
+    }
+
+    /// <summary>v6's six fixed log-rotation constants (BuildLogRotationConfAppend) — none derived from host
+    /// inputs, so each key rebuilds as a plain constant.</summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV6Line(string key, string text)
+        => key.ToUpperInvariant() switch
+        {
+            "LOGGING_COLLECTOR" => ClassifyFixedLine(key, text, "logging_collector", "logging_collector = on"),
+            "LOG_DIRECTORY" => ClassifyFixedLine(key, text, "log_directory", "log_directory = 'log'"),
+            "LOG_FILENAME" => ClassifyFixedLine(key, text, "log_filename", "log_filename = 'postgresql-%a.log'"),
+            "LOG_ROTATION_AGE" => ClassifyFixedLine(key, text, "log_rotation_age", "log_rotation_age = 1d"),
+            "LOG_ROTATION_SIZE" => ClassifyFixedLine(key, text, "log_rotation_size", "log_rotation_size = 0"),
+            "LOG_TRUNCATE_ON_ROTATION" => ClassifyFixedLine(
+                key, text, "log_truncate_on_rotation", "log_truncate_on_rotation = on"),
+            _ => (false, HandEditReason.FormMismatch),
+        };
 
     /// <summary>
     /// v13's two possible keys (design §3, review L3). <c>pg_stat_statements.track_utility</c> is a fixed

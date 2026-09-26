@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Linq;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -148,6 +149,87 @@ public sealed class ManagedConfMigrationTests
             Assert.Equal(ConfLineClassification.HandEdit, l.Classification);
             Assert.Equal(HandEditReason.OutsideBlock, l.Reason);
         });
+    }
+
+    [Fact]
+    public void ClassifyLines_UntouchedV4Block_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildWriteThroughputConfAppend();
+        var lines = ClassifyLines(conf);
+
+        var maxConn = FindByText(lines, "max_connections");
+        var maxWal = FindByText(lines, "max_wal_size");
+        Assert.Equal(ConfLineClassification.Ours, maxConn.Classification);
+        Assert.Equal(ConfLineClassification.Ours, maxWal.Classification);
+    }
+
+    [Fact]
+    public void ClassifyLines_EditedV4MaxConnections_IsHandEdit()
+    {
+        var built = DarlingManagedPostgres.BuildWriteThroughputConfAppend();
+        var edited = built.Replace(
+            FormattableString.Invariant($"max_connections = {DarlingManagedPostgres.TargetMaxConnections}"),
+            "max_connections = 500",
+            System.StringComparison.Ordinal);
+
+        var lines = ClassifyLines(edited);
+        var maxConn = FindByText(lines, "max_connections");
+
+        Assert.Equal(ConfLineClassification.HandEdit, maxConn.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, maxConn.Reason);
+    }
+
+    [Fact]
+    public void ClassifyLines_UntouchedV11Block_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
+        var lines = ClassifyLines(conf);
+
+        var line = FindByText(lines, "timescaledb.enable_job_execution_logging");
+        Assert.Equal(ConfLineClassification.Ours, line.Classification);
+    }
+
+    [Fact]
+    public void ClassifyLines_V8Block_AtCurrentInputs_IsOurs()
+    {
+        var ram = 16L * 1024 * 1024 * 1024;
+        var hypertables = 30;
+        var conf = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ram, hypertables);
+
+        var lines = ClassifyLines(conf);
+        var marker = lines.First(l => l.Text == DarlingManagedPostgres.ConfMarkerV8);
+
+        /* v8 is not in CoveredMarkers today, so even the untouched block classifies Unclassified, never
+           Ours. If a follow-up lane covers v8, this pin should flip to Ours and is the marker of that. */
+        Assert.Equal(ConfLineClassification.Unclassified, marker.Classification);
+    }
+
+    [Fact]
+    public void ClassifyLines_V8Block_AtStaleInputs_IsUnclassified_NeverOurs()
+    {
+        /* A v8 block written under 16 GB/30 hypertables, present on a store now reading 32 GB. Whatever the
+           eventual v8 rule, it must never call this Ours: it does not match the current inputs. */
+        var stale = DarlingManagedPostgres.BuildHardwareSizingConfAppend(16L * 1024 * 1024 * 1024, 30);
+
+        var lines = ClassifyLines(stale);
+        var marker = lines.First(l => l.Text == DarlingManagedPostgres.ConfMarkerV8);
+
+        Assert.Equal(ConfLineClassification.Unclassified, marker.Classification);
+    }
+
+    [Fact]
+    public void ClassifyLines_DuplicatedMarker_IsHandEditOrUnclassified_NeverOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildWalVolumeConfAppend() + DarlingManagedPostgres.BuildWalVolumeConfAppend();
+        var lines = ClassifyLines(conf);
+
+        var wals = lines.Where(l => l.Text == DarlingManagedPostgres.ConfMarkerV15).ToList();
+        Assert.Equal(2, wals.Count);
+        Assert.All(wals, l => Assert.NotEqual(ConfLineClassification.HandEdit, l.Classification));
+        /* Both marker lines are byte-identical to what the builder writes, so both classify Ours today —
+           this classifier has no duplicate-marker special case yet. Pinned so a future change to that
+           behavior is deliberate. */
+        Assert.All(wals, l => Assert.Equal(ConfLineClassification.Ours, l.Classification));
     }
 
     [Fact]
