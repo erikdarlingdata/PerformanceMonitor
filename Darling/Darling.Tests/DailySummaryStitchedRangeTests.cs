@@ -231,4 +231,49 @@ public sealed class DailySummaryStitchedRangeTests
 
         Assert.Equal(plain, stitched);
     }
+
+    /// <summary>
+    /// #3653 A6, lane LC-a4: the frozen legacy name this overload ITSELF ever names — <see cref="Legacy"/> on
+    /// the Hourly tier, <see cref="DailyLegacy"/> on the Daily tier (both hardcoded in the two-argument form
+    /// this overload falls back to; see its remarks) — must still build, both under
+    /// <see cref="RollupCoverage.Unknown"/> (nothing measured, so the legacy alone is named) and under a
+    /// stitched coverage whose successor floor falls INSIDE the window (the genuinely-stitched splice, which
+    /// names the legacy AND the successor). Both threw <see cref="ArgumentException"/> on 1abc48ba:
+    /// <c>QueriesCteForCagg</c>/<c>QueriesCteForStitchedCagg</c> read a frozen view's source off
+    /// <c>MaterializationHoleTargets</c>, which the freeze (#3653 LC) had just emptied of every frozen view.
+    /// </summary>
+    [Fact]
+    public void FrozenLegacy_StillBuilds_UnderUnknownCoverage_AndUnderAStitchThatCrossesTheWindow()
+    {
+        var windowStart = DaysAgo(10);
+
+        var hourlyUnknown = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, RollupCoverage.Unknown, windowStart);
+        Assert.Contains($"FROM collect.{Legacy}", hourlyUnknown, StringComparison.Ordinal);
+
+        var dailyUnknown = DailySummarySql.RangeSqlFor(RetentionTier.Daily, RollupCoverage.Unknown, windowStart);
+        Assert.Contains($"FROM collect.{DailyLegacy}", dailyUnknown, StringComparison.Ordinal);
+
+        var hourlyStitch = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [Legacy] = DaysAgo(80), [Successor] = DaysAgo(5) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All);
+        var hourlyStitched = DailySummarySql.RangeSqlFor(RetentionTier.Hourly, hourlyStitch, windowStart);
+        Assert.Contains($"FROM collect.{Legacy}", hourlyStitched, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{Successor}", hourlyStitched, StringComparison.Ordinal);
+
+        var dailyStitch = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [DailyLegacy] = DaysAgo(200),
+                [DailySuccessor] = DaysAgo(5),
+                /* The daily stitch's own boundary is read off the successor HOURLY's floor (ceiling-of-day),
+                   not the successor daily's floor directly — StitchedRelationSql's Daily branch. */
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = DaysAgo(90),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All);
+        var dailyStitched = DailySummarySql.RangeSqlFor(RetentionTier.Daily, dailyStitch, windowStart);
+        Assert.Contains($"FROM collect.{DailyLegacy}", dailyStitched, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{DailySuccessor}", dailyStitched, StringComparison.Ordinal);
+    }
 }

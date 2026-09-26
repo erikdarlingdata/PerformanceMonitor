@@ -40,7 +40,9 @@ public sealed class MaterializationHoleRepairTests
         var registered = TimescaleSupport.HourlyAggregates.Concat(TimescaleSupport.DailyAggregates).Concat(TimescaleSupport.BaselineAggregates).ToArray();
 
         Assert.Equal(registered.Length, targets.Count);
-        Assert.Equal(26, targets.Count); // #3653 A6 lane LB: +3 for the interval-honest successor dailies added to DailyAggregates
+        // #3653 LC: 26 (A6 lane LB's count) minus the six the freeze took out of HourlyAggregates/DailyAggregates
+        // (they stay in TimescaleSupport.RollupViews and FrozenRollupAggregates, but nothing repairs them now).
+        Assert.Equal(20, targets.Count);
         Assert.Equal(registered.Select(a => a.View).OrderBy(v => v, StringComparer.Ordinal), targets.Select(t => t.View).OrderBy(v => v, StringComparer.Ordinal));
 
         /* The rollups come first in the backfill's dependency order — every raw-sourced rollup before the
@@ -55,13 +57,29 @@ public sealed class MaterializationHoleRepairTests
             Assert.Equal(target.Source.EndsWith("_hourly", StringComparison.Ordinal) || target.Source.EndsWith("_daily", StringComparison.Ordinal) ? "bucket" : "collection_time", target.SourceTimeColumn);
         }
 
-        /* A daily is scanned after the hourly it reads, so its scan sees the rows the hourly's repair wrote. */
-        foreach (var (legacy, _, dependentDaily) in TimescaleSupport.SupersededHourlyRollups)
+        /* A daily is scanned after the hourly it reads, so its scan sees the rows the hourly's repair wrote.
+           #3653 LC: SupersededHourlyRollups' own Legacy/DependentDaily pair is frozen out of `targets` entirely
+           now (there is nothing left to order), so this re-pins the live analog — SupersededDailyRollups' own
+           SuccessorHourly/SuccessorDaily pair, derived rather than typed, the same two relations
+           RollupBackfill.Targets still orders by depth. */
+        foreach (var (_, successorDaily, successorHourly) in TimescaleSupport.SupersededDailyRollups)
         {
             Assert.True(
-                targets.ToList().FindIndex(t => t.View == legacy) < targets.ToList().FindIndex(t => t.View == dependentDaily),
-                $"{dependentDaily} must be scanned after {legacy}");
+                targets.ToList().FindIndex(t => t.View == successorHourly) < targets.ToList().FindIndex(t => t.View == successorDaily),
+                $"{successorDaily} must be scanned after {successorHourly}");
         }
+    }
+
+    /// <summary>#3653 LC: the repair walk must never see a frozen view — refreshing one is the one thing the
+    /// freeze forbids (see <see cref="TimescaleSupport.FrozenRollupAggregates"/>'s remarks). A regression that
+    /// re-adds one of the six to <see cref="RollupBackfill.Targets"/> (and so to
+    /// <see cref="TimescaleSupport.MaterializationHoleTargets"/>) fails here rather than at a live refresh.</summary>
+    [Fact]
+    public void MaterializationHoleTargets_HoldsNoFrozenRollupAggregate()
+    {
+        Assert.DoesNotContain(
+            TimescaleSupport.MaterializationHoleTargets,
+            target => TimescaleSupport.IsFrozenRollupAggregate(target.View));
     }
 
     [Fact]
@@ -119,10 +137,16 @@ public sealed class MaterializationHoleRepairTests
         Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0\n    OFFSET 0)", sql, StringComparison.Ordinal);
         Assert.EndsWith("ORDER BY c.bucket", sql.TrimEnd(), StringComparison.Ordinal);
 
+        /* #3653 LC froze query_stats_daily out of MaterializationHoleTargets; its unfiltered, hierarchical shape
+           lives on in its live successor daily (SuccessorDailyOf, derived rather than typed), which is
+           hierarchical from query_stats_interval_hourly with no WHERE of its own either. */
+        var successorDaily = TimescaleSupport.SuccessorDailyOf(TimescaleSupport.QueryStatsIntervalHourlyView)
+            ?? throw new InvalidOperationException(
+                $"{TimescaleSupport.QueryStatsIntervalHourlyView} must be in {nameof(TimescaleSupport.SupersededDailyRollups)}.");
         var unfiltered = TimescaleSupport.MaterializationHoleScanSql(
-            TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == TimescaleSupport.QueryStatsDailyView), ("s", "m"))
+            TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == successorDaily), ("s", "m"))
             .Replace("\r\n", "\n", StringComparison.Ordinal);
-        Assert.Contains("FROM collect.query_stats_hourly AS s", unfiltered, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats_interval_hourly AS s", unfiltered, StringComparison.Ordinal);
         Assert.Contains("s.bucket >= c.bucket", unfiltered, StringComparison.Ordinal);
         /* No filter: the source probe's fence follows straight after the width bound. */
         Assert.Contains("s.bucket < c.bucket + $3::interval\n    OFFSET 0)", unfiltered, StringComparison.Ordinal);
@@ -178,6 +202,39 @@ public sealed class MaterializationHoleRepairTests
         Assert.Throws<ArgumentNullException>(() => TimescaleSupport.CapMaterializationHoleRepairs(null!, 24, width));
     }
 
+    /// <summary>
+    /// #4186 round-3 H1: the seam window's own direction. Mirrors
+    /// <see cref="TheCap_TakesTheOldestFirst_SplitsAStraddlingRangeExactly_AndDefersTheRest"/> exactly, with
+    /// <c>newestFirst: true</c> — same three ranges, same cap, but the NEWEST 24 buckets are kept and a
+    /// straddling range splits at its OLDER edge instead of its newer one, so the kept portion stays adjacent
+    /// to whatever sits above it (the successor's already-materialized span in the real caller).
+    /// </summary>
+    [Fact]
+    public void TheCap_NewestFirst_TakesTheNewestFirst_SplitsAStraddlingRangeAtItsOlderEdge_AndDefersTheRest()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+        var ranges = new List<(DateTime Start, DateTime End)>
+        {
+            (Hour.AddHours(30), Hour.AddHours(40)),   /* newest, 10 buckets */
+            (Hour, Hour.AddHours(20)),                /* oldest, 20 buckets */
+            (Hour.AddHours(22), Hour.AddHours(28)),   /* middle, 6 buckets */
+        };
+
+        var (repair, deferred) = TimescaleSupport.CapMaterializationHoleRepairs(ranges, 24, width, newestFirst: true);
+
+        /* Newest 10 whole, then the middle's 6 whole (16 spent), then 8 of the oldest's 20 — split at its NEWER
+           edge, since newestFirst keeps the portion adjacent to what is already above it (24 = 10 + 6 + 8) —
+           the older remaining 12 hours of the oldest range deferred. */
+        Assert.Equal(new[] { (Hour.AddHours(30), Hour.AddHours(40)), (Hour.AddHours(22), Hour.AddHours(28)), (Hour.AddHours(12), Hour.AddHours(20)) }, repair);
+        Assert.Equal(new[] { (Hour, Hour.AddHours(12)) }, deferred);
+        Assert.Equal(24, repair.Sum(r => (int)((r.End - r.Start).Ticks / width.Ticks)));
+
+        /* Under the cap and exactly at it: everything repaired, nothing deferred, same as oldest-first. */
+        var small = new List<(DateTime Start, DateTime End)> { (Hour, Hour.AddHours(2)) };
+        Assert.Equal(small, TimescaleSupport.CapMaterializationHoleRepairs(small, 24, width, newestFirst: true).Repair);
+        Assert.Empty(TimescaleSupport.CapMaterializationHoleRepairs(small, 24, width, newestFirst: true).Deferred);
+    }
+
     [Fact]
     public void AlignDown_LandsOnABucketBoundary_ForBothWidths()
     {
@@ -187,6 +244,101 @@ public sealed class MaterializationHoleRepairTests
         Assert.Equal(Hour, TimescaleSupport.AlignDown(Hour, TimescaleSupport.HourlyBucket));
         Assert.Equal(DateTimeKind.Unspecified, TimescaleSupport.AlignDown(instant, TimescaleSupport.HourlyBucket).Kind);
         Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.AlignDown(instant, TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void ScanWindows_NoSeam_GivesTheOrdinaryWindowOnly()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+
+        /* floor newer than the horizon: the ordinary window starts at floor. */
+        var floor = Hour.AddHours(50);
+        var horizon = Hour;
+        var ceiling = Hour.AddHours(80);
+        Assert.Equal(
+            new[] { (floor, ceiling) },
+            TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor: floor, width));
+
+        /* floor older than the horizon (the ordinary, pre-#4186 clamp): the window starts at the horizon. */
+        var oldFloor = Hour;
+        var laterHorizon = Hour.AddHours(20);
+        Assert.Equal(
+            new[] { (laterHorizon, ceiling) },
+            TimescaleSupport.MaterializationHoleScanWindows(oldFloor, ceiling, laterHorizon, seamFloor: oldFloor, width));
+    }
+
+    [Fact]
+    public void ScanWindows_SeamAboveTheHorizon_GivesTwoWindows_SeamThenOrdinary()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+        var floor = Hour.AddHours(10);
+        var horizon = Hour.AddHours(2);
+        var seamFloor = Hour.AddHours(4);
+        var ceiling = Hour.AddHours(50);
+
+        var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor, width);
+
+        Assert.Equal(new[] { (seamFloor, floor.AddHours(-1)), (floor, ceiling) }, windows);
+        Assert.True(windows[0].From >= horizon, "the seam sits above the horizon in this case — a sanity check, not the regression this pins");
+    }
+
+    [Fact]
+    public void ScanWindows_SeamBelowTheHorizon_GivesTwoWindows_TheSeamUnclamped()
+    {
+        /* #4186 follow-up: a store stopped more than the raw span (4 days = 96h here) before its successor's
+           first start. The seam predates the horizon entirely — the exact shape the clamp used to swallow. */
+        var width = TimescaleSupport.HourlyBucket;
+        var horizon = Hour.AddHours(96);
+        var floor = Hour.AddHours(150);
+        var seamFloor = Hour.AddHours(10);
+        var ceiling = Hour.AddHours(200);
+
+        var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor, width);
+
+        Assert.Equal(new[] { (seamFloor, floor.AddHours(-1)), (floor, ceiling) }, windows);
+
+        /* The regression itself: the seam window's From reaches below the horizon rather than clamping to it —
+           the pre-fix formula (from = max(seamFloor, horizon)) would have reported Hour.AddHours(96) here. */
+        Assert.True(windows[0].From < horizon);
+        Assert.Equal(seamFloor, windows[0].From);
+    }
+
+    [Fact]
+    public void ScanWindows_TheOrdinaryWindow_NeverStartsBelowTheHorizon()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+        var ceiling = Hour.AddHours(500);
+
+        foreach (var (floor, horizon, seamFloor) in new[]
+        {
+            (Hour.AddHours(50), Hour, Hour.AddHours(50)),               /* no seam, floor above horizon */
+            (Hour, Hour.AddHours(20), Hour),                            /* no seam, floor below horizon */
+            (Hour.AddHours(10), Hour.AddHours(2), Hour.AddHours(4)),    /* seam above horizon */
+            (Hour.AddHours(150), Hour.AddHours(96), Hour.AddHours(10)), /* seam below horizon */
+        })
+        {
+            var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor, width);
+            var ordinary = windows[^1];
+            Assert.True(ordinary.From >= horizon);
+            Assert.Equal(ordinary.From, floor > horizon ? floor : horizon);
+        }
+    }
+
+    [Fact]
+    public void ScanWindows_EdgeCases_OneBucketSeam_NoWindowsWhenNothingToScan_AndTheWidthGuard()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+
+        /* A seam exactly one bucket wide still yields a valid, single-bucket window. */
+        var floor = Hour.AddHours(5);
+        var oneBucketSeam = floor.AddHours(-1);
+        var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, Hour.AddHours(50), Hour, oneBucketSeam, width);
+        Assert.Equal(new[] { (oneBucketSeam, oneBucketSeam), (floor, Hour.AddHours(50)) }, windows);
+
+        /* No seam and the whole span is older than the horizon: nothing to scan. */
+        Assert.Empty(TimescaleSupport.MaterializationHoleScanWindows(Hour, Hour.AddHours(5), Hour.AddHours(20), seamFloor: Hour, width));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => TimescaleSupport.MaterializationHoleScanWindows(Hour, Hour, Hour, Hour, TimeSpan.Zero));
     }
 
     /// <summary>
@@ -289,8 +441,11 @@ public sealed class MaterializationHoleRepairTests
         Assert.DoesNotContain("aggregate(s) scanned", storage, StringComparison.Ordinal);
         Assert.DoesNotContain("no holes.", storage, StringComparison.Ordinal);
         Assert.Contains("passClock.Elapsed", storage, StringComparison.Ordinal);
-        Assert.Contains("holesFound += ranges.Count;", storage, StringComparison.Ordinal);
-        Assert.Contains("bucketsFound += holes.Count;", storage, StringComparison.Ordinal);
+        /* #4186 round-3 H1: found is now the seam and ordinary windows' ranges/buckets summed, since the two
+           are scanned and capped separately (the seam newest-first, the ordinary oldest-first) rather than
+           merged into one list before counting. */
+        Assert.Contains("holesFound += seamRanges.Count + ordinaryRanges.Count;", storage, StringComparison.Ordinal);
+        Assert.Contains("bucketsFound += seamHoles.Count + ordinaryHoles.Count;", storage, StringComparison.Ordinal);
         Assert.Contains("had {Buckets} bucket(s) in [{Start}, {End})", storage, StringComparison.Ordinal);
         Assert.Contains("left for the next start", storage, StringComparison.Ordinal);
         Assert.Contains("could not scan or repair {View} this start", storage, StringComparison.Ordinal);
@@ -390,7 +545,11 @@ public sealed class MaterializationHoleRepairLiveTests
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        var view = TimescaleSupport.QueryStatsHourlyView;
+        /* #3653 LC: query_stats_hourly itself is now frozen — the repair walk never touches it, so it cannot
+           carry this proof any more. query_stats_interval_hourly is its live successor, raw-sourced from the
+           same collect.query_stats this test's own inserts target, so every plain (non-restart) row below is
+           admitted the same way the legacy used to admit it. */
+        var view = TimescaleSupport.QueryStatsIntervalHourlyView;
         var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, view, ct);
         Assert.NotNull(materialization);
 
@@ -518,15 +677,13 @@ public sealed class MaterializationHoleRepairLiveTests
         Assert.Empty(await ScanAsync(connection, target, materialization.Value, H(0), H(10), ct));
         Assert.Equal(new[] { H(0), H(1), H(2), H(3), H(4), H(9), H(10) }, await MaterializedBucketsAsync(connection, view, ct));
 
-        /* THE CONTROL on the source filter: the interval-honest successor sees the same tail (its WHERE admits
-           the planted rows), but an hour holding ONLY a restart row is not a hole for it — the scan applies the
-           aggregate's own filter — while the legacy, which admits the row, would materialize it. Planted at
-           H(12), refreshed on the legacy so its span reaches past it, and the successor's span made to reach
-           past it too by refreshing H(9)-H(11) there. */
-        var successor = TimescaleSupport.QueryStatsIntervalHourlyView;
-        var successorMaterialization = await TimescaleSupport.ResolveMaterializationAsync(connection, successor, ct);
-        Assert.NotNull(successorMaterialization);
-        await RefreshAsync(connection, successor, H(0), H(3), ct);
+        /* THE CONTROL on the source filter (#3653 LC): pre-freeze this planted a restart-only row and
+           contrasted the legacy (admits it) against the successor (excludes it, scan and all) — two live
+           relations reading the same collect.query_stats. The legacy no longer repairs at all, so only the
+           successor's own half still runs live (MaterializationHoleScanShapeTests/MaterializationHoleRepairTests'
+           pure pins still hold the CreateSql contrast). What remains provable here: an hour holding ONLY a
+           restart row is neither materialized NOR reported as a hole — the scan applies view's own filter, so
+           an uncovered hour the filter would reject is not a false positive. */
         await using (var restartOnly = new NpgsqlCommand(@"
 INSERT INTO collect.query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
@@ -540,15 +697,11 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
         }
 
         await InsertHoursAsync(connection, new[] { 14 }, H, ct);
-        await RefreshAsync(connection, successor, H(14), H(15), ct);
+        await RefreshAsync(connection, view, H(14), H(15), ct);
 
-        var successorTarget = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == successor);
-        var successorHoles = await ScanAsync(connection, successorTarget, successorMaterialization.Value, H(0), H(14), ct);
-        Assert.DoesNotContain(H(12), successorHoles);
-        Assert.Equal(new[] { H(3), H(4), H(9), H(10) }, successorHoles);
-
-        await RefreshAsync(connection, view, H(12), H(13), ct);
-        Assert.Contains(H(12), await MaterializedBucketsAsync(connection, view, ct));
+        var restartHoles = await ScanAsync(connection, target, materialization.Value, H(0), H(14), ct);
+        Assert.DoesNotContain(H(12), restartHoles);
+        Assert.DoesNotContain(H(12), await MaterializedBucketsAsync(connection, view, ct));
     }
 
     /// <summary>
@@ -583,7 +736,9 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
-        var view = TimescaleSupport.QueryStatsHourlyView;
+        /* #3653 LC: query_stats_hourly is frozen out of the repair walk; query_stats_interval_hourly is its live
+           successor and, like the legacy, admits every plain (non-restart) row this test plants. */
+        var view = TimescaleSupport.QueryStatsIntervalHourlyView;
         var cap = TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.HourlyBucket);
         Assert.Equal(24, cap);
 

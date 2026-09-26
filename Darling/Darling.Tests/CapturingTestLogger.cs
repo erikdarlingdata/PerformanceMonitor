@@ -47,6 +47,19 @@ internal sealed class CapturingTestLogger : ILogger
         }
     }
 
+    /// <summary>A snapshot of every line logged so far, in log order, for a test that needs to count matches
+    /// against a substring rather than a level.</summary>
+    public IReadOnlyList<string> Lines
+    {
+        get
+        {
+            lock (_lines)
+            {
+                return _lines.ToList();
+            }
+        }
+    }
+
     /// <summary>The <see cref="Exception"/> argument of every line logged at exactly this level, in log
     /// order, non-null entries only -- lets a test assert an entry's real exception reached the sink
     /// (the <c>logger.LogError(ex, ...)</c> overload), not just that its message text was baked into

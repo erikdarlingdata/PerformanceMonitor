@@ -490,13 +490,19 @@ public class BaselineSupplyTests
     /// <c>SupersededBaselineRelations</c>); this pin names the reason.
     ///
     /// <para><b>The grid DID move at #3653 (Q12), and not because of this pair.</b> The three interval-honest
-    /// HOURLY successors could not replace their legacies (the daily tier is hierarchical from those —
-    /// <c>SupersededHourlyRollups</c>), so they were appended to <c>HourlyAggregates</c> and the grid
-    /// re-derived by its own method: sixteen policies, the heaviest at :18, the watch line at 900 s. The two
-    /// bounded hourly successors are dealt into the bounded class ahead of the baselines, so this pair's
-    /// minutes moved 3→6 and 5→7 — the converge re-phases them once. What this pin still holds is the
-    /// baseline half: seven members, the pair in front, and the baseline pair adding NOTHING to the count the
-    /// grid derives from. The grid's own figures are pinned with their derivation in TimescaleSupportTests
+    /// HOURLY successors were appended to <c>HourlyAggregates</c> behind the legacy trio (the daily tier was
+    /// still hierarchical from it) and the grid re-derived by its own method: sixteen policies, the heaviest
+    /// at :18, the watch line at 900 s. The two bounded hourly successors were dealt into the bounded class
+    /// ahead of the baselines, so this pair's minutes moved 3→6 and 5→7.</para>
+    ///
+    /// <para><b>And it moved BACK at #3653 (LC), again not because of this pair.</b> The freeze gave the daily
+    /// tier its own interval-honest successors (A6 LB) and moved the legacy trio off the grid entirely, into
+    /// <c>FrozenRollupAggregates</c>, with their hourly successors taking the three positions the legacy trio
+    /// held rather than staying appended behind it — thirteen policies again, the heaviest back at :15, the
+    /// watch line back at 1,050 s, and this pair's minutes back at 3 and 5. The converge re-phases every moved
+    /// policy once, on the first start of each build. What this pin holds throughout is the baseline half:
+    /// seven members, the pair in front, and the baseline pair adding NOTHING to the count the grid derives
+    /// from. The grid's own figures are pinned with their derivation in TimescaleSupportTests
     /// (<c>CompressionPhaseGrid_ClearsEveryRefreshSlotsGuardBand_AndTheHeaviestRefreshsSlotWhole</c> and
     /// <c>TheRefreshGridIsUnchanged_AndTheCompressionGridsOneInputFromItIsPinned</c>), not restated here.</para>
     /// </summary>
@@ -507,14 +513,15 @@ public class BaselineSupplyTests
         Assert.Equal(TimescaleSupport.PerfmonIntervalBaselineView, TimescaleSupport.BaselineAggregates[0].View);
         Assert.Equal(TimescaleSupport.WaitStatsIntervalBaselineView, TimescaleSupport.BaselineAggregates[1].View);
 
-        /* The order's count is the hourly registry plus the seven baselines — 9 + 7 = 16 since #3653 — and
-           the baseline pair contributes exactly its two positions to it, no more. */
+        /* The order's count is the hourly registry plus the seven baselines — 6 + 7 = 13 since #3653's LC
+           freeze (was 9 + 7 = 16 during Q12) — and the baseline pair contributes exactly its two positions to
+           it, no more. */
         Assert.Equal(TimescaleSupport.HourlyAggregates.Length + 7, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(16, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(6, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
-        Assert.Equal(7, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
-        Assert.Equal(18, TimescaleSupport.HeaviestRefreshStartMinute);
-        Assert.Equal(900, TimescaleSupport.RefreshSlotWarningSeconds);
+        Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(3, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.PerfmonIntervalBaselineView));
+        Assert.Equal(5, TimescaleSupport.RefreshPhaseMinutesFor(TimescaleSupport.WaitStatsIntervalBaselineView));
+        Assert.Equal(15, TimescaleSupport.HeaviestRefreshStartMinute);
+        Assert.Equal(1050, TimescaleSupport.RefreshSlotWarningSeconds);
     }
 
     /// <summary>

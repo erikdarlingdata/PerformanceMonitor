@@ -110,6 +110,13 @@ public static class RollupBackfill
     /// </summary>
     public static readonly RollupBackfillTarget[] Targets =
         TimescaleSupport.RollupViews
+            /* #3653 LC: the six frozen legacy rollups stay in RollupViews (the coverage probe and the stitch
+               still need their floors) but leave the backfill plan — nothing ever advances their watermark
+               again, so there is nothing left to converge toward. Excluded HERE rather than left for
+               MaterializationHoleTargets to discover: that list derives its own CreateSql via
+               HourlyAggregates.Concat(DailyAggregates).Single(...), which no longer has an entry for any of
+               the six and would throw the moment anything read it. */
+            .Where(r => !TimescaleSupport.IsFrozenRollupAggregate(r.View))
             .Select(r => new RollupBackfillTarget(
                 r.View,
                 r.RawTable,

@@ -603,11 +603,18 @@ AND   j.hypertable_name = '" + HeldRelation + "'", connection) { CommandTimeout 
             Assert.Contains($"Warning: Retention policy for {HeldRelation} RE-HELD", pass1bLog.Joined, StringComparison.Ordinal);
             Assert.Contains($"Information: Retention re-evaluation: 1 policies held, 0 armed this pass, {total - 1} unchanged", pass1bLog.Joined, StringComparison.Ordinal);
 
-            /* ── MOVE THE COVERAGE, the way a backfill does: materialize the hour the seeded row is in on the
-                  hourly aggregate, then the day on the daily (hierarchical from the hourly) so the hourly
-                  tier's own gate — whose consumer is the daily — stays Covered rather than re-holding. ── */
-            await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, seeded.AddDays(-1), seeded.AddDays(1), ct);
-            await RefreshAsync(connection, TimescaleSupport.QueryStatsDailyView, seeded.AddDays(-2), seeded.AddDays(2), ct);
+            /* ── MOVE THE COVERAGE, the way a backfill does: materialize the hour the seeded row is in on BOTH
+                  successor hourlies, then their dailies. #3653 LC: RawTierCoverage for query_stats now requires
+                  BOTH query_stats_interval_hourly AND query_stats_db_interval_hourly; the legacy
+                  query_stats_hourly and query_stats_daily are frozen and no longer named by the coverage gate.
+                  The successor dailies must also be refreshed so the hourlies' OWN retention policies
+                  (which gate on the daily consumers) do not go from ARMED to RE-HELD when the hourlies gain
+                  data — a re-hold would change the (armed 1, unchanged total-1) tally to (armed 1, re-held 2,
+                  unchanged total-3). This mirrors what the original code did with the legacy daily. ── */
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, seeded.AddDays(-1), seeded.AddDays(1), ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsDbIntervalHourlyView, seeded.AddDays(-1), seeded.AddDays(1), ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalDailyView, seeded.AddDays(-2), seeded.AddDays(2), ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsDbIntervalDailyView, seeded.AddDays(-2), seeded.AddDays(2), ct);
 
             /* ── PASS 2: the hourly tick after the backfill. The hold releases: armed-this-pass 1, held 0,
                   everything else unchanged — and no restart happened between pass 1 and here. ── */
@@ -616,7 +623,8 @@ AND   j.hypertable_name = '" + HeldRelation + "'", connection) { CommandTimeout 
             Assert.True((pass2.Held, pass2.Armed, pass2.Unchanged, pass2.ReHeld, pass2.Failed) == (0, 1, total - 1, 0, 0),
                 $"pass 2 expected (held 0, armed 1, unchanged {total - 1}, re-held 0, failed 0), got ({pass2.Held}, {pass2.Armed}, {pass2.Unchanged}, {pass2.ReHeld}, {pass2.Failed}); {pass2Log.Joined}");
             Assert.True(await ScheduledAsync(connection, HeldRelation, ct), "the policy must be ARMED once its consumer covers everything it holds");
-            Assert.Contains($"Information: Retention policy for {HeldRelation} ARMED - {TimescaleSupport.QueryStatsHourlyView} now covers everything it holds", pass2Log.Joined, StringComparison.Ordinal);
+            // #3653 LC: coverage is now string.Join(" + ", [query_stats_interval_hourly, query_stats_db_interval_hourly])
+            Assert.Contains($"Information: Retention policy for {HeldRelation} ARMED - {TimescaleSupport.QueryStatsIntervalHourlyView} + {TimescaleSupport.QueryStatsDbIntervalHourlyView} now covers everything it holds", pass2Log.Joined, StringComparison.Ordinal);
             Assert.Contains($"Information: Retention re-evaluation: 0 policies held, 1 armed this pass, {total - 1} unchanged", pass2Log.Joined, StringComparison.Ordinal);
             Assert.DoesNotContain("Warning:", pass2Log.Joined, StringComparison.Ordinal);
 

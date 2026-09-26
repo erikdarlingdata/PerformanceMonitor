@@ -118,9 +118,9 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void ContinuousAggregatePolicy_IsTheConservativeHourlyShape_Idempotent()
     {
-        var sql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.QueryStatsHourlyView);
+        var sql = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.QueryStatsIntervalHourlyView);
 
-        Assert.Contains("add_continuous_aggregate_policy('collect.query_stats_hourly'", sql, StringComparison.Ordinal);
+        Assert.Contains("add_continuous_aggregate_policy('collect.query_stats_interval_hourly'", sql, StringComparison.Ordinal);
         Assert.Contains("end_offset => INTERVAL '1 hour'", sql, StringComparison.Ordinal);
         Assert.Contains("schedule_interval => INTERVAL '1 hour'", sql, StringComparison.Ordinal);
         Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
@@ -195,13 +195,13 @@ public sealed class TimescaleContinuousAggregateTests
     {
         Assert.Equal(1, TimescaleSupport.LightRefreshStepMinutes);
 
-        /* Sixteen hourly refreshes since #3653 (Q12): the nine registered hourly rollups — the six #3174
-           counted plus the three interval-honest successors appended beside the legacy trio they supersede —
-           and the seven baseline aggregates. Fifteen of them light; the heaviest is answered by identity. */
-        Assert.Equal(9, TimescaleSupport.HourlyAggregates.Length);
+        /* Thirteen hourly refreshes since #3653 (A6): the six registered hourly rollups — the three Query
+           Store views and the three interval-honest successors that REPLACED the legacy trio on the phase grid
+           — and the seven baseline aggregates. Twelve of them light; the heaviest is answered by identity. */
+        Assert.Equal(6, TimescaleSupport.HourlyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
-        Assert.Equal(16, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
-        Assert.Equal(15, TimescaleSupport.LightHourlyRefreshCount);
+        Assert.Equal(13, TimescaleSupport.HourlyRefreshPhaseOrder.Count);
+        Assert.Equal(12, TimescaleSupport.LightHourlyRefreshCount);
 
         var phases = TimescaleSupport.HourlyRefreshPhaseOrder
             .Select(TimescaleSupport.RefreshPhaseMinutesFor)
@@ -254,7 +254,7 @@ public sealed class TimescaleContinuousAggregateTests
 
         /* UTC, not the session time zone: a bare date_trunc('hour', now()) lands off-grid on the half-hour and
            quarter-hour zones, which is a store-wide silent skew rather than a local oddity. */
-        var anchored = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.QueryStatsHourlyView);
+        var anchored = TimescaleSupport.AddHourlyRefreshPolicySql(TimescaleSupport.QueryStatsIntervalHourlyView);
         Assert.Contains("now() AT TIME ZONE 'UTC'", anchored, StringComparison.Ordinal);
         Assert.DoesNotContain("date_trunc('hour', now())", anchored, StringComparison.Ordinal);
     }
@@ -396,6 +396,20 @@ public sealed class TimescaleContinuousAggregateTests
            permutation and leave TimescaleSupport.RefreshPhaseMinutesFor exercised at exactly one order — the
            "a test that agrees with any derivation" failure one layer down, and the same failure this grid
            exists to remove. Raised by review. */
+        /* The map RESPONDED to the order, per VIEW — without this the loop re-asserts the unrotated
+           claim thirteen times and an overload that ignored its parameter would pass, which is the
+           defect the inline copy this replaced actually embodied. Comparing the two minute SEQUENCES is
+           not enough: an overload that ignored `rotated` still returns a permutation of the unrotated
+           minutes, so the sequences differ while nothing moved. What has to change is the minute a
+           NAMED view gets.
+
+           A6: checked across ALL rotations rather than inside the per-rotation loop. With 3 (not 4)
+           unbounded non-heaviest views, some rotations preserve the relative sub-group orders — i.e.
+           the unbounded views land in the same order among themselves, and so do the bounded views —
+           so those rotations happen to change no individual view's minute. A modulus-based map would
+           change no view's minute for ANY rotation; the order-based map changes at least one view for
+           AT LEAST ONE rotation. That is the injective property being asserted here. */
+        var anyRotationResponded = false;
         for (var rotation = 1; rotation < TimescaleSupport.HourlyRefreshPhaseOrder.Count; rotation++)
         {
             var rotated = TimescaleSupport.HourlyRefreshPhaseOrder
@@ -409,17 +423,18 @@ public sealed class TimescaleContinuousAggregateTests
 
             Assert.Equal(minutes.Length, minutes.Distinct().Count());
 
-            /* And the map RESPONDED to the order, per VIEW — without this the loop re-asserts the unrotated
-               claim thirteen times and an overload that ignored its parameter would pass, which is the
-               defect the inline copy this replaced actually embodied. Comparing the two minute SEQUENCES is
-               not enough: an overload that ignored `rotated` still returns a permutation of the unrotated
-               minutes, so the sequences differ while nothing moved. What has to change is the minute a
-               NAMED view gets. */
-            Assert.Contains(
-                TimescaleSupport.HourlyRefreshPhaseOrder,
-                view => TimescaleSupport.RefreshPhaseMinutesFor(rotated, view)
-                    != TimescaleSupport.RefreshPhaseMinutesFor(view));
+            if (!anyRotationResponded
+                && TimescaleSupport.HourlyRefreshPhaseOrder.Any(
+                    view => TimescaleSupport.RefreshPhaseMinutesFor(rotated, view)
+                        != TimescaleSupport.RefreshPhaseMinutesFor(view)))
+            {
+                anyRotationResponded = true;
+            }
         }
+
+        Assert.True(anyRotationResponded,
+            "no rotation changed any view's minute — an order-ignoring (modulus-based) map would produce "
+            + "this result; the order-taking overload must respond to at least one rotation");
 
         /* The two overloads agree at the shipped order, so the seam cannot drift from the map the product
            actually uses. */
@@ -448,11 +463,12 @@ public sealed class TimescaleContinuousAggregateTests
         /* Positive control on the extraction itself, in the identical form: the two relations whose
            multi-consumer shape this test exists for must both come back with the consumers we know they have.
            A control that only proved "some regex matched something" would not exercise the case at issue.
-           collect.query_stats feeds FIVE hourly policies since #3653 (Q12): the query-grain rollup, the
-           per-database rollup, the query_stats baseline, and the two interval-honest successors of the first
-           two — the widest contention group on the grid, and every one of the five on its own minute. */
-        Assert.Equal(5, sourceOf.Count(kv => string.Equals(kv.Value, "query_stats", StringComparison.Ordinal)));
-        Assert.Equal(2, sourceOf.Count(kv => string.Equals(kv.Value, "procedure_stats", StringComparison.Ordinal)));
+           collect.query_stats feeds THREE hourly policies since #3653 (A6): the two interval-honest
+           rollups (query-grain and per-database) and the query_stats baseline — the widest contention group
+           on the grid after the legacy trio left the phase grid at LC, every one on its own minute. */
+        Assert.Equal(3, sourceOf.Count(kv => string.Equals(kv.Value, "query_stats", StringComparison.Ordinal)));
+        /* procedure_stats has ONE consumer since A6: only ProcedureStatsIntervalHourlyView (the legacy left the grid). */
+        Assert.Equal(1, sourceOf.Count(kv => string.Equals(kv.Value, "procedure_stats", StringComparison.Ordinal)));
         Assert.Equal(2, sourceOf.Count(kv => string.Equals(kv.Value, "query_store_stats", StringComparison.Ordinal)));
 
         var views = new HashSet<string>(definitions.Select(a => a.View), StringComparer.Ordinal);
@@ -1236,6 +1252,57 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.Contains("AS coverage_oldest_0", sql, StringComparison.Ordinal);
         Assert.Contains("AS coverage_oldest_1", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("GREATEST", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// WATCHED (mutation, #4186): a stitched slot (a coverage relation with a frozen legacy, found through
+    /// <c>LegacyOf</c>) must probe raw for a seam row before it falls back to the legacy's floor — an
+    /// UNCONDITIONAL stitch is the #4186 data-loss defect: a raw tail between the legacy's last bucket and
+    /// the successor's floor, never materialized by either side, read Covered and the purge dropped it. A
+    /// non-stitched slot (no <c>LegacyOf</c> match) must stay the plain <c>min(bucket)</c> form untouched.
+    /// </summary>
+    [Fact]
+    public void RetentionArmSafetySql_StitchedSlot_ProbesSeamBeforeFallingBackToLegacyFloor()
+    {
+        var sql = TimescaleSupport.RetentionArmSafetySql(
+            "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsIntervalHourlyView });
+
+        /* The seam probe: raw, bounded between the legacy's last bucket (+1h, so the legacy's own last
+           bucket is not re-counted) and the successor's floor (or infinity when it is empty). */
+        Assert.Contains("EXISTS (", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats AS seam", sql, StringComparison.Ordinal);
+        Assert.Contains("l.mx + INTERVAL '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("COALESCE(s.mn, 'infinity'::timestamp)", sql, StringComparison.Ordinal);
+
+        /* The filter must appear TWICE: once for source_oldest (every relation with a filter gets that
+           already) and once more inside the seam probe itself — a seam probe with no filter would let a
+           post-restart interval-0 row hold the gate open forever, exactly like source_oldest without it. */
+        var filterOccurrences = sql.Split(new[] { TimescaleSupport.IntervalHonestSourceFilter }, StringSplitOptions.None).Length - 1;
+        Assert.True(filterOccurrences >= 2,
+            $"expected the seam probe to carry its own {nameof(TimescaleSupport.IntervalHonestSourceFilter)} in addition to source_oldest's, found {filterOccurrences} occurrence(s) in: {sql}");
+
+        /* Seam empty -> the stitched floor. PostgreSQL's LEAST already ignores NULLs, so the old
+           COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn) wrapper was redundant; it must not come back. */
+        Assert.Contains("LEAST(l.mn, s.mn)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(LEAST(", sql, StringComparison.Ordinal);
+
+        /* Seam NOT empty -> the successor's own floor alone, never the legacy's — the legacy cannot vouch
+           for raw history it never covered. */
+        Assert.Contains("THEN s.mn", sql, StringComparison.Ordinal);
+
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsHourlyView}", sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView}", sql, StringComparison.Ordinal);
+
+        /* A non-stitched slot (query_store_stats' two consumers have no LegacyOf match) stays the plain
+           form — none of the seam machinery leaks into a slot that never needed it. */
+        var plainSql = TimescaleSupport.RetentionArmSafetySql(
+            "query_store_stats", "collection_time",
+            new[] { TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsIntervalHourlyView });
+
+        Assert.DoesNotContain("EXISTS (", plainSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("seam", plainSql, StringComparison.Ordinal);
+        Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsHourlyView}) AS coverage_oldest_0", plainSql, StringComparison.Ordinal);
+        Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}) AS coverage_oldest_1", plainSql, StringComparison.Ordinal);
     }
 
     /// <summary>

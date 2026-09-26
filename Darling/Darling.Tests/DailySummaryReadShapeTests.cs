@@ -323,7 +323,10 @@ public sealed class DailySummaryReadShapeLiveTests
                 """;
         }
 
-        var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == relation);
+        /* #3653 LC froze query_stats_hourly/_daily out of MaterializationHoleTargets; this oracle mirrors
+           DailySummarySql's own lookup (RollupCoverageProbeTargets), which still knows every relation the
+           product can route to. */
+        var target = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == relation);
         var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql);
         var sourceFilter = filter.Length == 0 ? string.Empty : " AND " + filter;
         return $"""

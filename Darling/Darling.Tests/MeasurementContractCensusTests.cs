@@ -888,13 +888,14 @@ public sealed class MeasurementContractCensusTests
     /// <see cref="TimescaleSupport.SupersededHourlyRollups"/>). A restart's (0, 0) row costs their <c>sum()</c>s
     /// nothing, but <c>count(*) AS sample_count</c> counts it as a sample on all three, and <c>min(delta_*)</c>
     /// reads it as a real minimum on the two that carry a min (<c>query_stats_db_hourly</c> carries sums and the
-    /// sample count only). Unlike the baseline pair they STAY registered and refreshing: the indefinite daily
-    /// tier is hierarchical from them and a continuous aggregate's source is fixed at CREATE, so they cannot be
-    /// dropped without cascading it nor frozen without stopping it. Every hourly-tier reader takes the
-    /// successor through <c>RollupCoverage.HourlyRelationFor</c> where it reaches as far as the legacy; the
-    /// daily tier inherits the legacy's contamination at the day grain until it has successors of its own
-    /// (which need the daily compression band re-derived first — it is full at twenty-three). These three
-    /// leave this list only with the legacy text, i.e. with a stitched read or a daily-successor lane.
+    /// sample count only). Unlike the baseline pair they STAY registered — in FrozenRollupAggregates since
+    /// #3653 LC's freeze, not HourlyAggregates — but no longer refreshing: the daily tier is hierarchical from
+    /// them and a continuous aggregate's source is fixed at CREATE, so LC froze the pair in place (no refresh
+    /// policy, watermark never advances again) rather than dropping or cascading it. Every hourly-tier reader
+    /// takes the successor through <c>RollupCoverage.HourlyRelationFor</c> where it reaches as far as the
+    /// legacy; the daily tier inherits the legacy's contamination at the day grain — LB's three interval-honest
+    /// successor dailies now exist, but only LA's stitched reads route to them past the legacy's floor. These
+    /// three leave this list only when the legacy CREATE text itself is finally retired.
     /// </description></item>
     /// </list>
     /// </summary>
@@ -1000,7 +1001,9 @@ public sealed class MeasurementContractCensusTests
         Assert.Equal(TimescaleSupport.SupersededHourlyRollups.Select(s => s.Legacy).OrderBy(v => v, StringComparer.Ordinal), registeredAdmitting);
         foreach (var view in registeredAdmitting)
         {
-            Assert.Contains(view, TimescaleSupport.HourlyAggregates.Select(a => a.View));
+            /* #3653 LC: the trio froze out of HourlyAggregates into FrozenRollupAggregates — still registered,
+               just on the other list, so the membership check has to look at both. */
+            Assert.Contains(view, TimescaleSupport.HourlyAggregates.Concat(TimescaleSupport.FrozenRollupAggregates).Select(a => a.View));
             var text = Text(aggregates.Single(a => a.View == view).Constant);
             foreach (var shape in contamination[view])
             {
@@ -1030,7 +1033,8 @@ public sealed class MeasurementContractCensusTests
                the structural fact the whole "stays registered" reasoning rests on. */
             var dailyText = Text(aggregates.Single(a => a.View == dependentDaily).Constant);
             Assert.Contains($"FROM collect.{view}", dailyText, StringComparison.Ordinal);
-            Assert.Contains(dependentDaily, TimescaleSupport.DailyAggregates.Select(a => a.View));
+            /* #3653 LC: the dependent daily froze right alongside its hourly — same list move, same reason. */
+            Assert.Contains(dependentDaily, TimescaleSupport.DailyAggregates.Concat(TimescaleSupport.FrozenRollupAggregates).Select(a => a.View));
         }
     }
 

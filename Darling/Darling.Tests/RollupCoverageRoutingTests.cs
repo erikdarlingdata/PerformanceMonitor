@@ -304,6 +304,119 @@ public sealed class RollupCoverageRoutingTests
         Assert.Null(RollupCoverage.Unknown.RawOldestOf("query_stats"));
     }
 
+    /* ─────── For stitch: legacy+successor floors for frozen pairs (#3653 LC) ─────── */
+
+    /// <summary>
+    /// On a FRESH store (just upgraded, legacy starts WITH NO DATA) the legacy floor is null and the successor
+    /// holds the data. Without the stitch, every window older than ~4 days falls to raw even though the successor
+    /// already has days/weeks of hourly and daily data.
+    /// </summary>
+    [Fact]
+    public void For_FreshStore_SuccessorFloorUsedWhenLegacyIsEmpty()
+    {
+        // Legacy trio floors absent (fresh store); successor hourlies and dailies have 30 and 90 days.
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = DaysAgo(30),
+                [TimescaleSupport.QueryStatsIntervalDailyView]  = DaysAgo(90),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                ["query_stats"] = DaysAgo(4),
+            });
+
+        var tc = coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView);
+
+        // The stitched hourly floor is the successor's floor, not null.
+        Assert.Equal(DaysAgo(30), tc.HourlyFloorUtc);
+        Assert.Equal(DaysAgo(90), tc.DailyFloorUtc);
+
+        // A 20-day window routes to Hourly, not Raw.
+        Assert.Equal(RetentionTier.Hourly, RetentionTierRouter.Resolve(Now, DaysAgo(20), true, true, tc));
+    }
+
+    /// <summary>
+    /// 90+ days post-freeze: retention has drained the legacy; the successor is the only active rollup.
+    /// Routing must still reach the hourly tier.
+    /// </summary>
+    [Fact]
+    public void For_PostTrimStore_SuccessorFloorUsedWhenLegacyDrained()
+    {
+        // Legacy is fully drained; successor has 30/90 days of data.
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = DaysAgo(30),
+                [TimescaleSupport.QueryStatsIntervalDailyView]  = DaysAgo(90),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                ["query_stats"] = DaysAgo(4),
+            });
+
+        var tc = coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView);
+
+        Assert.Equal(DaysAgo(30), tc.HourlyFloorUtc);
+        Assert.Equal(DaysAgo(90), tc.DailyFloorUtc);
+        Assert.Equal(RetentionTier.Hourly, RetentionTierRouter.Resolve(Now, DaysAgo(20), true, true, tc));
+    }
+
+    /// <summary>
+    /// Pre-freeze store (legacy still has data, successor not yet present): the legacy floor is used unchanged.
+    /// The stitch must not disturb stores that never ran the freeze migration.
+    /// </summary>
+    [Fact]
+    public void For_PreFreezeStore_LegacyFloorUsedWhenSuccessorAbsent()
+    {
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsHourlyView] = DaysAgo(20),
+                [TimescaleSupport.QueryStatsDailyView]  = DaysAgo(60),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                ["query_stats"] = DaysAgo(4),
+            });
+
+        var tc = coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView);
+
+        Assert.Equal(DaysAgo(20), tc.HourlyFloorUtc);
+        Assert.Equal(DaysAgo(60), tc.DailyFloorUtc);
+    }
+
+    /// <summary>
+    /// Post-freeze store with BOTH legacy and successor data (stitch boundary period): the deeper (earlier)
+    /// floor of the two wins for each tier.
+    /// </summary>
+    [Fact]
+    public void For_StitchBoundary_DeeperFloorWins()
+    {
+        // Legacy has 40 days, successor has 10 days (just started filling after freeze).
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsHourlyView]         = DaysAgo(40),
+                [TimescaleSupport.QueryStatsDailyView]          = DaysAgo(80),
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = DaysAgo(10),
+                [TimescaleSupport.QueryStatsIntervalDailyView]  = DaysAgo(10),
+            },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                ["query_stats"] = DaysAgo(4),
+            });
+
+        var tc = coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView);
+
+        // Legacy is deeper — its floor wins.
+        Assert.Equal(DaysAgo(40), tc.HourlyFloorUtc);
+        Assert.Equal(DaysAgo(80), tc.DailyFloorUtc);
+
+        // A 30-day window (inside the legacy's 40-day reach) routes to Hourly.
+        Assert.Equal(RetentionTier.Hourly, RetentionTierRouter.Resolve(Now, DaysAgo(30), true, true, tc));
+    }
+
     /* ─────────────────────────── the drift guard ─────────────────────────── */
 
     /// <summary>
