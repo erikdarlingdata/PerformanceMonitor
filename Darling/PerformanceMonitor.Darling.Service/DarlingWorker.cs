@@ -1828,8 +1828,9 @@ public sealed class DarlingWorker : BackgroundService
 
         /* #4348: the one-time scrub of collected statement text (collect.pg_statement_text,
            collect.pg_blocking_edges) an older build stored before the shared sensitive-statement filter
-           existed. Same launch discipline as settingScrub immediately above — after migrations confirm
-           both target tables exist, not gated on TimescaleDB, drained with the rest of startup below. */
+           existed. Same launch discipline as the setting scrub immediately above — after migrations
+           confirm both target tables exist, not gated on TimescaleDB, drained with the rest of startup
+           below. */
         var statementTextScrub = RunPgStatementTextScrubAsync(postgres, stoppingToken);
 
         /* #4214 ruling 9: the once-per-start store host/settings profile log — host facts, pg_settings and
@@ -3490,8 +3491,8 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>
     /// Runs <see cref="PgStatementTextScrub.RunAsync"/> once (#4348), concurrently with the rest of startup.
     /// Same isolation as <see cref="RunPgSettingScrubAsync"/>: its own connection, its own catch, and a
-    /// store this cannot reach degrades to whatever plaintext it already had, never to a service that did
-    /// not start.
+    /// store this cannot reach retries the scrub at the next start, never blocking the service from
+    /// starting.
     /// </summary>
     private async Task RunPgStatementTextScrubAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
     {
@@ -3517,9 +3518,11 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Never the exception TEXT — just the exception type and SQLSTATE (when it is an NpgsqlException),
+               the same discipline PgStatementTextScrub's own per-server/per-day catches apply. */
             _logger.LogWarning(
-                "Postgres statement-text scrub (#4348) could not run — any row an older collector build stored unfiltered stays as it is until the next start retries: {Message}",
-                ex.Message);
+                "Postgres statement-text scrub (#4348) could not run ({ExceptionType}{SqlState}) — the scrub retries at the next start.",
+                ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
         }
     }
 
