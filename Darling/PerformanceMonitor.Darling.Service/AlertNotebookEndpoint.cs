@@ -372,8 +372,8 @@ internal static class AlertNotebookEndpoint
     /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
     /// conversion — every metric NOT named here keeps the byte-identical mechanical path. Keyed on the EXACT
     /// alert-engine <c>MetricName</c> strings (the same literals <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
-    /// keys on), case-insensitively, matching every other metric lookup on this endpoint.</summary>
-    /// <summary>Made <c>internal</c> (not private) so <see cref="Darling.Tests.AlertNotebookAuthoredTemplateTests"/>
+    /// keys on), case-insensitively, matching every other metric lookup on this endpoint.
+    /// Made <c>internal</c> (not private) so <see cref="Darling.Tests.AlertNotebookAuthoredTemplateTests"/>
     /// can call it directly via <c>InternalsVisibleTo</c> instead of reflection — the same visibility
     /// <see cref="MatchAlert"/> and <see cref="StatusFromHistory"/> already use for their own pins.</summary>
     internal static AuthoredTemplateEntry? AuthoredTemplate(string? metric)
