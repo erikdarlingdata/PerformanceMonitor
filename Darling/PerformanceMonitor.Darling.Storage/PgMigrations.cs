@@ -2232,8 +2232,7 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending
     /// (server, collector, key) — right for a stamp or a token, wrong here: a verdict row carries nine
     /// distinct fields a reader filters and displays independently (current value, derived value, source,
     /// file, line, verdict, detail), and cramming them into one text column would mean every reader,
-    /// including a remote MCP caller, parses app-defined JSON instead of running SQL against typed columns.
-    /// The dispatch for this change pre-approved exactly one migration for this shape.</para>
+    /// including a remote MCP caller, parses app-defined JSON instead of running SQL against typed columns.</para>
     ///
     /// <para><b>Why the owner must compute and store it, not a live per-read check</b> (#4215 ruling M2). The
     /// <c>mcp</c> and <c>viewer</c> roles get a NULL <c>pg_settings.sourcefile</c> and cannot read
