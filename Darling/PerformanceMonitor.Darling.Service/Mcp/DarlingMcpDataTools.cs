@@ -572,16 +572,31 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var rows = await DarlingDataReader.GetTopQueriesByCpuAsync(
+            var routed = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
                 postgres, resolved.ServerId, requestedStart, now, top, database_name, rollUpByHostObject: rollUp, minMaxDop: minMaxDop, cancellationToken: cancellationToken);
+            var rows = routed.Rows;
+            var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
+
+            /* #4231 stage 3: hourly-routed rows have no host_object split and no per-row text dimension —
+               query_text is resolved with a separate follow-up, not the raw LATERAL's, and host_object/
+               distinct_texts are always null/0 at that tier (see GetTopQueriesByCpuHourlyAsync). Stated once
+               here rather than per row, since it is a property of the tier, not the row. */
+            var precisionNote = tierUsed == "hourly"
+                ? "hourly-rollup rows have no host-object split; proc-hosted callers that share a query_hash are combined"
+                : null;
 
             /* #4231: what the raw tier actually held, beside what was asked for. Rows above are top-N by CPU,
                not by time, so their timestamps say nothing about how far back the window reached — raw
                query_stats is dropped at 4 days on a store with the rollups armed, and a 7-day ask silently
-               got ~4. Same probe and the same #2364 disclosure get_query_store_top already makes. */
-            var floor = await DarlingDataReader.GetQueryStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
-            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
-            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+               got ~4. Same probe and the same #2364 disclosure get_query_store_top already makes.
+               #4231 stage 3: only meaningful for the RAW tier — an hourly-routed read did not touch
+               query_stats at all, so the raw floor probe would answer a fact about a table this read never
+               consulted; skip it and report window_truncated = false there. */
+            DateTime? floor = tierUsed == "raw"
+                ? await DarlingDataReader.GetQueryStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken)
+                : null;
+            var effectiveStart = tierUsed == "raw" ? RawWindowFloor.EffectiveStart(floor, requestedStart) : requestedStart;
+            var windowTruncated = tierUsed == "raw" && RawWindowFloor.IsTruncated(floor, requestedStart);
 
             if (rows.Count == 0)
             {
@@ -679,6 +694,11 @@ public sealed class DarlingMcpDataTools
                 group_by = rollUp ? "host_object" : "query_hash",
                 /* #3541 A13: the filter that shaped the population, stated on the payload; null when none. */
                 filter_applied = filterApplied,
+                /* #4231 stage 3: which tier answered — "raw" or "hourly" (never bare truncated/degraded
+                   vocabulary; see McpHelpers.WindowTruncatedDescription's own rule). precision_note explains
+                   what an hourly-routed row is missing versus what raw would have returned. */
+                tier_used = tierUsed,
+                precision_note = precisionNote,
                 cpu_attribution = new
                 {
                     ranked_cpu_seconds = attribution.RankedCpuSeconds,
