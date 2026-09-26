@@ -66,6 +66,11 @@ public static class PgSettingRedactor
 
     private const string Mask = "********";
 
+    /// <summary>A sample that reaches every pattern's match step (#4348), used only to warm each compiled
+    /// pattern's JIT ahead of the first real <see cref="Redact"/> call. Holds placeholder values only.</summary>
+    private const string WarmupSample =
+        "password=x sslpassword=y postgresql://u:p@h/?password=z&sig=s&X-Amz-Signature=t \"password\" = \"q\" --password w sshpass -p v curl -u a:b";
+
     /// <summary>
     /// A per-regex match-time bound (#4348): a pathological value (a long run with no separator, feeding one
     /// of the lookaround-heavy patterns below) could otherwise pin the engine backtracking well past the
@@ -97,7 +102,7 @@ public static class PgSettingRedactor
     /// <summary>Wraps one lookaround-bearing pattern so it always runs under a match timeout, while still
     /// letting a test force a much shorter one via <see cref="MatchTimeoutForTest"/> without rebuilding
     /// every call on the production path.</summary>
-    private sealed class TimeBoundPattern
+    internal sealed class TimeBoundPattern
     {
         private readonly string _pattern;
         private readonly RegexOptions _options;
@@ -115,24 +120,30 @@ public static class PgSettingRedactor
                 ? new Regex(_pattern, _options, overrideTimeout)
                 : _default).Replace(input, evaluator);
 
-        /// <summary>Runs the DEFAULT (production-timeout) instance once on a short, benign string, outside
-        /// any timed accounting the caller does (#4348): a <see cref="RegexOptions.Compiled"/> pattern's IL
-        /// is JITted on its first invocation, and on a busy CI runner that JIT cost alone can exceed the
-        /// 100&#160;ms <see cref="MatchTimeout"/>, turning the first real call on a short, well-formed value
-        /// into a spurious whole-value mask. Warming here, at type initialisation, pays that cost once,
-        /// before the type is usable at all, so the first real <see cref="Redact"/> call never has to. A
-        /// timeout during warmup (the JIT itself, on an especially slow runner, taking longer than the
-        /// timeout) is swallowed — warmup exists to pre-pay JIT cost, not to prove the pattern is fast.</summary>
+        /// <summary>Runs the DEFAULT (production-timeout) instance once on a sample that reaches every
+        /// pattern's match step, outside any timed accounting the caller does (#4348): a
+        /// <see cref="RegexOptions.Compiled"/> pattern's IL is JITted on its first invocation, and on a busy
+        /// CI runner that JIT cost alone can exceed the 100&#160;ms <see cref="MatchTimeout"/>, turning the
+        /// first real call on a short, well-formed value into a spurious whole-value mask. Warming here, at
+        /// type initialisation, pays that cost once, before the type is usable at all, so the first real
+        /// <see cref="Redact"/> call never has to. A timeout during warmup (the JIT itself, on an especially
+        /// slow runner, taking longer than the timeout) is swallowed — warmup exists to pre-pay JIT cost,
+        /// not to prove the pattern is fast.</summary>
         public void Warmup()
         {
             try
             {
-                _default.IsMatch("x");
+                _default.IsMatch(WarmupSample);
             }
             catch (RegexMatchTimeoutException)
             {
             }
         }
+
+        /// <summary>Runs <see cref="Warmup"/>'s sample through this pattern and reports whether it produced
+        /// at least one match (#4348) — used only by the test that pins that warmup reaches every pattern's
+        /// match step, not only its scan.</summary>
+        internal bool WarmupSampleMatches() => _default.IsMatch(WarmupSample);
     }
 
     /// <summary>Names whose value is masked in full when the setting is extension-scoped (#4348), or when a
@@ -317,7 +328,7 @@ public static class PgSettingRedactor
 
         try
         {
-            UriUserInfoPassword.IsMatch("x");
+            UriUserInfoPassword.IsMatch(WarmupSample);
         }
         catch (RegexMatchTimeoutException)
         {
@@ -325,6 +336,22 @@ public static class PgSettingRedactor
 
         WarmedUp = true;
     }
+
+    /// <summary>Every <see cref="TimeBoundPattern"/> this type warms at type initialisation (#4348) —
+    /// exposed only so a test can pin that the warmup sample actually reaches each one's match step, not
+    /// only its scan.</summary>
+    internal static readonly TimeBoundPattern[] WarmedPatterns =
+    {
+        LibpqPasswordKeyword,
+        UriQueryPassword,
+        AssignmentSecretName,
+        OptionSecretSpaced,
+        UriQueryKeyAnyEncoding,
+        UriQuerySignature,
+        QuotedSpacedAssignment,
+        CurlUserColon,
+        SshpassOption,
+    };
 
     private static bool IsQueryKeySecret(string rawKey)
     {

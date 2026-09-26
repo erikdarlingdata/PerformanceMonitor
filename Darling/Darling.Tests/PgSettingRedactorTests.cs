@@ -536,4 +536,21 @@ public sealed class PgSettingRedactorTests
 
         Assert.Equal("PGPASSWORD=******** psql -c 'select 1'", result);
     }
+
+    /// <summary>
+    /// #4348: warmup must reach each pattern's MATCH step, not only its scan (<c>TryFindNextPossibleStartingPosition</c>
+    /// finding a candidate but <c>TryMatchAtCurrentPosition</c> never running). This pins that the warmup
+    /// sample every <see cref="PgSettingRedactor.TimeBoundPattern"/> is warmed with actually produces at
+    /// least one match for EVERY pattern in the list, so the match step is exercised, not skipped.
+    /// </summary>
+    [Fact]
+    public void WarmupSample_MatchesEveryWarmedPattern()
+    {
+        Assert.NotEmpty(PgSettingRedactor.WarmedPatterns);
+
+        foreach (var pattern in PgSettingRedactor.WarmedPatterns)
+        {
+            Assert.True(pattern.WarmupSampleMatches());
+        }
+    }
 }
