@@ -54,6 +54,9 @@ public sealed class StartupHostProfileLogTests
             new HostSettingProfile("shared_buffers", "2048MB", 2048, "v8 (#4214 managed block)", "2048MB", 2048, HostSettingVerdict.Matches),
             new HostSettingProfile("max_connections", "100", 100, "v4 (#4214 managed block)", "200", 200, HostSettingVerdict.StaleAfterHardwareChange),
         ],
+        /* Same sentinel trick as Store above (#4214 part 2b): a startup profile never probes cloud identity
+           (ruling 3), so a future edit that starts printing it here fails this test visibly. */
+        Cloud = new CloudIdentity("SHOULD-NEVER-PRINT-aws", "SHOULD-NEVER-PRINT-instance"),
     };
 
     [Fact]

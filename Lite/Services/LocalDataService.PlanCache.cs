@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -25,7 +26,14 @@ public partial class LocalDataService
 
     /// <summary>
     /// The Plan Cache size trend: single-use vs multi-use cache size (MB) per collection, summed across
-    /// every (cacheobjtype, objtype) group — the Dashboard's Plan Cache chart shape (single-use bloat).
+    /// every (cacheobjtype, objtype) group — the Dashboard's Plan Cache chart shape (single-use bloat),
+    /// bucketed to <see cref="TrendBudget.Chart"/>'s point budget (#4234). The per-collection sum (inner
+    /// <c>per_collection</c>) is unchanged; the outer bucket AVERAGES that sum across the collections a
+    /// bucket holds (a gauge, not an accumulating counter). A bucket holding exactly one physical
+    /// collection is stamped at that collection's own raw time rather than the bucket grid when EVERY
+    /// bucket this call returned is such a singleton (ruling item 3). 2,016 rows over 7 days at the
+    /// collector's 5-minute cadence, two objtype groups per collection, with no cap, is the issue's own
+    /// measured number.
     /// </summary>
     public async Task<List<PlanCacheTrendPoint>> GetPlanCacheTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -35,36 +43,78 @@ public partial class LocalDataService
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
 
-        command.CommandText = @"
-SELECT
-    collection_time,
-    CAST(SUM(single_use_size_mb) AS DOUBLE PRECISION) AS single_use_mb,
-    CAST(SUM(multi_use_size_mb) AS DOUBLE PRECISION) AS multi_use_mb
-FROM v_plan_cache_stats
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-GROUP BY collection_time
-ORDER BY collection_time";
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = PlanCacheTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<PlanCacheTrendPoint>();
+        var rows = new List<(DateTime BucketStart, double SingleUse, double MultiUse, DateTime FirstCollectionTime, long CollectionCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var collectionCount = ToInt64(reader.GetValue(4));
+            if (collectionCount != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetDateTime(0),
+                reader.IsDBNull(1) ? 0 : ToDouble(reader.GetValue(1)),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2)),
+                reader.GetDateTime(3),
+                collectionCount));
+        }
+
+        var items = new List<PlanCacheTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new PlanCacheTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                SingleUseSizeMb = reader.IsDBNull(1) ? 0 : reader.GetDouble(1),
-                MultiUseSizeMb = reader.IsDBNull(2) ? 0 : reader.GetDouble(2)
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                SingleUseSizeMb = row.SingleUse,
+                MultiUseSizeMb = row.MultiUse
             });
         }
 
         return items;
     }
+
+    /// <summary>
+    /// The bucketed plan-cache trend statement text (#4234), pulled out of
+    /// <see cref="GetPlanCacheTrendAsync"/> so its shape is checkable without a live DuckDB. $1
+    /// server_id, $2/$3 the UTC window (also the GREATEST clamp so the first bucket never renders
+    /// earlier than the window), $4 the bucket width in minutes.
+    /// </summary>
+    internal static string PlanCacheTrendSql => $@"
+WITH per_collection AS
+(
+    SELECT
+        collection_time,
+        CAST(SUM(single_use_size_mb) AS DOUBLE PRECISION) AS single_use_mb,
+        CAST(SUM(multi_use_size_mb) AS DOUBLE PRECISION) AS multi_use_mb
+    FROM v_plan_cache_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+    GROUP BY collection_time
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(single_use_mb) AS single_use_mb,
+    AVG(multi_use_mb) AS multi_use_mb,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM per_collection
+GROUP BY 1
+ORDER BY 1";
 
     /// <summary>
     /// The Plan Cache latest-snapshot composition grid: every (cacheobjtype, objtype) group captured at

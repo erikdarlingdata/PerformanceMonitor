@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Common;
@@ -46,6 +47,12 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// </summary>
 internal static class DarlingServerResolver
 {
+    /// <summary>The registry-read fault sentence's fixed prefix (#4283 H2) — a constant so the web surface's
+    /// <see cref="PerformanceMonitor.Darling.Service.DarlingWebEndpoints.ClassifyToolResponse"/> and the
+    /// triage note/card can recognize this specific store fault and route it through <c>ServerErrorResult</c>
+    /// instead of leaving it a bare 400 string, without the two sides drifting on the literal text.</summary>
+    internal const string RegistryReadFaultPrefix = "Could not read the servers registry from the Postgres store: ";
+
     /// <summary>One enabled row from the servers registry — the resolver's pure-matching input.</summary>
     internal sealed record RegisteredServer(int ServerId, string ServerName, string? DisplayName);
 
@@ -72,9 +79,10 @@ ORDER BY server_name";
     /// </summary>
     public static async Task<((int ServerId, string ServerName) resolved, string? error)> ResolveOrErrorAsync(
         NpgsqlDataSource postgres,
-        string? serverName)
+        string? serverName,
+        CancellationToken cancellationToken = default)
     {
-        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres);
+        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {
             return (default, fault);
@@ -90,15 +98,19 @@ ORDER BY server_name";
     /// the caller's request, and this seam knows no tool name to put under <c>hints.operation</c>. It maps to
     /// the web surface's bare-string arm, which is the pre-#3739 behaviour, unchanged.
     /// </summary>
-    private static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadEnabledOrFaultAsync(NpgsqlDataSource postgres)
+    private static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadEnabledOrFaultAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         try
         {
-            return (await LoadEnabledAsync(postgres), null);
+            return (await LoadEnabledAsync(postgres, cancellationToken), null);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return (new List<RegisteredServer>(), $"Could not read the servers registry from the Postgres store: {ex.Message}");
+            /* #4203: an abandoned request's cancellation must reach the caller as OperationCanceledException,
+               not be folded into a fault sentence here — the web handler's own catch tells the two apart to
+               decide whether this is a quiet abandonment or a real registry-read failure. */
+            return (new List<RegisteredServer>(), $"{RegistryReadFaultPrefix}{ex.Message}");
         }
     }
 
@@ -251,9 +263,9 @@ ORDER BY server_name";
     /// accept a <c>dedup_key</c> need both, and reading the registry twice could disagree with itself.
     /// </summary>
     public static async Task<((int ServerId, string ServerName, string FingerprintName) resolved, string? error)>
-        ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName)
+        ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName, CancellationToken cancellationToken = default)
     {
-        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres);
+        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {
             return (default, fault);
@@ -317,16 +329,17 @@ ORDER BY server_name";
     }
 
     /// <summary>Reads the enabled rows from the servers registry.</summary>
-    internal static async Task<List<RegisteredServer>> LoadEnabledAsync(NpgsqlDataSource postgres)
+    internal static async Task<List<RegisteredServer>> LoadEnabledAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         var servers = new List<RegisteredServer>();
 
-        await using var connection = await postgres.OpenConnectionAsync();
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(LoadEnabledServersSql, connection);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        using var reader = await command.ExecuteReaderAsync();
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-        while (await reader.ReadAsync())
+        while (await reader.ReadAsync(cancellationToken))
         {
             servers.Add(new RegisteredServer(
                 reader.GetInt32(0),

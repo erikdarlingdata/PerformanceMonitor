@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -51,9 +52,10 @@ public sealed class DarlingMcpQueryStoreRegressionTools
         [Description("Limit to one database. Omit for all databases.")] string? database_name = null,
         [Description("Maximum rows to return, worst first. Default 30, sized to keep a default call under the shared response budget. Read truncated to know whether the window held more.")] int limit = 30,
         [Description("Return each row's full query text instead of a 240-character preview. Default false.")] bool full_text = false,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
@@ -73,10 +75,10 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 the one field whose whole reason for existing is that the cap should not have to be inferred.
             */
             var rows = await DarlingQueryStoreRegressionReader.GetQueryStoreRegressionsAsync(
-                postgres, resolved.ServerId, start, end, database_name, limit + 1, baselineStart);
+                postgres, resolved.ServerId, start, end, database_name, limit + 1, baselineStart, cancellationToken);
 
             if (rows.Count == 0)
-                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, baselineStart, hours_back);
+                return await EmptyAsync(postgres, resolved.ServerName, resolved.ServerId, start, end, baselineStart, hours_back, cancellationToken);
 
             var truncated = rows.Count > limit;
             var shown = rows.Take(limit);
@@ -137,7 +139,7 @@ public sealed class DarlingMcpQueryStoreRegressionTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_query_store_regressions", ex);
         }
@@ -184,14 +186,15 @@ public sealed class DarlingMcpQueryStoreRegressionTools
     /// two booleans, run only on this path.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, DateTime baselineStart, int hours_back)
+        NpgsqlDataSource postgres, string serverName, int serverId, DateTime start, DateTime end, DateTime baselineStart, int hours_back,
+        CancellationToken cancellationToken)
     {
         var (hasBaseline, hasRecent) = await DarlingQueryStoreRegressionReader.GetCoverageAsync(
-            postgres, serverId, start, end, baselineStart);
+            postgres, serverId, start, end, baselineStart, cancellationToken);
 
         if (!hasBaseline && !hasRecent)
         {
-            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_store")
+            return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, serverId, serverName, "query_store", cancellationToken)
                 ?? McpHelpers.Status(
                     "unavailable",
                     $"No Query Store data has EVER been collected for {serverName}, so this is NOT a report of zero regressions — there is nothing to compare. Query Store may be OFF on this server's databases, which get_query_store_health will say; otherwise check that collection is running for this server.");

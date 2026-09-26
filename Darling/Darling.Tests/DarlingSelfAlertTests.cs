@@ -1223,13 +1223,15 @@ public sealed class DarlingSelfAlertTests
     /* ---------------- #4215 A1d: a failed rejected-settings read must not false-resolve ---------------- */
 
     /// <summary>
-    /// THE PIN for the coordinator's A1d ruling. An active alert whose ONLY standing condition is a rejected
-    /// setting must stay active — never resolve — when the next tick's read of the rejected-verdict names
-    /// fails (<c>RejectedSettingNames</c> null). Before the fix, <c>ReadRejectedManagedConfSettingNamesAsync</c>
-    /// collapsed a failed read to an empty list, which made <c>RejectedSettingNames.Count == 0</c> read as
-    /// "no rejected settings" — indistinguishable from a genuine clear — and this test would have shown a
-    /// false "Store Settings Resolved" on the failed-read tick. Fixed: it fires again by the second tick's
-    /// standing check and never writes a resolution.
+    /// THE PIN for the coordinator's A1d ruling (comment 5840697338, item 2). An active alert whose ONLY
+    /// standing condition is a rejected setting must stay active — never resolve, and never re-fire with
+    /// stale names — when the next tick's read of the rejected-verdict names fails (<c>RejectedSettingNames</c>
+    /// null). Null means UNKNOWN, not empty: the rejected condition neither fires nor resolves on its own,
+    /// and with the other two conditions also false, the family keeps its CURRENT state exactly as it stood.
+    /// Before the fix, <c>ReadRejectedManagedConfSettingNamesAsync</c> collapsed a failed read to an empty
+    /// list, which made <c>RejectedSettingNames.Count == 0</c> read as "no rejected settings" —
+    /// indistinguishable from a genuine clear — and this test would have shown a false "Store Settings
+    /// Resolved" on the failed-read tick.
     /// </summary>
     [Fact]
     public async Task StoreSettings_RejectedValue_StaysActive_WhenTheNextReadFails()
@@ -1242,20 +1244,20 @@ public sealed class DarlingSelfAlertTests
         Assert.Single(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
 
-        // Tick 2 (past the refire interval): the read FAILED (null), not empty. Must NOT resolve.
+        // Tick 2 (past the refire interval): the read FAILED (null), not empty. Must stay active with
+        // NEITHER a resolve NOR a stale re-fire — the family's current state holds untouched.
         h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
         await e.ApplyStoreSettingsAsync(
             new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
 
-        Assert.Equal(2, h.Deliverer.Outcomes.Count);   // re-fired, not resolved
-        Assert.Empty(h.History.Records);               // no resolution written
-        var refired = h.Deliverer.Outcomes[1];
-        Assert.Contains("shared_buffers", refired.DetailText);   // last-known name carried forward
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire on unknown-name data
+        Assert.Empty(h.History.Records);       // no resolution written
     }
 
     /// <summary>
     /// The other half of the pin: the family DOES resolve, but only once a SUCCESSFUL read comes back with
-    /// no rejected rows — a failed read in between must not have already cleared the last-known state.
+    /// no rejected rows — a failed read in between must not have resolved it, and must not have re-fired it
+    /// either.
     /// </summary>
     [Fact]
     public async Task StoreSettings_RejectedValue_Resolves_OnlyAfterASuccessfulEmptyRead()
@@ -1266,16 +1268,93 @@ public sealed class DarlingSelfAlertTests
         await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
         Assert.Single(h.Deliverer.Outcomes);
 
-        // A failed read in between: still active, still not resolved.
+        // A failed read in between: still active, still not resolved, and not re-fired.
         h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
         await e.ApplyStoreSettingsAsync(
             new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
         Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
 
         // A successful read that comes back empty: NOW it resolves.
         await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
         var resolution = Assert.Single(h.History.Records);
         Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>
+    /// NEW pin (a): the hand-edit case. An alert active ONLY because of the hand-edit condition, with the
+    /// last good rejected read empty (no rejected names ever recorded). The hand edit clears AND the
+    /// rejected read fails in the same tick — the ruling requires NO resolve, because the rejected
+    /// condition's unknown state can't decide anything either way and the family must keep its current
+    /// (active) state. The next tick, a SUCCESSFUL empty rejected read alongside the still-clear hand edit
+    /// resolves it.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_HandEditClears_ButRejectedReadFails_StaysActive_ThenResolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        // Tick 1: hand-edited only, rejected read succeeded empty. Fires.
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        // Tick 2: the hand edit is gone AND the rejected read failed (null). Must NOT resolve.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Tick 3: the hand edit is still gone and a SUCCESSFUL empty rejected read arrives. Resolves.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>
+    /// NEW pin (b): no stale re-fire. An active alert (rejected-only), then consecutive FAILED rejected
+    /// reads across multiple refire intervals, must give no new fire or re-fire rows at all — the ruling
+    /// bars re-stating unknown data as if it were current.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_RejectedValue_ConsecutiveFailedReads_NeverReFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        for (var i = 0; i < 3; i++)
+        {
+            h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+            await e.ApplyStoreSettingsAsync(
+                new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire across any of the failed-read ticks
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// NEW pin (c): inactive stays inactive. A family with NOTHING standing (no last-good-conf fallback, no
+    /// hand edit) and a FAILED rejected read must not fire — unknown rejected names can't manufacture a
+    /// condition that was never there.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_Inactive_RejectedReadFails_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
     }
 
     /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */

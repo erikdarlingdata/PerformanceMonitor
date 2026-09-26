@@ -1,0 +1,176 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using Xunit;
+using static Darling.Tests.RepoFile;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #4222 (client slice c): source-text pins over <c>wwwroot/js/pages/triage.js</c> and
+/// <c>wwwroot/js/pages/views.js</c>'s alert-notebook render path. There is no JS test runner in this
+/// repository, so these pin the SHAPE of the shipped source the way <see cref="ViewTemplatesTests"/> and
+/// <see cref="ServerPageTabsTests"/> already do for this same pair of files — a rewrite that drops one of
+/// these properties changes visible behaviour without failing the C# build otherwise.
+///
+/// Pinned properties (the brief's own list):
+///  - the triage alert path renders through the SAME <c>renderNotebookDoc</c> the saved-view page uses, with
+///    an in-memory (not saved) definition;
+///  - the alert render path never calls <c>/api/fleet</c> (no fleet scope picker \u2014 the server is fixed);
+///  - a max-3 in-flight limiter exists and gates each alert-mode read cell's load;
+///  - "Save as notebook" POSTs to <c>/api/views</c> carrying the provenance string.
+/// </summary>
+public sealed class AlertNotebookRenderClientTests
+{
+    private const string TriagePath = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/triage.js";
+    private const string ViewsPath = "Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/views.js";
+
+    [Fact]
+    public void Triage_RendersTheAlertNotebook_ThroughTheSharedRenderNotebookDocWithAnInMemoryDefinition()
+    {
+        var triage = ReadRepoFile(TriagePath);
+
+        Assert.Contains("import { renderNotebookDoc } from \"./views.js\";", triage, StringComparison.Ordinal);
+        Assert.Contains("mode: \"alert\"", triage, StringComparison.Ordinal);
+        Assert.Contains("definition: def", triage, StringComparison.Ordinal);
+        Assert.Contains("/api/alert-notebook", triage, StringComparison.Ordinal);
+
+        // #2710: /api/triage stays the fallback for one release, on a 404 from the new endpoint.
+        Assert.Contains("/api/triage", triage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Triage_AlertNotebookPath_NeverReadsApiFleet()
+    {
+        var triage = ReadRepoFile(TriagePath);
+
+        Assert.DoesNotContain("/api/fleet", triage, StringComparison.Ordinal);
+        Assert.DoesNotContain("apiGetFleet", triage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Views_AlertMode_SkipsTheFleetScopeBar()
+    {
+        var views = ReadRepoFile(ViewsPath);
+
+        // The alert branch of renderNotebookDoc must not call fleetOptions/apiGetFleet on its own path \u2014
+        // only the saved-view (`!isAlert`) branch may.
+        var alertBranchStart = views.IndexOf("if (!isAlert) {", StringComparison.Ordinal);
+        Assert.True(alertBranchStart > 0, "Expected renderNotebookDoc's saved-mode scope-bar branch guarded by `if (!isAlert)`.");
+    }
+
+    [Fact]
+    public void Views_HasAMaxThreeInFlightLimiter_GatingAlertReadCells()
+    {
+        var views = ReadRepoFile(ViewsPath);
+
+        Assert.Contains("class InFlightLimiter", views, StringComparison.Ordinal);
+        Assert.Contains("new InFlightLimiter(3)", views, StringComparison.Ordinal);
+        Assert.Contains("limiter.acquire()", views, StringComparison.Ordinal);
+        Assert.Contains("limiter.release()", views, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Views_SaveAsNotebook_PostsToApiViews_WithTheProvenanceString()
+    {
+        var views = ReadRepoFile(ViewsPath);
+
+        Assert.Contains("function saveAsNotebookButton(", views, StringComparison.Ordinal);
+        Assert.Contains("api.createView({ name, description: provenance || null, definition });", views, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Triage_ProvenanceString_NamesTemplateMetricServerAndAt()
+    {
+        var triage = ReadRepoFile(TriagePath);
+
+        Assert.Contains("\"from alert template \"", triage, StringComparison.Ordinal);
+        Assert.Contains("t.template && t.template.id", triage, StringComparison.Ordinal);
+        Assert.Contains("t.template && t.template.version", triage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// "Open live" drops each read cell's <c>as_of</c> pin (today's only per-cell absolute-window field in the
+    /// #4366 shape \u2014 no composed cells, no per-cell `range`, yet) rather than a client-authored recompute.
+    /// </summary>
+    [Fact]
+    public void Triage_OpenLive_DropsTheReadCellsAsOfParam()
+    {
+        var triage = ReadRepoFile(TriagePath);
+
+        Assert.Contains("function stripAsOf(", triage, StringComparison.Ordinal);
+        Assert.Contains("as_of", triage, StringComparison.Ordinal);
+        Assert.Contains("onOpenLive: () => { def = stripAsOf(def); paint(); }", triage, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4368: the header cell must render current_value/threshold_value/detail_text — the endpoint's alert
+    /// node carries all three (AlertNotebookEndpoint.cs's AlertRowNode), and the header dropped them entirely
+    /// before this slice. Pinned through <c>el()</c>'s text path only (R4): a rewrite that switches either
+    /// field to <c>innerHTML</c> or a template string must fail this build, not just an XSS review.
+    /// </summary>
+    [Fact]
+    public void Views_AlertHeaderCell_RendersValueThresholdAndDetailText_ThroughElsTextPath()
+    {
+        var views = ReadRepoFile(ViewsPath);
+
+        Assert.Contains("a.current_value", views, StringComparison.Ordinal);
+        Assert.Contains("a.threshold_value", views, StringComparison.Ordinal);
+        Assert.Contains("a.detail_text", views, StringComparison.Ordinal);
+
+        // The detail_text line must go through el()'s { text: ... } prop (textContent), never innerHTML.
+        Assert.Contains("el(\"pre\", { class: \"code\", text: a.detail_text })", views, StringComparison.Ordinal);
+
+        // Scope the innerHTML ban to renderAlertHeaderCell's own body — the file's header comment (R4)
+        // says "never innerHTML" in prose, which the whole-file assertion this replaces was tripping on.
+        var lf = ReadRepoFileLf(ViewsPath);
+        var start = lf.IndexOf("function renderAlertHeaderCell(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "renderAlertHeaderCell not found in views.js");
+        var nextFn = lf.IndexOf("\nfunction ", start + 1, StringComparison.Ordinal);
+        Assert.True(nextFn > start, "could not find the next top-level function after renderAlertHeaderCell");
+        var body = lf.Substring(start, nextFn - start);
+        var bodyWithoutComments = StripJsComments(body);
+        Assert.DoesNotContain(".innerHTML", bodyWithoutComments, StringComparison.Ordinal);
+        Assert.DoesNotContain("innerHTML =", bodyWithoutComments, StringComparison.Ordinal);
+        Assert.DoesNotContain("insertAdjacentHTML", bodyWithoutComments, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Strips `//` line comments and `/* ... */` block comments so a pin can check for real code use of a
+    /// pattern without tripping on prose that happens to mention it (e.g. "never innerHTML" in a comment).
+    /// Not a full JS parser — good enough for this file, which has no such pattern inside a string literal.
+    /// </summary>
+    private static string StripJsComments(string source)
+    {
+        var withoutBlockComments = System.Text.RegularExpressions.Regex.Replace(
+            source, @"/\*.*?\*/", string.Empty, System.Text.RegularExpressions.RegexOptions.Singleline);
+        var withoutLineComments = System.Text.RegularExpressions.Regex.Replace(
+            withoutBlockComments, @"//[^\n]*", string.Empty);
+        return withoutLineComments;
+    }
+
+    /// <summary>
+    /// #4368: a route change (hashchange off #/triage, or navigating away entirely) while an alert-mode read
+    /// cell's slot is queued or its fetch is outstanding must not paint a stale result into a detached holder.
+    /// The fetch and the limiter's release still have to run either way — only the mount is guarded.
+    /// </summary>
+    [Fact]
+    public void Views_AlertModeReadCells_GuardAgainstRenderingAfterARouteChange()
+    {
+        var views = ReadRepoFile(ViewsPath);
+
+        Assert.Contains("opts.isLive", views, StringComparison.Ordinal);
+        Assert.Contains("const stillLive = !opts.isLive || opts.isLive();", views, StringComparison.Ordinal);
+        Assert.Contains("if (stillLive) mount(holder, rendered);", views, StringComparison.Ordinal);
+
+        var triage = ReadRepoFile(TriagePath);
+        Assert.Contains("const isLive = () => location.hash === ourHash;", triage, StringComparison.Ordinal);
+        Assert.Contains("isLive,", triage, StringComparison.Ordinal);
+    }
+}

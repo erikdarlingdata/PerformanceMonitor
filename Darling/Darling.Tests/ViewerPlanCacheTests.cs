@@ -27,7 +27,7 @@ namespace Darling.Tests;
 public sealed class ViewerPlanCacheSqlTests
 {
     [Fact]
-    public void PlanCacheTrendSql_SumsSingleVsMultiUseMb_PerCollection_OverTheWindow()
+    public void PlanCacheTrendSql_SumsSingleVsMultiUseMb_PerCollection_ThenBucketed_OrderedByBucket()
     {
         var sql = ViewerDataService.PlanCacheTrendSql;
 
@@ -38,7 +38,17 @@ public sealed class ViewerPlanCacheSqlTests
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
+
+        /* #4349: the per_collection CTE still groups by collection_time, but the outer read
+         * buckets those rows by bucket_start and orders the bucketed result, not the raw rows. */
+        Assert.Contains("AS bucket_start", sql, StringComparison.Ordinal);
+
+        var normalized = sql.ReplaceLineEndings("\n");
+        var outer = normalized[(normalized.LastIndexOf("\nFROM ", StringComparison.Ordinal) + 1)..];
+        var groupByIndex = outer.IndexOf("GROUP BY 1", StringComparison.Ordinal);
+        var orderByIndex = outer.IndexOf("ORDER BY 1", StringComparison.Ordinal);
+        Assert.True(groupByIndex >= 0, "expected GROUP BY 1 in the outer read");
+        Assert.True(orderByIndex > groupByIndex, "expected ORDER BY 1 to follow GROUP BY 1 in the outer read");
     }
 
     [Fact]

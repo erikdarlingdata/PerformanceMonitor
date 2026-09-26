@@ -4521,7 +4521,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="ManagedConfWriteResult.HandEdited"/>) — nothing persists them, so they are re-derived from
     /// the writer every start, the same way <see cref="StoreUpgradeReport"/> already is.
     /// <paramref name="RejectedSettingNames"/> is the one fact that IS store-backed: every
-    /// <see cref="HostSettingVerdict.RejectedValue"/> row <c>collect.managed_conf_verdicts</c> (V144) is
+    /// <see cref="HostSettingVerdict.RejectedValue"/> row <c>collect.managed_conf_verdicts</c> (V146) is
     /// currently holding, read fresh each tick since a rejected value fixed by a later start replaces that
     /// row without this process restarting. <c>null</c> means the read FAILED this tick — unknown, not
     /// empty — so the evaluator neither fires nor resolves on this condition alone and instead keeps
@@ -4537,13 +4537,6 @@ internal sealed class DarlingSelfAlertEvaluator
 
     private readonly ConcurrentDictionary<string, bool> _activeStoreSettings = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastStoreSettingsAlert = new();
-
-    /// <summary>The last KNOWN rejected-setting-name list for the store-settings family — updated only on a
-    /// successful read (<see cref="StoreSettingsReport.RejectedSettingNames"/> non-null), including a
-    /// successful read that came back empty. A failed read (<c>null</c>) leaves this untouched, so the
-    /// rejected-settings condition holds its last known state across a read failure instead of collapsing to
-    /// "clear" — the A1d false-resolve fix.</summary>
-    private readonly ConcurrentDictionary<string, IReadOnlyList<string>> _lastKnownRejectedSettingNames = new();
 
     /// <summary>The fixed key for the fleet-level store-settings edge (not a real server); non-numeric so the
     /// deliverer's #1236 int.TryParse override no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
@@ -4632,19 +4625,29 @@ internal sealed class DarlingSelfAlertEvaluator
             reasons.Add("darling-managed.conf is hand-edited, and the edit is being kept in force rather than overwritten");
         }
 
-        /* #4215 A1d: null means the read FAILED this tick — unknown, not empty — so this condition keeps its
-           LAST KNOWN state (whatever the previous successful read found) rather than either firing fresh or
-           clearing. A successful read, including one that comes back empty, always overwrites the last-known
-           value; a failed one never does. */
-        var rejectedSettingNames = report.RejectedSettingNames is not null
-            ? _lastKnownRejectedSettingNames[StoreSettingsKey] = report.RejectedSettingNames
-            : _lastKnownRejectedSettingNames.GetValueOrDefault(StoreSettingsKey, []);
+        /* #4215 A1d (coordinator ruling on comment 5840697338, item 2): null means the read FAILED this
+           tick — UNKNOWN, not empty. An unknown rejected condition neither fires nor resolves on its own; it
+           keeps the family's CURRENT state and lets the other two conditions decide. If either of those is
+           already true, the family is firing regardless of what the rejected read says, so fall through to
+           the normal fire/re-state path below without ever stating rejected names we didn't read. If both are
+           false, there is nothing else to decide this tick: return without touching _activeStoreSettings or
+           _lastStoreSettingsAlert, so an active alert stays active (no resolve, no stale re-fire) and an
+           inactive family stays inactive (no fire). A successful read — including one that comes back empty —
+           always states exactly what it found. */
+        var otherConditionsActive = reasons.Count > 0;
 
-        if (rejectedSettingNames.Count > 0)
+        if (report.RejectedSettingNames is null)
         {
-            var rejectedList = string.Join(", ", rejectedSettingNames);
+            if (!otherConditionsActive)
+            {
+                return;
+            }
+        }
+        else if (report.RejectedSettingNames.Count > 0)
+        {
+            var rejectedList = string.Join(", ", report.RejectedSettingNames);
             reasons.Add(string.Create(CultureInfo.InvariantCulture,
-                $"PostgreSQL rejected the managed value for {rejectedSettingNames.Count} owned setting(s): {rejectedList}"));
+                $"PostgreSQL rejected the managed value for {report.RejectedSettingNames.Count} owned setting(s): {rejectedList}"));
         }
 
         if (reasons.Count == 0)

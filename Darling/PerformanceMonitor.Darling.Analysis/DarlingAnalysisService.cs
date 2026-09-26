@@ -772,7 +772,8 @@ public sealed class DarlingAnalysisService
     /// wait-stats or blocking), so running <see cref="FactScorer.ScoreAll"/> over the narrow set is correct
     /// and cheap.</para>
     /// </summary>
-    public async Task<List<Fact>> CollectConfigAuditFactsAsync(int serverId, string serverName, DateTime? asOfUtc = null)
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(
+        int serverId, string serverName, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var context = new AnalysisContext
@@ -781,7 +782,8 @@ public sealed class DarlingAnalysisService
             ServerName = serverName,
             TimeRangeStart = timeRangeEnd.AddHours(-1),
             TimeRangeEnd = timeRangeEnd,
-            AsOfUtc = asOfUtc
+            AsOfUtc = asOfUtc,
+            CancellationToken = cancellationToken
         };
 
         try
@@ -800,8 +802,12 @@ public sealed class DarlingAnalysisService
             _scorer.ScoreAll(facts);
             return facts;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned web/MCP read) must reach the caller as
+               OperationCanceledException, not be swallowed into an empty result and logged as a fault —
+               this method has no per-pass budget of its own, so the only source of a cancelled
+               context.CancellationToken is the caller's own token. */
             _logger?.LogError("[DarlingAnalysisService] Config-audit fact collection failed for {Server}: {Message}",
                 serverName, ex.Message);
             return [];

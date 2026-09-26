@@ -1367,8 +1367,33 @@ internal static class DarlingDataReader
     /// $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database (NULL = all), $6 execution outcome
     /// (NULL = all; Regular, Aborted or Exception otherwise, one row per outcome either way), $7 module_name
     /// (NULL = every module; applied to the deduplicated interval rows, before the ranking and the cap).
+    /// <see cref="QueryStoreTopRawPrefix"/> + <see cref="QueryStoreTopSuffix"/>, byte-identical to this
+    /// constant's prior single-string form (#3953 split it off so <see cref="QueryStoreTopTableSql"/> can
+    /// share <see cref="QueryStoreTopSuffix"/>).
     /// </summary>
-    public const string QueryStoreTopSql = """
+    public const string QueryStoreTopSql = QueryStoreTopRawPrefix + QueryStoreTopSuffix;
+
+    /// <summary>
+    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reads
+    /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
+    /// the two reads cannot drift below <c>ranked</c>. Chosen per call by
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; every unfiltered/filtered combination this read
+    /// supports must agree with <see cref="QueryStoreTopSql"/> over the same window.
+    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
+    /// UTC — the MCP surface always supplies a literal instant here, never an open/preset end), $4 top,
+    /// $5 database, $6 execution outcome.
+    /// </summary>
+    public const string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopSuffix;
+
+    /// <summary>
+    /// The raw read's head (#3953 split it off <see cref="QueryStoreTopSql"/>'s prior single-string form,
+    /// byte-identical — the split itself changes nothing about the text a raw call sends): the interval dedupe
+    /// over the server's raw Query Store slice, plus the $6 execution-outcome filter (kept here, before the
+    /// ROW_NUMBER partition, exactly where it sat before the split). <see cref="QueryStoreTopSuffix"/> is
+    /// shared with <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database, $6 execution outcome.
+    /// </summary>
+    private const string QueryStoreTopRawPrefix = """
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
@@ -1399,6 +1424,42 @@ internal static class DarlingDataReader
                sort then sees only the outcome asked for. */
             AND   ($6::text IS NULL OR execution_type_desc = $6)
         ),
+        """;
+
+    /// <summary>
+    /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
+    /// interval — the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written — so this reads
+    /// it directly and sets <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's own clamp,
+    /// <c>max(window start, raw's chunk floor)</c>: raw chunks drop whole, so bounding the table read there
+    /// returns exactly the raw read's own answer over the snapshots raw still holds. $3 is bound the same way
+    /// raw's own $3 is (a plain lower bound, never NULL): the MCP surface has no concept of an open/preset end.
+    /// $6 is repeated here, before this CTE's own GROUP BY-eligible rows reach <c>ranked</c>, mirroring the raw
+    /// prefix's placement — <c>execution_type_desc</c> is a <c>ranked</c> GROUP BY key, not filtered again
+    /// there, so an unfiltered table CTE would silently ignore the outcome filter.
+    /// </summary>
+    private const string QueryStoreTopTablePrefix = """
+        WITH deduped AS (
+            SELECT
+                *,
+                1 AS rn
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+            AND   ($6::text IS NULL OR execution_type_desc = $6)
+        ),
+        """;
+
+    /// <summary>Everything from <c>ranked</c> down, shared by <see cref="QueryStoreTopSql"/> and
+    /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every
+    /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
+    /// identically. $7 (module_name) lives here, unchanged from the pre-split statement's own position
+    /// (<c>QueryStoreSql_AppliesModuleFilterAfterDedupAndBeforeRankingLimit</c> pins it: after <c>WHERE rn = 1</c>,
+    /// before <c>LIMIT $4 + 5</c>) — module_name is not a GROUP BY key here (<c>MAX(module_name)</c> is the
+    /// aggregate), so it has to filter the deduplicated rows before the GROUP BY rather than after it, and
+    /// living in the shared suffix means both the raw and the table CTE inherit that same placement.</summary>
+    private const string QueryStoreTopSuffix = """
         ranked AS (
             SELECT
                 database_name,
@@ -1481,15 +1542,59 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    /// <summary>
+    /// #3953's own threshold for this read (ruling issuecomment-5836972848 item 5): below this window the
+    /// table's extra round trips (the gate's own reads plus a second transaction) cost more than they save, so
+    /// the gate reads raw regardless of coverage. A read's own constant — does not share
+    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> (the grid's) — the two reads may not share a
+    /// threshold. Raised from 12 to 24 hours (lane B4t, rig-d4, 15-day seed at a field store's rate,
+    /// end-to-end through <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,CancellationToken)"/>):
+    /// median of 5 at the ruled 12-hour cell, table 737.0 ms (spread 655.1-746.5) against raw 581.1 ms (spread
+    /// 544.3-629.3) — the table was slower than raw there, so the ruling moves this threshold to 24 hours.
+    /// </summary>
+    public static readonly TimeSpan QueryStoreTopMinWindow = TimeSpan.FromHours(24);
+
+    /// <summary>The store schema version <see cref="TryGetQueryStoreTopFromTableAsync"/> requires (#3953 gate
+    /// clause 6, ruling issuecomment-5836972848) before it will even attempt the table. Unlike the viewer —
+    /// a separately-versioned desktop app that can connect to an older remote store, so it probes the live
+    /// connection via <c>GetStoreSchemaVersionAsync</c> — this headless service always applies its own pending
+    /// migrations up to <see cref="StorageVersion.SchemaVersion"/> before it starts serving MCP/web reads
+    /// (<see cref="StorageVersion"/>: "a store at this version is fully migrated"), so the compiled constant IS
+    /// the connected store's version for this surface; no extra round trip earns its keep here.</summary>
+    private const int QueryStoreTopTableMinSchemaVersion = 145;
+
     public static Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         CancellationToken cancellationToken = default) =>
         GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType: null, moduleName: null, cancellationToken);
 
+    /// <summary>
+    /// #3953: reads <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
+    /// says its coverage holds the window; any fault or a "no" reads <see cref="QueryStoreTopSql"/> unchanged,
+    /// exactly as before this table existed. <paramref name="endUtc"/> doubles as the gate's clause-4 literal
+    /// end: every caller of this MCP surface (the tool and its <c>/api/read</c> mirror) already resolves
+    /// <c>as_of</c> to a concrete instant before calling in, so there is no "open end" case to thread through
+    /// the way the viewer's WPF presets have.
+    /// </summary>
     public static async Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         string? executionType, string? moduleName, CancellationToken cancellationToken = default)
     {
+        /* Review D4R H1: the window check first, before the gate's own round trips even open — this surface
+           has no live schema probe to save (StorageVersion.SchemaVersion is a compiled constant), but every
+           call under QueryStoreTopMinWindow otherwise still opens a second connection, a transaction, and
+           pays ReadSourceInputsSql plus the unindexed PlainTableFloorSql scan for a read that can only ever
+           land on raw (UseTable's clause 5). */
+        if (StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion && endUtc - startUtc >= QueryStoreTopMinWindow)
+        {
+            var tableRows = await TryGetQueryStoreTopFromTableAsync(
+                postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken);
+            if (tableRows is not null)
+            {
+                return tableRows;
+            }
+        }
+
         var rows = new List<QueryStoreRow>();
         await using var command = postgres.CreateCommand(QueryStoreTopSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -1501,28 +1606,100 @@ internal static class DarlingDataReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new QueryStoreRow(
-                reader.IsDBNull(0) ? "" : reader.GetString(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                reader.IsDBNull(3) ? "" : reader.GetString(3),
-                reader.IsDBNull(4) ? "" : reader.GetString(4),
-                reader.IsDBNull(5) ? "" : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
-                reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
-                reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
-                reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
-                reader.IsDBNull(12) ? 0 : reader.GetDouble(12),
-                reader.IsDBNull(13) ? 0 : reader.GetDouble(13),
-                reader.IsDBNull(14) ? null : reader.GetDateTime(14),
-                reader.IsDBNull(15) ? "" : reader.GetString(15),
-                reader.IsDBNull(16) ? null : reader.GetString(16)));
+            rows.Add(ReadQueryStoreTopRow(reader));
         }
 
         return rows;
     }
+
+    /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
+    /// construction keeps the receiver shape <c>McpReadCommandTimeoutTests</c>' census recognizes: a
+    /// two-argument <c>NpgsqlCommand(sqlIdentifier, connection)</c> with <c>Transaction</c> set through the
+    /// object initializer rather than threaded positionally. A three-argument
+    /// <c>NpgsqlCommand(sql, connection, transaction)</c> is also the shape the HypoPG experiment's
+    /// monitored-TARGET command uses, so the census deliberately does not auto-accept it here.</summary>
+    private const string SetTransactionReadOnlySql = "SET TRANSACTION READ ONLY";
+
+    /// <summary>
+    /// #3953's gate and table read for the MCP/web top-queries surface, on ONE connection in ONE read-only
+    /// REPEATABLE READ transaction (M1, ruling issuecomment-5836972848), mirroring the viewer's
+    /// <c>TryGetQueryStoreTopQueriesFromTableAsync</c> so the gate's decision and the read it authorizes see the
+    /// same snapshot. Returns null (never an empty list) when the gate says raw, so the caller can tell "read
+    /// raw instead" from "the table legitimately has nothing" — an empty list from the table IS a valid answer.
+    /// Any fault opening the connection, starting the transaction, running the gate, or reading the table also
+    /// returns null (except cancellation, which propagates): the gate already does this for its own statements,
+    /// and the table read must fail the same way rather than surface to the caller as an error.
+    /// </summary>
+    private static async Task<List<QueryStoreRow>?> TryGetQueryStoreTopFromTableAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        string? executionType, string? moduleName, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            await using (var readOnly = new NpgsqlCommand(SetTransactionReadOnlySql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
+                connection, serverId, startUtc, endUtc, endUtc, QueryStoreTopMinWindow,
+                McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
+            if (!useTable)
+            {
+                return null;
+            }
+
+            var rows = new List<QueryStoreRow>();
+            await using var command = new NpgsqlCommand(QueryStoreTopTableSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
+            AddInt(command, serverId);
+            AddTimestamp(command, clampedStart);
+            AddTimestamp(command, endUtc);
+            AddInt(command, top);
+            AddNullableText(command, databaseName);
+            AddNullableText(command, executionType);
+            AddNullableText(command, moduleName);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(ReadQueryStoreTopRow(reader));
+            }
+
+            return rows;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Review D4R M2: same silent-fallback risk as the viewer's twin. This surface has no ILogger
+               reachable from a static method with no DI-injected instance (its caller, DarlingMcpDataTools,
+               takes no logger either), so Trace is the only seam available here. */
+            System.Diagnostics.Trace.TraceWarning($"#3953 MCP top-queries table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Shared by <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,string,string,CancellationToken)"/>'s
+    /// raw and table paths: both <see cref="QueryStoreTopSql"/> and <see cref="QueryStoreTopTableSql"/> project
+    /// the same <see cref="QueryStoreTopSuffix"/> column list, in the same order.</summary>
+    private static QueryStoreRow ReadQueryStoreTopRow(System.Data.Common.DbDataReader reader) => new(
+        reader.IsDBNull(0) ? "" : reader.GetString(0),
+        reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+        reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+        reader.IsDBNull(3) ? "" : reader.GetString(3),
+        reader.IsDBNull(4) ? "" : reader.GetString(4),
+        reader.IsDBNull(5) ? "" : reader.GetString(5),
+        reader.IsDBNull(6) ? null : reader.GetString(6),
+        reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+        reader.IsDBNull(8) ? 0 : reader.GetDouble(8),
+        reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
+        reader.IsDBNull(10) ? 0 : reader.GetDouble(10),
+        reader.IsDBNull(11) ? 0 : reader.GetDouble(11),
+        reader.IsDBNull(12) ? 0 : reader.GetDouble(12),
+        reader.IsDBNull(13) ? 0 : reader.GetDouble(13),
+        reader.IsDBNull(14) ? null : reader.GetDateTime(14),
+        reader.IsDBNull(15) ? "" : reader.GetString(15),
+        reader.IsDBNull(16) ? null : reader.GetString(16));
 
     /* ─────────────────────────── discovery / health ─────────────────────────── */
 
