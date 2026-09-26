@@ -353,6 +353,12 @@ SELECT
     /// that calls it because these two shapes — and the grace window that separates an orphan from a
     /// force still being written — are properties of the TABLE, and the only place they can be shown
     /// to hold is against a live store, which is what <c>PlanForceActionStoreTests</c> does.</para>
+    ///
+    /// <para>#4346: every row's <c>detail</c> is passed through <see cref="SanitizeDetailForAudit"/> before
+    /// it leaves this method too, on the same reasoning as <see cref="GetRecentActionsAsync"/> — this read
+    /// has no caller today, but a row written before #4326 sits in the table regardless, and the day a
+    /// review surface calls this it must not be the day someone notices the exception text it has been
+    /// quietly carrying since before this method had a caller.</para>
     /// </summary>
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(
         int serverId, DateTime nowUtc, CancellationToken ct)
@@ -403,7 +409,8 @@ LIMIT 16", connection)
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            rows.Add(ReadRecord(reader));
+            var record = ReadRecord(reader);
+            rows.Add(record with { Detail = SanitizeDetailForAudit(record.Detail) });
         }
 
         return rows;
@@ -439,12 +446,34 @@ LIMIT 16", connection)
         "state_unavailable: the forcing and automatic-plan-correction state read failed — an unattended force cannot proceed on an unknown engine state";
 
     /// <summary>
-    /// Rewrites <paramref name="detail"/> line by line: any <c>state_unavailable:</c> line that does not
-    /// match <see cref="SafeStateUnavailableLine"/> is replaced with <see cref="LegacyStateUnavailableLine"/>;
-    /// every other line (there is at most one <c>state_unavailable</c> line per row — the bot journals one
-    /// decision per target) passes through unchanged, because no other blocker's evidence has ever carried
-    /// exception text. Null and non-multiline shapes (the withheld-force sentence, would_force's null) are
-    /// untouched — only <c>state_unavailable:</c> lines are ever redacted.
+    /// Matches the whole <c>state_unavailable</c> BLOCK — from its prefix up to (not including) the start
+    /// of the next known blocker's line, or the end of the string, whichever comes first — rather than one
+    /// <c>\n</c>-delimited line. A pre-#4326 row's raw exception message can itself embed a newline (a
+    /// driver's multi-line message, a wrapped stack fragment), and matching only the first line would leave
+    /// everything after that embedded newline unredacted; #4326 itself never wrote more than one line for
+    /// this blocker, so a post-fix row's block is always exactly its one safe line and nothing here widens
+    /// what a clean row matches.
+    ///
+    /// <para><see cref="RegexOptions.Singleline"/> makes <c>.</c> match a newline so the lazy body can span
+    /// one; <see cref="RegexOptions.Multiline"/> anchors <c>^</c> right after a <c>\n</c> (which also covers
+    /// a <c>\r\n</c> pair, since the position immediately after <c>\n</c> is the same either way) for the
+    /// next-blocker lookahead. A lone <c>\r</c>, or a Unicode line separator (U+2028/U+2029), is deliberately
+    /// NOT a line boundary to .NET's <c>^</c>/<c>$</c> under these options — only <c>\n</c> is — so text
+    /// smuggled after one of those does not count as the start of the next blocker's line and stays inside
+    /// this block, where it is redacted with everything else in it instead of surviving past the anchor.</para>
+    /// </summary>
+    private static readonly Regex StateUnavailableBlock = new(
+        @"^state_unavailable:.*?(?=\r?\n(?:parameter_sensitivity_cofired|secondary_replica_evidence|apc_owns_it|apc_enabled_for_database|state_unavailable):|\z)",
+        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.Multiline);
+
+    /// <summary>
+    /// Rewrites <paramref name="detail"/>: every <see cref="StateUnavailableBlock"/> span that does not
+    /// match <see cref="SafeStateUnavailableLine"/> is replaced whole with
+    /// <see cref="LegacyStateUnavailableLine"/>; every other blocker's line (this row's other named
+    /// blockers — <c>parameter_sensitivity_cofired</c>, <c>secondary_replica_evidence</c>, <c>apc_owns_it</c>,
+    /// <c>apc_enabled_for_database</c>) passes through unchanged, because none of them has ever carried
+    /// exception text on any build. Null and non-<c>state_unavailable</c> shapes (the withheld-force
+    /// sentence, would_force's null) are untouched — only a <c>state_unavailable</c> block is ever redacted.
     /// </summary>
     internal static string? SanitizeDetailForAudit(string? detail)
     {
@@ -453,17 +482,8 @@ LIMIT 16", connection)
             return null;
         }
 
-        var lines = detail.Split('\n');
-        for (var i = 0; i < lines.Length; i++)
-        {
-            if (lines[i].StartsWith("state_unavailable:", StringComparison.Ordinal) &&
-                !SafeStateUnavailableLine.IsMatch(lines[i]))
-            {
-                lines[i] = LegacyStateUnavailableLine;
-            }
-        }
-
-        return string.Join("\n", lines);
+        return StateUnavailableBlock.Replace(detail, m =>
+            SafeStateUnavailableLine.IsMatch(m.Value) ? m.Value : LegacyStateUnavailableLine);
     }
 
     /// <summary>The audit read behind <c>get_plan_force_actions</c> — newest first, optional server scope.
