@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -61,9 +62,10 @@ public sealed class DarlingMcpPgXminTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the persistence figures. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -73,9 +75,9 @@ public sealed class DarlingMcpPgXminTools
         {
             var now = windowEnd;
             var rows = await DarlingPgXminReader.GetPgXminHorizonAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
             var capturesInWindow = await DarlingPgXminReader.GetXminCapturesInWindowAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
             /* Nothing holding the horizon is the HEALTHY answer, and saying so plainly matters more here
                than for most tools: an operator arrives at this tool BECAUSE bloat is growing, so "no
@@ -86,7 +88,7 @@ public sealed class DarlingMcpPgXminTools
                    holding back the xmin horizon" is a confident all-clear about a mechanism that does not
                    exist there, which is the same defect one engine over (#2532). */
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_xmin_horizon");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_xmin_horizon", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -169,7 +171,7 @@ public sealed class DarlingMcpPgXminTools
                 holders,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_xmin_horizon", ex);
         }

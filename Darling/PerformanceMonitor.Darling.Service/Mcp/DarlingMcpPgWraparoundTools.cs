@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -80,9 +81,10 @@ public sealed class DarlingMcpPgWraparoundTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the peak comparison. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -92,7 +94,7 @@ public sealed class DarlingMcpPgWraparoundTools
         {
             var now = windowEnd;
             var rows = await DarlingPgWraparoundReader.GetPgWraparoundAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
             if (rows.Count == 0)
             {
@@ -101,7 +103,7 @@ public sealed class DarlingMcpPgWraparoundTools
                    not collected yet, or a row whose engine_kind is NULL — naming "the server is SQL Server"
                    here would repeat a branch that can no longer reach this line. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wraparound_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_wraparound_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No PostgreSQL freeze-headroom data for this server and window. This collector runs on "
@@ -162,7 +164,7 @@ public sealed class DarlingMcpPgWraparoundTools
                 databases,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_wraparound_risk", ex);
         }
