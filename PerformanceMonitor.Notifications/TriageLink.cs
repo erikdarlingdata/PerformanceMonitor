@@ -36,15 +36,36 @@ public static class TriageLink
     /// <c>GET /api/triage</c>. A hash route so the static SPA serves it with no server-side route addition.</summary>
     private const string TriageRoute = "/#/triage";
 
+    /// <summary>The SPA hash route the Fleet Sweep Rollup links to instead of a triage page (#4223) — the
+    /// sweep-with-memory timeline (#3466), which takes no query: the rollup names no one server or metric, so
+    /// there is nothing for <c>server=</c>/<c>metric=</c>/<c>at=</c> to carry.</summary>
+    private const string SweepsRoute = "/#/sweeps";
+
+    /// <summary>The exact <c>MetricName</c> the Fleet Sweep Rollup self-alert fires under (see
+    /// <see cref="AlertFamily.MetricFamilies"/>). Held here, not read from Darling's own
+    /// <c>DarlingSelfAlertEvaluator.FleetSweepRollupMetric</c>, because this project cannot reference Darling's
+    /// — the two constants name the same string on purpose, and <c>AlertFamilyCensusTests</c>' census keeps
+    /// them from drifting apart silently.</summary>
+    internal const string FleetSweepRollupMetric = "Fleet Sweep Rollup";
+
     /// <summary>
-    /// PURE: the triage-page URL for one alert firing, or null when no valid base URL is configured — the
-    /// callers all treat null as "omit the link", so a blank or garbage <c>web.publicBaseUrl</c> degrades to
-    /// today's linkless payload rather than shipping a dead href. Only absolute http/https bases are accepted;
-    /// a trailing slash on the base is tolerated (trimmed). <paramref name="firedUtc"/> stamps the firing
-    /// instant (second precision, trailing Z) so the page can anchor its windows AT the incident rather than
-    /// at click time; <paramref name="dedupKey"/> is the #1140 correlation fingerprint (the same key PagerDuty
-    /// dedups on), passed through so the page can highlight the matching incident — optional, because an
-    /// incident-less alert (CPU, low disk) has only the metric+server fallback identity.
+    /// PURE: the link for one alert firing, or null when there is nothing to link to. The callers all treat
+    /// null as "omit the link", so a blank/garbage <c>web.publicBaseUrl</c> degrades to today's linkless
+    /// payload rather than shipping a dead href — that degrade now also covers the two report digests
+    /// (#4223): a scheduled document naming no single incident has no triage page to point at, so
+    /// <see cref="AlertFamily.Reports"/> metrics other than the rollup return null here on purpose.
+    ///
+    /// <para><b>#4223: the Fleet Sweep Rollup is the one report with somewhere to send a reader</b> — the
+    /// sweep timeline it summarizes, <c>#/sweeps</c>, which takes no query (the page has no single
+    /// server/metric/instant to anchor on, unlike a page-worthy alert). Every other metric, report or not,
+    /// keeps the triage-page URL below.</para>
+    ///
+    /// <para>Only absolute http/https bases are accepted; a trailing slash on the base is tolerated (trimmed).
+    /// <paramref name="firedUtc"/> stamps the firing instant (second precision, trailing Z) so the triage page
+    /// can anchor its windows AT the incident rather than at click time; <paramref name="dedupKey"/> is the
+    /// #1140 correlation fingerprint (the same key PagerDuty dedups on), passed through so the page can
+    /// highlight the matching incident — optional, because an incident-less alert (CPU, low disk) has only the
+    /// metric+server fallback identity.
     /// </summary>
     public static string? Build(string? baseUrl, string serverName, string metricName, DateTime firedUtc, string? dedupKey = null)
     {
@@ -59,6 +80,13 @@ public static class TriageLink
                 && !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)))
         {
             return null;
+        }
+
+        if (AlertFamily.Of(metricName) == AlertFamily.Reports)
+        {
+            return string.Equals(metricName, FleetSweepRollupMetric, StringComparison.Ordinal)
+                ? trimmed + SweepsRoute
+                : null;
         }
 
         var builder = new StringBuilder(trimmed.Length + 96);
@@ -98,6 +126,19 @@ public static class TriageLink
         }
 
         return uri.Host;
+    }
+
+    /// <summary>
+    /// PURE: the button/link label for a URL <see cref="Build"/> returned — "Open sweep timeline" for the
+    /// Fleet Sweep Rollup's <c>#/sweeps</c> link (#4223: it is not a triage page, so the label must not claim
+    /// it is one), else "Open triage page" for every other non-null link. Callers pass the SAME url they
+    /// received from <see cref="Build"/> so the label always matches what it names.
+    /// </summary>
+    public static string LinkLabel(string? triageUrl)
+    {
+        return triageUrl is not null && triageUrl.Contains(SweepsRoute, StringComparison.Ordinal)
+            ? "Open sweep timeline"
+            : "Open triage page";
     }
 
     /// <summary>
