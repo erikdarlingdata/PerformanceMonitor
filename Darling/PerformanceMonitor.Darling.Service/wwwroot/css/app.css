@@ -54,6 +54,21 @@ a:hover { text-decoration: underline; }
 .brand h1 { font-size: 1.05rem; margin: 0; color: var(--accent); letter-spacing: 0.2px; }
 .brand .sub { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
 
+/* Shell-level auto-refresh play/pause (#4222d). Text label ("Pause auto-refresh" / "Resume auto-refresh") is
+   set by app.js; a real <button> for keyboard access, styled as a small pill so it reads as a toggle. */
+.auto-refresh-toggle {
+  margin-top: 0.6rem;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.auto-refresh-toggle:hover { color: var(--fg); border-color: var(--accent); }
+.auto-refresh-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+
 .nav { padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
 .nav a,
 .server-item {
