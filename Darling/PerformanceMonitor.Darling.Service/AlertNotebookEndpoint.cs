@@ -374,6 +374,10 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
         (new[] { "Deadlocks Detected" },
             new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
+        (new[] { "Forced Plan Failing" },
+            new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
+        (new[] { "Long-Running Query" },
+            new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
     };
 
     /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
