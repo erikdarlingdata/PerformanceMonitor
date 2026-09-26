@@ -602,12 +602,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     /// <c>duckdb_memory()</c> is that buffer manager's own ledger, so it isolates the assertion from every
     /// other allocator in the process.</para>
     ///
-    /// <para><b>Threshold, justified by measurement (macOS, net10.0, DuckDB.NET 1.5.5, 3 runs, the same
-    /// 2,000,000-row/200-byte-payload seed and trim-cycle steps as below, outside this test project):
-    /// before=97.75/97.75/99.50 MB, after=0.75/0.75/0.75 MB every time — a >99% reduction, not a marginal
-    /// one.</b> A do-nothing trim leaves this at ratio 1.0; requiring the after-reading to drop to 50% or
-    /// less of the before-reading is nowhere near that measured ~99% floor, so it rejects a no-op trim with
-    /// a wide margin on either side.</para>
+    /// <para><b>What this asserts:</b> the trim cycle (<see cref="DuckDbInitializer.RunMemoryTrimCycle"/>)
+    /// sets <c>memory_limit</c> down to <see cref="DuckDbInitializer.TrimTargetMemoryLimit"/> and back, so
+    /// DuckDB's buffer manager evicts pages down to AT MOST that target — how far below it lands is
+    /// platform-dependent (Windows CI measured before=105906176/after=63700992, a ~40% drop; macOS measured
+    /// before≈98 MB/after≈0.75 MB). A ratio-based assertion is therefore not a stable contract across
+    /// platforms. What IS the trim's own contract: the before-reading must be above the target (otherwise
+    /// the wide read never filled the buffer past what the trim would remove anyway, and the test proves
+    /// nothing), and the after-reading must be at or below the target. A do-nothing trim leaves
+    /// after≈before, which is still above the target, so it still fails this check.</para>
     /// </summary>
     [Fact]
     public async Task RunMemoryTrimCycle_AfterWideRead_ReducesProcessMemory()
@@ -665,7 +668,13 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         initializer.Dispose();
 
         Console.WriteLine($"#4262 round 1 trim measurement (duckdb_memory): before={beforeBytes / (1024.0 * 1024.0):F1} MB, after={afterBytes / (1024.0 * 1024.0):F1} MB");
-        Assert.True(afterBytes <= beforeBytes / 2.0,
-            $"Expected the trim to release at least half of DuckDB's own reported buffer usage: before={beforeBytes}, after={afterBytes}");
+
+        // DuckDB's "64MB" memory_limit unit is decimal (64 * 1000 * 1000 bytes), not binary (MiB).
+        const double trimTargetBytes = 64.0 * 1000.0 * 1000.0;
+
+        Assert.True(beforeBytes > trimTargetBytes,
+            $"Expected the wide read to fill DuckDB's buffer past the trim target before trimming, or this test proves nothing: before={beforeBytes}, target={trimTargetBytes}");
+        Assert.True(afterBytes <= trimTargetBytes,
+            $"Expected the trim to bring DuckDB's own reported buffer usage down to its memory_limit target: before={beforeBytes}, after={afterBytes}, target={trimTargetBytes}");
     }
 }
