@@ -43,7 +43,7 @@ public sealed class ViewerCpuSchedulerSqlTests
          * counts are averaged per bucket, and the outer read orders by bucket_start, not collection_time. */
         Assert.DoesNotContain("LAG(", sql, StringComparison.Ordinal);
         Assert.Contains("AS bucket_start", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY 1\n        ORDER BY 1", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY 1\n        ORDER BY 1", sql.ReplaceLineEndings("\n"), StringComparison.Ordinal);
     }
 
     [Fact]
