@@ -2979,6 +2979,38 @@ public sealed class DarlingManagedPostgres
                     break;
                 }
 
+                case ManagedConfMigrationState.Kind.Verified:
+                {
+                    /* Step B (#4336 lane 6): only when this start's own WriteManagedConfFile call actually
+                       wrote a new darling-managed.conf does it have a previous text and the RenderInputs to
+                       verify against; a start that found the same bytes already in force has nothing to do. */
+                    if (LastManagedConfWriteResult is not { Written: true, PreviousText: var previousText, Inputs: { } inputs })
+                    {
+                        return null;
+                    }
+
+                    var renderedText = LastManagedConfWriteResult.Value.RenderedText;
+                    var rows = await snapshot(cancellationToken);
+                    outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDirectory, rows, renderedText, previousText);
+
+                    var changes = ManagedConfMigrationRunner.DiffStepBChanges(previousText, renderedText);
+                    var managedConfPathB = Path.Combine(_dataDirectory, ManagedConfFile.FileName);
+                    if (outcome.Status == ManagedConfVerificationStatus.Verified)
+                    {
+                        _logger.LogInformation(
+                            "{Path} verified against pg_file_settings:\n{Changes}",
+                            managedConfPathB, ManagedConfMigrationRunner.FormatStepBChangeLog(changes, inputs));
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "{Path} failed verification against pg_file_settings for {Keys}; the previous verified file was restored.",
+                            managedConfPathB, string.Join(", ", outcome.MismatchedKeys));
+                    }
+
+                    break;
+                }
+
                 default:
                     return null;
             }
@@ -2998,8 +3030,11 @@ public sealed class DarlingManagedPostgres
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "The #4215 conf migration failed for {DataDirectory}; the store keeps running on its current conf.", _dataDirectory);
+            var failedStep = confState == ManagedConfMigrationState.Kind.Verified
+                ? ManagedConfMigrationStep.B
+                : ManagedConfMigrationStep.A;
             return new ManagedConfMigrationOutcome(
-                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, failedStep);
         }
     }
 
