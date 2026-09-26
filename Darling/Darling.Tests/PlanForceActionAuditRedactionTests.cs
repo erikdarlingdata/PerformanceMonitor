@@ -498,6 +498,30 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.Empty(RawDetailReadersIn(StripComments(insertOnlyMention)));
     }
 
+    /// <summary>
+    /// #4346's own census-attribution bug, pinned directly: the scan's own detection function
+    /// (<see cref="RawDetailReadersIn"/>, built on <see cref="EnclosingMethodFqName"/>) must derive the SAME
+    /// fully qualified name for <c>PlanForceActionDetailScrub</c>'s raw SELECT that
+    /// <see cref="RawDetailReaderExemptions"/> lists — a round trip. Before the fix, the nested
+    /// <c>Summary</c> class declared ABOVE <c>RunAsync</c> stole the attribution
+    /// (<c>PerformanceMonitor.Darling.Service.Summary.Summary</c>) because the old
+    /// <c>EnclosingMethodFqName</c> picked the nearest preceding <c>class</c> keyword rather than the type
+    /// whose braces actually enclose the SQL, which is exactly what would have caught the bug: the
+    /// exemption's string can never round-trip against a wrong name, so
+    /// <see cref="NoOtherProductionCode_ReadsTheDetailColumnDirectly"/> would fail in CI with the exemption
+    /// present and correct.
+    /// </summary>
+    [Fact]
+    public void RawDetailReaderExemption_RoundTrips_AgainstTheScrubsOwnAttribution()
+    {
+        Assert.Single(RawDetailReaderExemptions);
+
+        var text = StripComments(ReadScrubSource().ReplaceLineEndings("\n"));
+        var found = RawDetailReadersIn(text);
+
+        Assert.Contains(RawDetailReaderExemptions[0], found);
+    }
+
     /// <summary>The ONE named exemption (#4346): <c>PlanForceActionDetailScrub.RunAsync</c>'s own SELECT,
     /// which must read <c>detail</c> raw because every other reader already sanitizes it on the way out
     /// (see <see cref="PlanForceActionDetailScrub_ExemptedMethod_ReturnsNoDetailText"/> for the exemption's
@@ -552,24 +576,126 @@ public sealed class PlanForceActionAuditRedactionTests
         return results;
     }
 
+    /// <summary>
+    /// #4346 census-attribution bug: the ORIGINAL version of this method picked the enclosing type by the
+    /// nearest preceding <c>class</c> KEYWORD in the text, not by which type's BRACES actually enclose
+    /// <paramref name="position"/>. <c>PlanForceActionDetailScrub</c> declares a nested <c>public sealed
+    /// class Summary</c> above <c>RunAsync</c>, whose body closes long before the scrub's raw-<c>detail</c>
+    /// SELECT — textually nearest, but not enclosing — so every SQL site in <c>RunAsync</c> was attributed
+    /// to <c>Summary.Summary</c> (a constructor-shaped match on the record-style ctor) and the ONE
+    /// exemption in <see cref="RawDetailReaderExemptions"/> never matched it.
+    ///
+    /// <para>Fixed by using <see cref="CSharpSourceWalker.BraceBalanced"/> — the same shared brace walk
+    /// #2927 consolidated five hand-rolled copies onto — to compute each declaration candidate's actual
+    /// body span, and keeping only the candidate whose span CONTAINS <paramref name="position"/>; among
+    /// those, the one whose opening brace is furthest to the right (innermost) wins. Applied to both the
+    /// type and the method, so a nested type declared before the real enclosing method can no longer steal
+    /// either name.</para>
+    /// </summary>
     private static string? EnclosingMethodFqName(string text, int position)
     {
-        var before = text[..position];
+        /* Braces inside a string literal (a SQL verbatim string could in principle contain one) would
+           unbalance a naive brace count, exactly the reason StripCommentsAndStrings' contract exists — so
+           brace positions are computed over the MASKED text, same length, so every offset still lines up
+           with position and with the declaration matches below (which never occur inside a literal). */
+        var masked = CSharpSourceWalker.StripCommentsAndStrings(text);
 
-        var methodMatch = LastMatch(before, @"(?:public|private|internal|protected)[^\n{;]*?\b(\w+)\s*\([^;{]*\)\s*(?:=>|\{)");
-        var classMatch = LastMatch(before, @"\bclass\s+(\w+)");
-        var namespaceMatch = LastMatch(before, @"\bnamespace\s+([\w.]+)");
+        var namespaceMatch = LastMatch(text[..position], @"\bnamespace\s+([\w.]+)");
 
-        if (methodMatch is null || classMatch is null)
+        const string methodPattern = @"(?:public|private|internal|protected)[^\n{;]*?\b(\w+)\s*\([^;{]*\)\s*(?=\{)";
+        const string typePattern = @"\b(?:class|struct|record|interface)\s+(\w+)";
+
+        var typeMatch = InnermostEnclosingDeclaration(text, masked, position, typePattern);
+        if (typeMatch is null)
+        {
+            return null;
+        }
+
+        var cls = typeMatch.Value.Name;
+
+        /* Usually the SQL text sits inside a method body, and brace-enclosure finds it directly (this is
+           what fixes the #4346 bug: a nested type declared earlier no longer wins just for being nearer in
+           text). But a query built as a `const string` FIELD declared just above the method that uses it —
+           this scrub's own shape — is never enclosed by any method's braces at all: the field belongs to
+           the class, not to a method. For that shape, attribute it to the nearest method declared AFTER
+           the field, still inside the SAME innermost enclosing type — the one that reads the constant. */
+        var methodMatch = InnermostEnclosingDeclaration(text, masked, position, methodPattern)
+            ?? NextDeclarationInType(text, masked, position, methodPattern, typeMatch.Value.OpenBrace, typeMatch.Value.CloseBrace);
+
+        if (methodMatch is null)
         {
             return null;
         }
 
         var ns = namespaceMatch?.Groups[1].Value;
-        var cls = classMatch.Groups[1].Value;
-        var method = methodMatch.Groups[1].Value;
+        var method = methodMatch.Value.Name;
 
         return ns is null ? $"{cls}.{method}" : $"{ns}.{cls}.{method}";
+    }
+
+    /// <summary>Finds every declaration matching <paramref name="declPattern"/> before
+    /// <paramref name="position"/>, computes its body span with <see cref="CSharpSourceWalker.BraceBalanced"/>
+    /// over <paramref name="masked"/> (comments and literal text blanked, same length as
+    /// <paramref name="text"/>), and returns the captured name plus brace span of whichever body actually
+    /// CONTAINS <paramref name="position"/> — the innermost one, i.e. the one whose opening brace is
+    /// furthest right. Returns <c>null</c> when no declaration's body encloses the position.</summary>
+    private static (string Name, int OpenBrace, int CloseBrace)? InnermostEnclosingDeclaration(
+        string text, string masked, int position, string declPattern)
+    {
+        (string Name, int OpenBrace, int CloseBrace)? best = null;
+
+        foreach (Match m in Regex.Matches(text[..position], declPattern))
+        {
+            var braceIndex = text.IndexOf('{', m.Index + m.Length);
+            if (braceIndex < 0 || braceIndex > position)
+            {
+                continue;
+            }
+
+            var body = CSharpSourceWalker.BraceBalanced(masked, braceIndex);
+            var closeIndex = braceIndex + body.Length - 1;
+
+            if (position > closeIndex)
+            {
+                continue;
+            }
+
+            if (best is null || braceIndex > best.Value.OpenBrace)
+            {
+                best = (m.Groups[1].Value, braceIndex, closeIndex);
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Fallback for a declaration (a <c>const string</c> query field, this scrub's own shape)
+    /// that no method body encloses: the nearest declaration matching <paramref name="declPattern"/> AFTER
+    /// <paramref name="position"/> but still inside <paramref name="typeOpenBrace"/>/
+    /// <paramref name="typeCloseBrace"/> — the next member of the same innermost enclosing type, which for
+    /// a query constant declared just above the method that reads it is that method.</summary>
+    private static (string Name, int OpenBrace, int CloseBrace)? NextDeclarationInType(
+        string text, string masked, int position, string declPattern, int typeOpenBrace, int typeCloseBrace)
+    {
+        foreach (Match m in Regex.Matches(text, declPattern))
+        {
+            if (m.Index <= position || m.Index < typeOpenBrace || m.Index > typeCloseBrace)
+            {
+                continue;
+            }
+
+            var braceIndex = text.IndexOf('{', m.Index + m.Length);
+            if (braceIndex < 0 || braceIndex > typeCloseBrace)
+            {
+                continue;
+            }
+
+            var body = CSharpSourceWalker.BraceBalanced(masked, braceIndex);
+            var closeIndex = braceIndex + body.Length - 1;
+            return (m.Groups[1].Value, braceIndex, closeIndex);
+        }
+
+        return null;
     }
 
     private static Match? LastMatch(string text, string pattern)
