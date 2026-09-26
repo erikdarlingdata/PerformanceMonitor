@@ -376,6 +376,10 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
         (new[] { "Failed Agent Job", "Long-Running Job", "Agent Not Running" },
             new AuthoredTemplateEntry("authored/agent-job", AgentJobTemplateVersion, BuildAgentJobCells)),
+        (new[] { "Forced Plan Failing" },
+            new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
+        (new[] { "Long-Running Query" },
+            new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
         (new[] { "Server Unreachable", "Server Restored" },
             new AuthoredTemplateEntry("authored/server-connect", ServerConnectTemplateVersion, BuildServerConnectCells)),
     };
