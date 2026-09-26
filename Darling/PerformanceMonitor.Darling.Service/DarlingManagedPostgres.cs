@@ -537,7 +537,9 @@ public sealed class DarlingManagedPostgres
     /// The v16 marker (#4246): <c>checkpoint_timeout = 15min</c> only, up from PostgreSQL's 5-minute default.
     /// The interval was held back from v15 (see <see cref="ConfMarkerV15"/>) pending a 24-hour trial on one
     /// production store, applied there through <c>ALTER SYSTEM</c> and a reload rather than this block. That
-    /// trial's verdict: pending the 24 h measurement on one production store.
+    /// trial's reading at +3 hours: WAL volume fell from 14.0 to 4.6 GB/h, the
+    /// full-page-image share from 8.6% to 4.2%, and the average checkpoint sync
+    /// phase from 1.66 s to 0.24 s.
     ///
     /// <para><b>The risk this carries.</b> A longer interval puts more dirty pages, and so more files, into
     /// each checkpoint's sync phase, which is what makes the phase take longer.
