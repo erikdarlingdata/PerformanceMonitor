@@ -866,10 +866,14 @@ public sealed class ViewerMemoryLivePostgresTests
         var bodySucceeded = false;
         try
         {
-            /* Far enough apart (7 days) that TrendBuckets.AutoMinutes widens the auto bucket past both
-               collections’ gap, so a window spanning them lands them in the SAME bucket. */
-            var t1 = TruncateToSeconds(DateTime.UtcNow.AddDays(-7));
-            var t2 = t1.AddDays(6);
+            /* #4364 fix: a 7-day window auto-buckets to a WIDE grid (tens of minutes), not the fixed
+               10-minute width the old comment assumed — two collections 6 days apart do NOT land in the
+               same bucket at that width. Put both collections inside the SAME minute instead (floored to
+               the minute so a 30s offset can never spill into the next one), so date_bin's grid merges
+               them regardless of the auto-chosen width for the (now short) window this call requests. */
+            var nowFloor = DateTime.UtcNow;
+            var t1 = new DateTime(nowFloor.Year, nowFloor.Month, nowFloor.Day, nowFloor.Hour, nowFloor.Minute, 0, DateTimeKind.Utc);
+            var t2 = t1.AddSeconds(30);
 
             await InsertMemoryGrantAsync(connection, GrantChartMergedServerId, GrantChartMergedServerName, t1, poolId: 1,
                 availMb: 10.00m, grantedMb: 10.00m, usedMb: 10.00m, grantee: 1, waiter: 0, timeoutDelta: 3, forcedDelta: 3);

@@ -251,10 +251,16 @@ public sealed partial class ViewerDataService
                 CAST(SUM(max_target_memory_mb) AS double precision) AS max_target_memory_mb,
                 CAST(SUM(grantee_count) AS bigint) AS grantee_count,
                 CAST(SUM(waiter_count) AS bigint) AS waiter_count,
-                /* #3540/#4349: MAX over the collection's own resource-semaphore rows, routed through NULLIF —
-                   0 only when EVERY row was unknowable (a restart) becomes NULL, exactly like every other
-                   derived interval_seconds alias on this tree; NULL (pre-V128 rows) stays NULL. */
+                /* #3540/#4349/#4364: MAX over the collection's own resource-semaphore rows. interval_seconds
+                   is the sanctioned NULLIF form the measurement-contract census requires of any alias named
+                   interval_sec(onds) — 0 (a restart, the ONLY known-unrateable case) becomes NULL through it.
+                   But NULLIF cannot by itself tell that known-zero NULL apart from a pre-V128 row's true NULL
+                   (interval never recorded) once collapsed into one alias, so the rated CTE below tests the
+                   RAW max_interval_seconds_raw instead — the same IS DISTINCT FROM 0 the pre-#4364 guard used —
+                   to keep an unknown interval's delta (LockWaitTrendSql's NULL-falls-back idiom, not #3540's
+                   drop rule) while still nulling a genuine restart's. */
                 NULLIF(MAX(sample_interval_seconds), 0) AS interval_seconds,
+                MAX(sample_interval_seconds) AS max_interval_seconds_raw,
                 CAST(SUM(timeout_error_count_delta) AS bigint) AS timeout_error_count_delta,
                 CAST(SUM(forced_grant_count_delta) AS bigint) AS forced_grant_count_delta
             FROM v_memory_grant_stats
@@ -274,8 +280,8 @@ public sealed partial class ViewerDataService
                 max_target_memory_mb,
                 grantee_count,
                 waiter_count,
-                CASE WHEN interval_seconds IS NOT NULL THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
-                CASE WHEN interval_seconds IS NOT NULL THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
+                CASE WHEN max_interval_seconds_raw IS DISTINCT FROM 0 THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
+                CASE WHEN max_interval_seconds_raw IS DISTINCT FROM 0 THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
             FROM per_collection
         )
         SELECT

@@ -119,10 +119,15 @@ WITH per_collection AS
         SUM(used_memory_mb) AS used_memory_mb,
         SUM(grantee_count) AS grantee_count,
         SUM(waiter_count) AS waiter_count,
-        /* #3540/#4349: MAX over the collection's own resource-semaphore rows, routed through NULLIF —
-           0 only when EVERY row was unknowable (a restart) becomes NULL, matching Darling's
-           MemoryGrantChartDataSql. */
+        /* #3540/#4349/#4364: MAX over the collection's own resource-semaphore rows. interval_seconds is the
+           sanctioned NULLIF form the measurement-contract census requires of any alias named
+           interval_sec(onds) — 0 (a restart, the ONLY known-unrateable case) becomes NULL through it. But
+           NULLIF alone cannot tell that known-zero NULL apart from a pre-#3540 row's true NULL (interval
+           never recorded) once collapsed into one alias, so the rated CTE below tests the RAW
+           max_interval_seconds_raw instead — IS DISTINCT FROM 0 — to keep an unknown interval's delta
+           while still nulling a genuine restart's, matching Darling's MemoryGrantChartDataSql. */
         NULLIF(MAX(sample_interval_seconds), 0) AS interval_seconds,
+        MAX(sample_interval_seconds) AS max_interval_seconds_raw,
         SUM(timeout_error_count_delta) AS timeout_error_count_delta,
         SUM(forced_grant_count_delta) AS forced_grant_count_delta
     FROM v_memory_grant_stats
@@ -141,8 +146,8 @@ rated AS
         used_memory_mb,
         grantee_count,
         waiter_count,
-        CASE WHEN interval_seconds IS NOT NULL THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
-        CASE WHEN interval_seconds IS NOT NULL THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
+        CASE WHEN max_interval_seconds_raw IS DISTINCT FROM 0 THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
+        CASE WHEN max_interval_seconds_raw IS DISTINCT FROM 0 THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
     FROM per_collection
 )
 SELECT
