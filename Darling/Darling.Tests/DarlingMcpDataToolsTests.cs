@@ -265,7 +265,7 @@ public sealed class DarlingMcpDataToolsSurfaceAndSqlTests
 
         var catalog = DarlingWebEndpoints.CatalogDescriptors["get_collection_log"].Params;
 
-        foreach (var filter in new[] { "collector_name", "min_duration_ms" })
+        foreach (var filter in new[] { "collector_name", "min_duration_ms", "status" })
         {
             Assert.Contains(filter, catalog.Select(p => p.Name));
         }

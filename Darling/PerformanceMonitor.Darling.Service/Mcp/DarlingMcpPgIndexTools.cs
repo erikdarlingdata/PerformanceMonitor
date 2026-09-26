@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -53,9 +54,10 @@ public sealed class DarlingMcpPgIndexTools
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
         [Description("Maximum rows to return. Default 25. See the tool's reading guide.")] int limit = 25,
         [Description("Return ONLY the indexes that have an answer, ranked by reclaimable bytes descending. Default false. See the tool's reading guide.")] bool answered_only = false,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -76,7 +78,7 @@ public sealed class DarlingMcpPgIndexTools
                documented as deliberately pessimistic and is not this change's to soften. */
             var fetched = await DarlingPgIndexBloatReader.GetPgIndexBloatAsync(
                 postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1,
-                answered_only);
+                answered_only, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             /* Asked on BOTH paths, not just the empty one (#3278). A returned page that is 100% suppressed
@@ -92,17 +94,17 @@ public sealed class DarlingMcpPgIndexTools
                    three already-computed values. Computing the LAST of three ranked answers FIRST is how
                    somebody later reorders the chain and does not notice they have changed which one wins. */
                 var capability = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_index_bloat");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_index_bloat", cancellationToken);
 
                 if (capability != null) return capability;
 
                 var precondition = await DarlingRuntimePrecondition.StatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_index_bloat");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_index_bloat", cancellationToken);
 
                 if (precondition != null) return precondition;
 
                 coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
-                    postgres, resolved.ServerId, windowEnd, rows.Count);
+                    postgres, resolved.ServerId, windowEnd, rows.Count, cancellationToken);
 
                 /* ANSWERED-ONLY OVER A SERVER THAT HAS INDEXES IS ITS OWN REFUSAL, not an empty (#3424).
                    The filter removes the answerless rows, so "no rows" here means NOT ONE of this server's
@@ -149,7 +151,7 @@ public sealed class DarlingMcpPgIndexTools
             }
 
             coverage = await DarlingPgIndexBloatReader.GetCoverageVerdictAsync(
-                postgres, resolved.ServerId, windowEnd, rows.Count);
+                postgres, resolved.ServerId, windowEnd, rows.Count, cancellationToken);
 
             /* WHETHER THE ANSWERS ARE REACHABLE AT ALL, which `truncated` cannot say (#3424). #3278 gave
                this read a denominator and that shipped; it did not give the answers a route, and its own
@@ -377,7 +379,7 @@ public sealed class DarlingMcpPgIndexTools
                 indexes,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_index_bloat", ex);
         }
@@ -389,9 +391,10 @@ public sealed class DarlingMcpPgIndexTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (7 days) - this collector runs daily.")] int hours_back = 168,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -404,7 +407,7 @@ public sealed class DarlingMcpPgIndexTools
             var windowStart = windowEnd.AddHours(-hours_back);
 
             var rows = await DarlingPgColumnStatsReader.GetPgColumnStatsAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, limit);
+                postgres, resolved.ServerId, windowStart, windowEnd, limit, cancellationToken);
 
             /* Asked on BOTH paths, not just the empty one (#3154). A returned row set that covers a
                fraction of the tables above the floor is the same defect as an unexplained empty, one
@@ -422,17 +425,17 @@ public sealed class DarlingMcpPgIndexTools
                    answer first is how somebody later reorders the chain and does not notice they have
                    changed which of the three wins. */
                 var capability = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats", cancellationToken);
 
                 if (capability != null) return capability;
 
                 var precondition = await DarlingRuntimePrecondition.StatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_column_stats", cancellationToken);
 
                 if (precondition != null) return precondition;
 
                 coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
-                    postgres, resolved.ServerId, windowEnd, rows.Count);
+                    postgres, resolved.ServerId, windowEnd, rows.Count, cancellationToken);
 
                 /* The arm, not a list of the arms. This message used to recite the size floor AND the
                    privilege filter and select neither, which is prose about the mechanism rather than a
@@ -446,7 +449,7 @@ public sealed class DarlingMcpPgIndexTools
             }
 
             coverage = await DarlingPgColumnStatsReader.GetCoverageVerdictAsync(
-                postgres, resolved.ServerId, windowEnd, rows.Count);
+                postgres, resolved.ServerId, windowEnd, rows.Count, cancellationToken);
 
             var columns = rows.Select(r => new
             {
@@ -483,7 +486,7 @@ public sealed class DarlingMcpPgIndexTools
                 columns,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_column_stats", ex);
         }

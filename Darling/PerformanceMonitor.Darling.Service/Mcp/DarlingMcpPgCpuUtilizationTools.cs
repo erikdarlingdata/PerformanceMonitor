@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -48,17 +49,19 @@ public sealed class DarlingMcpPgCpuUtilizationTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4.")] int hours_back = 4,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetPgCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgCpuMaxPoints));
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetPgCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PgCpuMaxPoints), cancellationToken);
 
     /// <summary>
     /// get_pg_cpu_utilization under an explicit <paramref name="budget"/> (#4193): the MCP tool passes its own,
     /// the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.
     /// </summary>
     internal static async Task<string> GetPgCpuUtilization(
-        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -70,7 +73,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
         try
         {
             var points = await DarlingPgCpuUtilizationReader.GetBucketedHistoryAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
 
             if (points.Count == 0)
             {
@@ -78,7 +81,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                    PgCpuUtilizationCollector's doc comment), so that is the likelier and more actionable
                    answer than a bare "no data in window". */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_cpu_utilization")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_cpu_utilization", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No CPU utilization data for {resolved.ServerName} in the last {hours_back} hour(s).");
@@ -122,7 +125,7 @@ public sealed class DarlingMcpPgCpuUtilizationTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_cpu_utilization", ex);
         }
