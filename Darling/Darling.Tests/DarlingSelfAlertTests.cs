@@ -216,6 +216,11 @@ public sealed class DarlingSelfAlertTests
         /// harness IS the byte-identical arm every pre-#3500 pin in this suite runs on.</summary>
         public string? StoreName { get; set; }
 
+        /// <summary>#3013: the swallowed-read counter, null by default so most pins build an evaluator that
+        /// counts nothing (matching AlertEngineTests' ReadFailures seam). #4391 pins set it to see the Raw
+        /// Purge Over Horizon read-failure count.</summary>
+        public AlertReadFailureCounter? ReadFailures { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -236,6 +241,7 @@ public sealed class DarlingSelfAlertTests
             storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null,
             retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
+            readFailures: ReadFailures,
             storeName: StoreName);
     }
 
@@ -5225,9 +5231,10 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
     private static RawPurgeOverHorizonReading RawReading(
         long jobId = 2001, string hypertable = "query_stats", string dropAfter = "4 days",
-        double? ratio = 4.5, RawLastPurgeRecord? lastPurge = null) =>
+        double? ratio = 4.5, RawLastPurgeRecord? lastPurge = null, bool lastPurgeReadFailed = false) =>
         new(jobId, hypertable, dropAfter, ratio,
-            lastPurge ?? new RawLastPurgeRecord(DateTime.UtcNow, "hole", null, null));
+            lastPurgeReadFailed ? null : lastPurge ?? new RawLastPurgeRecord(DateTime.UtcNow, "hole", null, null),
+            lastPurgeReadFailed);
 
     [Fact]
     public async Task RawPurgeOverHorizon_OverHorizonWithAHole_Fires_AndSaysAHole()
@@ -5294,6 +5301,96 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("55P03", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RecordStale_Fires_AndSaysNotRecordedSince()
+    {
+        /* #4391: an old "ran" record must not keep the alert quiet forever once the trigger itself has
+           stopped running. RED at 34064e99e: the evaluator only checks the outcome string, never the
+           record's age, so this stays silent on the pre-fix code. */
+        var h = new Harness();
+        var e = h.Build();
+        var staleAt = h.Now - TimeSpan.FromHours(3);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(staleAt, "ran", null, 1_234)) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("has not recorded a pass since", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RecordRecent_DoesNotFire()
+    {
+        /* The companion to the stale pin: a record inside the staleness window still clears the alert on
+           "ran", same as before #4391. RED at 34064e99e would ALSO pass here (no alert either way) — this
+           pin exists to prove the new staleness check does not over-fire, not to distinguish the commits. */
+        var h = new Harness();
+        var e = h.Build();
+        var recentAt = h.Now - TimeSpan.FromMinutes(30);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(recentAt, "ran", null, 1_234)) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_ReadFailedWhileActive_NeitherFiresNorResolves_AndCountsTheFailure()
+    {
+        /* #4391: an unreadable record must not falsely clear a standing alert. Fire on a hole first, then
+           feed a read failure that WOULD resolve if read as "never written" (ratio under horizon) — the
+           active state must survive untouched, and the failure must be counted rather than silently
+           swallowed. This is compile-RED at 34064e99e: RawPurgeOverHorizonReading has no
+           LastPurgeReadFailed parameter on that commit. */
+        var readFailures = new AlertReadFailureCounter(() => DateTime.UtcNow);
+        var h = new Harness { ReadFailures = readFailures };
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(ratio: 0.5, lastPurgeReadFailed: true) }, Ct);
+
+        Assert.Empty(h.History.Records);
+        Assert.Equal(1, readFailures.ReadFor(null).InstanceReadFailures);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_ReadFailedWhileInactive_DoesNotFire_AndCountsTheFailure()
+    {
+        var readFailures = new AlertReadFailureCounter(() => DateTime.UtcNow);
+        var h = new Harness { ReadFailures = readFailures };
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurgeReadFailed: true) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(1, readFailures.ReadFor(null).InstanceReadFailures);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_GateUnknown_And_GateError_NameTheReason()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(jobId: 1, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "gate_unknown", null, null)) },
+            Ct);
+        var gateUnknown = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("could not be resolved", gateUnknown.DetailText, StringComparison.Ordinal);
+
+        h.Deliverer.Outcomes.Clear();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(jobId: 2, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "gate_error", null, null)) },
+            Ct);
+        var gateError = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("trigger's own gate check failed", gateError.DetailText, StringComparison.Ordinal);
     }
 
     /* Armed can't suppress this alert by construction: RawPurgeOverHorizonReading carries no armed flag at

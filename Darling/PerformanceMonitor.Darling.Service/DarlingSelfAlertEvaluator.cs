@@ -5585,14 +5585,22 @@ internal sealed class DarlingSelfAlertEvaluator
         foreach (var reading in readings)
         {
             var key = reading.JobId.ToString(CultureInfo.InvariantCulture);
+
+            if (reading.LastPurgeReadFailed)
+            {
+                _readFailures?.RecordReadFailure(null, RawPurgeOverHorizonReadName, 0);
+                continue;
+            }
+
             var label = string.IsNullOrEmpty(reading.HypertableName)
                 ? $"raw retention job {key}"
                 : $"{reading.HypertableName} raw retention [{key}]";
 
             var overHorizon = reading.OverHorizonRatio is double ratio && ratio >= warnRatio;
             var lastRan = string.Equals(reading.LastPurge?.Outcome, "ran", StringComparison.Ordinal);
+            var recordStale = reading.LastPurge is { } rec && now - rec.At > RawPurgeRecordStaleAfter;
 
-            if (overHorizon && !lastRan)
+            if (overHorizon && (!lastRan || recordStale))
             {
                 _activeRawPurgeOverHorizon[key] = true;
                 if (CooldownElapsed(_lastRawPurgeOverHorizonAlert, key, now))
@@ -5600,7 +5608,9 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastRawPurgeOverHorizonAlert[key] = now;
                     var ratioValue = reading.OverHorizonRatio!.Value;
                     bool critical = ratioValue >= criticalRatio;
-                    var reasonText = RawPurgeOutcomeReasonText(reading.LastPurge);
+                    var reasonText = recordStale
+                        ? $"the purge trigger has not recorded a pass since {reading.LastPurge!.At:yyyy-MM-dd HH:mm} UTC"
+                        : RawPurgeOutcomeReasonText(reading.LastPurge);
                     await FireAsync(
                         StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
                         $"{ratioValue:F1}x its {reading.DropAfter} horizon", $"{warnRatio:F1}x",
@@ -5642,8 +5652,19 @@ internal sealed class DarlingSelfAlertEvaluator
         "not_covered" => "not covered (the coverage sweep measured Short or Unknown for it)",
         "no_chunks" => "no chunks to evaluate",
         "run_failed" => $"the purge failed (SqlState {lastPurge!.SqlState ?? "(none)"})",
+        "gate_unknown" => "a successor rollup could not be resolved, so coverage could not be confirmed",
+        "gate_error" => "the trigger's own gate check failed; the service log's 'Raw retention purge for' warning names the error",
         _ => "not covered (no purge-trigger pass has recorded an outcome for it yet)",
     };
+
+    /// <summary>
+    /// #4391: how old a last-purge record can be before the Raw Purge Over Horizon alert stops trusting a
+    /// recorded <c>"ran"</c> outcome to mean the trigger is still running. Twice the hourly store-maintenance
+    /// tick the trigger rides on (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>), so one missed tick
+    /// does not false-fire but two in a row does: an old <c>"ran"</c> record must not keep the alert quiet
+    /// forever once the trigger itself has stopped running.
+    /// </summary>
+    internal static readonly TimeSpan RawPurgeRecordStaleAfter = TimeSpan.FromHours(2);
 
     /// <summary>
     /// The isolating entry point for the #3783 Store TOAST Slack check — rides the worker's hourly store
@@ -6533,6 +6554,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// replica grain and the database grain are separately freshness-gated but failure-isolated together.
     /// </summary>
     internal const string AgStateReadName = "Availability-Group self-alert";
+
+    /// <summary>The counter's name for the Raw Purge Over Horizon condition's last-purge-record read (#4391).</summary>
+    internal const string RawPurgeOverHorizonReadName = "raw purge over horizon self-alert";
 
     /// <summary>
     /// One round trip for the collection-stopped signals: the newest SUCCESS/SKIPPED time across all of the
