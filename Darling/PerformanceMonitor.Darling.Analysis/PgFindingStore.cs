@@ -609,14 +609,9 @@ ORDER BY local_bucket, story_path_hash";
     /// <summary>
     /// Returns the most recent findings for a server within the given time range, newest and
     /// most severe first, including each finding's persisted remediation action.
-    ///
-    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
-    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
-    /// its store calls take no pass token. Threading one here would mean inventing a caller that
-    /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var findings = new List<AnalysisFinding>();
 
@@ -628,20 +623,20 @@ ORDER BY local_bucket, story_path_hash";
                zone-shifted. */
             var windowEnd = DateTime.SpecifyKind(asOfUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(GetRecentFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(windowEnd.AddHours(-hoursBack));
             command.Parameters.AddWithValue(asOfUtc is null ? NoUpperBound : windowEnd);
             command.Parameters.AddWithValue(limit);
 
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
                 findings.Add(ReadFinding(reader));
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.LogError("[PgFindingStore] GetRecentFindingsAsync failed: {Message}", ex.Message);
         }

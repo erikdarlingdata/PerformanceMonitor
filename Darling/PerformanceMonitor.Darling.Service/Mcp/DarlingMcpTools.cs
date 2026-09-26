@@ -309,9 +309,10 @@ public sealed class DarlingMcpTools
         [Description("Hours of data to analyze. Default 4.")] int hours_back = 4,
         [Description(FactSourceFilterDescription)] string? source = null,
         [Description("Minimum severity to include. Default 0 (all facts). Use 0.5 to see only significant facts.")] double min_severity = 0,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -329,7 +330,7 @@ public sealed class DarlingMcpTools
         try
         {
             var (facts, coverage, collection) = await analysisService.CollectAndScoreFactsAsync(
-                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor);
+                resolved.ServerId, resolved.ServerName, hours_back, asOfUtc: anchor, cancellationToken: cancellationToken);
 
             /* #3691: null on a clean read, and then every envelope below is byte-for-byte what it was; when
                a family failed, the sentence is appended to the message and collection_caveats to the payload. */
@@ -429,7 +430,7 @@ public sealed class DarlingMcpTools
                 facts = result
             }, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_analysis_facts", ex);
         }
@@ -442,9 +443,10 @@ public sealed class DarlingMcpTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours back for the comparison (recent) period. Default 4.")] int hours_back = 4,
         [Description("Hours back for the baseline period start, measured from the end of the comparison window (now, or as_of). Default 28 (yesterday same time).")] int baseline_hours_back = 28,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -468,7 +470,8 @@ public sealed class DarlingMcpTools
             var (baselineFacts, comparisonFacts, baselineCoverage, comparisonCoverage, dispersion) = await analysisService.ComparePeriodsAsync(
                 resolved.ServerId, resolved.ServerName,
                 baselineStart, baselineEnd,
-                comparisonStart, comparisonEnd);
+                comparisonStart, comparisonEnd,
+                cancellationToken);
 
             /* The COLLECTION_GAP context fact (#3538 A2) is an observation of the COLLECTOR, not of the
                server, and it is reported through the coverage blocks and caveat below. Left in the
@@ -592,7 +595,7 @@ public sealed class DarlingMcpTools
                 facts = comparison.Rows.Select(r => r.ToPayload()).ToList()
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("compare_analysis", ex);
         }
@@ -1085,9 +1088,10 @@ public sealed class DarlingMcpTools
         /* DI-resolved like postgres (no [Description]); trailing so the /api/read dispatch row and every
            Darling.Tests call site, none of which name arguments past as_of, keep compiling. See
            analyze_server's copy of this note for the full reasoning (#4316). */
-        ILogger? logger = null)
+        ILogger? logger = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -1113,7 +1117,7 @@ public sealed class DarlingMcpTools
                against the store-read constant rather than a caller's limit: a window of exactly 10,000
                occurrences read as cut. The page is the same newest 10,000 the store returned before. */
             var fetched = await analysisService.GetRecentFindingsAsync(
-                resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit + 1, asOfUtc: anchor);
+                resolved.ServerId, hours_back, FindingOccurrences.WindowCoveringLimit + 1, asOfUtc: anchor, cancellationToken: cancellationToken);
             var (findings, truncated) = McpHelpers.BoundPage(fetched, FindingOccurrences.WindowCoveringLimit);
 
             if (findings.Count == 0)
@@ -1158,7 +1162,7 @@ public sealed class DarlingMcpTools
 
             /* #3652: one state read for every representative's force-plan targets — see analyze_server. */
             var (forcePlanStates, forcePlanStateNote) =
-                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest), logger: logger);
+                await DarlingForcePlanTargetStateReader.TryReadAsync(postgres, resolved.ServerId, groups.Select(g => g.Latest), logger: logger, cancellationToken: cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
@@ -1279,7 +1283,7 @@ public sealed class DarlingMcpTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_analysis_findings", ex);
         }
