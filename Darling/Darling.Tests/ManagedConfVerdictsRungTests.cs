@@ -41,7 +41,7 @@ public sealed class ManagedConfVerdictsRungTests
     private static PgMigrations.Migration V146 => PgMigrations.Scripts.Single(m => m.Version == RungVersion);
 
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
