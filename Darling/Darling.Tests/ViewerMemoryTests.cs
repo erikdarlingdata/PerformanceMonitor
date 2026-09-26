@@ -74,8 +74,13 @@ public sealed class ViewerMemorySqlTests
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(granted_memory_mb) AS double precision)", sql, StringComparison.Ordinal);
+        /* per_collection still sums per collection_time before the outer bucket AVERAGES the gauge (#4349). */
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AVG(total_granted_mb) AS total_granted_mb", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS collection_count", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY 1", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -129,17 +134,22 @@ public sealed class ViewerMemorySqlTests
         var sql = ViewerDataService.MemoryGrantChartDataSql;
 
         Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
+        /* per_collection still groups per collection_time + pool_id (#4349); the outer bucket then AVERAGES
+           the sizing/count gauges per pool over the date_bin grid. */
         Assert.Contains("GROUP BY collection_time, pool_id", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time, pool_id", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY pool_id, 2", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY pool_id, 2", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
 
         /* pool_id is the integer group key, selected raw (GetInt32). */
         Assert.Contains("pool_id", sql, StringComparison.Ordinal);
 
         /* The three sizing MB SUMs plus the workspace-memory ceiling (target / max target — item 2) all
-           CAST to double precision. */
+           CAST to double precision inside per_collection; the outer bucket AVERAGES them (a gauge). */
         foreach (var col in new[] { "available_memory_mb", "granted_memory_mb", "used_memory_mb", "target_memory_mb", "max_target_memory_mb" })
         {
             Assert.Contains($"CAST(SUM({col}) AS double precision)", sql, StringComparison.Ordinal);
+            Assert.Contains($"AVG({col})", sql, StringComparison.Ordinal);
         }
 
         /* The four activity count SUMs CAST to bigint (integer→bigint / bigint→numeric both land on

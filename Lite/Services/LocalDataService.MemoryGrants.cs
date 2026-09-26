@@ -119,7 +119,10 @@ WITH per_collection AS
         SUM(used_memory_mb) AS used_memory_mb,
         SUM(grantee_count) AS grantee_count,
         SUM(waiter_count) AS waiter_count,
-        MAX(sample_interval_seconds) AS interval_seconds,
+        /* #3540/#4349: MAX over the collection's own resource-semaphore rows, routed through NULLIF —
+           0 only when EVERY row was unknowable (a restart) becomes NULL, matching Darling's
+           MemoryGrantChartDataSql. */
+        NULLIF(MAX(sample_interval_seconds), 0) AS interval_seconds,
         SUM(timeout_error_count_delta) AS timeout_error_count_delta,
         SUM(forced_grant_count_delta) AS forced_grant_count_delta
     FROM v_memory_grant_stats
@@ -138,8 +141,8 @@ rated AS
         used_memory_mb,
         grantee_count,
         waiter_count,
-        CASE WHEN interval_seconds IS DISTINCT FROM 0 THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
-        CASE WHEN interval_seconds IS DISTINCT FROM 0 THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
+        CASE WHEN interval_seconds IS NOT NULL THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
+        CASE WHEN interval_seconds IS NOT NULL THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
     FROM per_collection
 )
 SELECT

@@ -252,9 +252,10 @@ public sealed partial class ViewerDataService
                 CAST(SUM(max_target_memory_mb) AS double precision) AS max_target_memory_mb,
                 CAST(SUM(grantee_count) AS bigint) AS grantee_count,
                 CAST(SUM(waiter_count) AS bigint) AS waiter_count,
-                /* #3540: MAX over the collection's own resource-semaphore rows — 0 only when EVERY row was
-                   unknowable (a restart); NULL (pre-V128 rows) falls through untouched by IS DISTINCT FROM. */
-                MAX(sample_interval_seconds) AS interval_seconds,
+                /* #3540/#4349: MAX over the collection's own resource-semaphore rows, routed through NULLIF —
+                   0 only when EVERY row was unknowable (a restart) becomes NULL, exactly like every other
+                   derived interval_seconds alias on this tree; NULL (pre-V128 rows) stays NULL. */
+                NULLIF(MAX(sample_interval_seconds), 0) AS interval_seconds,
                 SUM(timeout_error_count_delta) AS timeout_error_count_delta,
                 SUM(forced_grant_count_delta) AS forced_grant_count_delta
             FROM v_memory_grant_stats
@@ -274,8 +275,8 @@ public sealed partial class ViewerDataService
                 max_target_memory_mb,
                 grantee_count,
                 waiter_count,
-                CASE WHEN interval_seconds IS DISTINCT FROM 0 THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
-                CASE WHEN interval_seconds IS DISTINCT FROM 0 THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
+                CASE WHEN interval_seconds IS NOT NULL THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
+                CASE WHEN interval_seconds IS NOT NULL THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
             FROM per_collection
         )
         SELECT
