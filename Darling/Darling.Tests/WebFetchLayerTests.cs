@@ -211,6 +211,70 @@ public sealed class WebFetchLayerTests
         Assert.True(skipRouteAt < sidebarAt, "the in-flight check must run before this tick's own reads start");
     }
 
+    /* ---------------------------------------------------------------------------------------------------
+       #4222d — shell-level auto-refresh play/pause, plus the #/triage poll-cost guard.
+       --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>#/triage joins the composer routes in the poll skip: the alert-notebook deep link's landing
+    /// page must not be re-rendered by the periodic tick, same cost concern as the editor routes, evaluated
+    /// on the SAME line so a paused tab and an in-flight-read tab share the one guard.</summary>
+    [Fact]
+    public void AppJs_RefreshSkipsTriageRouteToo()
+    {
+        var app = AppJs;
+
+        Assert.Contains("routeName === \"triage\"", app, StringComparison.Ordinal);
+
+        var refreshAt = app.IndexOf("function refresh() {", StringComparison.Ordinal);
+        Assert.True(refreshAt >= 0, "refresh() not found");
+        var triageAt = app.IndexOf("routeName === \"triage\"", refreshAt, StringComparison.Ordinal);
+        var sidebarAt = app.IndexOf("refreshSidebar();", refreshAt, StringComparison.Ordinal);
+        Assert.True(triageAt >= 0 && triageAt < sidebarAt, "triage must join the skip guard, computed before this tick's own reads start");
+    }
+
+    /// <summary>The shell-level play/pause control (#4222d): a real, keyboard-reachable button whose state is
+    /// persisted in localStorage, and which the 60s interval AND the visibility-change handler both consult —
+    /// so pausing stops the tick outright, it does not just hide the already-automatic tab-hidden pause.
+    /// Resuming runs one refresh immediately rather than waiting out the rest of the 60s window.</summary>
+    [Fact]
+    public void AppJs_HasAShellLevelAutoRefreshPauseThatGatesBothPollPaths()
+    {
+        var app = AppJs;
+
+        Assert.Contains("const AUTO_REFRESH_PAUSED_KEY = \"darling.autoRefreshPaused\";", app, StringComparison.Ordinal);
+        Assert.Contains("function isAutoRefreshPaused() {", app, StringComparison.Ordinal);
+        Assert.Contains("localStorage.getItem(AUTO_REFRESH_PAUSED_KEY) === \"1\";", app, StringComparison.Ordinal);
+        Assert.Contains("function setAutoRefreshPaused(paused) {", app, StringComparison.Ordinal);
+        Assert.Contains("function initAutoRefreshToggle() {", app, StringComparison.Ordinal);
+        Assert.Contains("document.getElementById(\"auto-refresh-toggle\")", app, StringComparison.Ordinal);
+        Assert.Contains("if (!paused) refresh();", app, StringComparison.Ordinal);
+
+        // Both poll paths — the interval tick and the visibility-change handler — check the paused flag,
+        // not just document.hidden; pausing must stop the tick even on a visible tab.
+        Assert.Contains("if (!document.hidden && !isAutoRefreshPaused()) refresh();", app, StringComparison.Ordinal);
+        var occurrences = 0;
+        var idx = 0;
+        const string gate = "if (!document.hidden && !isAutoRefreshPaused()) refresh();";
+        while ((idx = app.IndexOf(gate, idx, StringComparison.Ordinal)) >= 0)
+        {
+            occurrences++;
+            idx += 1;
+        }
+        Assert.Equal(2, occurrences);
+    }
+
+    /// <summary>The button itself lives in the shell chrome (index.html's sidebar brand block), not inside any
+    /// page render, so it survives every route change; the shell only sets its text/attrs, never its own
+    /// markup wholesale (R4 — el()/textContent, no innerHTML for the label).</summary>
+    [Fact]
+    public void IndexHtml_HasTheAutoRefreshToggleButtonInTheShellChrome()
+    {
+        var index = ReadRepoFile(Path.Combine(
+            "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "index.html"));
+
+        Assert.Contains("<button id=\"auto-refresh-toggle\" class=\"auto-refresh-toggle\" type=\"button\" aria-pressed=\"false\"></button>", index, StringComparison.Ordinal);
+    }
+
     /// <summary>The counter itself: apiGetFleet and apiSend are deliberately NOT counted (the shared fleet read
     /// and a mutation are not "page reads" a poll tick should wait out) — only apiGet/readTool's own fetch
     /// counts, which is what makes the guard above a proxy for "the page's panel reads", not "any network
