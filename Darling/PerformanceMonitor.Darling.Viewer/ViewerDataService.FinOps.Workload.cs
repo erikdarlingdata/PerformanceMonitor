@@ -35,7 +35,7 @@ public sealed partial class ViewerDataService
        matching fragment fails loudly instead of silently leaving the panel on raw. */
 
     /// <summary>The database-grain CTE in <see cref="DatabaseResourceUsageSql"/>, verbatim.</summary>
-    private const string WorkloadCteRaw = """
+    private const string WorkloadCteRaw = $"""
         database_name,
         SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
         SUM(delta_logical_reads) AS logical_reads,
@@ -46,6 +46,7 @@ public sealed partial class ViewerDataService
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
     GROUP BY database_name
 """;
 
@@ -71,7 +72,7 @@ public sealed partial class ViewerDataService
 """;
 
     /// <summary>The CPU/execution CTE shared by both top-consumer queries, verbatim.</summary>
-    private const string ConsumerCteRaw = """
+    private const string ConsumerCteRaw = $"""
         database_name,
         SUM(delta_worker_time) / 1000.0 AS cpu_time_ms,
         SUM(delta_execution_count) AS execution_count
@@ -79,6 +80,7 @@ public sealed partial class ViewerDataService
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
     GROUP BY database_name
 """;
 
@@ -158,7 +160,7 @@ public sealed partial class ViewerDataService
                     : coverage.StitchedRelationSql(TimescaleSupport.QueryStatsDailyView, "f", windowStartUtc, RollupCoverage.StitchTier.Daily)),
                 "top consumers");
 
-    public const string DatabaseResourceUsageSql = @"
+    public const string DatabaseResourceUsageSql = $@"
 WITH workload AS (
     SELECT
         database_name,
@@ -171,6 +173,7 @@ WITH workload AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
     GROUP BY database_name
 ),
 io AS (
@@ -345,7 +348,7 @@ ORDER BY max_connections DESC";
     /// did. Baking either rule in would apply it to both grids, so the NULL-name filter is applied client-side,
     /// per grid, in <see cref="GetTopResourceConsumersAsync"/> instead.</para>
     /// </summary>
-    public const string TopResourceConsumersSql = @"
+    public const string TopResourceConsumersSql = $@"
 WITH workload AS (
     SELECT
         database_name,
@@ -355,6 +358,7 @@ WITH workload AS (
     WHERE server_id = $1
     AND   collection_time >= $2
     AND   delta_worker_time IS NOT NULL
+    AND   {TimescaleSupport.IntervalHonestSourceFilter}
     GROUP BY database_name
 ),
 io AS (
@@ -561,7 +565,7 @@ ORDER BY bc.total_wait_time_ms DESC";
     }
 
     /// <summary>Top-N most expensive queries by total CPU over the window. $1 server_id, $2 cutoff, $3 topN.</summary>
-    public const string ExpensiveQueriesSql = @"
+    public const string ExpensiveQueriesSql = $@"
 SELECT
     database_name,
     SUM(delta_worker_time) / 1000.0 AS total_cpu_ms,
@@ -578,6 +582,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   delta_worker_time IS NOT NULL
 AND   delta_worker_time > 0
+AND   {TimescaleSupport.IntervalHonestSourceFilter}
 GROUP BY
     database_name,
     sql_handle,
@@ -630,7 +635,7 @@ LIMIT $3";
     /// to query_hash level in SQL (with correlated sample-text subqueries, as Lite does), then scores in C#
     /// via <see cref="HighImpactScorer"/>. $1 server_id, $2 cutoff.
     /// </summary>
-    public const string HighImpactQueriesSql = @"
+    public const string HighImpactQueriesSql = $@"
 SELECT
     query_hash,
     MIN(database_name) AS database_name,
@@ -673,6 +678,7 @@ WHERE server_id = $1
 AND   collection_time >= $2
 AND   query_hash IS NOT NULL AND query_hash != ''
 AND   delta_execution_count > 0
+AND   {TimescaleSupport.IntervalHonestSourceFilter}
 GROUP BY query_hash
 HAVING SUM(delta_execution_count) > 0
 ORDER BY SUM(delta_worker_time) DESC";
