@@ -320,17 +320,31 @@ jobs:
             releases/*.exe
             releases/SHA256SUMS.txt
           if-no-files-found: error
+          retention-days: 3
 
       - name: Save the nightly version string
         shell: bash
         run: echo "${{ steps.version.outputs.VERSION }}" > windows-version.txt
 
+      # The commit build actually checked out, so publish can name the release after the tree it
+      # built rather than dev's tip at publish time (20-60 minutes later, once darling-pg is done).
+      - name: Save the built commit SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "${sha}" > windows-commit-sha.txt
+          echo "Built commit: ${sha}"
+
       - name: Upload the nightly version string
         uses: actions/upload-artifact@v6
         with:
           name: windows-version
-          path: windows-version.txt
+          path: |
+            windows-version.txt
+            windows-commit-sha.txt
           if-no-files-found: error
+          retention-days: 3
 
   # Darling.Tests has live-PostgreSQL tests gated on env vars that the per-PR/push build never
   # sets, so regular CI runs only the ungated subset. This job stands up a throwaway PostgreSQL
@@ -352,8 +366,8 @@ jobs:
     steps:
       # Scheduled runs always test dev (schedules execute from the default branch, so ref_name
       # would be main). A manual dispatch tests the DISPATCHED ref — the only way to validate a
-      # branch's gated-pg test changes before merge; the artifact-publishing build job stays
-      # pinned to dev either way, so a branch dispatch can never ship branch binaries.
+      # branch's gated-pg test changes before merge; the build job stays pinned to dev either
+      # way, so a branch dispatch can never ship branch binaries.
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
@@ -542,17 +556,21 @@ jobs:
             ${{ runner.temp }}/darling-cluster-logs/**
             TestResults/
           if-no-files-found: ignore
+          overwrite: true
 
   # ── Linux artifact + container image (#1804) ─────────────────────────────────────────────────────
-  # Runs AFTER the windows build job so the nightly release exists to upload into. Publishes the
-  # linux-x64 service tar.gz with its own checksum file (the windows job owns SHA256SUMS.txt; a
-  # cross-job rewrite of one file is a race), and pushes the service image to ghcr tagged :nightly.
-  # The bundled pg-runtime is deliberately absent from the linux artifact — the compose distribution
-  # pairs the service with the official timescale/timescaledb image, and managed mode stays Windows.
+  # Runs in parallel with the windows build job — it shares only the check job's nightly stamp,
+  # not any windows artifact. Publishes the linux-x64 service tar.gz with its own checksum file
+  # (the windows job owns SHA256SUMS.txt; a cross-job rewrite of one file is a race), and builds
+  # the service container image, saving it to a tar for the publish job below to push — this job
+  # talks to neither the release nor ghcr. The bundled pg-runtime is deliberately absent from the
+  # linux artifact — the compose distribution pairs the service with the official
+  # timescale/timescaledb image, and managed mode stays Windows.
   linux:
-    # check as well as build: build already depends on check, so this adds no ordering, only
-    # access to the one stamp both jobs name their artifacts with (#3390).
-    needs: [check, build]
+    # Only check: this job reads no output of build's beyond the shared stamp (#3390), and
+    # nothing here consumes a windows artifact, so it runs in parallel with build rather than
+    # waiting on it.
+    needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -595,6 +613,7 @@ jobs:
           mkdir -p releases
           tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
           (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
+          echo "${version}" > releases/linux-version.txt
 
       # The container image build needs THIS checkout (docker build's context is the repo root,
       # #1804), so it stays here rather than moving to publish, which has no source tree. Only the
@@ -624,7 +643,9 @@ jobs:
           path: |
             releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
             releases/SHA256SUMS-linux.txt
+            releases/linux-version.txt
           if-no-files-found: error
+          retention-days: 3
 
       - name: Upload container image
         uses: actions/upload-artifact@v6
@@ -632,6 +653,7 @@ jobs:
           name: darling-container-image
           path: releases/darling-container-image.tar
           if-no-files-found: error
+          retention-days: 3
 
   # ── Publish (#4336 follow-up) ─────────────────────────────────────────────────────────────────
   # The one job that talks to the outside world: the GitHub release, the ghcr push, the signature,
@@ -646,7 +668,13 @@ jobs:
       needs.build.result == 'success' &&
       needs.linux.result == 'success' &&
       needs.darling-pg.result == 'success' &&
-      (github.event_name != 'workflow_dispatch' || inputs.publish != false)
+      (github.event_name != 'workflow_dispatch' || format('{0}', inputs.publish) != 'false')
+    # A scheduled re-dispatch and a manual dispatch both land the same tag (`nightly`); two
+    # close dispatches otherwise race on this job's delete-then-create of the release, so only
+    # one publish runs at a time and a queued second one waits rather than colliding.
+    concurrency:
+      group: nightly-publish
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -698,6 +726,34 @@ jobs:
           echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
           echo "Nightly version: ${version}"
 
+      # The full SHA build actually checked out (written by the build job's own `git rev-parse
+      # HEAD`), so the release below names the tree that was built rather than dev's tip at
+      # publish time — 20-60 minutes later, once darling-pg finishes.
+      - name: Read the built commit SHA
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(cat windows-commit-sha.txt)"
+          [ -n "${sha}" ] || { echo "::error::windows-commit-sha.txt was empty."; exit 1; }
+          echo "SHA=${sha}" >> "$GITHUB_OUTPUT"
+          echo "Built commit: ${sha}"
+
+      # publish takes its release version from the windows handoff but ships linux's tag and
+      # container image too; a mismatch would mean the two build jobs disagreed about which
+      # nightly stamp they were building, and shipping under one label anyway is the wrong call.
+      - name: Verify windows and linux versions match
+        shell: bash
+        run: |
+          set -euo pipefail
+          windows_version="${{ steps.version.outputs.VERSION }}"
+          linux_version="$(cat releases/linux-version.txt)"
+          if [ "${windows_version}" != "${linux_version}" ]; then
+            echo "::error::Windows and Linux nightly versions do not match. windows=${windows_version} linux=${linux_version}"
+            exit 1
+          fi
+          echo "Windows and Linux versions match: ${windows_version}"
+
       - name: Delete previous nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -710,12 +766,14 @@ jobs:
         run: |
           set -euo pipefail
           version="${{ steps.version.outputs.VERSION }}"
-          sha="$(git rev-parse --short HEAD)"
+          sha="${{ steps.commit.outputs.SHA }}"
+          short_sha="${sha:0:7}"
+          echo "Naming the release after the built commit: ${sha}"
           body=$(cat <<EOF
           Automated nightly build from \`dev\` branch.
 
           **Version:** \`${version}\`
-          **Commit:** \`${sha}\`
+          **Commit:** \`${short_sha}\`
           **Built:** $(date -u +"%Y-%m-%d %H:%M UTC")
 
           > These builds include the latest changes and may be unstable.
@@ -724,7 +782,7 @@ jobs:
           )
 
           gh release create nightly \
-            --target dev \
+            --target "${sha}" \
             --title "Nightly Build (${version})" \
             --notes "${body}" \
             --prerelease \
