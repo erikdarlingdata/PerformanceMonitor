@@ -1225,7 +1225,7 @@ public sealed class AlertReadFailureSurfaceTests
            the deadlock re-mask pass, which rewrites only rows still raw and resumes next hour, with every
            deadlock read normalizing in the meantime. 30th since #4215: the store-settings
            self-alert's wrapper catch (its report is a parameter, like every sibling standing condition).
-           ReadRejectedManagedConfSettingNamesAsync's catch is NOT here (re-ruled): a RejectedValue row is
+           ReadRejectedManagedConfSettingNamesAsync's catch is NOT here: a RejectedValue row is
            judgeable evidence, so it moved to the counted census above instead. */
         Assert.Equal(30, totalExempt);
 

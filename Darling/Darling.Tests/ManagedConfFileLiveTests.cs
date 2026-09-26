@@ -86,7 +86,7 @@ public sealed class ManagedConfFileLiveTests
                ONLY AFTER that start does MigrateManagedConfAsync run Step A -- it rewrites postgresql.conf
                down to the one include line and writes darling-managed.conf with the effective values, but
                deliberately never reloads, so pg_settings still attributes everything to postgresql.conf until
-               the NEXT start (see #4215's design decision (a)). */
+               the NEXT start. */
             var first = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             await first.EnsureRunningAsync(timeout.Token);
             Assert.True(first.StartedByThisProcess);
@@ -104,7 +104,7 @@ public sealed class ManagedConfFileLiveTests
 
             await first.StopIfStartedByThisProcessAsync();
 
-            /* Second start: the same data directory now classifies Verified, so A1's pre-start write
+            /* Second start: the same data directory now classifies Verified, so the pre-start write
                (EnsureManagedConfReadyAsync -> WriteManagedConfFile) runs and the server boots directly on
                darling-managed.conf. This is the start pg_settings.sourcefile can actually be checked against. */
             var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
