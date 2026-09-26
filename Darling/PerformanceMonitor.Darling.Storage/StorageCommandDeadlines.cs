@@ -38,18 +38,25 @@ public static class StorageCommandDeadlines
     /// <c>min(collection_time)</c> class on the largest store's 23 GB hypertable, which TimescaleDB
     /// answers by chunk exclusion. The shipped trend reads are all per-server and time-windowed; a
     /// deliberately HARDER superset (the same aggregate unfiltered, fleet-wide, over seven days)
-    /// measured 35.2 s, bounding any single shipped read far below it.</para>
+    /// measured 35.2 s, bounding any single shipped read far below it. 30 s keeps ≥8× headroom over
+    /// the most pessimistic estimate and ~44× over anything actually observed.</para>
     ///
-    /// <para>ABOVE the managed store's shipped server-side ceiling too, since #4442 raised that ceiling
-    /// to 60 s and put this family on the SAME least-privilege pool the role GUC bounds
-    /// (<see cref="!:McpCommandDeadlines.ReadSeconds"/> is this surface's sibling half, at 75 s). Ninety
-    /// seconds keeps this the looser-by-a-fixed-margin of the two client deadlines — the relation
-    /// <c>McpReadCommandTimeoutTests</c> pins — while staying well under the point a hung interactive read
-    /// is worse than a failed one: these calls hold a pooled store connection with no enclosing budget and
-    /// no retry cadence, so the deadline is the only thing standing between one stalled read and a tool
-    /// that hangs until the client abandons it. Ninety seconds is where the budgeted analysis pass put a
-    /// read that a 120 s <c>CancelAfter</c> would still rescue (#2871); an unbudgeted interactive read must
-    /// sit strictly under that, not above it.</para>
+    /// <para>BELOW the point where a hung interactive read is worse than a failed one: these calls
+    /// hold a pooled store connection with no enclosing budget and no retry cadence, so the deadline
+    /// is the only thing standing between one stalled read and a tool that hangs until the client
+    /// abandons it. Sixty seconds is where the budgeted analysis pass put a read that a 120 s
+    /// <c>CancelAfter</c> would still rescue (#2871); an unbudgeted interactive read must sit
+    /// strictly under that, not above it.</para>
+    ///
+    /// <para><b>UNDER the managed store's shipped server-side ceiling, deliberately, since #4442.</b>
+    /// #4442 raised the <c>mcp</c>/<c>viewer</c> role ceiling to 60 s and, on the web/MCP composed read
+    /// path, raised the paired client deadline (<see cref="!:McpCommandDeadlines.ReadSeconds"/>) to sit
+    /// strictly above it. This family stays here instead: the 30 s band above was measured against a
+    /// worst verified read of 685 ms and a 35.2 s pessimistic superset, and #4442 did not re-measure it
+    /// against a 60 s server ceiling — raising the client deadline without new data would only widen
+    /// the window a stalled read holds a pooled connection for. A caller here still sees this client's
+    /// own timeout, not the store's <c>57014</c>; #4442 files a follow-up to revisit this band with fresh
+    /// latency data before raising it.</para>
     /// </summary>
-    public const int McpReadSeconds = 90;
+    public const int McpReadSeconds = 30;
 }

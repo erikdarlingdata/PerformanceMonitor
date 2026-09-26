@@ -121,13 +121,14 @@ internal static class McpCommandDeadlines
     /// confusion #2826 exists to prevent. A client deadline at or under the 60 s ceiling would start
     /// pre-empting a bound that already works and already reports well.</para>
     ///
-    /// <para>BELOW the 90 s <see cref="StorageCommandDeadlines.McpReadSeconds"/> now carries (#4442 raised it
-    /// alongside this one, keeping the same margin), and below the sibling half of the same surface. The
-    /// viewer's pin set the standard that a deadline must be MEANINGFULLY under the inherited default rather
-    /// than equal to it, and <see cref="StorageCommandDeadlines.McpReadSeconds"/> — the <c>DarlingPg*Reader</c>
-    /// family serving these same 136 tools from <c>.Storage</c> — must not be the looser of the two, so the
-    /// ceiling here is asserted relationally against it in <c>McpReadCommandTimeoutTests</c> rather than by
-    /// copying its number.</para>
+    /// <para>ABOVE <see cref="StorageCommandDeadlines.McpReadSeconds"/> now, and deliberately: #4442 raises
+    /// only the composed web/MCP read path above the 60 s ceiling, and leaves the <c>.Storage</c>
+    /// <c>DarlingPg*Reader</c> family (which serves the same tools through a different reader) at its #3004
+    /// band, strictly UNDER the ceiling — that family's client deadline still fires before a managed store's
+    /// own <c>57014</c> would, which is today's behaviour and unchanged by this issue. The two constants used
+    /// to be ordered the other way (this one had to stay at or under the storage half's); #4442 inverts that
+    /// relation on purpose rather than by omission, and <c>McpReadCommandTimeoutTests</c> pins the new
+    /// direction so a future edit has to notice which one it is restoring.</para>
     /// </summary>
     internal const int ReadSeconds = 75;
 

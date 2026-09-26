@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -33,7 +34,65 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
     private const int RungVersion = 147;
     private const int PreviousVersion = 146;
 
+    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    private const int ProbeOrdinal = 122;
+
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+
+    /// <summary>
+    /// The rung is registered and is the new top of the ladder — the claim this class takes over from
+    /// <c>ManagedConfVerdictsRungTests</c> (V146) now that V147 has landed.
+    /// </summary>
+    [Fact]
+    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    {
+        var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
+
+        Assert.Equal("compose-statement-timeout-sixty", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
+        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
+        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
+        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
+    }
+
+    /// <summary>
+    /// The viewer probe's sentinel carries this rung, and the map treats it as the TOP arm: a missing top arm
+    /// maps a fully-migrated store one rung short, permanently, because <see cref="ViewerDataService.RequiredStoreSchemaVersion"/>
+    /// is <see cref="StorageVersion.SchemaVersion"/>.
+    /// </summary>
+    [Fact]
+    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    {
+        Assert.Contains(
+            "column_name = 'compose_statement_timeout_seconds' AND column_default = '60'",
+            ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+
+        var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
+        Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
+        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+
+        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
+
+        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var arity = method.GetParameters().Length;
+        Assert.Equal(ProbeOrdinal, arity - 1);
+        Assert.Equal("hasComposeTimeoutSixty", method.GetParameters()[ProbeOrdinal].Name);
+
+        var all = Enumerable.Repeat((object)true, arity).ToArray();
+        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+
+        var behind = (object[])all.Clone();
+        behind[ProbeOrdinal] = false;
+        Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
+
+        var thisArm = viewer.IndexOf("if (hasComposeTimeoutSixty)", StringComparison.Ordinal);
+        var previousArm = viewer.IndexOf("if (hasManagedConfVerdicts)", StringComparison.Ordinal);
+        Assert.True(thisArm >= 0, "the viewer has no V147 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(thisArm < previousArm, "the V147 arm sits below V146's, so a current store maps one rung low");
+        Assert.Contains(
+            "return " + StorageVersion.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) + ";",
+            viewer[thisArm..previousArm], StringComparison.Ordinal);
+    }
 
     [Fact]
     public async Task AStoreAtTheOldShippedDefault_MovesTo60_AndTheColumnDefaultMoves()

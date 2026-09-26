@@ -342,8 +342,10 @@ public sealed class McpReadCommandTimeoutTests
     /// production, so a client deadline at or under it would pre-empt a bound that already works and already
     /// names its cause (<c>57014</c>) instead of rendering as a stream fault. That floor dominates the
     /// measured one by more than an order of magnitude — the family's verified reads are sub-second. The
-    /// CEILING is <see cref="StorageCommandDeadlines.McpReadSeconds"/>, asserted relationally against the
-    /// sibling half of the same surface so this project's reads can never be the looser of the two.</para>
+    /// relation to <see cref="StorageCommandDeadlines.McpReadSeconds"/> is now the OPPOSITE of what it used
+    /// to be: this composed web/MCP path sits strictly ABOVE the 60 s ceiling, while the <c>.Storage</c>
+    /// half deliberately stays under its own #3004 band, so this project's reads must be the LOOSER of the
+    /// two, not the tighter.</para>
     /// </summary>
     [Fact]
     public void TheReadDeadline_StaysInsideItsJustifiedBand()
@@ -363,10 +365,11 @@ public sealed class McpReadCommandTimeoutTests
             + "'Exception while reading from stream', which is the misdiagnosis #2826 exists to prevent");
 
         Assert.True(
-            seconds <= StorageCommandDeadlines.McpReadSeconds,
-            $"read deadline {seconds}s exceeds the {StorageCommandDeadlines.McpReadSeconds}s the .Storage half of "
+            seconds >= StorageCommandDeadlines.McpReadSeconds,
+            $"read deadline {seconds}s is under the {StorageCommandDeadlines.McpReadSeconds}s the .Storage half of "
             + "this SAME surface runs under (the DarlingPg*Reader family, served by the same 136 tools on the same "
-            + "pool) — one tool call must not get a looser ceiling depending on which project holds the reader");
+            + "pool) — the composed web/MCP path must sit strictly above the server ceiling, which the storage "
+            + "readers deliberately do not, so this side can never be the tighter of the two");
     }
 
     /// <summary>

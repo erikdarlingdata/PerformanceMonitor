@@ -140,7 +140,7 @@ public sealed class ComposeStoreRolesLiveTests
             var first = new CapturingTestLogger();
             var verdict = await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, first, ct, credentials);
             Assert.True(verdict.Provisioned, first.Joined);
-            Assert.Equal(60, verdict.AppliedComposeStatementTimeoutSeconds);
+            Assert.Equal(new DarlingConfig().ComposeStatementTimeoutSeconds, verdict.AppliedComposeStatementTimeoutSeconds);
             Assert.Contains("Role passwords: re-asserted for admin, viewer, mcp", first.Joined, StringComparison.Ordinal);
 
             foreach (var role in Roles)
@@ -873,7 +873,9 @@ VALUES ($1, (now() AT TIME ZONE 'UTC'), $2, $3, (now() AT TIME ZONE 'UTC'), 60, 
     {
         await using var connection = await OpenAsync(new NpgsqlConnectionStringBuilder(login) { Pooling = false }.ConnectionString, ct);
         Assert.Equal(role, await ScalarAsync<string>(connection, "SELECT current_user::text", ct));
-        Assert.Equal("15s", await ScalarAsync<string>(connection, "SHOW statement_timeout", ct));
+        Assert.Equal(
+            $"{new DarlingConfig().ComposeStatementTimeoutSeconds}s",
+            await ScalarAsync<string>(connection, "SHOW statement_timeout", ct));
 
         var denied = await Assert.ThrowsAsync<PostgresException>(
             () => ScalarAsync<object>(connection, "SELECT smtp_encrypted_password FROM config.config_notification", ct));
