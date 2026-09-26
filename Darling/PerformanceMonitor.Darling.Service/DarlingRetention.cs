@@ -180,7 +180,7 @@ public static class DarlingRetention
     internal const int QueryStoreIntervalLatestRetentionDays = 15;
 
     /// <summary>
-    /// #3953 (V144): the WIDE interval table's own horizon, on <c>first_execution_time</c>, kept separately from
+    /// #3953 (V145): the WIDE interval table's own horizon, on <c>first_execution_time</c>, kept separately from
     /// <see cref="QueryStoreIntervalLatestRetentionDays"/> because the two tables serve different readers at
     /// different windows. Ruled (issuecomment-5836972848, item 2): the table serves windows up to the 7-day preset,
     /// a Query Store interval can span a day, and the purge keys on <c>first_execution_time</c> — so 8 days is
@@ -678,7 +678,7 @@ public static class DarlingRetention
                 }
             }
 
-            /* #3953 (V144): the WIDE interval table beside V143's, at its own 9-day horizon
+            /* #3953 (V145): the WIDE interval table beside V143's, at its own 9-day horizon
                (QueryStoreIntervalWideRetentionDays) on first_execution_time — a shorter horizon than V143's 15
                days (ruled: the wide table serves only the 7-day preset and shorter). Same batched-DELETE shape,
                same pending-replay horizon reasoning, failure-isolated like every sibling. The table floor the

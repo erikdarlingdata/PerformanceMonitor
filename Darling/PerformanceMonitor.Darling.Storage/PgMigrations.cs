@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 Erik Darling, Darling Data LLC
  *
  * This file is part of the SQL Server Performance Monitor.
@@ -2116,14 +2116,6 @@ CREATE INDEX IF NOT EXISTS idx_raw_chunk_interval_reconcile_runs_time
     /// pending tables, so a later gate can parametrize V143's own decision on the table rather than duplicate it
     /// (ruling, item 5).</para>
     ///
-    /// <para><b>B4 addendum:</b> the "NO secondary index" call above covers a window index on the full table,
-    /// which F1 measured as a net loss; it does not cover <c>ix_query_store_interval_wide_null_start</c> below,
-    /// added in B4. The slicer's legacy-row probe (<c>ViewerDataService.QueryStoreSlicerHasLegacyRowSql</c>) runs
-    /// <c>WHERE server_id = $1 AND interval_start_time_utc IS NULL</c> on every slicer read;
-    /// <c>ux_query_store_interval_wide</c> doesn't carry <c>interval_start_time_utc</c>, so without a matching
-    /// index that probe is a scan of the server's whole row set in the common case where no such row exists. The
-    /// partial predicate keeps this index at or near zero rows in steady state (interval_start_time_utc has been
-    /// populated since #1841), so it costs the writer nothing on the HOT-update path F1 measured.</para>
     /// </summary>
     private const string V145Sql = @"
 /* One row per Query Store interval identity, every outcome. Types and nullability mirror query_store_stats except
@@ -2207,16 +2199,6 @@ ON collect.query_store_interval_wide
     execution_type_desc
 )
 NULLS NOT DISTINCT;
-
-/* B4 (#3953): the slicer's legacy-row probe runs WHERE server_id = $1 AND interval_start_time_utc IS NULL on
-   every slicer read. ux_query_store_interval_wide doesn't lead with (or carry) interval_start_time_utc, so
-   without this index the probe scans the server's whole row set whenever no NULL-start row exists (the usual
-   case). The predicate keeps the index itself near-empty in steady state: interval_start_time_utc has been
-   populated since #1841, and a NULL only appears when the collector's interval join misses
-   (QueryStoreCollector.cs ~805). */
-CREATE INDEX IF NOT EXISTS ix_query_store_interval_wide_null_start
-ON collect.query_store_interval_wide (server_id)
-WHERE interval_start_time_utc IS NULL;
 
 /* Column-for-column copy of V143's coverage table: this table's own claim, independent of V143's. */
 CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_coverage

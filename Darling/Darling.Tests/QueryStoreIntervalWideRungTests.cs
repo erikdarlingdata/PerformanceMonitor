@@ -60,8 +60,8 @@ public sealed class QueryStoreIntervalWideRungTests
 
         Assert.Equal(3, CountOf(sql, "CREATE TABLE IF NOT EXISTS collect."));
         Assert.Equal(1, CountOf(sql, "CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_wide"));
-        Assert.Equal(1, CountOf(sql, "CREATE INDEX IF NOT EXISTS ix_query_store_interval_wide_null_start"));
-        Assert.Equal(5, CountOf(sql, "CREATE "));
+        Assert.DoesNotContain("ix_query_store_interval_wide_null_start", sql, StringComparison.Ordinal);
+        Assert.Equal(4, CountOf(sql, "CREATE "));
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide\n", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_coverage\n", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending\n", sql, StringComparison.Ordinal);

@@ -3412,7 +3412,7 @@ public sealed class DarlingCollectorRunner
             && await _queryStoreIntervalLatest.PrepareServerAsync(
                 pgConnection, server.ServerId, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
 
-        /* #3953 (V144): the wide interval table's own prepare, independent of V143's above — its own coverage row
+        /* #3953 (V145): the wide interval table's own prepare, independent of V143's above — its own coverage row
            and its own hourly gap check, on its own claim. A fault here only skips THIS table's apply. */
         var queryStoreWidePrepared = queryStoreDatabases is not null
             && await _queryStoreIntervalWide.PrepareServerAsync(
@@ -3553,7 +3553,7 @@ public sealed class DarlingCollectorRunner
                     context.QueryStoreIntervalMisses++;
                 }
 
-                /* #3953 (V144): the wide table's apply, under its OWN savepoint (QueryStoreIntervalWide.SavepointName),
+                /* #3953 (V145): the wide table's apply, under its OWN savepoint (QueryStoreIntervalWide.SavepointName),
                    beside V143's above. A fault here rolls back only to that savepoint: V143's apply just above,
                    already released from its own savepoint, is untouched, and raw still commits either way. */
                 await _queryStoreIntervalWide.ApplyBatchAsync(
