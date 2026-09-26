@@ -208,10 +208,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         "get_file_io_trend",
         "get_memory_trend",
         "get_perfmon_trend",
-        "get_procedure_duration_trend",
-        "get_query_duration_trend",
-        "get_query_store_duration_trend",
-        "get_query_trend",
         "get_server_summary",
         "get_daily_summary",
         "get_daily_summary_range",
@@ -239,15 +235,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         "get_running_jobs",
         "get_plan_xml",
         "get_default_trace_events",
-        "get_health_parser_cpu_tasks",
-        "get_health_parser_io_issues",
-        "get_health_parser_memory_broker",
-        "get_health_parser_memory_conditions",
-        "get_health_parser_memory_node_oom",
-        "get_health_parser_scheduler_issues",
-        "get_health_parser_severe_errors",
-        "get_health_parser_significant_waits",
-        "get_health_parser_system_health",
     };
 
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>
@@ -3132,15 +3119,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
-            ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
-                    ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c))
+                    ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted)
                     : MissingParam("database_name"))
                 : MissingParam("query_hash"),
 
@@ -3201,15 +3188,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_default_trace_events"] = (c, pg, an) => DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), as_of: AsOf(c)),
 
             /* ── system_health parse-on-read family ── */
-            ["get_health_parser_cpu_tasks"] = (c, pg, an) => DarlingMcpHealthParserTools.GetCPUTasks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_io_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetIOIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_memory_broker"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryBroker(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_memory_conditions"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryConditions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_memory_node_oom"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryNodeOOM(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_scheduler_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSchedulerIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_severe_errors"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
+            ["get_health_parser_cpu_tasks"] = (c, pg, an) => DarlingMcpHealthParserTools.GetCPUTasks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_io_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetIOIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_memory_broker"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryBroker(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_memory_conditions"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryConditions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_memory_node_oom"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryNodeOOM(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_scheduler_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSchedulerIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_severe_errors"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
         };
     }
 
