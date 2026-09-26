@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -85,7 +86,8 @@ public sealed class DarlingMcpAlertTools
         /* Appended after as_of for the reason get_collection_log's filters are: MCP invokes by name, the
            /api/read dispatch passes as_of by name, and a trailing optional is the one position no existing
            positional C# caller can be re-bound by. */
-        [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read.")] bool include_dismissed = false)
+        [Description("Include alerts an operator has dismissed in the Viewer. Default false, which is the Alert History grid's own read.")] bool include_dismissed = false,
+        CancellationToken cancellationToken = default)
     {
         var hoursError = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (hoursError != null) return hoursError;
@@ -98,7 +100,7 @@ public sealed class DarlingMcpAlertTools
         var scope = "(all servers)";
         if (!string.IsNullOrWhiteSpace(server_name))
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null) return error;
             serverId = resolved.ServerId;
             scope = resolved.ServerName;
@@ -112,7 +114,7 @@ public sealed class DarlingMcpAlertTools
                the pattern get_collection_log and get_query_heatmap use. The cap was already the caller's
                here; what was missing was any way to tell a window of exactly `limit` alerts from a busier
                one, and any statement that the dismissed rows had been removed. */
-            var rows = await DarlingAlertReader.GetAlertHistoryPageAsync(postgres, since, windowEnd, serverId, limit + 1, include_dismissed);
+            var rows = await DarlingAlertReader.GetAlertHistoryPageAsync(postgres, since, windowEnd, serverId, limit + 1, include_dismissed, cancellationToken);
             var truncated = rows.Count > limit;
             var page = truncated ? rows.Take(limit).ToList() : rows;
 
@@ -122,7 +124,7 @@ public sealed class DarlingMcpAlertTools
                nothing by construction. */
             var dismissedExcludedCount = include_dismissed
                 ? 0L
-                : await DarlingAlertReader.CountDismissedAlertsAsync(postgres, since, windowEnd, serverId);
+                : await DarlingAlertReader.CountDismissedAlertsAsync(postgres, since, windowEnd, serverId, cancellationToken);
 
             if (page.Count == 0)
             {
@@ -196,13 +198,14 @@ public sealed class DarlingMcpAlertTools
                 alerts
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_alert_history", ex);
         }
     }
 
-    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers, a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED: since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores the earlier paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres)
+    [McpServerTool(Name = "get_alert_settings"), Description("Gets the alert configuration currently in effect: enabled flags, thresholds, cooldowns, delivery mode, and cadences. cooldown_minutes gates whether an alert FIRES; delivery.cooldown_minutes separately bounds the resulting post, per alert fingerprint and, for a re-notification, per metric across every monitored server. Darling: an unseeded store answers status unavailable and darling.json's defaults still govern until it seeds. Lite always answers its live in-memory settings. An empty knob list (e.g. long_running_query's exclusions) means cleared, not a default in force.<<GUIDE>>Gets the current alert configuration the service is using: which alerts are enabled and their thresholds (CPU, blocking, deadlocks, poison waits, long-running queries/jobs, tempdb, low disk, failed jobs, database state, Availability Group health, connection loss), the cooldown, excluded databases, the deadlock/blocking delivery mode and cooldown, the scheduled-analysis cadence, and the fleet-sweep cadence. TWO different cooldowns are reported and they govern different stages: top-level cooldown_minutes gates whether the alert engine FIRES at all, while delivery.cooldown_minutes bounds the resulting Slack/Teams/PagerDuty/webhook/email post twice over: once per alert FINGERPRINT, and once per METRIC across the whole fleet for a RE-notification. The second bound is why one fault on forty servers does not cost forty posts an hour; the servers it holds back are named on the post that does go out, under an 'Other Servers Affected' section. A first notice is never held back by either bound, and PerEvent delivery mode opts out of the per-metric one. A channel going quiet with alerts still in get_alert_history is delivery.cooldown_minutes, not cooldown_minutes. The self_alerts group holds the thresholds for alerts about the MONITOR STORE itself rather than a monitored server — those arrive with Server: 'Monitor Store' by default, or with the store's own peers.storeName label when the operator set that file-only field (a multi-store estate names each store on its own self-alerts), so an alert naming either spelling is tuned here and nowhere else, including Retention Held's warn/critical ratios. Mute rules match the alert row's server spelling, so on a store with storeName set, scope self-alert mutes to that label, not to 'Monitor Store'. The health_bands group is NOT an alert: its two tiers decide what band a server's card, the worst-first ranking and get_fleet_overview's counts read, in deadlocks per HOUR normalised over whatever window was asked for — so the same pair means the same condition on a 1-hour read and a 24-hour one. Tuning deadlocks.count_threshold does not move the band and tuning health_bands does not move the alert. The file_growth group's rise_mb is megabytes per HOUR, averaged over file_growth.lookback_minutes — a rate, not a total for the window: 10240 means 10 GB/hr whether the lookback is 5 minutes or 24 hours, and the engine scales it to the window (a 5-minute lookback asks for 853 MB inside it, a 24-hour one for 240 GB). The fleet_sweep group is NOT an alert family either, and its cadence is a SECOND cadence, separate from the scheduled-analysis one: fleet_sweep.enabled turns the scheduled whole-fleet sweep report on or off, and fleet_sweep.interval_minutes (15–1440, default 60 — hourly) is how often it runs. The alerts_enabled master switch deliberately does not govern sweep production, only delivery: sweeps keep running under alerts_enabled: false — that is when they carry the would-have-paged ledger — so muting the fleet does not blind the report surface. Separately, deadlocks.pg_count_threshold and blocking.pg_count_threshold are the PostgreSQL versions of those two alerts' count gates, reported inside those same groups, and they are deliberately NOT the same numbers as the count_threshold beside them: the two engines count with different instruments (captured deadlock graphs versus deadlocks parsed from the server log; engine-recorded blocked-process reports versus a periodic SAMPLE of pg_stat_activity), and while both engines' cards now band deadlocks through the same health_bands tiers, a PostgreSQL server still has no blocking band to calibrate against. The enabled switch in each group governs BOTH engines; the two thresholds do not move each other. On a store with no PostgreSQL targets both PostgreSQL keys are inert. poison_wait.threshold_ms is RETIRED: since the Poison Wait alert grades ACCUMULATED wait over a ten-minute window, this value is stored and reported for compatibility but consulted by nothing; poison_wait.threshold_ms_note says so beside it on every read, and update_alert_settings accepts it with a warning rather than refusing a round-tripped payload. poison_wait.enabled is the live switch. analysis.uncorroborated_route is where a notify-worthy but UNCORROBORATED finding goes — one fact in its chain and no matched co-fire check: 'digest' (the default) keeps it off every paging channel and puts it in the daily Analysis Singles Digest and the web/MCP surfaces, 'page' restores the earlier paging of every notify-worthy finding; a corroborated finding pages under either. It is the EFFECTIVE route, never null, resolved from the knob's two homes with the STORE winning: the settings row's analysis_uncorroborated_route column (V137) when it holds a route, else darling.json's analysis.uncorroboratedRoute (read once at service start), else the shipped 'digest'. analysis.uncorroborated_route_source says which home decided — 'store', 'file' or 'default' — and analysis.uncorroborated_route_note restates the precedence beside it; a store column left NULL (every store the morning after the V137 upgrade, and every fresh seed) reads 'file'. Set it with update_alert_settings or the Viewer's Settings window (Notifications > Automated Analysis): live in the running service within one collection sweep, consulted on the next scheduled-analysis delivery, no restart; send null through update_alert_settings to clear the column and hand the decision back to the file. long_running_query.excluded_program_name_prefixes and long_running_query.excluded_logins are the Long-Running Query alert's OPT-OUT knob: a session whose program_name STARTS WITH an entry of the first list, or whose login_name IS an entry of the second (both case-insensitive, no wildcard grammar), is NOT EVALUATED by that alert at all — not read into the decision, not counted, not fingerprinted — which is the opposite of a mute rule (a mute silences a fire already decided; an exclusion means the session never reaches the decision, and excluding a paging program resolves the open incident). The exclusion is applied in the read ahead of long_running_query.max_results, so an excluded session never consumes a result slot, and the fired alert's card carries Excluded Count / Excluded By Program Prefix / Excluded By Login items saying how many SESSIONS each list removed on that evaluation (a session matching both counts once, under the prefix). The lists ship SEEDED from a 7-day read of one large production store, whose long-running population fell into four classes: (1) SQL Agent job steps — program_name prefix 'SQLAgent - TSQL JobStep', ~460 sessions a week across 11 jobs, medians 35–62 min — the default prefix; (2) the NT AUTHORITY\\SYSTEM and NT AUTHORITY\\NETWORK SERVICE logins — the permanent multi-day CDC-shaped background — the default logins; (3) the application's admin login — deliberately NOT a default, because it runs the job wave but also real ad-hoc long-runners, and the job-step prefix already covers its share; (4) named humans — never excluded, they are what the page is for. The seeds are DEFAULTS: an empty list here means the operator cleared it and that arm excludes nothing. SMTP/webhook delivery credentials are managed separately and are not reported here — configure them in the standalone Darling Viewer app's Settings window (Notifications section), which connects to this store (including remotely, not just localhost) rather than requiring desktop access to this specific box.")]    public static async Task<string> GetAlertSettings(        NpgsqlDataSource postgres,
+        CancellationToken cancellationToken = default)
     {
         try
         {
@@ -211,7 +214,7 @@ public sealed class DarlingMcpAlertTools
                SELECTs -- and two independent reads could straddle a concurrent update_alert_settings commit
                and report a mix of pre- and post-update state, which is the very thing the write path takes a
                transaction to avoid producing. See DarlingAlertReader.GetAlertConfigurationAsync. */
-            var (s, deliveryCooldown) = await DarlingAlertReader.GetAlertConfigurationAsync(postgres);
+            var (s, deliveryCooldown) = await DarlingAlertReader.GetAlertConfigurationAsync(postgres, cancellationToken);
             if (s is null)
                 return McpHelpers.Status(
                     "unavailable",
@@ -227,7 +230,7 @@ public sealed class DarlingMcpAlertTools
 
             return JsonSerializer.Serialize(BuildAlertSettingsPayload(s, deliveryCooldown.Value), McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_alert_settings", ex);
         }
@@ -498,11 +501,12 @@ public sealed class DarlingMcpAlertTools
         "be traced. Routes are authored in the Viewer's Settings window; here they can be disabled or deleted " +
         "(set_notification_route_enabled / delete_notification_route).")]
     public static async Task<string> GetNotificationRoutes(
-        NpgsqlDataSource postgres)
+        NpgsqlDataSource postgres,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            var routes = await new PgNotificationRouteStore(postgres).LoadSummariesAsync();
+            var routes = await new PgNotificationRouteStore(postgres).LoadSummariesAsync(cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
@@ -541,7 +545,7 @@ public sealed class DarlingMcpAlertTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_notification_routes", ex);
         }
@@ -646,11 +650,12 @@ public sealed class DarlingMcpAlertTools
     [McpServerTool(Name = "get_mute_rules"), Description("Gets the configured alert mute rules. Mute rules suppress specific recurring alerts (by server, metric, database, query text, wait type, or job name) while still logging them — so an agent can tell a genuinely healthy-quiet server from one whose alerts are being suppressed.")]
     public static async Task<string> GetMuteRules(
         NpgsqlDataSource postgres,
-        [Description("Include only enabled, non-expired rules. Default true.")] bool enabled_only = true)
+        [Description("Include only enabled, non-expired rules. Default true.")] bool enabled_only = true,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            var all = await new PgMuteRuleStore(postgres).LoadAllAsync();
+            var all = await new PgMuteRuleStore(postgres).LoadAllAsync(cancellationToken);
             var rules = all.AsEnumerable();
             if (enabled_only)
                 rules = rules.Where(r => r.Enabled && (r.ExpiresAtUtc == null || r.ExpiresAtUtc > DateTime.UtcNow));
@@ -682,7 +687,7 @@ public sealed class DarlingMcpAlertTools
                 mute_rules = list.Select(BuildMuteRulePayload)
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_mute_rules", ex);
         }
