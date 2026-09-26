@@ -731,6 +731,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             /* #3021 get_store_log — the store's OWN server-log census, the second self-monitoring
                surface beside get_store_metrics. */
             .WithGeminiCompatibleTools<DarlingMcpStoreLogTools>()
+            .WithGeminiCompatibleTools<DarlingMcpReadLatencyTools>()
             /* #4214 part 2 get_store_host — the store HOST's profile (platform/RAM/data volume, store
                facts, per-setting verdicts), the read side of part 1's --check-settings verb. Darling-only:
                Lite has no managed PostgreSQL store to profile. */
