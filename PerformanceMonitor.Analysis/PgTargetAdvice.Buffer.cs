@@ -270,8 +270,9 @@ public static partial class PgTargetAdvice
 
         var pendingRestart = KnobMeta(knob, "pending_restart") ?? 0;
         if (pendingRestart > 0)
-            sb.Append("The snapshot reports pending_restart for this setting: a different value is in the file and takes effect " +
-                      "at the next restart. ");
+            sb.Append("The snapshot reports pending_restart for this setting: the file holds a different value than the " +
+                      "running server. It takes effect at the next restart, unless PostgreSQL rejected it, in which case " +
+                      "the server log names it and that restart would fail. ");
 
         return new AdviceBlock(
             Headline: $"shared_buffers is {stated}",
