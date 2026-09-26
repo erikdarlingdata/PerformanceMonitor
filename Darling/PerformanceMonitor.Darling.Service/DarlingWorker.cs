@@ -6769,6 +6769,15 @@ LIMIT 1";
                 connection, _logger, cancellationToken);
             readClock.Restart();
             await _selfAlerts!.EvaluateRetentionHoldsAsync(retentionHolds, cancellationToken);
+            readClock.Restart();
+
+            /* #4299 L3b (M1): the raw purge over-horizon check rides the SAME connection, hourly cadence and
+               retentionHolds reading as the check just above — reused, not re-read, so this tick's raw rows
+               are the exact ones EvaluateRetentionHoldsAsync just judged. */
+            var rawPurgeOverHorizon = await TimescaleSupport.ReadRawPurgeOverHorizonReadingsAsync(
+                connection, retentionHolds, _logger, cancellationToken);
+            readClock.Restart();
+            await _selfAlerts!.EvaluateRawPurgeOverHorizonAsync(rawPurgeOverHorizon, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

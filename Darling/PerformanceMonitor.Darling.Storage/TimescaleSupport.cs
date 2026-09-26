@@ -11324,6 +11324,38 @@ WHERE j.proc_name = 'policy_retention'
         return readings;
     }
 
+    /// <summary>
+    /// #4299 L3b (M1): the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/>
+    /// judges — each of the three raw relations' <see cref="RetentionHoldReading.OverHorizonRatio"/> (already
+    /// present in <paramref name="holdReadings"/>, the SAME list <see cref="EvaluateRetentionHoldsAsync"/>
+    /// reads this pass) paired with that relation's <see cref="ReadRawLastPurgeOutcomeAsync"/> record. Filters
+    /// <paramref name="holdReadings"/> down to raw relations only — a second read of the same catalog would
+    /// duplicate <see cref="RetentionHoldReadSql"/>'s work; this reuses the pass's own reading instead.
+    /// </summary>
+    public static async Task<IReadOnlyList<RawPurgeOverHorizonReading>> ReadRawPurgeOverHorizonReadingsAsync(
+        NpgsqlConnection connection, IReadOnlyList<RetentionHoldReading> holdReadings, ILogger? logger,
+        CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var readings = new List<RawPurgeOverHorizonReading>();
+        foreach (var hold in holdReadings)
+        {
+            if (!RawRelations.Contains(hold.HypertableName))
+            {
+                continue;
+            }
+
+            var lastPurge = await ReadRawLastPurgeOutcomeAsync(connection, hold.HypertableName, logger, cancellationToken);
+            readings.Add(new RawPurgeOverHorizonReading(hold.JobId, hold.HypertableName, hold.DropAfter, hold.OverHorizonRatio, lastPurge));
+        }
+
+        return readings;
+    }
+
     /* ---------------- compression-run observability (#1778) ---------------- */
 
     /// <summary>
@@ -12080,6 +12112,16 @@ public sealed record RetentionHoldReading(
 /// instead of the generic Retention Held text, which cannot distinguish these).
 /// </summary>
 public sealed record RawLastPurgeRecord(DateTime At, string Outcome, string? SqlState, long? ElapsedMs);
+
+/// <summary>
+/// #4299 L3b (M1): one raw relation's over-horizon measure PLUS its last recorded purge-trigger outcome —
+/// the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/> judges. Built
+/// from a <see cref="RetentionHoldReading"/> for a raw relation (<see cref="TimescaleSupport.RawRelations"/>)
+/// plus that same relation's <see cref="TimescaleSupport.ReadRawLastPurgeOutcomeAsync"/> result, by
+/// <see cref="TimescaleSupport.ReadRawPurgeOverHorizonReadingsAsync"/>.
+/// </summary>
+public sealed record RawPurgeOverHorizonReading(
+    long JobId, string HypertableName, string DropAfter, double? OverHorizonRatio, RawLastPurgeRecord? LastPurge);
 
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how
