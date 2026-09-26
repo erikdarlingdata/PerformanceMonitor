@@ -233,12 +233,21 @@ public sealed class AlertNotebookAuthoredContextTests
      [Fact]
      public void ProductionPrefixTable_HoldsExactlyTheRegisteredContextFamilies()
      {
-         var row = Assert.Single(AlertNotebookEndpoint.s_authoredPrefixTemplates);
-         Assert.Equal("Custom:", row.Prefix);
-         Assert.Equal(AlertNotebookEndpoint.AuthoredContextKind.CustomRule, row.Kind);
-         Assert.NotNull(row.Entry.BuildCellsWithContext);
-         Assert.Null(row.Entry.BuildCells);
-         Assert.True(AlertNotebookEndpoint.ShouldPrefetch(row.Entry, row.Kind));
+         Assert.Equal(2, AlertNotebookEndpoint.s_authoredPrefixTemplates.Length);
+
+         var customRow = Assert.Single(
+             AlertNotebookEndpoint.s_authoredPrefixTemplates, r => r.Prefix == "Custom:");
+         Assert.Equal(AlertNotebookEndpoint.AuthoredContextKind.CustomRule, customRow.Kind);
+         Assert.NotNull(customRow.Entry.BuildCellsWithContext);
+         Assert.Null(customRow.Entry.BuildCells);
+         Assert.True(AlertNotebookEndpoint.ShouldPrefetch(customRow.Entry, customRow.Kind));
+
+         var analysisRow = Assert.Single(
+             AlertNotebookEndpoint.s_authoredPrefixTemplates, r => r.Prefix == "Analysis: ");
+         Assert.Equal(AlertNotebookEndpoint.AuthoredContextKind.AnalysisFinding, analysisRow.Kind);
+         Assert.NotNull(analysisRow.Entry.BuildCellsWithContext);
+         Assert.Null(analysisRow.Entry.BuildCells);
+         Assert.True(AlertNotebookEndpoint.ShouldPrefetch(analysisRow.Entry, analysisRow.Kind));
      }
 
     /* ═══════════════════════════ Custom: id parsing ═══════════════════════════ */

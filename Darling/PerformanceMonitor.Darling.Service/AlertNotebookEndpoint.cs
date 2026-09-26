@@ -553,6 +553,8 @@ internal static partial class AlertNotebookEndpoint
     {
         ("Custom:", AuthoredContextKind.CustomRule,
             new AuthoredTemplateEntry("authored/custom-rule", CustomRuleTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildCustomRuleCells)),
+        ("Analysis: ", AuthoredContextKind.AnalysisFinding,
+            new AuthoredTemplateEntry("authored/analysis-finding", AnalysisFindingTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildAnalysisFindingCells)),
     };
 
     /// <summary>Exact-then-prefix resolution, with the kind the caller needs to run the right pre-fetch
