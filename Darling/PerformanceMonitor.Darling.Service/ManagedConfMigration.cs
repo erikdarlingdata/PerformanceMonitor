@@ -929,4 +929,154 @@ internal static class ManagedConfMigration
 
     private static string TrimTrailingCarriageReturn(string line)
         => line.EndsWith('\r') ? line[..^1] : line;
+
+    /// <summary>One key the rewrite either removed (an Ours line) or kept as an operator override, for the
+    /// change log #4336 lane mig-b writes (design rule 3, ruling comment-5827624802 §3 rule 3; classify
+    /// ruling item 4).</summary>
+    internal readonly record struct RewriteLogEntry(string Message, string? OverriddenKey);
+
+    /// <summary>The rewritten <c>postgresql.conf</c> text plus its change log (#4336 lane mig-b). Never reads
+    /// or writes <c>postgresql.auto.conf</c> — that file is the operator's, per design section 4, and this
+    /// pure function never touches disk at all.</summary>
+    internal readonly record struct RewriteResult(
+        string NewConfText,
+        IReadOnlyList<RewriteLogEntry> Log,
+        IReadOnlySet<string> ExcludedKeys);
+
+    /// <summary>
+    /// Rewrites an existing <c>postgresql.conf</c> (#4336 lane mig-b, design §3 "What moves"):
+    /// <list type="bullet">
+    /// <item>every line <see cref="ClassifyLines"/> marks <see cref="ConfLineClassification.Ours"/> is
+    /// removed (rule 3's "the operator's line still wins" pairs with this: the product's own copy of a key
+    /// goes away so the include, not a stale block, is what a reader sees);</item>
+    /// <item>every <see cref="ConfLineClassification.HandEdit"/> line (and every <see cref="ConfLineClassification.Unclassified"/>
+    /// one, per this class's own doc comment: unproven is treated as a hand edit) is KEPT, moved below the
+    /// include line, in original relative order (rule 3);</item>
+    /// <item>exactly one <see cref="ManagedConfFile.IncludeLine"/> is written, once, right after the surviving
+    /// non-block content and before the moved hand edits (design §2 "where the line goes: the end"; if one
+    /// is already present and un-migrated — review L5, "no opt-out" — it is treated as ordinary text like any
+    /// other line outside a covered span, and a fresh one is still appended, so re-running this function is
+    /// idempotent per rule 6 rather than leaving two includes only on a first run);</item>
+    /// <item>every other line — comments, blank lines, stock PostgreSQL defaults, anything outside a managed
+    /// span — is left exactly where it is, byte for byte.</item>
+    /// </list>
+    /// <paramref name="managedKeys"/> is the key set the managed file will set (<see cref="ManagedConfFile.RenderBody"/>'s
+    /// output, reduced to keys) — used only for the classify ruling's item 4 log line below, never to decide
+    /// what moves; that decision is <see cref="ClassifyLines"/>'s alone.
+    /// </summary>
+    internal static RewriteResult Rewrite(string postgresqlConf, IReadOnlySet<string> managedKeys, int? configuredPort = null)
+    {
+        var classified = ClassifyLines(postgresqlConf, configuredPort);
+        var normalized = postgresqlConf.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var hadTrailingNewline = normalized.EndsWith('\n');
+        var rawLines = normalized.Split('\n');
+        if (hadTrailingNewline && rawLines.Length > 0 && rawLines[^1].Length == 0)
+        {
+            rawLines = rawLines[..^1];
+        }
+
+        var kept = new List<string>();
+        var handEdits = new List<string>();
+        var log = new List<RewriteLogEntry>();
+        var alreadyIncluded = false;
+
+        for (var i = 0; i < rawLines.Length; i++)
+        {
+            var line = classified[i];
+            if (line.Classification == ConfLineClassification.Ours)
+            {
+                if (line.Note is not null)
+                {
+                    log.Add(new RewriteLogEntry(line.Note, OverriddenKey: null));
+                }
+
+                continue; /* dropped: the product's own line, superseded by the managed file's include. */
+            }
+
+            /* HandEdit and Unclassified both survive, unchanged, per this class's own "unproven is never
+               ours" rule. A pre-existing, un-migrated include of the managed file is ordinary text here —
+               it is outside every covered span, so ClassifyLines already called it a HandEdit; skip re-adding
+               it below so a second run of this function does not duplicate the include line. */
+            if (string.Equals(rawLines[i], ManagedConfFile.IncludeLine, StringComparison.Ordinal))
+            {
+                alreadyIncluded = true;
+                continue;
+            }
+
+            if (IsBelowSomeIncludeAlready(rawLines, i))
+            {
+                handEdits.Add(rawLines[i]);
+            }
+            else
+            {
+                kept.Add(rawLines[i]);
+            }
+        }
+
+        _ = alreadyIncluded; /* re-added unconditionally below either way — rule 6's no-op case is proved by
+                                 byte-identical output on a second run, not by skipping the append. */
+
+        /* Classify ruling item 4: for every managedKeys entry a surviving hand-edit line still sets, log the
+           override and exclude it from later verification. Scan the ORIGINAL hand-edit lines (both those kept
+           above the include and those already below it) rather than the reduced `kept`/`handEdits` split,
+           since either position still wins over the managed file per design section 4. */
+        var excluded = new HashSet<string>(StringComparer.Ordinal);
+        var overriddenValueByKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rawLine in kept)
+        {
+            RecordOverrideIfManaged(rawLine, managedKeys, overriddenValueByKey);
+        }
+
+        foreach (var rawLine in handEdits)
+        {
+            RecordOverrideIfManaged(rawLine, managedKeys, overriddenValueByKey);
+        }
+
+        foreach (var (key, value) in overriddenValueByKey)
+        {
+            excluded.Add(key);
+            log.Add(new RewriteLogEntry(
+                FormattableString.Invariant($"{key}: derived <new>, overridden by operator line below the include ({value}), not applied"),
+                OverriddenKey: key));
+        }
+
+        var newLines = new List<string>(kept);
+        newLines.Add(ManagedConfFile.IncludeLine);
+        newLines.AddRange(handEdits);
+
+        var newText = string.Join('\n', newLines) + "\n";
+        return new RewriteResult(newText, log, excluded);
+    }
+
+    /// <summary>Whether physical line <paramref name="index"/> (0-based, into <paramref name="rawLines"/>)
+    /// sits after SOME already-present <c>include 'darling-managed.conf'</c> line earlier in the file — the
+    /// first-run case where an operator (or a half-applied earlier attempt) already added the include and a
+    /// hand edit already sits below it. Kept distinct from "HandEdit below the NEW include this run writes"
+    /// so a first run's ordering decision does not depend on where this run happens to place its own include.</summary>
+    private static bool IsBelowSomeIncludeAlready(string[] rawLines, int index)
+    {
+        for (var j = 0; j < index; j++)
+        {
+            if (string.Equals(rawLines[j], ManagedConfFile.IncludeLine, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>If <paramref name="rawLine"/> assigns a key in <paramref name="managedKeys"/>, records its
+    /// value keyed by name (classify ruling item 4) — last one wins if more than one surviving hand edit sets
+    /// the same managed key, matching how PostgreSQL itself would apply them.</summary>
+    private static void RecordOverrideIfManaged(string rawLine, IReadOnlySet<string> managedKeys, Dictionary<string, string> overriddenValueByKey)
+    {
+        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(rawLine))
+        {
+            if (managedKeys.Contains(name))
+            {
+                overriddenValueByKey[name] = value;
+            }
+        }
+    }
 }
