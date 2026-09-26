@@ -565,7 +565,18 @@ ORDER BY c.bucket";
                     }
                 }
 
-                var horizon = AlignDown(utcNow - MaterializationHoleScanSpanFor(target.Source), target.BucketWidth);
+                /* #4299 L4: for a raw-sourced target the old time horizon (utcNow - MaterializationHoleScanSpanFor)
+                   assumed raw purges on ITS OWN schedule, so nothing older than that span could still be sitting
+                   in raw unrepaired. Variant (d') stops scheduling the three raw jobs at all — raw now purges
+                   only when the service's own trigger fires — so raw can hold rows far older than that span
+                   while the trigger has not yet run, and the old clamp would leave a hole below it unscanned
+                   indefinitely. For raw-sourced targets the lower bound is instead the RAW FLOOR actually still
+                   present (min(SourceTimeColumn) in the source table itself), so the scan reaches every bucket
+                   raw genuinely still holds; a raw table with nothing in it yet (fresh install) falls back to the
+                   old time horizon, which is harmless there since there is nothing to scan either way. */
+                var horizon = IsRawSourced(target.Source)
+                    ? await RawFloorHorizonAsync(connection, target, utcNow, cancellationToken)
+                    : AlignDown(utcNow - MaterializationHoleScanSpanFor(target.Source), target.BucketWidth);
                 var windows = MaterializationHoleScanWindows(floor.Value, ceiling.Value, horizon, seamFloor, target.BucketWidth);
                 if (windows.Count == 0)
                 {
@@ -733,6 +744,92 @@ ORDER BY c.bucket";
         passClock.Stop();
         return new MaterializationHoleRepairSummary(
             scanned, skipped, holesFound, bucketsFound, holesRepaired, bucketsRepaired, holesDeferred, bucketsDeferred, holesRemaining, failures, holesForced, passClock.Elapsed);
+    }
+
+    /// <summary>
+    /// #4299 L4: is <paramref name="source"/> one of the three raw tables named in <see cref="RawTierCoverage"/>
+    /// (the ones a service-triggered purge drops, never on a schedule of their own)? Used to pick the hole
+    /// scan's lower bound: a raw-sourced target needs the RAW FLOOR itself, not the old time-based horizon (see
+    /// <see cref="RawFloorHorizonAsync"/>'s doc for why the time horizon stopped being safe under variant (d')).
+    /// </summary>
+    public static bool IsRawSourced(string source)
+    {
+        foreach (var (relation, _, _) in RawTierCoverage)
+        {
+            if (string.Equals(relation, source, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// #4299 L4: the hole scan's lower bound for a raw-sourced target, aligned down to a bucket boundary — the
+    /// oldest row <paramref name="target"/>'s source table (one of <see cref="RawTierCoverage"/>'s three) still
+    /// holds, or <c>utcNow - MaterializationHoleScanSpanFor(target.Source)</c> when the source is empty (nothing
+    /// to scan below either bound in that case, so the fallback is harmless).
+    ///
+    /// <para><b>Why the time horizon stopped being safe.</b> Before #4299, every raw table purged on its OWN
+    /// scheduled retention job, so nothing older than <see cref="MaterializationHoleScanSpanFor"/>'s span could
+    /// still be sitting in raw — scanning further back than that was wasted probes over rows already gone.
+    /// Variant (d') UNSCHEDULES the three raw jobs (<c>scheduled</c> stays permanently false) and moves the
+    /// purge onto a service-triggered <c>CALL run_job(id)</c>, gated on this very repair having found no hole in
+    /// the range about to be dropped (see <see cref="HoleFreeThroughAsync"/>). Between the moment raw ages past
+    /// that old span and the moment the trigger's gate is satisfied, raw legitimately holds rows older than the
+    /// old horizon — an outage-lengthened startup, a store that has never yet passed the gate, or simply a
+    /// service that has not reached an hourly Periodic pass yet. Clamping the scan to the old time horizon in
+    /// that window would leave a real hole below it unscanned and unrepaired for as long as the purge stays
+    /// held, which is now indefinite rather than bounded by the old schedule. Reading the raw floor directly
+    /// removes the assumption: the scan reaches exactly as far back as raw still has rows to lose.</para>
+    /// </summary>
+    public static async Task<DateTime> RawFloorHorizonAsync(
+        NpgsqlConnection connection, MaterializationHoleTarget target, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        using var floorCommand = new NpgsqlCommand(
+            $"SELECT min({target.SourceTimeColumn}) FROM collect.{target.Source}", connection) { CommandTimeout = SetupTimeoutSeconds };
+        var rawFloor = await floorCommand.ExecuteScalarAsync(cancellationToken);
+        return rawFloor is DateTime raw
+            ? AlignDown(raw, target.BucketWidth)
+            : AlignDown(utcNow - MaterializationHoleScanSpanFor(target.Source), target.BucketWidth);
+    }
+
+    /// <summary>
+    /// #4299 L4: the raw purge's own trigger gate, checked as a FRESH scan of the EXACT range the purge is about
+    /// to drop — never a reuse of a repair pass's stale tally, because the repair and the trigger can run in
+    /// different passes and a range clean when the repair last looked can have grown a hole since (a plain
+    /// refresh that regressed, a collection gap the repair pass never saw). Returns <c>true</c> only when EVERY
+    /// bucket in <c>[dropFrom, dropTo)</c> is covered by the materialization AND not one of <paramref
+    /// name="deferredRanges"/> — a range this same pass's <see cref="CapMaterializationHoleRepairs"/> capped out
+    /// of and left for the next start counts as a hole for gating purposes even though the scan itself would
+    /// currently read it clean once repaired, because "repaired" here means "already closed", not "queued".
+    /// <paramref name="deferredRanges"/> is the union of a target's seam-deferred and ordinary-deferred ranges
+    /// from the SAME pass that produced the fresh <paramref name="materialization"/> reads this call scans
+    /// against — passing a stale deferred list from an earlier pass defeats the point exactly as reusing a
+    /// stale "finished" flag would.
+    /// </summary>
+    public static async Task<bool> HoleFreeThroughAsync(
+        NpgsqlConnection connection, MaterializationHoleTarget target, (string Schema, string Name) materialization,
+        DateTime dropFrom, DateTime dropTo, IReadOnlyList<(DateTime Start, DateTime End)> deferredRanges,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(deferredRanges);
+        if (dropTo <= dropFrom)
+        {
+            return true;
+        }
+
+        foreach (var deferred in deferredRanges)
+        {
+            if (deferred.Start < dropTo && deferred.End > dropFrom)
+            {
+                return false;
+            }
+        }
+
+        var holes = await ScanHolesAsync(connection, target, materialization, dropFrom, dropTo - target.BucketWidth, cancellationToken);
+        return holes.Count == 0;
     }
 
     /// <summary>The hole buckets of one aggregate over <c>[from, to]</c> inclusive, oldest first.</summary>
