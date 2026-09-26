@@ -216,4 +216,126 @@ internal static class ManagedConfMigrationRunner
         return new ManagedConfMigrationOutcome(
             ManagedConfVerificationStatus.Failed, mismatches, backupPath, ManagedConfMigrationStep.A);
     }
+
+    /// <summary>
+    /// Step B (#4336 lane 6): after a normal derivation has already rendered and written
+    /// <c>darling-managed.conf</c>, checks that <paramref name="rows"/> (a fresh <c>pg_file_settings</c>
+    /// snapshot) shows every key <paramref name="renderedText"/> declares with the rendered value and no
+    /// error, from a row whose <c>sourcefile</c> ends with <see cref="ManagedConfFile.FileName"/>. A row's
+    /// <c>applied</c> may be false — an operator line below the include can legitimately override it; only
+    /// the value and the absence of an error matter here. All keys match: stamp the new text as verified. Any
+    /// key fails: restore <paramref name="previousText"/> (when there was one) so the old stamp matches
+    /// again, and report <c>Failed</c>.
+    /// </summary>
+    internal static ManagedConfMigrationOutcome VerifyStepB(
+        string dataDir,
+        IReadOnlyList<FileSettingRow> rows,
+        string renderedText,
+        string? previousText)
+    {
+        var byKey = new Dictionary<string, List<FileSettingRow>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows)
+        {
+            if (row.Name is null || row.SourceFile is null
+                || !row.SourceFile.EndsWith(ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!byKey.TryGetValue(row.Name, out var list))
+            {
+                list = new List<FileSettingRow>();
+                byKey[row.Name] = list;
+            }
+
+            list.Add(row);
+        }
+
+        var mismatchedKeys = new List<string>();
+        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(renderedText))
+        {
+            var ok = byKey.TryGetValue(name, out var candidates)
+                && candidates.Exists(r => r.Error is null && string.Equals(r.Setting, value, StringComparison.Ordinal));
+            if (!ok)
+            {
+                mismatchedKeys.Add(name);
+            }
+        }
+
+        var managedConfPath = Path.Combine(dataDir, ManagedConfFile.FileName);
+
+        if (mismatchedKeys.Count == 0)
+        {
+            ManagedConfMigrationSteps.WriteVerifiedStamp(dataDir, renderedText);
+            return new ManagedConfMigrationOutcome(
+                ManagedConfVerificationStatus.Verified, Array.Empty<string>(), null, ManagedConfMigrationStep.B);
+        }
+
+        if (previousText is not null)
+        {
+            if (!ManagedConfFile.TryReplaceAtomic(
+                    managedConfPath,
+                    previousText,
+                    ManagedConfFile.DefaultMaxReplaceAttempts,
+                    ManagedConfFile.DefaultReplaceRetryDelay,
+                    out var restoreError))
+            {
+                throw new IOException(
+                    FormattableString.Invariant($"Failed to restore {managedConfPath}."), restoreError);
+            }
+        }
+
+        return new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, mismatchedKeys, null, ManagedConfMigrationStep.B);
+    }
+
+    /// <summary>
+    /// One Information line per key that changed between <paramref name="previousText"/> and the fresh
+    /// render, for Step B's log (#4336 lane 6): the key, its old value (<c>(unset)</c> when it had none), the
+    /// new value, and the <see cref="ManagedConfFile.RenderInputs"/> that produced it — RAM, whether that RAM
+    /// figure is authoritative, platform, PostgreSQL major, CPU count, and hypertable count.
+    /// </summary>
+    internal static string FormatStepBChangeLog(
+        IReadOnlyList<(string Key, string? Old, string New)> changes,
+        ManagedConfFile.RenderInputs inputs)
+    {
+        var lines = new List<string>(changes.Count);
+        foreach (var (key, old, @new) in changes)
+        {
+            lines.Add(FormattableString.Invariant(
+                $"{key}: {old ?? "(unset)"} -> {@new} (RAM {inputs.RamBytes / (1024 * 1024)} MB, authoritative {inputs.RamAuthoritative}; platform {inputs.Platform}; PG {inputs.PostgresMajor}; CPUs {inputs.ProcessorCount}; hypertables {inputs.HypertableCount})"));
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// Diffs <paramref name="previousText"/> (null when there was none) against <paramref name="renderedText"/>
+    /// key by key, for <see cref="FormatStepBChangeLog"/>'s input: only keys whose value actually changed —
+    /// a key rendered with the same value it already had is not a change.
+    /// </summary>
+    internal static IReadOnlyList<(string Key, string? Old, string New)> DiffStepBChanges(
+        string? previousText, string renderedText)
+    {
+        var oldValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (previousText is not null)
+        {
+            foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(previousText))
+            {
+                oldValues[name] = value;
+            }
+        }
+
+        var changes = new List<(string Key, string? Old, string New)>();
+        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(renderedText))
+        {
+            var hadOld = oldValues.TryGetValue(name, out var old);
+            if (!hadOld || !string.Equals(old, value, StringComparison.Ordinal))
+            {
+                changes.Add((name, hadOld ? old : null, value));
+            }
+        }
+
+        return changes;
+    }
 }
