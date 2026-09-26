@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -177,17 +178,83 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.DoesNotContain("hunter2", sanitized);
     }
 
-    /// <summary>A sibling blocker's line on the same multi-line detail still survives redaction of an
-    /// adjacent, unsafe state_unavailable block — the block match must not eat past the next blocker's
-    /// prefix.</summary>
+    /// <summary>F1 (#4363 security round): <c>ForcePlanBotPolicy.Blockers</c> always adds
+    /// <c>state_unavailable</c> LAST — <c>apc_owns_it</c>/<c>apc_enabled_for_database</c> both require a
+    /// non-null, non-empty <c>state</c> and cannot co-occur with the null/empty-state condition that adds
+    /// <c>state_unavailable</c> — so a real detail never has a sibling blocker AFTER it. A pre-#4326 row's
+    /// raw exception message CAN embed <c>"\n" + "apc_owns_it:"</c> (or any other sibling's exact prefix)
+    /// as free text; a sibling-prefix lookahead would have ended the block there and let everything after
+    /// it — unredacted — through. The fix anchors the block to <c>\z</c> instead: everything from the
+    /// legacy row's <c>state_unavailable:</c> onward is redacted, including the impersonating text.</summary>
     [Fact]
-    public void SiblingBlockerLine_SurvivesEvenWithAdjacentRedaction()
+    public void LegacyLine_EmbeddingASiblingPrefix_IsRedactedToTheEnd()
     {
-        var detail = "state_unavailable: garbage (Exception: whatever leaked)\napc_owns_it: query_store_stats: plan 7 is_forced_plan = true";
-        var sanitized = PgPlanForceActionStore.SanitizeDetailForAudit(detail)!;
-        var lines = sanitized.Split('\n');
+        var legacy = "apc_owns_it: query_store_stats: plan 7 is_forced_plan = true\n" +
+            "state_unavailable: the forcing and automatic-plan-correction state read failed (PostgresException: 28P01: password authentication failed for user \"fake_user\"\n" +
+            "apc_owns_it: host=db-fake-01.example password=hunter2) \u2014 an unattended force cannot proceed on an unknown engine state";
+        var sanitized = PgPlanForceActionStore.SanitizeDetailForAudit(legacy)!;
 
-        Assert.DoesNotContain("whatever leaked", sanitized);
-        Assert.Equal("apc_owns_it: query_store_stats: plan 7 is_forced_plan = true", lines[1]);
+        Assert.DoesNotContain("hunter2", sanitized);
+        Assert.DoesNotContain("db-fake-01", sanitized);
+        Assert.DoesNotContain("fake_user", sanitized);
+        Assert.StartsWith("apc_owns_it: query_store_stats: plan 7 is_forced_plan = true\n", sanitized);
+        Assert.Equal(
+            "apc_owns_it: query_store_stats: plan 7 is_forced_plan = true\n" +
+            "state_unavailable: the forcing and automatic-plan-correction state read failed \u2014 an unattended force cannot proceed on an unknown engine state",
+            sanitized);
+    }
+
+    /// <summary>F2 (#4363 security round): the null-state "returned no row" shape
+    /// (<c>ForcePlanBotPolicy.Blockers(target, null, null)</c>) never carried exception text, and must
+    /// pass through unchanged — built from the writer itself so wording drift there turns this test red
+    /// instead of silently over-redacting.</summary>
+    [Fact]
+    public void NoRowShape_FromTheWriter_PassesThroughUnchanged()
+    {
+        var target = new ForcePlanTarget(Database: "db1", QueryId: 42, PlanId: 7);
+        var blockers = ForcePlanBotPolicy.Blockers(target, state: null, stateUnavailableReason: null);
+        var detail = ForcePlanBotPolicy.Evidence(blockers)!;
+
+        Assert.Equal(detail, PgPlanForceActionStore.SanitizeDetailForAudit(detail));
+        Assert.Contains("returned no row for plan 7 of query 42 in db1", detail);
+    }
+
+    /// <summary>F2: the empty-state "ran and observed nothing" shape
+    /// (<c>ForcePlanBotPolicy.Blockers(target, emptyState, null)</c>) — the common production case —
+    /// never carried exception text either, and must pass through unchanged.</summary>
+    [Fact]
+    public void EmptyStateShape_FromTheWriter_PassesThroughUnchanged()
+    {
+        var target = new ForcePlanTarget(Database: "db1", QueryId: 42, PlanId: 7);
+        var emptyState = new ForcePlanTargetState(
+            PlanIsForced: null, PlanForcingType: null, ForceFailureCount: null, LastForceFailureReason: null,
+            PlanObservedAtUtc: null, OtherForcedPlanId: null, OtherForcedPlanForcingType: null,
+            OtherForcedPlanObservedAtUtc: null, ApcState: null, ApcStateReason: null, ApcRegressedPlanId: null,
+            ApcLastGoodPlanId: null, ApcLastGoodPlanForcingType: null, ApcLastGoodPlanIsForced: null,
+            ApcLastGoodPlanForceFailureReason: null, ApcExecuteActionInitiatedBy: null, ApcObservedAtUtc: null,
+            ForceLastGoodPlanActualState: null, EnablementObservedAtUtc: null);
+        Assert.True(emptyState.IsEmpty);
+
+        var blockers = ForcePlanBotPolicy.Blockers(target, emptyState, stateUnavailableReason: null);
+        var detail = ForcePlanBotPolicy.Evidence(blockers)!;
+
+        Assert.Equal(detail, PgPlanForceActionStore.SanitizeDetailForAudit(detail));
+        Assert.Contains("ran and observed nothing for this target inside the last", detail);
+    }
+
+    /// <summary>Both journal reads apply the sanitizer — the review's missing pin. Exercises
+    /// <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/> the same way both
+    /// <c>GetRecentActionsAsync</c> and <c>GetPendingReviewsAsync</c> do at their respective call sites
+    /// (<c>record with { Detail = SanitizeDetailForAudit(record.Detail) }</c>), pinning that a legacy
+    /// exception-bearing line never survives either read's output shape.</summary>
+    [Fact]
+    public void BothReads_ApplyTheSameSanitizer()
+    {
+        var legacy = "state_unavailable: the forcing and automatic-plan-correction state read failed (NpgsqlException: 28P01: password authentication failed for user \"darling_ro\" at host db-primary-02.internal)";
+        var recentActionsShape = legacy;
+        var pendingReviewShape = legacy;
+
+        Assert.DoesNotContain("db-primary-02", PgPlanForceActionStore.SanitizeDetailForAudit(recentActionsShape));
+        Assert.DoesNotContain("db-primary-02", PgPlanForceActionStore.SanitizeDetailForAudit(pendingReviewShape));
     }
 }

@@ -417,24 +417,27 @@ LIMIT 16", connection)
     }
 
     /// <summary>
-    /// Matches the ONE evidence line #4326 can produce for a null-state read failure —
-    /// <c>state_unavailable: {CollectionFailure.Describe output} — an unattended force cannot proceed on
-    /// an unknown engine state</c> — where the parenthesized reason is exactly a type name, optionally
-    /// with a SQLSTATE, followed by one of <see cref="CollectionFailure.Describe"/>'s two fixed log notes.
-    /// Never <c>ex.Message</c>: a build before #4326 put the exception's own message in that same position
+    /// Matches the THREE evidence shapes <see cref="ForcePlanBotPolicy.Blockers"/> can put in a
+    /// <c>state_unavailable</c> block, and only those: the #4326 read-failure line (parenthesized reason
+    /// is exactly a type name, optionally with a SQLSTATE, followed by one of
+    /// <see cref="CollectionFailure.Describe"/>'s two fixed log notes); the null-state "returned no row"
+    /// line; and the empty-state "ran and observed nothing" line — both written straight from
+    /// <c>target</c>/<c>state</c> fields, never from an exception. Never <c>ex.Message</c>: a build before
+    /// #4326 put the exception's own message in the read-failure line's position
     /// (<c>PgPlanForceActionStore.TryGetTargetStatesAsync</c>'s old catch), and a real error message from
-    /// PostgreSQL or the driver essentially never happens to match this exact template, so failing the
-    /// match is the signal that a row is legacy. Every OTHER blocker's evidence line
+    /// PostgreSQL or the driver essentially never happens to match any of these three exact templates, so
+    /// failing the match is the signal that a row is legacy. Every OTHER blocker's evidence line
     /// (<c>parameter_sensitivity_cofired</c>, <c>secondary_replica_evidence</c>, <c>apc_owns_it</c>,
-    /// <c>apc_enabled_for_database</c>, and the empty-state shape of <c>state_unavailable</c>) has never
-    /// carried exception text on any build, so this pattern only ever needs to gate the one line that did.
+    /// <c>apc_enabled_for_database</c>) has never carried exception text on any build, so this pattern only
+    /// ever needs to gate the one blocker that did.
     /// </summary>
     private static readonly Regex SafeStateUnavailableLine = new(
-        @"^state_unavailable: the forcing and automatic-plan-correction state read failed \(" +
-        @"[A-Za-z][A-Za-z0-9]*(, SQLSTATE [0-9A-Z]{5})?; " +
-        @"(the log has the full error|a table or column the read needs is missing, logged only at Debug level)\) " +
-        @"— an unattended force cannot proceed on an unknown engine state$",
-        RegexOptions.Compiled);
+        @"\Astate_unavailable: (?:" +
+        @"the forcing and automatic-plan-correction state read failed \([A-Za-z][A-Za-z0-9]*(?:, SQLSTATE [0-9A-Z]{5})?; (?:the log has the full error|a table or column the read needs is missing, logged only at Debug level)\) — an unattended force cannot proceed on an unknown engine state" +
+        @"|the forcing and automatic-plan-correction state read returned no row for plan -?[0-9]+ of query -?[0-9]+ in [^\r\n\u2028\u2029]{1,256}; an unattended force cannot proceed on an unknown engine state" +
+        @"|the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last [0-9]+ hours: no query_store_stats row for plan -?[0-9]+, no forced sibling plan of query -?[0-9]+, no plan_correction recommendation, and no plan_correction capture for [^\r\n\u2028\u2029]{1,256} at all — FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown" +
+        @")\z",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// The fixed sentence for a null-state read failure BEFORE #4326 fixed it (see
@@ -446,24 +449,33 @@ LIMIT 16", connection)
         "state_unavailable: the forcing and automatic-plan-correction state read failed — an unattended force cannot proceed on an unknown engine state";
 
     /// <summary>
-    /// Matches the whole <c>state_unavailable</c> BLOCK — from its prefix up to (not including) the start
-    /// of the next known blocker's line, or the end of the string, whichever comes first — rather than one
-    /// <c>\n</c>-delimited line. A pre-#4326 row's raw exception message can itself embed a newline (a
-    /// driver's multi-line message, a wrapped stack fragment), and matching only the first line would leave
-    /// everything after that embedded newline unredacted; #4326 itself never wrote more than one line for
-    /// this blocker, so a post-fix row's block is always exactly its one safe line and nothing here widens
-    /// what a clean row matches.
+    /// Matches the whole <c>state_unavailable</c> BLOCK — from its prefix to the END of the string, not to
+    /// the next sibling blocker's line. <see cref="ForcePlanBotPolicy.Blockers"/> always adds
+    /// <c>state_unavailable</c> LAST: it fires only when <c>state</c> is null or empty
+    /// (<c>PgPlanForceActionStore.cs</c>, this file), while <c>apc_owns_it</c> and
+    /// <c>apc_enabled_for_database</c> both require a non-null, non-empty <c>state</c>
+    /// (<c>FactRemediation.ForcePlanBlockers</c>, <c>PerformanceMonitor.Analysis/FactRemediation.cs</c>
+    /// ~1019-1043, checked via <c>if (state is null || state.IsEmpty) return blockers;</c> before either
+    /// APC blocker can be added; <c>ForcePlanBotPolicy.Blockers</c>,
+    /// <c>PerformanceMonitor.Analysis/ForcePlanBotPolicy.cs</c> ~291-317, adds
+    /// <c>apc_enabled_for_database</c> only under <c>state is { ApcIsOn: true }</c> and
+    /// <c>state_unavailable</c> only under <c>state is null</c> or <c>state.IsEmpty</c>). So the two APC
+    /// blockers can never co-occur with <c>state_unavailable</c>, and it is always the final block — a
+    /// sibling-prefix LOOKAHEAD is not needed and is actively unsafe: a pre-#4326 row's raw exception
+    /// message is free text and can itself contain <c>"\n" + "apc_owns_it:"</c> (or any other sibling's
+    /// exact prefix) by coincidence or by an attacker who controls part of the upstream error message, and
+    /// a lookahead-bounded block would end there, leaving everything after it — unredacted — outside the
+    /// match and passed through verbatim. Anchoring to <c>\z</c> instead removes that seam: nothing after
+    /// <c>state_unavailable:</c> can end the block early, because there is no more string in which the next
+    /// blocker legitimately fires.
     ///
-    /// <para><see cref="RegexOptions.Singleline"/> makes <c>.</c> match a newline so the lazy body can span
-    /// one; <see cref="RegexOptions.Multiline"/> anchors <c>^</c> right after a <c>\n</c> (which also covers
-    /// a <c>\r\n</c> pair, since the position immediately after <c>\n</c> is the same either way) for the
-    /// next-blocker lookahead. A lone <c>\r</c>, or a Unicode line separator (U+2028/U+2029), is deliberately
-    /// NOT a line boundary to .NET's <c>^</c>/<c>$</c> under these options — only <c>\n</c> is — so text
-    /// smuggled after one of those does not count as the start of the next blocker's line and stays inside
-    /// this block, where it is redacted with everything else in it instead of surviving past the anchor.</para>
+    /// <para><see cref="RegexOptions.Singleline"/> makes <c>.</c> match a newline so the body can span one;
+    /// <see cref="RegexOptions.Multiline"/> anchors <c>^</c> right after a <c>\n</c> (which also covers a
+    /// <c>\r\n</c> pair, since the position immediately after <c>\n</c> is the same either way) so the
+    /// block is found even when it is not the first line in <c>detail</c>.</para>
     /// </summary>
     private static readonly Regex StateUnavailableBlock = new(
-        @"^state_unavailable:.*?(?=\r?\n(?:parameter_sensitivity_cofired|secondary_replica_evidence|apc_owns_it|apc_enabled_for_database|state_unavailable):|\z)",
+        @"^state_unavailable:.*\z",
         RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.Multiline);
 
     /// <summary>
