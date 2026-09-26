@@ -246,10 +246,10 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.Contains("ran and observed nothing for this target inside the last", detail);
     }
 
-    /// <summary>Both journal reads apply the sanitizer — the review's missing pin. Exercises
-    /// <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/> the same way both
-    /// <c>GetRecentActionsAsync</c> and <c>GetPendingReviewsAsync</c> do at their respective call sites:
-    /// both route through <see cref="PgPlanForceActionStore"/>'s shared <c>ReadRecord</c> mapper, which
+    /// <summary>Both journal reads apply the sanitizer. Exercises
+    /// <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/> the way both
+    /// <c>GetRecentActionsAsync</c> and <c>GetPendingReviewsAsync</c> get it: both route through
+    /// <see cref="PgPlanForceActionStore"/>'s shared <c>ReadRecord</c> mapper, which
     /// applies the sanitizer once per row, so a legacy exception-bearing line never survives either
     /// read's output shape.</summary>
     [Fact]
@@ -390,7 +390,7 @@ public sealed class PlanForceActionAuditRedactionTests
     }
 
     /// <summary>
-    /// #4377 (coordinator addendum): the raw-<c>detail</c>-read choke point isn't just
+    /// #4376: the raw-<c>detail</c>-read choke point isn't just
     /// <c>PgPlanForceActionStore</c> — nothing under <c>Darling/</c> (outside <c>Darling.Tests</c>) or
     /// <c>PerformanceMonitor.Common/</c> may read the <c>detail</c> column of
     /// <c>collect.plan_force_actions</c> except <see cref="PgPlanForceActionStore.GetRecentActionsAsync"/>
