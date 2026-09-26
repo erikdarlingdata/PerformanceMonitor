@@ -29,8 +29,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/> on the way OUT — so a caller of
 /// <c>GetRecentActionsAsync</c>/<c>GetPendingReviewsAsync</c> never sees the legacy text, but the STORED row
 /// still carries it. A scrub built on those readers could never find what it exists to fix. This class is
-/// therefore the one named exemption in <c>PlanForceActionAuditRedactionTests.RawDetailReaderExemptions</c>
-/// (#4377): its own SELECT reads <c>detail</c> directly, decides with the SAME
+/// therefore the one named exemption in <c>PlanForceActionDetailCensusTests.RawDetailReaderExemptions</c>
+/// (#4377/#4384): its own SELECT reads <c>detail</c> directly, decides with the SAME
 /// <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/> the readers use — no second copy of the
 /// allow-list — and writes back only that function's output. It never returns a <c>detail</c> string to a
 /// caller; the public surface is counts only (see <see cref="Summary"/>).</para>
