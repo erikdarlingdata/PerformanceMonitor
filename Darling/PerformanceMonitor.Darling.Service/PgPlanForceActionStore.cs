@@ -354,12 +354,12 @@ SELECT
     /// force still being written — are properties of the TABLE, and the only place they can be shown
     /// to hold is against a live store, which is what <c>PlanForceActionStoreTests</c> does.</para>
     ///
-    /// <para>#4346 first applied <see cref="SanitizeDetailForAudit"/> to every row this read returns —
-    /// this read has no caller today, but a row written before #4326 sits in the table regardless, and the
-    /// day a review surface calls this it must not be the day someone notices the exception text it has
-    /// been quietly carrying since before this method had a caller. #4376 moved the sanitizer into
-    /// <see cref="ReadRecord"/>, the shared row mapper, so it still applies here — and to every other
-    /// current or future reader of this table — without a per-method call site to remember.</para>
+    /// <para>Every row's <c>detail</c> is sanitized by <see cref="ReadRecord"/> (#4346/#4376): this read
+    /// has no caller today, but a row written before #4326 sits in the table regardless, and the day a
+    /// review surface calls this it must not be the day someone notices the exception text it has been
+    /// quietly carrying since before this method had a caller. Because the sanitizer lives in
+    /// <see cref="ReadRecord"/>, the shared row mapper, it applies here — and to every other current or
+    /// future reader of this table — without a per-method call site to remember.</para>
     /// </summary>
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(
         int serverId, DateTime nowUtc, CancellationToken ct)
@@ -499,11 +499,9 @@ LIMIT 16", connection)
     }
 
     /// <summary>The audit read behind <c>get_plan_force_actions</c> — newest first, optional server scope.
-    /// #4346 first applied <see cref="SanitizeDetailForAudit"/> to every row here, so a row written before
-    /// #4326 (which put the read failure's own exception message here) cannot reach an MCP or web caller
-    /// through this read. #4376 moved the sanitizer into <see cref="ReadRecord"/>, the shared row mapper —
-    /// this read still gets it, at the same choke point every other reader of this table now goes
-    /// through.</summary>
+    /// Every row's <c>detail</c> passes through <see cref="SanitizeDetailForAudit"/> in
+    /// <see cref="ReadRecord"/>, so a row written before #4326 (which put the read failure's own exception
+    /// message here) cannot reach a caller (#4346).</summary>
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetRecentActionsAsync(
         int? serverId, DateTime sinceUtc, int limit, CancellationToken ct)
     {
@@ -536,12 +534,9 @@ LIMIT $3", connection)
         return rows;
     }
 
-    /// <summary>The single choke point every reader of a <c>collect.plan_force_actions</c> row goes
-    /// through (#4376): <c>Detail</c> is passed through <see cref="SanitizeDetailForAudit"/> HERE, once,
-    /// rather than at each call site, so a new reader added later cannot forget the redaction — it gets it
-    /// by construction, the same way it gets every other column. #4346 first applied the sanitizer inside
-    /// <see cref="GetRecentActionsAsync"/> and <see cref="GetPendingReviewsAsync"/> individually; #4376
-    /// moves it here so it happens exactly once per row, not once per caller.</summary>
+    /// <summary>The single mapper every reader of a <c>collect.plan_force_actions</c> row uses.
+    /// <c>Detail</c> is passed through <see cref="SanitizeDetailForAudit"/> here, once per row, so every
+    /// reader gets it (#4376).</summary>
     private static PlanForceActionRecord ReadRecord(NpgsqlDataReader reader) => new(
         ActionId: reader.GetInt64(0),
         ActionTimeUtc: DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
