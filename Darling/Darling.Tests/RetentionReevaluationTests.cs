@@ -587,9 +587,14 @@ VALUES (1, $1, 9138, '" + Seed + "', 'TestDb', decode(md5('reeval'), 'hex'), dec
 
             /* ── PASS 1b: the hand-arm the runbook forbids, undone on the next pass and counted as a RE-HOLD.
                   Parked with next_start => 'infinity' so the armed job cannot run and drop the seeded chunk out
-                  from under the rest of this test; scheduled = true is all the prior read sees. ── */
+                  from under the rest of this test; for a raw relation the prior read the sweep takes is
+                  config->>'darling_armed' (RawArmedStateSql), not scheduled — #4299 (d′) unconditionally
+                  converges scheduled to false on every pass regardless of the hand-arm, so hand-arming via
+                  scheduled alone would leave the prior-armed read false and the re-hold below would prove
+                  nothing. next_start => 'infinity' keeps TimescaleDB's own scheduler from running the drop in
+                  between, in case some future build re-honors scheduled for a raw relation. ── */
             using (var handArm = new NpgsqlCommand(@"
-SELECT alter_job(j.job_id, scheduled => true, next_start => 'infinity'::timestamptz)
+SELECT alter_job(j.job_id, scheduled => true, next_start => 'infinity'::timestamptz, config => j.config || jsonb_build_object('darling_armed', true))
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
@@ -598,10 +603,13 @@ AND   j.hypertable_name = '" + HeldRelation + "'", connection) { CommandTimeout 
                 await handArm.ExecuteNonQueryAsync(ct);
             }
 
-            /* The hand-arm the runbook forbids still writes scheduled directly — that mechanism is unchanged; what
-               changes under #4299 (d′) is that the NEXT pass’s unconditional converge reverts it regardless
-               of the coverage verdict, which is the assertion two lines below this one. */
+            /* The hand-arm the runbook forbids writes BOTH flags directly — that mechanism is unchanged; what
+               changes under #4299 (d′) is that the NEXT pass’s unconditional converge reverts scheduled
+               regardless of the coverage verdict (asserted below), while darling_armed is the flag the sweep's
+               prior-state read actually consults for a raw relation, which is what makes the re-hold below a
+               transition rather than a no-op. */
             Assert.True(await ScheduledAsync(connection, HeldRelation, ct), "the hand-arm must have taken, or the re-hold below proves nothing");
+            Assert.True(await RawArmedAsync(connection, HeldRelation, ct), "the hand-arm must set darling_armed too, or the sweep's prior-state read for a raw relation sees no transition to re-hold");
 
             var pass1bLog = new CapturingTestLogger();
             var pass1b = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, pass1bLog, TimescaleSupport.RetentionSweepPass.Periodic, ct);
