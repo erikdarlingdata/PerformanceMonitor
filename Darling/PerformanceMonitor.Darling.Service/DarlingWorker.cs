@@ -7214,7 +7214,21 @@ LIMIT 1";
                    a day is visible from this WARNING alone without anyone re-running the repair by hand. */
                 catch (OperationCanceledException) when (seamBudget.IsCancellationRequested && !budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
                 {
-                    var hoursDeferred = await TimescaleSupport.CountOpenSeamHoursAsync(connection, DateTime.UtcNow, budget.Token);
+                    /* #4300: the re-read itself is failure-isolated from the rest of the pass — a throw here
+                       (a catalog read that times out, a connection already in a bad state after the budget
+                       cut it off mid-statement) must not stop the coverage sweep, the purge trigger or the
+                       epoch relaunch below, the exact isolation this whole catch exists to preserve. An
+                       unreadable count logs as "unknown" rather than ending the pass here. */
+                    string hoursDeferred;
+                    try
+                    {
+                        hoursDeferred = (await TimescaleSupport.CountOpenSeamHoursAsync(connection, DateTime.UtcNow, budget.Token)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        hoursDeferred = "unknown";
+                    }
+
                     _logger.LogWarning(
                         "Retention re-evaluation: seam repair paused at the {BudgetMinutes}-minute budget; resumes next hour; {HoursDeferred} hour(s) still deferred.",
                         (long)s_seamRepairBudget.TotalMinutes, hoursDeferred);

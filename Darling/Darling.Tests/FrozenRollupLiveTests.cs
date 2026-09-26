@@ -615,6 +615,9 @@ public sealed class FrozenRollupLiveTests
             /* The hourly Periodic pass's own seam-only repair — ONE call, ONE tick, no restart. */
             var seamOnly = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
             Assert.Equal(7, seamOnly.BucketsRepaired);
+            Assert.Equal(0, seamOnly.HolesRemaining);
+            Assert.Equal(0, seamOnly.BucketsDeferred);
+            Assert.Equal(0, seamOnly.Failures);
 
             await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
             {
@@ -624,6 +627,102 @@ public sealed class FrozenRollupLiveTests
 
             /* The seam is now empty — Covered, from the hourly tick alone, no second start. */
             Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4300: a seam WIDER than the hourly cap (24 buckets) cannot be closed by one seam-only call. The same
+    /// shape as <see cref="Outage_SeamWiderThanTheCap_NewestFirstRepairsTheTopAndKeepsTheGateHeldUntilFullyRepaired"/>,
+    /// but through <see cref="TimescaleSupport.RepairMaterializationSeamsAsync"/> (the hourly Periodic pass's
+    /// own entry point) instead of the full start-path walk. A pass that can only take the newest 24 of a
+    /// 36-bucket seam must report the remaining 12 as deferred, leave the raw gate reading not-safe (Short),
+    /// and never stamp <c>darling_repair_epoch</c> — that stamp is written only by the full-walk completion
+    /// path (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>), never by the seam-only call itself, so a
+    /// pass that could not fully close the seam this tick must not leave behind anything that would let the
+    /// raw purge trigger read the epoch as current.
+    /// </summary>
+    [Fact]
+    public async Task Outage_SeamWiderThanTheCap_SeamOnlyRepair_DefersTheRestAndLeavesTheGateHeldWithNoEpochStamped()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Same seam shape as the wider-than-cap start-path pin: the legacy materializes only ONE bucket,
+               35 hours back (l.mx = S-35h); raw carries an unbroken run of 36 hourly buckets from S-35h
+               through S, so the seam floor (raw's own filtered floor) is 36 buckets wide — wider than the
+               24-bucket hourly cap, so ONE seam-only call cannot close it. */
+            var s = D0.AddDays(3);
+
+            for (var hour = 0; hour <= 35; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"seamcap_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-35), s.AddHours(-34), ct);
+
+            var u = s.AddDays(2);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seamcap_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            /* The hourly Periodic pass's own seam-only repair, ONE call — the cap takes the newest 24 of the
+               36 seam buckets, leaving the OLDEST 12 (S-35h..S-24h) deferred. */
+            var seamOnly = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(24, seamOnly.BucketsRepaired);
+            Assert.True(seamOnly.BucketsDeferred > 0, "a 36-bucket seam under a 24-bucket cap must leave a deferred remainder");
+            Assert.Equal(12, seamOnly.BucketsDeferred);
+
+            /* The gate stays held — the deferred 12 buckets are still holes below the (partially advanced)
+               floor, so a fresh Covered read must still answer Short. */
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            /* No repair epoch stamped by this call — that stamp belongs only to the full-walk completion
+               path (DarlingWorker.RunMaterializationHoleRepairAsync), never to RepairMaterializationSeamsAsync
+               itself, whether or not this pass fully closed the seam. */
+            await using (var epochCheck = new NpgsqlCommand(TimescaleSupport.RawRepairEpochMatchesSql("procedure_stats"), connection))
+            {
+                var value = await epochCheck.ExecuteScalarAsync(ct);
+                var epochCurrent = value is bool b && b;
+                Assert.False(epochCurrent, "a seam-only pass must never stamp the repair epoch, deferred remainder or not");
+            }
 
             bodySucceeded = true;
         }
