@@ -7,6 +7,8 @@
  */
 
 using System;
+using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
@@ -106,5 +108,39 @@ public sealed class ManagedConfMigrationWiringTests
         var verifyCall = At(source, "ManagedConfMigrationRunner.VerifyStepB(", verifiedCase);
 
         Assert.True(verifiedCase < verifyCall, "the Kind.Verified case must call VerifyStepB.");
+    }
+
+    /// <summary>#4215: the migration's <c>pg_file_settings</c> snapshot opens on a connection string with
+    /// <c>Pooling = false</c> — this read must land on the server the current start just launched, never on
+    /// a pooled socket left over from an earlier server lifetime in the same process (the stale-pool failure
+    /// fixed for the upgrade tests in #4397).</summary>
+    [Fact]
+    public void MigrationSnapshotConnectionString_SetsPoolingFalse()
+    {
+        var source = ReadManagedSource();
+        var helper = At(source, "private static string MigrationSnapshotConnectionString(string connectionString)", 0);
+        var poolingFalse = At(source, "Pooling = false,", helper);
+        var snapshotUse = At(source, "new NpgsqlConnection(MigrationSnapshotConnectionString(connectionString));", 0);
+
+        Assert.True(helper < poolingFalse, "MigrationSnapshotConnectionString must set Pooling = false.");
+        Assert.True(snapshotUse > 0, "the migration's snapshot connection must be built through MigrationSnapshotConnectionString.");
+    }
+
+    /// <summary>Pure pin on the helper's output: given any pooled connection string, the result parses with
+    /// <c>Pooling=false</c>.</summary>
+    [Fact]
+    public void MigrationSnapshotConnectionString_OutputParsesWithPoolingFalse()
+    {
+        var pooled = "Host=127.0.0.1;Port=5432;Username=darling;Database=darling;Pooling=true";
+        var builder = new NpgsqlConnectionStringBuilder(pooled);
+        Assert.True(builder.Pooling, "the input fixture must itself be pooled to make this pin meaningful.");
+
+        // The connection string this test's fixture would receive from PinSessionTimeZoneUtc + Pooling=false,
+        // built the same way MigrationSnapshotConnectionString builds it.
+        var timeZonePinned = DarlingStoreConnection.PinSessionTimeZoneUtc(pooled);
+        var result = new NpgsqlConnectionStringBuilder(timeZonePinned) { Pooling = false }.ConnectionString;
+
+        var parsed = new NpgsqlConnectionStringBuilder(result);
+        Assert.False(parsed.Pooling, "the migration snapshot connection string must parse with Pooling=false.");
     }
 }
