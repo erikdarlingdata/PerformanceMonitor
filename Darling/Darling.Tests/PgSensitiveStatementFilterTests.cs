@@ -28,14 +28,14 @@ public sealed class PgSensitiveStatementFilterTests
 {
     /// <summary>
     /// One definition in the whole repo. Every occurrence of the pattern's opening token
-    /// (<c>[[:&lt;:]](create|alter)</c>) must be the ONE declaration in <see cref="PgSensitiveStatementFilter"/>
+    /// (<c>[[:&lt;:]]password[[:&gt;:]]</c>) must be the ONE declaration in <see cref="PgSensitiveStatementFilter"/>
     /// — a second literal copy anywhere else is exactly the drift #4348 exists to prevent.
     /// </summary>
     [Fact]
     public void ThePatternHasExactlyOneDefinitionInTheRepo()
     {
         var repoRoot = FindRepoRoot();
-        var needle = "[[:<:]](create|alter)";
+        var needle = "[[:<:]]password[[:>:]]";
         var hits = 0;
         string? onlyFile = null;
 

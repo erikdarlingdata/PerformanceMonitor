@@ -32,10 +32,18 @@ public static class PgSensitiveStatementFilter
 
     /// <summary>
     /// The statements whose text can carry a credential, as a case-insensitive PostgreSQL regular expression:
-    /// role, user and group DDL (their <c>PASSWORD</c> clause, and <c>CREATE/ALTER USER MAPPING</c>'s password
-    /// option), subscription DDL (a connection string), foreign server DDL (its options), a <c>PASSWORD</c>
-    /// keyword followed by a literal, a libpq <c>password=</c> or <c>PGPASSWORD=</c> setting, and a URI's
-    /// <c>user:secret@</c>, with comments allowed wherever the grammar allows whitespace.
+    /// a <c>PASSWORD</c> keyword followed by a literal (covers role, user and group DDL's <c>PASSWORD</c>
+    /// clause, and <c>CREATE/ALTER USER MAPPING</c>'s password option, since both always end in the literal),
+    /// a libpq <c>password=</c> or <c>PGPASSWORD=</c> setting (covers a connection string wherever it appears —
+    /// subscription DDL, foreign server DDL, <c>dblink</c>), and a URI's <c>user:secret@</c>, with comments
+    /// allowed wherever the grammar allows whitespace.
+    ///
+    /// <para><b>No blanket DDL-name alternative, on purpose.</b> An earlier version also matched
+    /// <c>CREATE|ALTER ROLE|USER|GROUP|SUBSCRIPTION|SERVER</c> by name alone, meaning to catch every form of
+    /// each DDL statement; in practice it flagged forms that carry no credential at all (<c>ALTER ROLE app
+    /// SET work_mem = '64MB'</c>) while adding nothing the literal-following alternatives below did not
+    /// already catch (every credential-bearing form of that DDL ends in a literal). Removed rather than
+    /// carried forward.</para>
     ///
     /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
     /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes, so the literal means
@@ -43,8 +51,7 @@ public static class PgSensitiveStatementFilter
     /// (<c>password = $1</c>) is not a hit: it carries no value.</para>
     /// </summary>
     public const string SensitiveStatementPattern =
-        "[[:<:]](create|alter)" + TokenGap + "+(role|user|group|subscription|server)[[:>:]]"
-        + "|[[:<:]]password[[:>:]]" + TokenGap + "*(=|to)?" + TokenGap + "*(e?'|u&'|[$][^0-9])"
+        "[[:<:]]password[[:>:]]" + TokenGap + "*(=|to)?" + TokenGap + "*(e?'|u&'|[$][^0-9])"
         + "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]"
         + "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@";
 
