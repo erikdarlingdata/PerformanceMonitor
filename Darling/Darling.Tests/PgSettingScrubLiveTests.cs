@@ -421,7 +421,7 @@ public sealed class PgSettingScrubLiveTests
 
             await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
             await verifyConnection.OpenAsync(ct);
-            Assert.False(await ContainsSecretAsync(verifyConnection, "hunter2", ct), "a raw password survived the hour-sliced scrub");
+            Assert.False(await ContainsSecretAsync(verifyConnection, "hunter2", ct), "a setting value is still unmasked after the hour-sliced scrub");
 
             var markerValue = await ScalarTextAsync(verifyConnection,
                 "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",
@@ -515,7 +515,7 @@ public sealed class PgSettingScrubLiveTests
             Assert.False(second.AlreadyDone);
             Assert.Equal(95, second.RowsUpdated);
 
-            Assert.False(await ContainsSecretAsync(setupConnection, "hunter2", ct), "a raw password survived the resumed run");
+            Assert.False(await ContainsSecretAsync(setupConnection, "hunter2", ct), "a setting value is still unmasked after the resumed run");
 
             var markerAfterResume = await ScalarTextAsync(setupConnection,
                 "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",
