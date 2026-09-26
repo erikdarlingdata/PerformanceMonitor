@@ -204,14 +204,15 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
            alone refuses even the open-end positive control, before clause 4 is ever reached. A second,
            unrelated identity anchored at or before skewFloor pulls the server's table floor down there, so
            clause 3 passes and only clause 4 (LiteralEnd vs applied_through) can still refuse the straddle read. */
+        var floorAnchorFirst = WindowStart.AddDays(-2);
         var floorAnchor = new QueryStoreCollector.Row
         {
             DatabaseName = "qsStraddle",
             QueryId = 6999,
             PlanId = 69991,
             ExecutionTypeDesc = "Regular",
-            FirstExecutionTime = WindowStart.AddDays(-2),
-            LastExecutionTime = WindowStart.AddDays(-2).AddMinutes(9),
+            FirstExecutionTime = floorAnchorFirst,
+            LastExecutionTime = floorAnchorFirst.AddMinutes(9),
             QueryHash = "0x00006999",
             QueryPlanHash = "0x00069991",
             ExecutionCount = 10,
@@ -220,6 +221,9 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = 6998,
+            /* Tier-2 row: a legacy row (IntervalStartTimeUtc left null) makes clause 6 refuse the table, so
+               every seed row here must carry it to isolate clause 4 alone. */
+            IntervalStartTimeUtc = new DateTime(floorAnchorFirst.Year, floorAnchorFirst.Month, floorAnchorFirst.Day, floorAnchorFirst.Hour, 0, 0, DateTimeKind.Unspecified),
         };
         await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { floorAnchor }, server, WindowStart.AddDays(-2).AddMinutes(10), context, ct);
 
@@ -239,6 +243,9 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = 7000,
+            /* Tier-2 row: same interval (same RuntimeStatsIntervalId), so the same interval start as the
+               re-fetch below; a legacy row here would make clause 6 refuse the table. */
+            IntervalStartTimeUtc = new DateTime(day0.Year, day0.Month, day0.Day, day0.Hour, 0, 0, DateTimeKind.Unspecified),
         };
         await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { insideWindow }, server, day0.AddMinutes(10), context, ct);
 
@@ -259,6 +266,8 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = 7000,
+            /* Tier-2 row: same interval as insideWindow above, so the same interval start. */
+            IntervalStartTimeUtc = new DateTime(day0.Year, day0.Month, day0.Day, day0.Hour, 0, 0, DateTimeKind.Unspecified),
         };
         await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { reFetched }, server, afterLiteralEnd, context, ct);
     }
