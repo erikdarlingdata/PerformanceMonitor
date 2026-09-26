@@ -3712,7 +3712,7 @@ public sealed class DarlingManagedPostgres
             existingText is null ? "Wrote {Path}" : "Updated {Path}",
             managedPath);
         EnsureManagedIncludeLine(dataDirectory);
-        return new ManagedConfWriteResult(Written: true, HandEdited: false, WriteFailed: false, rendered, []);
+        return new ManagedConfWriteResult(Written: true, HandEdited: false, WriteFailed: false, rendered, [], PreviousText: existingText, Inputs: inputs);
     }
 
     /// <summary>
