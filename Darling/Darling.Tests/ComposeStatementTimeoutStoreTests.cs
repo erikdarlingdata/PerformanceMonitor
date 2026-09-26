@@ -190,7 +190,7 @@ public class ComposeStatementTimeoutStoreTests
     {
         var sql = DarlingManagedRoles.BuildProvisioningSql(ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
 
-        Assert.Contains("SET statement_timeout = '15s'", sql, StringComparison.Ordinal);
+        Assert.Contains("SET statement_timeout = '60s'", sql, StringComparison.Ordinal);
     }
 
     private static string ReadViewerSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")

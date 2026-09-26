@@ -103,8 +103,8 @@ public sealed class ComposeStatementTimeoutReloadTests
     /// PostgreSQL, which is the single outcome the backstop exists to prevent.
     /// </summary>
     [Theory]
-    [InlineData(0, "15s")]
-    [InlineData(-1, "15s")]
+    [InlineData(0, "60s")]
+    [InlineData(-1, "60s")]
     [InlineData(1, "5s")]
     [InlineData(5, "5s")]
     [InlineData(600, "600s")]

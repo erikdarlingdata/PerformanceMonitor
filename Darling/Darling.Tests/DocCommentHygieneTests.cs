@@ -572,6 +572,11 @@ public sealed class DocCommentHygieneTests
         ["!:DarlingServerConnector"] =
             "MARKER. Names DarlingServerConnector, which this repository declares.",
 
+        ["!:McpCommandDeadlines.ReadSeconds"] =
+            "MARKER. Names McpCommandDeadlines.ReadSeconds, both of which this repository declares. Two "
+            + "sites (#4442): ViewerCommandDeadlines and StorageCommandDeadlines each cite the mcp read "
+            + "deadline as the sibling half of their own client-deadline derivation.",
+
         ["!:StallWaitProbePolicy.HardBudget"] =
             "MARKER. Names StallWaitProbePolicy.HardBudget, both of which this repository declares.",
 

@@ -594,7 +594,7 @@ public sealed class DarlingManagedRolesTests
             "provision-roles.sql sends the mcp password before it turns utility tracking off");
         Assert.Contains("ALTER ROLE mcp    SET log_min_duration_statement = '5000ms';", byo, StringComparison.Ordinal);
         Assert.Contains("ALTER ROLE mcp    SET log_parameter_max_length = 0;", byo, StringComparison.Ordinal);
-        Assert.Contains("ALTER ROLE mcp    SET statement_timeout = '15s';", byo, StringComparison.Ordinal);
+        Assert.Contains("ALTER ROLE mcp    SET statement_timeout = '60s';", byo, StringComparison.Ordinal);
 
         /* The BYO remedy for the preload names the multi-literal ALTER SYSTEM form, never the one-literal list
            that stores a single library name (#3904's review). */
