@@ -305,6 +305,33 @@ ORDER BY c.bucket";
     public static string LegacySuccessorHoleExistsSql(
         string relation, string sourceTimeColumn, string sourceFilter, string legacy, string successor,
         string fromExpr, string toExpr, string bucketWidthLiteral)
+        => $"EXISTS ({LegacySuccessorHoleBodySql(relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral)})";
+
+    /// <summary>
+    /// The LIST form of the same hole definition (#4301, H2): every hole bucket in
+    /// <c>[<paramref name="fromExpr"/>, <paramref name="toExpr"/>]</c>, oldest first — the repair walk's own
+    /// shape (<see cref="MaterializationHoleScanSql"/>'s <c>ORDER BY c.bucket</c>), sharing the identical
+    /// <see cref="LegacySuccessorHoleBodySql"/> body <see cref="LegacySuccessorHoleExistsSql"/> wraps in
+    /// <c>EXISTS(...)</c> for the gate. TEXT-IDENTICAL body, so the gate's <c>EXISTS</c> and the walk's
+    /// bucket list can never disagree about what a hole is.
+    /// </summary>
+    public static string LegacySuccessorHoleScanSql(
+        string relation, string sourceTimeColumn, string sourceFilter, string legacy, string successor,
+        string fromExpr, string toExpr, string bucketWidthLiteral)
+        => $@"SELECT hb.bucket
+FROM ({LegacySuccessorHoleBodySql(relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral)}) AS hb(bucket)
+ORDER BY hb.bucket";
+
+    /// <summary>
+    /// The shared body <see cref="LegacySuccessorHoleExistsSql"/> wraps in <c>EXISTS(...)</c> and
+    /// <see cref="LegacySuccessorHoleScanSql"/> wraps in a <c>SELECT ... ORDER BY</c> — kept as ONE private
+    /// builder (#4301, H2) so the gate's <c>EXISTS</c> probe and the walk's bucket list can never drift into
+    /// disagreeing about what a hole is; a change to the definition edits exactly one place. TEXT of the
+    /// buckets clause is otherwise identical to <see cref="LegacySuccessorHoleExistsSql"/>'s own prior body.
+    /// </summary>
+    private static string LegacySuccessorHoleBodySql(
+        string relation, string sourceTimeColumn, string sourceFilter, string legacy, string successor,
+        string fromExpr, string toExpr, string bucketWidthLiteral)
     {
         ArgumentNullException.ThrowIfNull(relation);
         ArgumentNullException.ThrowIfNull(sourceTimeColumn);
@@ -317,8 +344,8 @@ ORDER BY c.bucket";
 
         var filterClause = sourceFilter.Length == 0 ? string.Empty : $"\n        AND   {sourceFilter}";
 
-        return $@"EXISTS (
-    SELECT 1
+        return $@"
+    SELECT hb.bucket
     FROM generate_series({fromExpr}, {toExpr}, {bucketWidthLiteral}) AS hb(bucket)
     WHERE NOT EXISTS (SELECT 1 FROM collect.{legacy} AS hl WHERE hl.bucket = hb.bucket OFFSET 0)
     AND   NOT EXISTS (SELECT 1 FROM collect.{successor} AS hs WHERE hs.bucket = hb.bucket OFFSET 0)
@@ -327,7 +354,7 @@ ORDER BY c.bucket";
               WHERE hr.{sourceTimeColumn} >= hb.bucket
               AND   hr.{sourceTimeColumn} < hb.bucket + {bucketWidthLiteral}{filterClause}
               OFFSET 0)
-    OFFSET 0)";
+    OFFSET 0";
     }
 
     /// <summary>The materialized span of one aggregate — its oldest and newest bucket — read off the

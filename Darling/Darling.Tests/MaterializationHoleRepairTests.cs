@@ -398,6 +398,48 @@ public sealed class MaterializationHoleRepairTests
     }
 
     /// <summary>
+    /// #4301 (H2, filter parity companion): <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/> (the
+    /// gate's <c>EXISTS</c> wrapper) and <see cref="TimescaleSupport.LegacySuccessorHoleScanSql"/> (the walk's
+    /// bucket LIST) must share the IDENTICAL body text — one private builder, two wrappers — so the gate and
+    /// the walk can never drift into disagreeing about what a hole is. Asserts the shared
+    /// <c>generate_series(...) ... OFFSET 0</c> buckets clause appears verbatim inside both generated strings.
+    /// </summary>
+    [Fact]
+    public void LegacySuccessorHoleExistsSql_AndLegacySuccessorHoleScanSql_ShareTheIdenticalBody()
+    {
+        const string relation = "query_stats";
+        const string sourceTimeColumn = "collection_time";
+        const string sourceFilter = "sample_interval_seconds IS DISTINCT FROM 0";
+        const string legacy = "query_stats_hourly";
+        const string successor = "query_stats_interval_hourly";
+        const string fromExpr = "$1::timestamp";
+        const string toExpr = "$2::timestamp";
+        const string bucketWidthLiteral = "$3::interval";
+
+        var existsSql = TimescaleSupport.LegacySuccessorHoleExistsSql(
+            relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral);
+        var scanSql = TimescaleSupport.LegacySuccessorHoleScanSql(
+            relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral);
+
+        Assert.StartsWith("EXISTS (", existsSql, StringComparison.Ordinal);
+        Assert.StartsWith("SELECT hb.bucket", scanSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY hb.bucket", scanSql, StringComparison.Ordinal);
+
+        /* Strip each wrapper down to the shared buckets clause and compare verbatim — the whole point of the
+           refactor is that this body is ONE piece of text, not two that happen to agree today. Located by
+           IndexOf rather than a hardcoded literal length, so the file's own line-ending convention (CRLF)
+           does not throw the split off by one. */
+        var existsBody = existsSql.Substring("EXISTS (".Length, existsSql.Length - "EXISTS (".Length - 1);
+        var scanFromIndex = scanSql.IndexOf("FROM (", StringComparison.Ordinal) + "FROM (".Length;
+        var scanCloseIndex = scanSql.LastIndexOf(") AS hb(bucket)", StringComparison.Ordinal);
+        var scanBody = scanSql.Substring(scanFromIndex, scanCloseIndex - scanFromIndex);
+
+        Assert.Equal(existsBody, scanBody);
+        Assert.Contains("generate_series(", existsBody, StringComparison.Ordinal);
+        Assert.Contains("OFFSET 0", existsBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The start path: launched (not awaited) right after the ensure, on its own connection, inside the
     /// TimescaleDB block, before the compression and retention ensures; drained at shutdown beside the baseline
     /// backfill. Source-order pins, the RetiredBaselineAggregateTests shape.
