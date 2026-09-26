@@ -3527,6 +3527,16 @@ public sealed class DarlingWorker : BackgroundService
     /// TimescaleDB block faulting first) already writes its own line at the launch site's catch; nothing here
     /// can or should speak for that case.</para>
     /// </summary>
+    /// <summary>
+    /// #4391: whether a materialization-hole repair pass's summary is clean enough to stamp the repair
+    /// epoch — true only when the pass had zero isolated per-aggregate failures. Deferred holes
+    /// (<see cref="TimescaleSupport.MaterializationHoleRepairSummary.HolesDeferred"/>) and holes still
+    /// remaining after repair do not disqualify a stamp: those are re-measured fresh by the Periodic raw
+    /// purge trigger's own hole scan at drop time, so a deferred-but-otherwise-clean pass may still stamp.
+    /// </summary>
+    internal static bool RepairEpochStampAllowed(TimescaleSupport.MaterializationHoleRepairSummary summary)
+        => summary.Failures == 0;
+
     private async Task RunMaterializationHoleRepairAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
     {
         _materializationHoleRepairRunning = true;
@@ -3556,27 +3566,44 @@ public sealed class DarlingWorker : BackgroundService
                 summary.HolesRepaired, summary.BucketsRepaired, summary.HolesForced, summary.HolesDeferred, summary.BucketsDeferred,
                 summary.HolesRemaining, summary.Failures, (long)summary.Elapsed.TotalMilliseconds);
 
-            /* #4299 L2: the completion stamp — reached ONLY here, past both the epoch read and the repair
-               call, neither of which threw or was cancelled. Stamped on every one of the three raw jobs
+            /* #4299 L2 / #4391: the completion stamp — reached ONLY here, past both the epoch read and the
+               repair call, neither of which threw or was cancelled. Stamped on every one of the three raw jobs
                (TimescaleSupport.RawRelations), one statement per job, each guarded by its own
                IS DISTINCT FROM so a repeat stamp of the same value writes nothing. A stamp failure here is
                logged and swallowed per job — the repair itself already succeeded and reporting that success
                is not conditional on the stamp also landing; a job whose stamp did not take simply stays
-               ungated for the Periodic trigger until the next repair tries again. */
-            foreach (var relation in TimescaleSupport.RawRelations)
+               ungated for the Periodic trigger until the next repair tries again.
+
+               The stamp itself is gated on RepairEpochStampAllowed(summary): a repair that ran with one or
+               more isolated per-aggregate failures (summary.Failures > 0) must NOT stamp, because the epoch
+               is the trigger's promise that the repair covering it finished clean — TimescaleSupport's own
+               doc on the stamp says an isolated failure must not make that check pass. Deferred holes and
+               holes still remaining after repair (summary.HolesDeferred, summary.HolesRemaining) do NOT block
+               the stamp: those are read fresh by the trigger's own hole scan at purge time, which is the gate
+               for them; only a failure that means this pass never finished cleanly blocks it here. */
+            if (RepairEpochStampAllowed(summary))
             {
-                try
+                foreach (var relation in TimescaleSupport.RawRelations)
                 {
-                    await using var stamp = new NpgsqlCommand(TimescaleSupport.RawRepairEpochStampSql(relation), connection);
-                    stamp.Parameters.AddWithValue(postmasterEpoch);
-                    await stamp.ExecuteNonQueryAsync(stoppingToken);
+                    try
+                    {
+                        await using var stamp = new NpgsqlCommand(TimescaleSupport.RawRepairEpochStampSql(relation), connection);
+                        stamp.Parameters.AddWithValue(postmasterEpoch);
+                        await stamp.ExecuteNonQueryAsync(stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(
+                            "Materialization-hole repair finished, but stamping the repair epoch on {Relation}'s raw retention job failed — the Periodic trigger will not purge it until a later repair stamps it: {Message}",
+                            relation, ex.Message);
+                    }
                 }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    _logger.LogWarning(
-                        "Materialization-hole repair finished, but stamping the repair epoch on {Relation}'s raw retention job failed — the Periodic trigger will not purge it until a later repair stamps it: {Message}",
-                        relation, ex.Message);
-                }
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Materialization-hole repair finished with {Failures} failure(s); the repair epoch stays unstamped, so the Periodic raw purge keeps holding until a repair completes cleanly.",
+                    summary.Failures);
             }
         }
         catch (OperationCanceledException)
@@ -7355,9 +7382,26 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger.LogInformation(
+                /* #4391: the trigger's own gate check failing partway through (a timeout or error reading
+                   coverage, the epoch, chunk ranges, or a successor's holes) is not a routine "not covered
+                   this pass" outcome the way the continues above are — it means the gate itself could not
+                   answer, so it is logged at Warning rather than Information, and recorded as gate_error so
+                   the record distinguishes "the gate said no" from "the gate could not run". The record call
+                   is wrapped so a failure recording the outcome never escapes this catch and skips the next
+                   relation in the loop. */
+                logger.LogWarning(
                     "Raw retention purge for {Relation} did not run this pass — the trigger's own gate check failed: {Message}",
                     relation, ex.Message);
+
+                try
+                {
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(
+                        connection, relation, "gate_error", (ex as PostgresException)?.SqlState, null, logger, CancellationToken.None);
+                }
+                catch (Exception recordEx) when (recordEx is not OperationCanceledException)
+                {
+                    logger.LogDebug("Could not record the gate_error purge outcome for {Relation}: {Message}", relation, recordEx.Message);
+                }
             }
         }
     }
