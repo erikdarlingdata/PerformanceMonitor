@@ -6098,6 +6098,10 @@ public sealed class DarlingWorker : BackgroundService
                             {
                                 new(finding.Subject, new[] { finding.CurrentValue }),
                             },
+                            /* #4223: the wait type as structured data, the same string the mute context
+                               below already keys on (WaitType = finding.Subject) — an alert-notebook reader
+                               can branch on it without parsing the subject back out of the incident. */
+                            WaitType = finding.Subject,
                         },
                         DetailText: null,
                         finding.NumericCurrentValue,

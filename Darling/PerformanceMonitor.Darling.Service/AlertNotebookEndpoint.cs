@@ -374,6 +374,8 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
         (new[] { "Deadlocks Detected" },
             new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
+        (new[] { "Poison Wait" },
+            new AuthoredTemplateEntry("authored/poison-wait", PoisonWaitTemplateVersion, BuildPoisonWaitCells)),
     };
 
     /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
@@ -410,9 +412,15 @@ internal static partial class AlertNotebookEndpoint
     /// is the bucket count, not a row cap (spec §3's own budget rule: "every read cell has an explicit limit,
     /// OR its trend goes through the chart bucket budget"). <see cref="AuthoredReadCell"/> must not force a
     /// 'limit' onto one of these, or <c>ValidateReadPanelSpec</c>'s undeclared-param check reds it.</summary>
-    private static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
+    internal static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_deadlock_trend",
+        /* #4223 Poison Wait: get_wait_trend has a bucket-count budget, not a row cap (PReqText("wait_type")
+           with no PLimit). get_memory_grants and get_resource_semaphore declare no limit param at all
+           (DarlingWebEndpoints.CatalogDescriptors). */
+        "get_wait_trend",
+        "get_memory_grants",
+        "get_resource_semaphore",
     };
 
     /// <summary>An authored template's read cell (spec §1 binding): <c>server</c>, <c>as_of = window_end</c>
