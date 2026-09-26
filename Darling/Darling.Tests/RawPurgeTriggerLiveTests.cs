@@ -420,6 +420,174 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
         }
     }
 
+    /// <summary>#4299 (H1): stale <c>darling_armed = true</c> from an EARLIER pass, coverage measured
+    /// UNKNOWN this pass (a coverage relation renamed underneath the probe, so it throws and
+    /// <c>MeasureRetentionCoverageAsync</c> catches it as Unknown). The trigger must not purge on the stale
+    /// standing value — it re-measures fresh via <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> and
+    /// that call answers false for both Short and Unknown. RED on <c>1cd544d13</c>: the old trigger read
+    /// <c>darling_armed</c> straight off the config the sweep just wrote and dropped chunks even though this
+    /// pass's OWN measurement could not confirm coverage.</summary>
+    [Fact]
+    public async Task StaleArmedTrue_CoverageUnknownThisPass_NoDropAndNotCovered()
+    {
+        var (connection, scratch) = await OpenAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await ArmRawJobAsync(connection, Raw);
+            await SeedRawAsync(connection);
+
+            var dropFrom = TimescaleSupport.AlignDown(DateTime.UtcNow.AddDays(-11), TimeSpan.FromHours(1));
+            var dropTo = TimescaleSupport.AlignDown(DateTime.UtcNow, TimeSpan.FromHours(1));
+            await RefreshSuccessorsAsync(connection, dropFrom, dropTo);
+
+            /* State (a): Covered this pass, current epoch, no hole — the sweep arms and writes
+               darling_armed = true. */
+            var periodic = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, TimescaleSupport.RetentionSweepPass.Periodic, default);
+            Assert.True(periodic.Armed >= 1, "the seeded and fully-refreshed raw relation must read Covered this pass");
+            await StampCurrentEpochAsync(connection, Raw);
+
+            await using (var armedRead = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql(Raw), connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                var value = await armedRead.ExecuteScalarAsync();
+                Assert.True(value is bool b && b, "the sweep must have left darling_armed = true, or this pin proves nothing");
+            }
+
+            /* Now make coverage UNKNOWN for THIS pass without touching darling_armed: rename the
+               query_stats_interval_hourly successor CAGG's view out from under the coverage probe, the same
+               shape FrozenRollupLiveTests uses to force MeasureRetentionCoverageAsync's catch branch. */
+            await using (var rename = new NpgsqlCommand(
+                $"ALTER MATERIALIZED VIEW collect.{TimescaleSupport.QueryStatsIntervalHourlyView} RENAME TO pin_h1_renamed_away", connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await rename.ExecuteNonQueryAsync();
+            }
+
+            Assert.False(
+                await TimescaleSupport.IsRawTierDropSafeAsync(connection, Raw, default),
+                "a fresh measurement with the successor renamed away must read Unknown, not Covered, or this pin proves nothing");
+
+            await using (var armedStillTrue = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql(Raw), connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                var value = await armedStillTrue.ExecuteScalarAsync();
+                Assert.True(value is bool b && b, "darling_armed is the sweep's own standing verdict and must stay stale/unchanged on Unknown, or this pin is not testing what H1 describes");
+            }
+
+            var before = await ChunkCountAsync(connection);
+            Assert.True(before > 0, "the seed must have produced at least one raw chunk, or this pin proves nothing");
+
+            var logger = new CapturingTestLogger();
+            try
+            {
+                await DarlingWorker.TriggerRawPurgeCoreAsync(connection, logger, default);
+
+                var after = await ChunkCountAsync(connection);
+                Assert.Equal(before, after);
+
+                var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+                Assert.NotNull(rec);
+                Assert.Equal("not_covered", rec!.Outcome);
+            }
+            finally
+            {
+                await using var restore = new NpgsqlCommand(
+                    $"ALTER MATERIALIZED VIEW collect.pin_h1_renamed_away RENAME TO {TimescaleSupport.QueryStatsIntervalHourlyView}", connection) { CommandTimeout = SetupTimeoutSeconds };
+                await restore.ExecuteNonQueryAsync();
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
+            });
+            await connection.DisposeAsync();
+        }
+    }
+
+    /// <summary>#4299 (H1): state (a) (Covered, current epoch, no hole), but the hole check's own successor
+    /// cannot be resolved this pass — <see cref="TimescaleSupport.ResolveMaterializationAsync"/> returns null
+    /// because the successor CAGG's view was renamed away, standing in for a successor mid-rebuild. An
+    /// unresolvable successor must NOT read as hole-free: the trigger blocks the purge and records
+    /// <c>gate_unknown</c>. RED on <c>1cd544d13</c>: the old trigger's <c>if (materialization is null)
+    /// continue;</c> skipped the target entirely, so with only one MaterializationHoleTarget left resolvable
+    /// for query_stats (query_stats_baseline) the loop found nothing to call NOT hole-free, and dropped
+    /// chunks.</summary>
+    [Fact]
+    public async Task Covered_CurrentEpoch_UnresolvableSuccessor_NoDropAndGateUnknown()
+    {
+        var (connection, scratch) = await OpenAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await ArmRawJobAsync(connection, Raw);
+            await SeedRawAsync(connection);
+
+            var dropFrom = TimescaleSupport.AlignDown(DateTime.UtcNow.AddDays(-11), TimeSpan.FromHours(1));
+            var dropTo = TimescaleSupport.AlignDown(DateTime.UtcNow, TimeSpan.FromHours(1));
+            await RefreshSuccessorsAsync(connection, dropFrom, dropTo);
+
+            var periodic = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, TimescaleSupport.RetentionSweepPass.Periodic, default);
+            Assert.True(periodic.Armed >= 1, "the seeded and fully-refreshed raw relation must read Covered this pass");
+
+            await StampCurrentEpochAsync(connection, Raw);
+
+            /* Make the hole check's own successor unresolvable: rename query_stats_baseline's CAGG view out
+               from under ResolveMaterializationAsync, standing in for a successor mid-rebuild.
+               query_stats_baseline is a MaterializationHoleTarget for query_stats but is NOT one of
+               RawTierCoverage's named coverage relations, so this rename leaves IsRawTierDropSafeAsync's
+               Covered verdict untouched — this pin isolates the hole-check's own resolve failure from the
+               coverage gate above it, which the previous test already covers separately. */
+            await using (var rename = new NpgsqlCommand(
+                $"ALTER MATERIALIZED VIEW collect.{TimescaleSupport.QueryStatsBaselineView} RENAME TO pin_h1b_renamed_away", connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await rename.ExecuteNonQueryAsync();
+            }
+
+            Assert.Null(
+                await TimescaleSupport.ResolveMaterializationAsync(connection, TimescaleSupport.QueryStatsBaselineView, default));
+
+            Assert.True(
+                await TimescaleSupport.IsRawTierDropSafeAsync(connection, Raw, default),
+                "query_stats_baseline is not one of RawTierCoverage's coverage relations, so coverage itself must still read Covered here, or this pin is not isolating the hole-check's own resolve failure");
+
+            var before = await ChunkCountAsync(connection);
+            Assert.True(before > 0, "the seed must have produced at least one raw chunk, or this pin proves nothing");
+
+            var logger = new CapturingTestLogger();
+            try
+            {
+                await DarlingWorker.TriggerRawPurgeCoreAsync(connection, logger, default);
+
+                var after = await ChunkCountAsync(connection);
+                Assert.Equal(before, after);
+
+                var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+                Assert.NotNull(rec);
+                Assert.Equal("gate_unknown", rec!.Outcome);
+            }
+            finally
+            {
+                await using var restore = new NpgsqlCommand(
+                    $"ALTER MATERIALIZED VIEW collect.pin_h1b_renamed_away RENAME TO {TimescaleSupport.QueryStatsBaselineView}", connection) { CommandTimeout = SetupTimeoutSeconds };
+                await restore.ExecuteNonQueryAsync();
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
+            });
+            await connection.DisposeAsync();
+        }
+    }
+
     /// <summary>#4299 L2 (two-service pin): two INDEPENDENT <see cref="NpgsqlDataSource"/>s against the SAME
     /// scratch store, standing in for two service processes. Service A stamps the current postmaster epoch;
     /// Service B's own relaunch-decision read (<see cref="DarlingWorker.ShouldLaunchMaterializationHoleRepair"/>,

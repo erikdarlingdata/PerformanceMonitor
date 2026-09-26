@@ -7172,17 +7172,28 @@ LIMIT 1";
     /// #4299 L2: the Periodic pass's trigger for the three raw jobs' own purge — reached only from
     /// <see cref="ReevaluateRetentionPoliciesAsync"/>, on the SAME connection and immediately after
     /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync(NpgsqlConnection, ILogger, TimescaleSupport.RetentionSweepPass, CancellationToken)"/>
-    /// has run this pass's coverage sweep, so the armed-verdict read below is this pass's own, never a stale
-    /// one from an earlier hour. For each raw relation, in the same pass:
+    /// has run this pass's coverage sweep, so the drop decision below is measured fresh, not read back from a
+    /// value the sweep merely wrote. For each raw relation, in the same pass:
     /// <list type="bullet">
-    /// <item>a fresh Covered verdict — <c>config-&gt;&gt;'darling_armed'</c> true, written by the sweep just above;</item>
+    /// <item>a FRESH Covered verdict — <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/>, called again
+    /// here rather than trusting <c>config-&gt;&gt;'darling_armed'</c> the sweep just above wrote: <c>darling_armed</c>
+    /// is the readers' and alerts' standing verdict and is deliberately left as it was on anything OTHER than
+    /// Covered (#1877's bounded-depth-cap posture), so an Unknown probe (one that throws, times out, or comes
+    /// back empty) leaves a PRIOR pass's <c>true</c> in place; a purge gated on that stale value would drop
+    /// chunks on a coverage state this pass itself could not confirm. <c>IsRawTierDropSafeAsync</c> answers
+    /// true ONLY on a Covered verdict measured THIS call — Short and Unknown both answer false — so the purge
+    /// can never run on a verdict older than the pass that is about to act on it;</item>
     /// <item>a repair finished under the CURRENT <c>pg_postmaster_start_time()</c> — <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/>;</item>
     /// <item>no hole in the range the purge is about to drop — <see cref="TimescaleSupport.HoleFreeThroughAsync"/>
     /// over every registered aggregate whose source is this raw relation, from the oldest raw chunk's
-    /// <c>range_start</c> to <c>now() - drop_after</c>.</item>
+    /// <c>range_start</c> to <c>now() - drop_after</c>. A successor <see cref="TimescaleSupport.ResolveMaterializationAsync"/>
+    /// cannot resolve (mid-rebuild, renamed, or dropped) is NOT skipped as though it were hole-free: an
+    /// unresolvable successor means the gate cannot tell whether the range it should be covering is intact,
+    /// which is exactly the state <c>hole-free</c> must never mean. This records <c>gate_unknown</c> and blocks
+    /// the purge, the same fail-closed posture as an Unknown coverage verdict.</item>
     /// </list>
-    /// All three hold → <see cref="TimescaleSupport.RunRetentionPurgeJobAsync"/>. One INFORMATION line per raw
-    /// job either way, naming which of the three gates it failed (or that the run itself failed).
+    /// All hold → <see cref="TimescaleSupport.RunRetentionPurgeJobAsync"/>. One INFORMATION line per raw
+    /// job either way, naming which gate it failed (or that the run itself failed).
     ///
     /// <para><b>Deferred ranges: passed as empty, and this is a real gap, not an oversight.</b> The ruling names
     /// "the latest repair summary if it's reachable" as the source for <paramref name="deferredRanges"/> above
@@ -7219,17 +7230,16 @@ LIMIT 1";
         {
             try
             {
-                bool armed;
-                await using (var armedRead = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql(relation), connection))
-                {
-                    var value = await armedRead.ExecuteScalarAsync(cancellationToken);
-                    armed = value is bool b && b;
-                }
+                /* Measured THIS call, not read back from config->>'darling_armed' — that key stays as the
+                   readers' and alerts' standing verdict and can hold a PRIOR pass's true through an Unknown
+                   probe (#1877). The purge decision needs this pass's own fresh answer, so it calls the same
+                   probe IsRawTierDropSafeAsync arms against, again, right here. */
+                var covered = await TimescaleSupport.IsRawTierDropSafeAsync(connection, relation, cancellationToken);
 
-                if (!armed)
+                if (!covered)
                 {
                     logger.LogInformation(
-                        "Raw retention purge for {Relation} did not run this pass — not covered (the coverage sweep just above measured Short or Unknown for it).",
+                        "Raw retention purge for {Relation} did not run this pass — not covered (a fresh measurement this pass found Short or Unknown for it).",
                         relation);
                     await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "not_covered", null, null, logger, cancellationToken);
                     continue;
@@ -7280,6 +7290,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                 }
 
                 var holeFree = true;
+                var successorUnresolved = false;
                 foreach (var target in TimescaleSupport.MaterializationHoleTargets)
                 {
                     if (!string.Equals(target.Source, relation, StringComparison.Ordinal))
@@ -7290,7 +7301,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                     var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, target.View, cancellationToken);
                     if (materialization is null)
                     {
-                        continue;
+                        /* An unresolvable successor (mid-rebuild, renamed, or dropped) is NOT hole-free — the
+                           gate cannot tell whether the range it should be covering is intact, so it must not
+                           read as clean. Fail closed, same as an Unknown coverage verdict above. */
+                        successorUnresolved = true;
+                        holeFree = false;
+                        break;
                     }
 
                     if (!await TimescaleSupport.HoleFreeThroughAsync(
@@ -7299,6 +7315,15 @@ AND   j.hypertable_name = '{relation}'", connection))
                         holeFree = false;
                         break;
                     }
+                }
+
+                if (successorUnresolved)
+                {
+                    logger.LogInformation(
+                        "Raw retention purge for {Relation} did not run this pass — a successor's materialization could not be resolved (mid-rebuild, renamed, or dropped), so coverage cannot be confirmed hole-free.",
+                        relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "gate_unknown", null, null, logger, cancellationToken);
+                    continue;
                 }
 
                 if (!holeFree)
