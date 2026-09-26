@@ -296,22 +296,10 @@ public sealed class ManagedConfUpgradePathTests : IDisposable
                 Assert.Contains("log_min_duration_statement = 4358", newConf, StringComparison.Ordinal);
                 Assert.Contains(ManagedConfMigration.MovedOperatorLinesComment, newConf, StringComparison.Ordinal);
 
-                /* No managed key duplicated between the legacy-appended block and the carried operator block. */
-                var occurrences = 0;
-                var searchFrom = 0;
-                while (true)
-                {
-                    var found = newConf.IndexOf("shared_preload_libraries = 'timescaledb'", searchFrom, StringComparison.Ordinal);
-                    if (found < 0)
-                    {
-                        break;
-                    }
-
-                    occurrences++;
-                    searchFrom = found + 1;
-                }
-
-                Assert.Equal(1, occurrences);
+                /* No managed key duplicated between the legacy-appended block and the carried operator block.
+                   #4336's Step A moved shared_preload_libraries into darling-managed.conf, so the count spans
+                   both files, not just the operator's postgresql.conf. */
+                await ManagedPreloadAssert.FileLevel_HasOneManagedPreloadLine_WithBothLibraries(dataDirectory, timeout.Token);
 
                 await using var connection = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString);
                 await connection.OpenAsync(timeout.Token);

@@ -216,6 +216,40 @@ public sealed class ManagedConfFileTests
         Assert.Contains("pg_stat_statements", preload.RenderedValue, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The render-level half of the #4336 upgrade-path fix: exactly one effective
+    /// <c>shared_preload_libraries</c> line in the rendered managed-conf body, holding both
+    /// <c>timescaledb</c> and <c>pg_stat_statements</c>. <c>DarlingStoreUpgradeTests</c> and
+    /// <c>ManagedConfUpgradePathTests</c> assert the same rule across the two files on disk after a real
+    /// bootstrap (gated, Windows-only); this pins the rule at the render itself, ungated.
+    /// </summary>
+    [Fact]
+    public void RenderBody_PreloadLine_IsExactlyOne_WithBothLibraries()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        var occurrences = 0;
+        var searchFrom = 0;
+        while (true)
+        {
+            var found = body.IndexOf("shared_preload_libraries = '", searchFrom, StringComparison.Ordinal);
+            if (found < 0)
+            {
+                break;
+            }
+
+            occurrences++;
+            searchFrom = found + 1;
+        }
+
+        Assert.Equal(1, occurrences);
+
+        var diffs = ManagedConfFile.DiffBodyKeys(string.Empty, body);
+        var preload = Assert.Single(diffs, d => d.Key == "shared_preload_libraries");
+        Assert.Contains("timescaledb", preload.RenderedValue, StringComparison.Ordinal);
+        Assert.Contains("pg_stat_statements", preload.RenderedValue, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void RenderBody_NonAuthoritativeRam_SkipsHardwareSizingBlock_ButStillSetsSharedBuffers()
     {
