@@ -34,7 +34,9 @@ internal readonly record struct ManagedConfWriteResult(
     bool HandEdited,
     bool WriteFailed,
     string RenderedText,
-    IReadOnlyList<ManagedConfKeyDiff> ChangedKeys);
+    IReadOnlyList<ManagedConfKeyDiff> ChangedKeys,
+    string? PreviousText = null,
+    RenderInputs? Inputs = null);
 
 /// <summary>
 /// The one service-owned settings file for a managed store (#4215): <c>darling-managed.conf</c>, rendered fresh
