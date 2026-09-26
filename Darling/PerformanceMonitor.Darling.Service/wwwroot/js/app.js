@@ -26,9 +26,12 @@
  *   #/notebook/{id}/edit— the notebook composer editing a saved notebook (#1563 D7)
  *   #/notebook/new      — the notebook composer creating a new notebook (optionally /new/{template})
  * The refresh loop re-renders the active page every 60s and PAUSES while the tab is hidden (the interval skips
- * work when document.hidden), refreshing once immediately when the tab becomes visible again. The 60s refresh
- * DELIBERATELY does NOT re-render either composer route (the editor-route poll guard) — a background rebuild there
- * would discard an in-progress edit — while the sidebar (server list + view list) still refreshes.
+ * work when document.hidden), refreshing once immediately when the tab becomes visible again. It also pauses
+ * on the operator's own say-so — the shell's "Pause auto-refresh" control (#4222d), persisted in localStorage,
+ * which resuming clears by running one refresh immediately. The 60s refresh DELIBERATELY does NOT re-render
+ * either composer route or #/triage (the poll guard in refresh()) — a background rebuild would discard an
+ * in-progress edit, or waste a read against a page opened to read once — while the sidebar (server list + view
+ * list) still refreshes.
  */
 
 import { el, mount, apiGet, apiGetFleet, bandClass, localTime, hasInFlightReads, isSessionExpired, onSessionExpired } from "./util.js";
@@ -311,8 +314,13 @@ function refresh() {
      otherwise fire every one of the page's panel reads a second time on top of the first, which is exactly what
      doubled audit_config on the Config tab. The sidebar/view-list/AG-nav probe keep refreshing every tick
      regardless — only the heavier per-page render waits for the last one to settle. */
+  /* Triage cost guard (#4222d): #/triage is the alert-notebook deep link's landing page. Its cost item says
+     the periodic poll must not re-render it every 60s — the same reason the composer routes below are
+     skipped, just for "don't waste a read against a page you opened to read once" rather than "don't discard
+     an edit". hashchange still routes there normally on first load / a fresh alert link. */
   const routeName = currentRoute().name;
   const skipRoute = routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
+    || routeName === "triage"
     || hasInFlightReads();
 
   /* The sidebar and the route() below both read /api/fleet in this same synchronous pass; apiGetFleet hands the
@@ -342,15 +350,55 @@ function showSignedOutState(message, _login) {
   ]));
 }
 
+/* ─────────────────────────── auto-refresh play/pause (#4222d) ─────────────────────────── */
+
+/* Shell-level control, not just alert notebooks: the tab-hidden pause (above) is automatic and invisible;
+   this is the operator's OWN on/off switch for the 60s tick, usable from every page. Persisted in
+   localStorage so it survives a reload/navigation — an operator investigating a live incident who paused the
+   screen to read it stays paused after following a link. Resuming runs one refresh immediately rather than
+   waiting out whatever is left of the 60s window, so "Resume" reads as "refresh now, and keep going". */
+const AUTO_REFRESH_PAUSED_KEY = "darling.autoRefreshPaused";
+
+function isAutoRefreshPaused() {
+  return localStorage.getItem(AUTO_REFRESH_PAUSED_KEY) === "1";
+}
+
+function setAutoRefreshPaused(paused) {
+  if (paused) localStorage.setItem(AUTO_REFRESH_PAUSED_KEY, "1");
+  else localStorage.removeItem(AUTO_REFRESH_PAUSED_KEY);
+}
+
+function updateAutoRefreshToggle(button, paused) {
+  const label = paused ? "Resume auto-refresh" : "Pause auto-refresh";
+  button.textContent = label;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+  button.setAttribute("aria-pressed", String(paused));
+}
+
+function initAutoRefreshToggle() {
+  const button = document.getElementById("auto-refresh-toggle");
+  if (!button) return;
+
+  updateAutoRefreshToggle(button, isAutoRefreshPaused());
+  button.addEventListener("click", () => {
+    const paused = !isAutoRefreshPaused();
+    setAutoRefreshPaused(paused);
+    updateAutoRefreshToggle(button, paused);
+    if (!paused) refresh();
+  });
+}
+
 function start() {
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) refresh();
+    if (!document.hidden && !isAutoRefreshPaused()) refresh();
   });
   setInterval(() => {
-    if (!document.hidden) refresh();
+    if (!document.hidden && !isAutoRefreshPaused()) refresh();
   }, POLL_MS);
   onSessionExpired(showSignedOutState);
+  initAutoRefreshToggle();
 
   refreshSidebar();
   refreshViewList();
