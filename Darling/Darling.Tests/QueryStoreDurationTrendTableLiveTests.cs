@@ -159,6 +159,45 @@ public sealed class QueryStoreDurationTrendTableLiveTests
         return items;
     }
 
+    /// <summary>
+    /// #4310 site 3 clause 6's own pin for the duration trend: (c) on the LEGACY seed
+    /// (<see cref="QueryStoreIntervalWideGridLiveTests.SeedGridLegacyAsync"/>, forced long-covered so clauses
+    /// 1-5 alone would otherwise route the table), the gate refuses — <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
+    /// returns <c>UseTable == false</c> — and <see cref="ViewerDataService.GetQueryStoreDurationTrendAsync"/>
+    /// therefore returns exactly raw's own per-snapshot points (arm 2's un-deduped, collection_time-placed
+    /// treatment), not the table's collapsed one. This is the originally red CI case (a legacy-only store's
+    /// duration trend losing points to the table's per-identity collapse), now green via raw.
+    /// </summary>
+    [Fact]
+    public async Task LegacySeed_RefusesTheTable_AndTheDurationTrendMatchesRawsPerSnapshotPoints()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4310 site 3 clause 6 legacy duration-trend live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+
+        await QueryStoreIntervalWideGridLiveTests.SeedGridLegacyAsync(runner, ServerId, WindowStart, ct);
+        await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
+
+        var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+        Assert.False(useTable, "every row in this seed is legacy (interval_start_time_utc IS NULL); clause 6 must refuse the table");
+
+        var rawPoints = await ReadPointsAsync(postgres, ViewerDataService.QueryStoreDurationTrendSql, WindowStart, WindowEnd, ct);
+        Assert.True(rawPoints.Count > 0, "the seed produced no raw points; the comparison would be vacuous");
+
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        var series = await viewer.GetQueryStoreDurationTrendAsync(ServerId, WindowStart, WindowEnd);
+        Assert.Equal(rawPoints.Select(p => (p.CollectionTime, p.Value, p.ExecutionCount)).ToList(),
+            series.Points.Select(p => (p.CollectionTime, p.Value, p.ExecutionCount)).ToList());
+    }
+
     private static async Task ForceFilledSinceAsync(NpgsqlConnection connection, DateTime value, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
