@@ -6101,6 +6101,99 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
+    /// #4299 (d′): <c>lock_timeout</c> for the service's OWN <c>CALL run_job(id)</c> against a raw retention
+    /// job — the trigger that replaces the scheduler's own run under variant (d′), since the three raw jobs
+    /// are never scheduled. Bounded, not generous, ON PURPOSE: <c>run_job</c> executes
+    /// <c>policy_retention</c>, whose <c>drop_chunks</c> takes <c>ACCESS EXCLUSIVE</c> on the hypertable and
+    /// every chunk it touches, so an un-bounded run queued behind a live reader would hold up every LATER
+    /// reader of the table for as long as <see cref="RunRetentionPurgeJobTimeoutSeconds"/> allows — same
+    /// hazard <see cref="PgTableTuning.DropLockTimeoutSeconds"/> (a private constant in that file, same
+    /// number) guards for its own guarded <c>DROP INDEX</c>. Proven live on the rig (#4299 lane 4299-1c): a
+    /// blocked run raises <c>55P03 lock_not_available</c> at this bound, not at
+    /// <see cref="RunRetentionPurgeJobTimeoutSeconds"/> — the next hourly Periodic pass retries it, so a
+    /// timeout here costs one skipped pass, never a stuck one. <c>SET LOCAL</c> so it cannot outlive the
+    /// statement's own transaction either way.
+    /// </summary>
+    private const string RunRetentionPurgeJobLockTimeout = "5s";
+
+    /// <summary>
+    /// <c>CommandTimeout</c> for <see cref="RunRetentionPurgeJobSql"/> itself — the ceiling the CALL's own
+    /// work (not the lock wait, which <see cref="RunRetentionPurgeJobLockTimeout"/> already bounds far
+    /// tighter) is allowed to run once it has the lock. <c>drop_chunks</c> on a bounded number of expired
+    /// chunks is metadata work, not a scan of their contents, so this reuses <see cref="SetupTimeoutSeconds"/>
+    /// rather than inventing a second unmeasured number: the same 300s budget the first TimescaleDB
+    /// conversion and every other setup-shaped statement in this file already carry.
+    /// </summary>
+    private const int RunRetentionPurgeJobTimeoutSeconds = SetupTimeoutSeconds;
+
+    /// <summary>
+    /// #4299 (d′): the service's own trigger for a raw retention job, run ONLY from the hourly Periodic pass
+    /// (never Startup — PostgreSQL's own start-time run of an overdue scheduled job is exactly the race this
+    /// design takes the raw jobs off the scheduler to avoid; see <see cref="ConvergeRawArmedStateSql"/>).
+    /// Wrapped in its own transaction with a short <see cref="RunRetentionPurgeJobLockTimeout"/>
+    /// <c>lock_timeout</c> — proven live (#4299 lane 4299-1c) to apply INSIDE <c>run_job</c>, not just around
+    /// it: a run blocked on the target hypertable's chunk lock raises <c>55P03 lock_not_available</c> at the
+    /// bound instead of holding the lock request indefinitely. <c>$1</c> is the job's own <c>job_id</c>
+    /// (<see cref="RawArmedStateSql"/>'s caller already has it from the same catalog read).
+    ///
+    /// <para>A lock-timeout failure aborts the statement's own explicit transaction before reaching
+    /// <c>COMMIT</c> (same shape <see cref="PgTableTuning.GuardedDrop"/> documents for its guarded DROP), so
+    /// the caller (<see cref="RunRetentionPurgeJobAsync"/>) issues a best-effort <c>ROLLBACK</c> on every
+    /// caught failure — proven on the rig: the connection recovers and the next statement on it succeeds.</para>
+    /// </summary>
+    public const string RunRetentionPurgeJobSql =
+        "BEGIN; SET LOCAL lock_timeout = '" + RunRetentionPurgeJobLockTimeout + "'; CALL run_job($1::integer); COMMIT;";
+
+    /// <summary>
+    /// Runs <see cref="RunRetentionPurgeJobSql"/> for <paramref name="jobId"/> — the service triggering ITS
+    /// OWN raw purge under variant (d′), from the hourly Periodic pass only. A timeout or any other failure
+    /// is logged at Warning and swallowed, never thrown: the caller's contract is "try once, report the
+    /// outcome", and the NEXT hourly pass is the retry — there is no reason to crash a pass over one purge
+    /// that can wait an hour. Returns true only when the CALL completed inside both bounds.
+    ///
+    /// <para>Does not decide WHETHER to run — that is the Periodic trigger's job (a fresh Covered verdict, a
+    /// repair finished under the current <c>pg_postmaster_start_time()</c>, no hole in the range about to be
+    /// dropped). This method only executes the CALL once told to and reports what happened.</para>
+    /// </summary>
+    public static async Task<bool> RunRetentionPurgeJobAsync(
+        NpgsqlConnection connection, long jobId, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            using var command = new NpgsqlCommand(RunRetentionPurgeJobSql, connection) { CommandTimeout = RunRetentionPurgeJobTimeoutSeconds };
+            command.Parameters.AddWithValue(jobId);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Raw retention purge job {JobId} did not complete (lock_timeout={LockTimeout}, CommandTimeout={CommandTimeout}s) — the next hourly pass retries it: {Message}",
+                jobId, RunRetentionPurgeJobLockTimeout, RunRetentionPurgeJobTimeoutSeconds, ex.Message);
+
+            try
+            {
+                using var rollback = new NpgsqlCommand("ROLLBACK", connection) { CommandTimeout = SetupTimeoutSeconds };
+                await rollback.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
+            {
+                /* Best-effort: PgTableTuning.ApplyAsync's ROLLBACK-after-every-failure is the same discipline,
+                   for the same reason — a connection left "in failed transaction" would take the NEXT
+                   statement run on it down too, and this connection is shared across the rest of the sweep. */
+                logger?.LogWarning("ROLLBACK after a failed raw retention purge job {JobId} also failed: {Message}", jobId, rollbackEx.Message);
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Re-holds a retention policy that is ALREADY ARMED (#1877). The mirror of
     /// <see cref="ArmRetentionPolicySql"/>, and the statement that closes the arm-only gap: a policy created
     /// paused stays paused by itself, but <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a
@@ -6213,6 +6306,22 @@ AND   j.hypertable_name = '{relation}'";
     /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude
     /// first-pass rows the successors themselves never materialize — without this, a single 0-interval row
     /// older than any successor bucket holds the gate open permanently even after the stitch fix.</para>
+    ///
+    /// <para><b>The raw purge never runs by itself (#4299, variant d′).</b> A Covered verdict from this SQL
+    /// no longer arms TimescaleDB's own scheduler for the three raw jobs (<see cref="RawRelations"/>) —
+    /// they stay permanently unscheduled (<see cref="ConvergeRawArmedStateSql"/>) and the verdict is recorded
+    /// in <c>config-&gt;&gt;'darling_armed'</c> instead. The purge only actually runs
+    /// (<see cref="RunRetentionPurgeJobAsync"/>, <c>CALL run_job(id)</c>) when the service itself triggers
+    /// it from the hourly Periodic pass, gated on a FRESH Covered verdict from this probe AND a repair
+    /// (<see cref="RepairMaterializationHolesAsync"/>) already finished under the CURRENT
+    /// <c>pg_postmaster_start_time()</c> — never on the Startup pass, so PostgreSQL's own start-time run of
+    /// an overdue job (the #4299 pre-existing hazard this whole design exists to remove) cannot race the
+    /// repair. Two things bypass the service's own gate on purpose and are named here rather than treated as
+    /// a leak: the FIRST start after the upgrade still runs whichever raw job the OLD scheduled-based code
+    /// already armed, once (Low L2 — 3.8.0 parity for that one run only), and a DBA's own
+    /// <c>alter_job</c>/<c>run_job</c> against a raw job's <c>job_id</c> always executes immediately, exactly
+    /// as it does for every other job in the catalog — this gate governs the SERVICE's own trigger, not the
+    /// database's ordinary admin surface.</para>
     /// </summary>
     public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations)
     {

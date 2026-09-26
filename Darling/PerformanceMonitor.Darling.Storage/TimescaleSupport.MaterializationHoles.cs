@@ -116,10 +116,20 @@ namespace PerformanceMonitor.Darling.Storage;
 /// created every aggregate; the repairs are bounded but a full cap on the heaviest aggregate is a policy run's
 /// worth of work, which is minutes on the largest store. So the worker launches this the way it launches the
 /// baseline backfill (#1757) — its own connection, concurrent with the rest of startup, drained at shutdown —
-/// rather than holding a restarted service dark for it. Ordering against the retention policies is not
-/// load-bearing: a raw purge is a background job already on its own schedule on every upgraded store, so
-/// running the scan before <see cref="EnsureRetentionPoliciesAsync"/> re-arms it changes nothing about the
-/// race; what bounds the race is that a hole is repairable for exactly as long as its source holds the rows.</para>
+/// rather than holding a restarted service dark for it. Ordering against the retention policies (i.e. running
+/// this scan before or after <see cref="EnsureRetentionPoliciesAsync"/> on the SAME start) is not load-bearing
+/// under #4299's design (variant d′): the raw purge no longer runs on its own schedule at all — the three raw
+/// jobs stay permanently unscheduled, and the only thing that ever triggers a purge is the service's own
+/// hourly Periodic pass, gated on a repair already finished under the CURRENT
+/// <c>pg_postmaster_start_time()</c> (<see cref="RetentionArmSafetySql"/> states the gate in full). Since that
+/// trigger cannot fire before the NEXT hourly tick, it can never race this start's own hole scan no matter
+/// which of the two the Startup pass launches first. Two things still bypass the service's own gate, named
+/// here rather than treated as a leak: the FIRST start after the upgrade, which still runs whichever raw job
+/// the OLD scheduled-based code had already armed, once (Low L2 — 3.8.0 parity for that one run only, before
+/// this store has converged to the never-scheduled shape); and a DBA's own <c>alter_job</c>/<c>run_job</c>
+/// against a raw job, which always executes immediately like any other job in the catalog and is reverted by
+/// the very next hourly converge. Neither exception changes what bounds the ordinary race: a hole is
+/// repairable for exactly as long as its source holds the rows.</para>
 /// </summary>
 public static partial class TimescaleSupport
 {

@@ -1959,8 +1959,14 @@ public sealed class DarlingWorker : BackgroundService
                    is a few hundred index probes per aggregate and starts at once, but a capped repair on the
                    heaviest aggregate is a policy run's worth of work, and holding a restarted service dark for
                    it is the trade #1757 already declined for the baseline backfill. Ordering against the
-                   retention re-arm is not load-bearing (TimescaleSupport.MaterializationHoles states why).
-                   Drained with the command loop at shutdown. */
+                   retention re-arm is not load-bearing (TimescaleSupport.MaterializationHoles states why in
+                   full): under #4299's design the raw purge no longer runs on its own schedule at all, so this
+                   scan and EnsureRetentionPoliciesAsync can run in either order on the same start without a
+                   race — the only trigger for an actual purge is the service's OWN hourly Periodic pass, which
+                   cannot fire before the next hourly tick. The first start after the upgrade, which still runs
+                   whichever raw job the old scheduled-based code had already armed once, and a DBA's own
+                   alter_job/run_job against a raw job, are the two named exceptions to that gate; both are
+                   unaffected by this ordering either way. Drained with the command loop at shutdown. */
                 holeRepair = RunMaterializationHoleRepairAsync(postgres, stoppingToken);
 
                 /* #3817 segment two: the ensures that must run AFTER the hole repair is LAUNCHED — #3597's
