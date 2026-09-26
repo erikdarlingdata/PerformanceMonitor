@@ -295,12 +295,21 @@ public sealed partial class ViewerDataService
     /// The table-routed twin of <see cref="QueryStoreDurationTrendSql"/> (#4310 site 3): reads
     /// <c>query_store_interval_wide</c> directly instead of the raw arms' interval dedupe — the table already
     /// holds the latest snapshot per interval, every outcome (<see cref="QueryStoreIntervalWide.UpsertSql"/>'s
-    /// running-maximum guard) — so this drops arm 1's identity subquery/ROW_NUMBER entirely and keeps arm 2
-    /// (the legacy, un-deduped rows with no <c>interval_start_time_utc</c>) reading the SAME base table, exactly
-    /// as <see cref="ViewerDataService.QueryStoreTopTablePrefix"/> does for the grid's top read. $1 server_id,
-    /// $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window end (naive UTC;
-    /// $3 binds arm 1's placement filter, $4 binds arm 2's collection-time filter — both are the caller's
-    /// unclamped <c>endUtc</c>), $5 database filter.
+    /// running-maximum guard) — so this drops arm 1's identity subquery/ROW_NUMBER entirely and reads arm 2
+    /// (the legacy rows with no <c>interval_start_time_utc</c>) off the SAME base table, exactly as
+    /// <see cref="ViewerDataService.QueryStoreTopTablePrefix"/> does for the grid's top read.
+    /// <para><b>Arm 2's own dedup is NOT a no-op here, unlike arm 1's raw text.</b> A legacy row's identity
+    /// (<see cref="QueryStoreIntervalWide.IdentityColumns"/>) carries no <c>collection_time</c>, so a legacy
+    /// interval re-fetched across several cycles — the collector's ordinary behaviour for an open interval
+    /// before tier 2 assigned intervals their own identity, or any interval whose catalog join missed — keeps
+    /// only its LATEST snapshot in the table, the same running-maximum guard arm 1 relies on; this arm places
+    /// every snapshot at its OWN collection_time and needs every one of them, not the running maximum. This is
+    /// why <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s clause 6 refuses the table outright when the
+    /// window holds any legacy row, rather than trusting this arm to read them un-deduped the way raw's own
+    /// arm 2 does.</para>
+    /// $1 server_id, $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window
+    /// end (naive UTC; $3 binds arm 1's placement filter, $4 binds arm 2's collection-time filter — both are
+    /// the caller's unclamped <c>endUtc</c>), $5 database filter.
     /// </summary>
     public const string QueryStoreDurationTrendTableSql = """
         WITH placed AS
@@ -318,8 +327,10 @@ public sealed partial class ViewerDataService
 
             UNION ALL
 
-            /* Arm 2 — rows collected before tier 2, which the table carries unchanged from raw (the writer
-               applies every outcome; a NULL interval start is never deduped away). Byte-identical to
+            /* Arm 2 — legacy rows (no interval_start_time_utc). The table's upsert keeps only the LATEST
+               snapshot per identity, and a legacy identity carries no collection_time, so this arm can only
+               be trusted when the gate's clause 6 has already confirmed the window holds no such row — see
+               ReadsTableAsync and QueryStoreDurationTrendTableSql's own remarks. Byte-identical to
                QueryStoreDurationTrendSql's own arm 2 apart from the source table. */
             SELECT
                 collection_time AS point_time,
@@ -500,7 +511,6 @@ public sealed partial class ViewerDataService
     /// the days it had under an axis that said seven — the sibling charts' #3666 defect, on the one chart that
     /// PR left out because its routing is a watermark and not the tier ladder. The MCP tool has disclosed
     /// this floor as <c>routing.unserved_before</c> since #2736; the chart now reads the same rule.</para>
-    /// </summary>
     /// <para>#4310 site 3: below <see cref="QueryStoreDurationTrendMinWindow"/> the read stays exactly
     /// as it was (the rollup route above, or raw). At or above it, and only when the store's schema is V145 or
     /// later, <see cref="QueryStoreIntervalWide.ReadsTableAsync"/> gets ONE chance to route the RAW arm (never
@@ -510,7 +520,7 @@ public sealed partial class ViewerDataService
     /// before this table existed. <paramref name="literalEndUtc"/> is the gate's clause-4 input, mirroring the
     /// grid's own parameter: null for an open end (the WPF preset means "through now"), or a concrete instant
     /// for a custom range. The window check comes first, before the schema probe or the gate's own round
-    /// trips, so a short window costs zero extra store round trips (review D4R H1's rule, restated here).</para>
+    /// trips, so a short window costs no extra store round trips.</para>
     /// </summary>
     public async Task<QueryStoreTrendSeries> GetQueryStoreDurationTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
@@ -524,18 +534,18 @@ public sealed partial class ViewerDataService
         }
         else
         {
-            points = null!;
+            List<QueryTrendPoint>? fromTable = null;
             if (endUtc - startUtc >= QueryStoreDurationTrendMinWindow)
             {
                 var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
                 if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
                 {
-                    points = await TryReadQueryStoreDurationTrendFromTableAsync(
-                        serverId, startUtc, endUtc, literalEndUtc, databaseNames, cancellationToken)!;
+                    fromTable = await TryReadQueryStoreDurationTrendFromTableAsync(
+                        serverId, startUtc, endUtc, literalEndUtc, databaseNames, cancellationToken);
                 }
             }
 
-            points ??= await ReadDurationTrendAsync(QueryStoreDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+            points = fromTable ?? await ReadDurationTrendAsync(QueryStoreDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
         }
 
         /* Coverage the MCP tool's way: effective_start from the first served point (the shared rule, so the

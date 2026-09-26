@@ -466,6 +466,32 @@ FROM collect.query_store_interval_wide AS t
 WHERE t.server_id = $1;";
 
     /// <summary>
+    /// Clause 6's probe (2026 field review of #4310 site 3): whether the window holds any pre-tier-2 row (no
+    /// <c>runtime_stats_interval_id</c>, no reconstructable identity) for this server. The upsert's identity
+    /// (<see cref="IdentityColumns"/>) does not carry <c>collection_time</c>, so a legacy row re-fetched across
+    /// several cycles — the collector's normal behaviour for an open interval, before tier 2 assigned intervals
+    /// their own identity — keeps only its LATEST snapshot in the table; every caller that places these rows at
+    /// <c>collection_time</c> (both duration-trend arm 2's) needs every one of them, not the running maximum. A
+    /// field store carries zero such rows once raw retention (days) has aged the post-upgrade window out, so
+    /// this scan is a bounded, indexed (<c>server_id</c>, <c>collection_time</c>) read on the common path and
+    /// costs nothing extra there; it is what lets clause 6 answer TRUE only on the rare upgraded-recently store
+    /// this table cannot yet serve correctly. Bounded to the SAME range the table read would use
+    /// (<see cref="ClampedStart"/> through <paramref name="windowEnd"/> in <see cref="ReadsTableAsync"/>), not
+    /// the caller's raw windowStart, so a legacy row outside the served range cannot force a needless refusal.
+    /// </summary>
+    public const string HasLegacyRowSql = @"
+SELECT EXISTS
+(
+    SELECT
+        1
+    FROM collect.query_store_stats AS s
+    WHERE s.server_id = $1
+    AND   s.collection_time >= $2
+    AND   s.collection_time <= $3
+    AND   s.interval_start_time_utc IS NULL
+);";
+
+    /// <summary>
     /// The Queries grid's own minimum window (#3953 clause 5, ruling issuecomment-5836972848 item 5): below this
     /// the table's fixed per-decision round trips (two more queries plus a transaction) cost more than the read
     /// they would save, so the gate reads raw regardless of coverage. One constant per read — the MCP read (a
@@ -488,8 +514,12 @@ WHERE t.server_id = $1;";
     /// <summary>
     /// The rule: read <c>query_store_interval_wide</c> for a grid/MCP top read if and only if all five of
     /// these hold, otherwise run today's raw statement unchanged (ruling issuecomment-5836972848; review D4R
-    /// items H3, M1). A sixth clause — the viewer's store must report schema version 145 or later — is the
-    /// caller's: it needs the viewer's own connection probe, which this pure function does not have.
+    /// items H3, M1). Two further clauses are the caller's, checked outside this pure function because each
+    /// needs its own round trip: the viewer's store must report schema version 145 or later (needs the
+    /// viewer's own connection probe), and <see cref="ReadsTableAsync"/>'s clause 6 (a 2026 field review) —
+    /// the window must hold no legacy row (<c>interval_start_time_utc IS NULL</c>, see
+    /// <see cref="HasLegacyRowSql"/>) — checked once clauses 1-5 already say "table", so a store refused for
+    /// any other reason never pays the probe.
     /// <list type="number">
     /// <item>Coverage exists (<paramref name="filledSince"/> is not null) and there is no pending batch.</item>
     /// <item><c>filledSince &lt;= max(R, S)</c> (<paramref name="rawFloor"/>, <paramref name="windowStart"/>):
@@ -631,10 +661,31 @@ WHERE t.server_id = $1;";
             }
 
             var useTable = UseTable(filledSince, hasPending, rawFloor, windowStart, windowEnd, literalWindowEnd, appliedThrough, tableFloor, minWindow);
+            var clampedStart = ClampedStart(rawFloor, windowStart);
+
+            /* Clause 6 (2026 field review): only checked once clauses 1-5 already say "table" — a store
+               refused for any other reason never pays this probe. See HasLegacyRowSql's remarks for why a
+               legacy row (interval_start_time_utc IS NULL) makes the table's answer wrong, not merely stale:
+               the upsert's identity carries no collection_time, so a legacy interval re-fetched across several
+               cycles keeps only its latest snapshot, and every caller that places these rows at collection_time
+               needs every one of them. */
+            if (useTable)
+            {
+                await using var legacy = new NpgsqlCommand(HasLegacyRowSql, connection) { CommandTimeout = commandTimeoutSeconds };
+                legacy.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+                legacy.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = clampedStart });
+                legacy.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = windowEnd });
+                var hasLegacyRow = (bool)(await legacy.ExecuteScalarAsync(cancellationToken))!;
+                if (hasLegacyRow)
+                {
+                    useTable = false;
+                }
+            }
+
             logger?.LogDebug(
                 "Query Store wide-table source for server {ServerId}: {Source} (coverage since {FilledSince:o}; applied through {AppliedThrough:o}; raw floor {RawFloor:o}; window {WindowStart:o}-{WindowEnd:o}; literal end {LiteralEnd:o}; table floor {TableFloor:o})",
                 serverId, useTable ? "interval table" : "raw", filledSince, appliedThrough, rawFloor, windowStart, windowEnd, literalWindowEnd, tableFloor);
-            return (useTable, ClampedStart(rawFloor, windowStart));
+            return (useTable, clampedStart);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
