@@ -6373,6 +6373,7 @@ LIMIT 1";
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(cancellationToken);
+            readClock.Restart();
             var stored = await DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(connection, cancellationToken);
             return stored
                 .Where(static row => row.Verdict == HostSettingVerdict.RejectedValue)
