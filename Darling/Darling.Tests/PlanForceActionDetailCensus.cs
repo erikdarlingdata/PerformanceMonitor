@@ -15,7 +15,7 @@ using System.Text.RegularExpressions;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4384: an exact, per-file census of every place production C# source builds a string literal that
+/// #4346: an exact, per-file census of every place production C# source builds a string literal that
 /// mentions BOTH <c>plan_force_actions</c> and the whole word <c>detail</c> — the replacement for the
 /// #4346/#4376 raw-<c>detail</c>-reader scan, which attributed sites to a computed enclosing-method name
 /// (fragile: a nested type or a field-held SQL constant could steal or dodge that attribution). This census
@@ -329,7 +329,7 @@ internal static class PlanForceActionDetailCensus
 
     /// <summary>Length of the literal's prefix (<c>@</c>, <c>$</c>, <c>$@</c>, <c>@$</c>, a run of two or
     /// more <c>$</c> before a raw-string quote run, or none) if <paramref name="position"/> begins a
-    /// string literal, else -1. A run of N <c>$</c> signs immediately before the quote run (L1) is the
+    /// string literal, else -1. A run of N <c>$</c> signs immediately before the quote run is the
     /// interpolated-raw-string form <c>$$"""..."""</c>, whose holes open/close with exactly N braces.</summary>
     private static int LiteralPrefixLength(string source, int position)
     {
@@ -391,7 +391,7 @@ internal static class PlanForceActionDetailCensus
         var prefix = source[start..(start + prefixLength)];
         var isVerbatim = prefix.Contains('@');
         var isInterpolated = prefix.Contains('$');
-        /* L1: a run of N '$' before the quote (N>=2, no '@') is an interpolated raw string whose holes
+        /* A run of N '$' before the quote (N>=2, no '@') is an interpolated raw string whose holes
            open/close with exactly N braces; every other interpolated form uses exactly 1. */
         var holeBraceCount = isInterpolated && !isVerbatim ? Math.Max(1, prefix.Count(ch => ch == '$')) : 1;
 
@@ -485,7 +485,7 @@ internal static class PlanForceActionDetailCensus
 
     /// <summary>Reads a raw string literal (<c>"""..."""</c>, N&gt;=3 quotes, optionally interpolated),
     /// replacing each hole with a single space. <paramref name="holeBraceCount"/> is the number of
-    /// leading <c>$</c> signs (L1): a hole opens with exactly that many <c>{</c> and closes with that many
+    /// leading <c>$</c> signs : a hole opens with exactly that many <c>{</c> and closes with that many
     /// <c>}</c>; fewer braces than that in a row are literal text, not a hole delimiter.</summary>
     private static (string Text, int End) ReadRawString(
         string source, int literalStart, int quoteStart, int quoteRunLength, bool isInterpolated,
@@ -546,7 +546,7 @@ internal static class PlanForceActionDetailCensus
     }
 
     /// <summary>Skips a brace-balanced interpolation hole starting at the run of <paramref name="openBraceCount"/>
-    /// consecutive <c>{</c> at <paramref name="openBraceIndex"/> (L1: N for an <c>N$</c>-raw string, else 1),
+    /// consecutive <c>{</c> at <paramref name="openBraceIndex"/> (N for an <c>N$</c>-raw string, else 1),
     /// appending a single space to <paramref name="builder"/> in its place, and returns the index just past
     /// the matching closing brace run, also reporting it via <paramref name="holeEnd"/>.</summary>
     private static int SkipInterpolationHole(

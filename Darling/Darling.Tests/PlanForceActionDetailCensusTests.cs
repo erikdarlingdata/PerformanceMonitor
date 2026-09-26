@@ -16,10 +16,10 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4346/#4376/#4384: an exact per-file census of every place production C# source builds a string literal
+/// #4346: an exact per-file census of every place production C# source builds a string literal
 /// naming BOTH <c>plan_force_actions</c> and the whole word <c>detail</c>. Replaces the #4346/#4376
 /// enclosing-method-attribution scan (<c>PlanForceActionAuditRedactionTests.NoOtherProductionCode_
-/// ReadsTheDetailColumnDirectly</c>, deleted by #4384) with a simpler, exact count: no attribution, no
+/// ReadsTheDetailColumnDirectly</c>, since deleted) with a simpler, exact count: no attribution, no
 /// per-caller allow-list, just "how many literals in this file say both words" against a hard-coded map
 /// that must equal today's real count in every file. A new site anywhere fails the map; the exemption list
 /// in (c) below documents WHY the scrub's own site is allowed to exist, not that it is invisible to the
@@ -31,7 +31,7 @@ public sealed class PlanForceActionDetailCensusTests
     private const string ScrubFileName = "PlanForceActionDetailScrub.cs";
     private const string MigrationsFileName = "PgMigrations.cs";
 
-    /// <summary>The ONE exempted type (#4346/#4377/#4384): <c>PlanForceActionDetailScrub</c> reads
+    /// <summary>The ONE exempted type (#4346): <c>PlanForceActionDetailScrub</c> reads
     /// <c>detail</c> raw because it is the one-time scrub that has to find pre-#4326 rows every other
     /// reader now sanitizes on the way out (see the type's own remarks). At most one entry — a second
     /// exempted type would need a fresh decision, not a silent second line here.</summary>
@@ -145,7 +145,7 @@ public sealed class PlanForceActionDetailCensusTests
         Assert.Equal(0, PlanForceActionDetailCensus.CountDetailSites(source));
     }
 
-    /// <summary>L1 control (#4384): a <c>$$"""..."""</c> interpolated raw string's hole opens/closes with
+    /// <summary>Control: a <c>$$"""..."""</c> interpolated raw string's hole opens/closes with
     /// exactly two braces — both <see cref="PlanForceActionDetailCensus.CountDetailSites"/> and
     /// <see cref="PlanForceActionDetailCensus.CountTableMentions"/> must count the literal once, and the
     /// <c>{{x}}</c> hole must not be treated as literal text that could supply either word.</summary>
@@ -159,7 +159,7 @@ public sealed class PlanForceActionDetailCensusTests
         Assert.Equal(1, PlanForceActionDetailCensus.CountTableMentions(source));
     }
 
-    /// <summary>L1 control (#4384): in a <c>$$"""..."""</c> literal, a SINGLE brace is literal text, not a
+    /// <summary>Control: in a <c>$$"""..."""</c> literal, a SINGLE brace is literal text, not a
     /// hole delimiter (a hole needs the full two-brace run) — the literal text "{ literal brace }" must
     /// still be read as ordinary characters, and the mention still counts once.</summary>
     [Fact]
@@ -176,7 +176,7 @@ public sealed class PlanForceActionDetailCensusTests
      * --------------------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// Today's real per-file count, computed and hard-coded (#4384). Sites, one line each:
+    /// Today's real per-file count, computed and hard-coded . Sites, one line each:
     ///
     /// <para><b><see cref="StoreFileName"/> = 3:</b>
     /// (1) <c>JournalAsync</c>'s INSERT — the column list names <c>detail</c>;
@@ -192,7 +192,7 @@ public sealed class PlanForceActionDetailCensusTests
     /// text</c> column, so the same literal names both words; this is schema DDL, never a read, and needs
     /// no exemption entry (only READS are exempted here), but the census counts literals, not readers.</para>
     /// </summary>
-    /// <summary>Keyed by repo-relative path (#4384 L2), the same shape as
+    /// <summary>Keyed by repo-relative path , the same shape as
     /// <see cref="ExpectedTableMentionCountsByPath"/> below — a bare file name is ambiguous once two
     /// files anywhere in the tree happen to share a name.</summary>
     private static readonly Dictionary<string, int> ExpectedCountsByFileName = new()
@@ -261,7 +261,7 @@ public sealed class PlanForceActionDetailCensusTests
     }
 
     /* ---------------------------------------------------------------------------------------------------
-     * (b2) A second, exact per-file census (#4384): every literal naming the table AT ALL, with or
+     * (b2) A second, exact per-file census : every literal naming the table AT ALL, with or
      * without "detail" alongside it. This is strictly wider than (b)'s co-occurrence count above, so it
      * also catches a table name held in its own const, a bare SELECT * against the table, or a "detail"
      * reference landing in a separate interpolation hole from the table name — none of which trip
@@ -270,7 +270,7 @@ public sealed class PlanForceActionDetailCensusTests
      * --------------------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// Today's real per-file table-mention count, computed and hard-coded (#4384). Sites, one line each:
+    /// Today's real per-file table-mention count, computed and hard-coded . Sites, one line each:
     ///
     /// <para><b>Darling/PerformanceMonitor.Darling.Service/PgPlanForceActionStore.cs = 4:</b>
     /// the INSERT (<c>JournalAsync</c>), the last-action-time subquery, and the two SELECTs
@@ -417,11 +417,11 @@ public sealed class PlanForceActionDetailCensusTests
     }
 
     /* ---------------------------------------------------------------------------------------------------
-     * (d) M1: LegacyDetailCandidateSql is declared once and used exactly once.
+     * (d) LegacyDetailCandidateSql is declared once and used exactly once.
      * --------------------------------------------------------------------------------------------------- */
 
     [Fact]
-    public void M1_LegacyDetailCandidateSql_DeclaredOnceUsedOnce()
+    public void LegacyDetailCandidateSql_DeclaredOnceUsedOnce()
     {
         var scrubFile = ProductionSourceFiles()
             .Single(f => Path.GetFileName(f) == ScrubFileName);
@@ -430,7 +430,7 @@ public sealed class PlanForceActionDetailCensusTests
         Assert.Equal(2, PlanForceActionDetailCensus.CountIdentifierUses(text, "LegacyDetailCandidateSql"));
     }
 
-    /// <summary>M1 control (#4384): a second use written as an interpolation HOLE
+    /// <summary>Control (#4346): a second use written as an interpolation HOLE
     /// (<c>$"{LegacyDetailCandidateSql}"</c>) must be counted — a hole is code, not literal text, so
     /// masking it away the way literal text is masked would make this use invisible.</summary>
     [Fact]
@@ -447,13 +447,13 @@ public sealed class PlanForceActionDetailCensusTests
         Assert.Equal(1, PlanForceActionDetailCensus.CountIdentifierUses(source, "LegacyDetailCandidateSql"));
     }
 
-    /// <summary>M1 (#4384): no production code reaches <c>LegacyDetailCandidateSql</c> (or any private
+    /// <summary>#4346: no production code reaches <c>LegacyDetailCandidateSql</c> (or any private
     /// member of the exempted scrub type) via reflection instead of the compiler-checked reference the
     /// census counts above — a <c>GetField</c>/<c>GetFields</c> call sitting in the same file as
     /// <c>typeof(PlanForceActionDetailScrub)</c>, or anywhere in the scrub's own file, is exactly that
     /// bypass.</summary>
     [Fact]
-    public void M1_NoProductionCode_ReachesPlanForceActionDetailScrubMembersByReflection()
+    public void NoProductionCode_ReachesPlanForceActionDetailScrubMembersByReflection()
     {
         var violations = new List<string>();
 
@@ -485,7 +485,7 @@ public sealed class PlanForceActionDetailCensusTests
     }
 
     [Fact]
-    public void M1_NoProductionCode_ReferencesLegacyDetailCandidateSqlByReflectionOrNameof()
+    public void NoProductionCode_ReferencesLegacyDetailCandidateSqlByReflectionOrNameof()
     {
         var violations = new List<string>();
 
