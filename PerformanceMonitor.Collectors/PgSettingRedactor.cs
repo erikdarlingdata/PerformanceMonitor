@@ -8,6 +8,7 @@
 
 using System;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace PerformanceMonitor.Collectors;
 
@@ -38,7 +39,7 @@ namespace PerformanceMonitor.Collectors;
 /// <item>An extension setting — a name with a dot, such as <c>anon.salt</c> — has its whole value masked when
 /// ANY dot-separated segment of the name contains (as a substring, case-insensitive) <c>password</c>,
 /// <c>passwd</c>, <c>passphrase</c>, <c>secret</c>, <c>salt</c>, <c>token</c>, <c>key</c>, <c>credential</c> or
-/// <c>pwd</c> — not only the last segment (round 1's L1: <c>vault.secret.value</c> matches on the middle
+/// <c>pwd</c> — not only the last segment (<c>vault.secret.value</c> matches on the middle
 /// segment). This is a plain substring test, not a whole-word one: <c>myext.api_key</c> matches (ends in
 /// <c>key</c>) and so would a name that merely happens to contain those letters together, such as
 /// <c>myext.turkey_interval</c> — the false positive it can produce only over-masks, never leaks, and
@@ -82,8 +83,16 @@ public static class PgSettingRedactor
     /// timeout-bearing pattern below runs under its own compiled-in <see cref="MatchTimeout"/>; a non-null
     /// value overrides all of them for the duration of the test, at the cost of building an uncompiled
     /// throwaway <see cref="Regex"/> per call — acceptable only because this path is test-only.
+    /// Backed by <see cref="AsyncLocal{T}"/> so parallel test classes each see only their own override,
+    /// instead of one process-wide value stomping on the others.
     /// </summary>
-    internal static TimeSpan? MatchTimeoutForTest;
+    private static readonly AsyncLocal<TimeSpan?> _matchTimeoutForTest = new();
+
+    internal static TimeSpan? MatchTimeoutForTest
+    {
+        get => _matchTimeoutForTest.Value;
+        set => _matchTimeoutForTest.Value = value;
+    }
 
     /// <summary>Wraps one lookaround-bearing pattern so it always runs under a match timeout, while still
     /// letting a test force a much shorter one via <see cref="MatchTimeoutForTest"/> without rebuilding
@@ -108,7 +117,7 @@ public static class PgSettingRedactor
     }
 
     /// <summary>Names whose value is masked in full when the setting is extension-scoped (#4348), or when a
-    /// marker sits in ANY dot-separated segment of the name, not only the last (review round 1, M5/L1).</summary>
+    /// marker sits in ANY dot-separated segment of the name, not only the last.</summary>
     private static readonly string[] WholeValueNameMarkers =
     {
         "password",
@@ -125,12 +134,12 @@ public static class PgSettingRedactor
     /// <summary>A libpq <c>password</c>/<c>sslpassword</c> keyword inside a conninfo-shaped value. The keyword
     /// must sit at the start of the string or after whitespace, exactly like every other libpq keyword=value
     /// pair, so THIS regex does not fire on an unrelated keyword such as <c>passfile</c> — but
-    /// <see cref="AssignmentSecretName"/>'s broader name part (round 2's M1) treats <c>PASS</c> as a
+    /// <see cref="AssignmentSecretName"/>'s broader name part treats <c>PASS</c> as a
     /// substring, so <c>passfile=/x/.pgpass</c> is still masked whole, by that regex, not this one; it is an
     /// over-mask the ruling accepts, never a leak. The value is either a libpq-quoted string (backslash
     /// escapes <c>\\</c> and <c>\'</c>, closing on the first unescaped <c>'</c>, or running to the end of the
-    /// value when the closing quote never arrives — round 1's L2), plus whatever non-whitespace immediately
-    /// follows the closing quote (round 1's M4: a quoted value glued to a trailing <c>;</c> or another token
+    /// value when the closing quote never arrives), plus whatever non-whitespace immediately
+    /// follows the closing quote (a quoted value glued to a trailing <c>;</c> or another token
     /// with no space), or an unquoted run of non-whitespace.</summary>
     private static readonly TimeBoundPattern LibpqPasswordKeyword = new(
         @"(?<=^|\s)(?<kw>sslpassword|password)\s*=\s*(?:'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
@@ -138,8 +147,8 @@ public static class PgSettingRedactor
 
     /// <summary>The password half of a URI's user info: <c>scheme://user:secret@host</c>. A bare
     /// <c>user@host</c>, with no password, does not match and the username is left alone. The user name may
-    /// be empty (round 1's M2: <c>postgresql://:secret@host</c> is valid libpq and still carries a
-    /// password). The password itself may contain a raw space or an NBSP (round 1's L2 — libpq's own
+    /// be empty (<c>postgresql://:secret@host</c> is valid libpq and still carries a
+    /// password). The password itself may contain a raw space or an NBSP (libpq's own
     /// <c>isspace</c> is not Unicode-aware, so a literal space can sit inside the password up to the <c>@</c>),
     /// so the password class excludes only <c>@</c>, <c>/</c> and the URI's own delimiters, not all
     /// whitespace.</summary>
@@ -156,15 +165,15 @@ public static class PgSettingRedactor
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A shell-style or option-style assignment (<c>NAME=value</c>) whose name contains PASSWORD,
-    /// PASSWD, PASSPHRASE, SECRET, TOKEN, CREDENTIAL, PWD, or a standalone KEY segment (round 1's M5
-    /// amendment: common WAL-G/Azure/pgBackRest variable names such as <c>WALG_LIBSODIUM_KEY</c> and
+    /// PASSWD, PASSPHRASE, SECRET, TOKEN, CREDENTIAL, PWD, or a standalone KEY segment (covers
+    /// common WAL-G/Azure/pgBackRest variable names such as <c>WALG_LIBSODIUM_KEY</c> and
     /// <c>AZURE_STORAGE_ACCESS_KEY</c>). <c>PASS</c> covers PASSWORD, PASSWD and PASSPHRASE as substrings; KEY
     /// is bounded on both sides by <c>(?&lt;![A-Za-z0-9])</c>/<c>(?![A-Za-z0-9])</c> so it matches only as its
     /// own word or delimited segment, never as a substring — which is what keeps libpq's <c>sslkey=/path</c>
     /// unmasked. Covers <c>PGPASSWORD=x</c>, <c>AWS_SECRET_ACCESS_KEY=x</c>, <c>WALG_PGP_KEY_PASSPHRASE=x</c>
     /// inside <c>archive_command</c>/<c>restore_command</c>-shaped values. The value side accepts the same
     /// libpq-style quoting as <see cref="LibpqPasswordKeyword"/>, plus double quotes, plus whatever
-    /// non-whitespace immediately follows the closing quote (round 1's M4), so a quoted value with an
+    /// non-whitespace immediately follows the closing quote, so a quoted value with an
     /// <c>=</c>, space, or trailing punctuation inside or after it is not mistaken for the start of the next
     /// token.</summary>
     private static readonly TimeBoundPattern AssignmentSecretName = new(
@@ -172,10 +181,10 @@ public static class PgSettingRedactor
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A space-separated option whose name contains PASS, SECRET, TOKEN, CREDENTIAL, PWD, or a
-    /// standalone KEY segment -- the same name part as <see cref="AssignmentSecretName"/> (review round 2's
-    /// M1: the option path had fallen behind the assignment path's name list, so <c>gpg --passphrase x</c>,
-    /// <c>openssl enc -pass pass:x</c>, <c>--encryption-key x</c> and <c>--credentials x</c> still leaked),
-    /// taking its value from the next whitespace-delimited token rather than an <c>=</c> (round 1's M3:
+    /// standalone KEY segment -- the same name part as <see cref="AssignmentSecretName"/> (covers the
+    /// space-separated option path so <c>gpg --passphrase x</c>,
+    /// <c>openssl enc -pass pass:x</c>, <c>--encryption-key x</c> and <c>--credentials x</c> are all masked),
+    /// taking its value from the next whitespace-delimited token rather than an <c>=</c> (
     /// <c>--password hunter2</c> and <c>--secret-access-key hunter2</c> have no <c>=</c> at all, so
     /// <see cref="AssignmentSecretName"/> never fires on them). <c>(?!-)</c> keeps a value-less flag such as
     /// <c>--no-password -h x</c> from swallowing the next option as its value.</summary>
@@ -338,13 +347,22 @@ public static class PgSettingRedactor
         }
         catch (RegexMatchTimeoutException)
         {
-            onMatchTimeout?.Invoke(name);
+            // The value is already masked below; a logging callback that throws must not surface past this
+            // method, which is documented to never throw.
+            try
+            {
+                onMatchTimeout?.Invoke(name);
+            }
+            catch
+            {
+            }
+
             return Mask;
         }
     }
 
     /// <summary>Names that would otherwise trip <see cref="WholeValueNameMarkers"/>'s dotted-name test but
-    /// carry no secret — a password POLICY setting, not a password (review round 2's L3). Exact match,
+    /// carry no secret — a password POLICY setting, not a password. Exact match,
     /// case-insensitive; anything ELSE with a marker in a dot-separated segment is still masked whole,
     /// including a real secret sitting in the same batch as one of these (the negative case the pin
     /// covers).</summary>
@@ -376,7 +394,7 @@ public static class PgSettingRedactor
         }
 
         // Extension-scoped settings only: a bare core GUC such as password_encryption never matches here,
-        // no matter what its name contains — only a dotted name is tested at all. Round 1's L1: a marker in
+        // no matter what its name contains — only a dotted name is tested at all. A marker in
         // ANY dot-separated segment counts, not only the last one (vault.secret.value), so the whole name is
         // tested as a substring rather than slicing off just the last part.
         var dot = name.IndexOf('.');

@@ -362,7 +362,7 @@ public sealed class PgSettingRedactorTests
         Assert.Equal("password=********", result);
     }
 
-    // L3, round 2: these three names are password POLICY settings, not secrets — the allowlist keeps them
+    // These three names are password POLICY settings, not secrets — the allowlist keeps them
     // unmasked even though "password" sits in the dotted name.
     [Theory]
     [InlineData("rds.accepted_password_auth_method", "md5+password")]
@@ -374,7 +374,7 @@ public sealed class PgSettingRedactorTests
         Assert.Equal(value, PgSettingRedactor.Redact(name, value));
     }
 
-    // L3 negative: a REAL secret next to an allowlisted name in the same batch is still masked — the
+    // Negative case: a REAL secret next to an allowlisted name in the same batch is still masked — the
     // allowlist is name-exact, not a blanket "don't touch anything dotted with .password. in it" escape.
     [Fact]
     public void AllowlistedPolicyName_DoesNotShieldARealSecretElsewhere()
@@ -436,17 +436,48 @@ public sealed class PgSettingRedactorTests
     [Fact]
     public void ForcedTimeout_MasksWholeValue_AndNamesOnlyTheSetting()
     {
-        var longValue = string.Concat(Enumerable.Repeat("a", 5000)) + "=x";
+        var longValue = string.Concat(Enumerable.Repeat("ZQXV", 2000)) + "=x";
         string? loggedName = null;
+        var callbackCount = 0;
 
         PgSettingRedactor.MatchTimeoutForTest = new TimeSpan(1);
         try
         {
-            var result = PgSettingRedactor.Redact("archive_command", longValue, name => loggedName = name);
+            var result = PgSettingRedactor.Redact("archive_command", longValue, name =>
+            {
+                loggedName = name;
+                callbackCount++;
+            });
 
             Assert.Equal("********", result);
+            Assert.Equal(1, callbackCount);
             Assert.Equal("archive_command", loggedName);
-            Assert.DoesNotContain("a", loggedName ?? string.Empty);
+            Assert.DoesNotContain("ZQXV", loggedName ?? string.Empty);
+        }
+        finally
+        {
+            PgSettingRedactor.MatchTimeoutForTest = null;
+        }
+    }
+
+    /// <summary>
+    /// #4348: <see cref="PgSettingRedactor.Redact"/> is documented as never throwing. A callback that throws
+    /// must not escape past a forced timeout — the value is already masked by that point.
+    /// </summary>
+    [Fact]
+    public void ForcedTimeout_ThrowingCallback_StillReturnsMaskAndDoesNotThrow()
+    {
+        var longValue = string.Concat(Enumerable.Repeat("ZQXV", 2000)) + "=x";
+
+        PgSettingRedactor.MatchTimeoutForTest = new TimeSpan(1);
+        try
+        {
+            string? result = null;
+            var ex = Record.Exception(() =>
+                result = PgSettingRedactor.Redact("archive_command", longValue, _ => throw new InvalidOperationException("boom")));
+
+            Assert.Null(ex);
+            Assert.Equal("********", result);
         }
         finally
         {
