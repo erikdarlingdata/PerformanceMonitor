@@ -87,6 +87,7 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Changed
 
+- **llms.txt and CITATION.cff now match the shipped product** ([#4157]) - llms.txt said 41 T-SQL collectors (it is 42), listed Azure SQL Database under Lite only (Darling supports it too), never mentioned Darling's 29 PostgreSQL collectors or its Windows/Linux and web-dashboard support, named only email and tray alerts (Teams, Slack, PagerDuty and generic webhooks also fire), and undercounted downloads (15,000+, not 4,300+). SentryOne is now named as SolarWinds SQL Sentry. CITATION.cff drops a version and release date no release step keeps current. A new test compares both collector counts in llms.txt against the collector catalog so they cannot go stale silently again.
 - **The MCP tool list's size limit now matches its size** ([#4141]) - #3898 moved reading guidance out of the tool list. The budget test's total limit now equals the tool list's measured size. On Darling that is 170,798 bytes, down from a limit of 329,494. On Lite it is 89,719 bytes, down from 148,216. Any later growth has to raise the limit on purpose. The window_truncated note on the time-series tools also drops its issue number, and now says the field was formerly named truncated.
 - **get_spinlock_stats puts a short description in the tool list** ([#4127]) - Before this change, this Darling and Lite MCP tool put 597 and 1,306 characters into the tool list. It now serves a head of 595 characters on both, under the usual 620-character cap. The get_tool_guide tool returns the rest of the guide by tool name. Nothing was deleted, and no tool behavior changed.
 - **analyze_query_plan puts a short description in the tool list** ([#4126]) - Before this change, this Darling and Lite MCP tool put 915 and 903 characters into the tool list. It now serves a head of 616 characters on both products, and the get_tool_guide tool returns the rest of the guide by tool name. Nothing was deleted, and no tool behavior changed.
@@ -167,6 +168,14 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Fixed
 
+- **The deadlock and plan-capture log patterns only offer a report whose ERROR: is the line's own label** ([#4042]) - A crafted SQL statement that echoed "ERROR:  deadlock detected" plus a tab-continued DETAIL line matched the deadlock pattern through to the line's real process-id bracket. Measured end to end this forgery stored nothing, because the log assembler already takes a report's label from the line it actually came from, and new tests pin that for both the SQL and C# copies of the pattern. Both copies are narrowed anyway, matching the rule behind them exactly: the gap before ERROR: and DETAIL: can no longer cross another field's label, and the managed log-prefix family's gap to the process-id bracket can no longer slide past the real bracket into a statement's text (the same fix #4016 made for plan capture). Fewer forged lines are offered as candidates at all.
+- **Plan capture keeps working under a custom log prefix with fields before the process id** ([#4016]) - Plan capture required exactly one token between the timestamp and the process-id bracket in log_line_prefix. A self-hosted prefix with more than one field there (for example '%m %u@%d [%p] %Q ') matched nothing, so those stores silently stopped capturing plans. The gap before the process id now allows any number of fields, as long as none of them is itself a bracket, so a forged log line behind the real bracket still cannot be read as a plan.
+- **Trace flag reads no longer hide every enabled flag after an ordinary run** ([#4032]) - get_trace_flags, the web viewer's Trace Flags grid, and Lite's equivalent compared the newest captured row's timestamp against the newest successful run's timestamp, but Darling stamps a run's collection-log row when the run ENDS, after its capture rows are written - so that comparison read false after every ordinary run and hid every enabled flag. All three reads now keep the newest capture unless the newest successful run explicitly captured zero rows (which means every flag is off); a failed run, or one with no row count, keeps the reading from before this fix.
+- **The fleet card's collection-health figures no longer reread a week of raw log rows on every call** ([#3911]) - The seven-day fleet-wide collection-health read decompressed six of its seven days of collection_log on every call. It now reads from a new hourly rollup instead, cutting the read down to the buckets it needs. The fleet card's numbers are unchanged; only how they are produced is faster.
+- **The per-server collection-health summary stops leaking memory and stops going stale on a fleet with more than one active caller** ([#3900]) - The health memo keyed its cache on the window's start time, which two calls a few seconds apart would each compute freshly, so the cache never hit in production and grew without bound as more distinct start times accumulated. It now keys on the window's length, so calls asking the same question in different moments share one cached answer and old entries age out.
+- **A collector that produced then stopped no longer reads healthy with zero rows** ([#3889]) - Collection health banding keyed a regressed collector's WARNING floor on the collector's STATUS word rather than on whether it was actually producing output, so a collector whose query still ran and still returned SUCCESS - just with zero rows, after previously producing rows - kept reading HEALTHY indefinitely. On one production server this hid a stopped collector for up to two weeks and over 1,900 consecutive zero-row successes. Banding now also watches for a productive collector's output falling to zero for three or more consecutive runs, and reports it as regressed. A collector whose normal resting state is zero rows (an event capture with nothing to report) is unaffected.
+- **job_history collection survives an msdb reseed** ([#3886]) - The collector deduped job-history rows against a stored high-water mark taken from the target's job-history identity column. A maintenance window that purges msdb's job history also resets that identity to a lower value, so the stored watermark (in the millions) outlived the identity it was taken from (back in the thousands), and the collector's filter matched nothing from then on - forever, on that server, with no error. The watermark now yields to a bounded time window whenever the target's current identity max falls below the stored watermark, the regression is logged once, and job history collection self-heals on its next run without intervention.
+- **The compression-stuck self-alert no longer pages on a healthy job's own run instant** ([#3588]) - TimescaleDB's job_stats view assembles job_status from pg_stat_activity and next_start from the background-worker job-stat row, so for a moment at both edges of every healthy run one read sees the same shape as a genuinely dead job (next_start = -infinity while the schedule still reads Scheduled). A production store paged on exactly that, 53 ms into a 63 ms run that went on to succeed. The check now re-reads five seconds after a -infinity trip and only reports the job if the trip still holds; a failed confirmation defers judgement to the next hourly check rather than paging. The hourly check itself is now snapped to :30 past the minute instead of drifting a few seconds later each time, keeping it off the fixed-schedule policies' own :00 run instants.
 - **pg_deadlocks reads a self-hosted target's csvlog file, closing the same forged-line hole #4124 closed for pg_log_events** ([#4136]) - pg_deadlocks only read stderr-format log text. A target with csvlog but not stderr in log_destination produced no deadlock rows at all. A target with both was open to the same forged-line risk #4124 describes for pg_log_events. A failed login can plant a newline into a logged name. Unquoted stderr text turns that newline into a fake extra line. pg_deadlocks now parses the target's own .csv file as CSV when log_destination includes csvlog, the same forger-safe, whole-record join #4124 built. A planted newline now stays inside its own quoted field instead of becoming a fake deadlock. This change leaves pg_log_events and plan capture as they were. #4137 covers plan capture.
 - **pg_plan_capture reads a self-hosted target's csvlog file** ([#4137]) - pg_plan_capture only read auto_explain plans from stderr-format log text. A self-hosted target with csvlog but not stderr in log_destination captured no plans. pg_plan_capture now reads the target's own .csv file when log_destination includes csvlog, through the same whole-record CSV parser #4124 built. It takes the query id from csvlog's own query_id column. The stderr route is unchanged.
 - **Darling's daily retention purge no longer holds up collection** ([#4133]) - The purge ran inside the loop that starts each server's collection, and the loop waited for it to finish. A slow purge, 346 to 400 seconds on a large store, stalled collection for every server for that long. The purge now runs in the background, and a new purge never starts while one is still running.
@@ -1624,6 +1633,7 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#3580]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3580
 [#3581]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3581
 [#3582]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3582
+[#3588]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3588
 [#3591]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3591
 [#3597]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3597
 [#3598]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3598
@@ -3677,6 +3687,10 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#3909]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3909
 [#3918]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3918
 [#3919]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3919
+[#3886]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3886
+[#3889]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3889
+[#3900]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3900
+[#3911]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3911
 [#3920]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3920
 [#3927]: https://github.com/erikdarlingdata/PerformanceMonitor/issues/3927
 [#3931]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/3931
@@ -3715,16 +3729,19 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4011]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4011
 [#4013]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4013
 [#4015]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4015
+[#4016]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4016
 [#4020]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4020
 [#4022]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4022
 [#4025]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4025
 [#4029]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4029
 [#4030]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4030
 [#4031]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4031
+[#4032]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4032
 [#4036]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4036
 [#4038]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4038
 [#4039]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4039
 [#4040]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4040
+[#4042]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4042
 [#4044]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4044
 [#4047]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4047
 [#4048]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4048
@@ -3794,3 +3811,4 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4136]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4136
 [#4137]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4137
 [#4141]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4141
+[#4157]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4157
