@@ -2470,23 +2470,24 @@ public sealed class DarlingManagedPostgres
         => BuildRoleConnectionString(port, UserName, password);
 
     /// <summary>
-    /// Builds a managed loopback connection string for a specific login role — shared by
-    /// <see cref="BuildConnectionString"/> (the owner) and
-    /// <see cref="TryBuildMcpConnectionStringFromStoredCredential"/> (the <c>mcp</c> role). Same
-    /// <c>127.0.0.1</c> + port + <see cref="SearchPath"/> shape; only the username/password differ.
-    /// </summary>
-    /// <summary>
     /// Builds a non-pooled connection string for the #4215 migration's <c>pg_file_settings</c> snapshot. The
     /// snapshot is a one-shot read that must land on the server this start just launched, never on a pooled
     /// socket left over from an earlier server lifetime in the same process — the same stale-pool failure
     /// fixed in <c>DarlingStoreUpgradeTests</c> (#4397).
     /// </summary>
     private static string MigrationSnapshotConnectionString(string connectionString)
-        => new NpgsqlConnectionStringBuilder(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString))
-        {
-            Pooling = false,
-        }.ConnectionString;
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        builder.Pooling = false;
+        return builder.ConnectionString;
+    }
 
+    /// <summary>
+    /// Builds a managed loopback connection string for a specific login role — shared by
+    /// <see cref="BuildConnectionString"/> (the owner) and
+    /// <see cref="TryBuildMcpConnectionStringFromStoredCredential"/> (the <c>mcp</c> role). Same
+    /// <c>127.0.0.1</c> + port + <see cref="SearchPath"/> shape; only the username/password differ.
+    /// </summary>
     private static string BuildRoleConnectionString(int port, string username, string password)
     {
         var builder = new NpgsqlConnectionStringBuilder
@@ -2891,7 +2892,8 @@ public sealed class DarlingManagedPostgres
     {
         Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = async ct =>
         {
-            await using var connection = new NpgsqlConnection(MigrationSnapshotConnectionString(connectionString));
+            await using var connection = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(MigrationSnapshotConnectionString(connectionString)));
             await connection.OpenAsync(ct);
             await using var command = new NpgsqlCommand(ManagedConfFileSettings.SnapshotSql, connection)
             {

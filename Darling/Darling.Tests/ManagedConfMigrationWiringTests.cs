@@ -119,8 +119,8 @@ public sealed class ManagedConfMigrationWiringTests
     {
         var source = ReadManagedSource();
         var helper = At(source, "private static string MigrationSnapshotConnectionString(string connectionString)", 0);
-        var poolingFalse = At(source, "Pooling = false,", helper);
-        var snapshotUse = At(source, "new NpgsqlConnection(MigrationSnapshotConnectionString(connectionString));", 0);
+        var poolingFalse = At(source, "builder.Pooling = false;", helper);
+        var snapshotUse = At(source, "DarlingStoreConnection.PinSessionTimeZoneUtc(MigrationSnapshotConnectionString(connectionString))", 0);
 
         Assert.True(helper < poolingFalse, "MigrationSnapshotConnectionString must set Pooling = false.");
         Assert.True(snapshotUse > 0, "the migration's snapshot connection must be built through MigrationSnapshotConnectionString.");
