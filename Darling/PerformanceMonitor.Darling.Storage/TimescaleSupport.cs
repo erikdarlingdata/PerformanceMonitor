@@ -6166,13 +6166,40 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// #4299 L3b: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record back as
-    /// a <see cref="RawLastPurgeRecord"/>, or <c>null</c> when the key has never been written or does not
-    /// parse (fail-closed the same direction <see cref="RawArmedReadExpression"/> takes: an unreadable record
-    /// is unmeasured, not "ran"). Tolerant of a missing job row or a read failure, same posture as
-    /// <see cref="ReadJobCadenceReadingsAsync"/> — never throws outward.
+    /// #4299/#4391 L3b: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record back
+    /// as a <see cref="RawLastPurgeRecord"/>, or <c>null</c> when the key has never been written or does not
+    /// parse. Kept for the existing callers that only need the record; see
+    /// <see cref="ReadRawLastPurgeStateAsync"/> for the tri-state read that tells "never written" apart from
+    /// "could not be read".
     /// </summary>
     public static async Task<RawLastPurgeRecord?> ReadRawLastPurgeOutcomeAsync(
+        NpgsqlConnection connection, string relation, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        var (_, record) = await ReadRawLastPurgeStateAsync(connection, relation, logger, cancellationToken);
+        return record;
+    }
+
+    /// <summary>
+    /// #4299/#4391 L3b: which of the three states <paramref name="relation"/>'s last-purge record is in.
+    /// <see cref="NeverWritten"/> means no purge-trigger pass has recorded an outcome for it yet (the key is
+    /// missing or blank). <see cref="ReadFailed"/> means a value exists but could not be read — the read
+    /// threw, or the value failed to parse — which is a DIFFERENT state from never having been written: an
+    /// unreadable record must not be reported as "never covered".
+    /// </summary>
+    public enum RawLastPurgeReadState
+    {
+        Present,
+        NeverWritten,
+        ReadFailed,
+    }
+
+    /// <summary>
+    /// #4299/#4391 L3b: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record and
+    /// reports which of <see cref="RawLastPurgeReadState"/> applies, alongside the record when it parsed.
+    /// Tolerant of a missing job row or a read failure, same posture as <see cref="ReadJobCadenceReadingsAsync"/>
+    /// — never throws outward.
+    /// </summary>
+    public static async Task<(RawLastPurgeReadState State, RawLastPurgeRecord? Record)> ReadRawLastPurgeStateAsync(
         NpgsqlConnection connection, string relation, ILogger? logger, CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -6186,7 +6213,7 @@ AND   j.hypertable_name = '{relation}'";
             var value = await read.ExecuteScalarAsync(cancellationToken);
             if (value is not string json || string.IsNullOrWhiteSpace(json))
             {
-                return null;
+                return (RawLastPurgeReadState.NeverWritten, null);
             }
 
             using var document = System.Text.Json.JsonDocument.Parse(json);
@@ -6211,15 +6238,15 @@ AND   j.hypertable_name = '{relation}'";
 
             if (at is null || string.IsNullOrEmpty(outcome))
             {
-                return null;
+                return (RawLastPurgeReadState.ReadFailed, null);
             }
 
-            return new RawLastPurgeRecord(at.Value, outcome, sqlState, elapsedMs);
+            return (RawLastPurgeReadState.Present, new RawLastPurgeRecord(at.Value, outcome, sqlState, elapsedMs));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogDebug("Could not read the last-purge record for {Relation}: {Message}", relation, ex.Message);
-            return null;
+            return (RawLastPurgeReadState.ReadFailed, null);
         }
     }
 
@@ -11378,8 +11405,8 @@ WHERE j.proc_name = 'policy_retention'
                 continue;
             }
 
-            var lastPurge = await ReadRawLastPurgeOutcomeAsync(connection, hold.HypertableName, logger, cancellationToken);
-            readings.Add(new RawPurgeOverHorizonReading(hold.JobId, hold.HypertableName, hold.DropAfter, hold.OverHorizonRatio, lastPurge));
+            var (state, lastPurge) = await ReadRawLastPurgeStateAsync(connection, hold.HypertableName, logger, cancellationToken);
+            readings.Add(new RawPurgeOverHorizonReading(hold.JobId, hold.HypertableName, hold.DropAfter, hold.OverHorizonRatio, lastPurge, state == RawLastPurgeReadState.ReadFailed));
         }
 
         return readings;
@@ -12150,7 +12177,8 @@ public sealed record RawLastPurgeRecord(DateTime At, string Outcome, string? Sql
 /// <see cref="TimescaleSupport.ReadRawPurgeOverHorizonReadingsAsync"/>.
 /// </summary>
 public sealed record RawPurgeOverHorizonReading(
-    long JobId, string HypertableName, string DropAfter, double? OverHorizonRatio, RawLastPurgeRecord? LastPurge);
+    long JobId, string HypertableName, string DropAfter, double? OverHorizonRatio, RawLastPurgeRecord? LastPurge,
+    bool LastPurgeReadFailed = false);
 
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how
