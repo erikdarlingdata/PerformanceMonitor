@@ -60,7 +60,7 @@ public static class ComposeLimits
     /// <see cref="!:StorageVersion.SchemaVersion"/> would break the viewer's connect-time version gate. A Postgres
     /// interval literal.
     /// </summary>
-    public const string StatementTimeout = "15s";
+    public const string StatementTimeout = "60s";
 
     /// <summary>The fixed percentile for <c>percentile_cont</c> (p95) — a hardcoded default per the
     /// defaults-over-speculative-config rule; a per-panel percentile knob is a clean later add.</summary>

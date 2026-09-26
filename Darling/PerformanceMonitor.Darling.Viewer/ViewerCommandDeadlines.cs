@@ -72,8 +72,17 @@ public static class ViewerCommandDeadlines
     /// #2882 and #2888 both made, and the same reason both erred short. What it competes for is the store
     /// connection pool (<see cref="ViewerStorePool.MaxPoolSize"/> — ten on a managed seat, the operator's
     /// value on a bring-your-own one), and while permits are held the sidebar freshness dots, the alert
-    /// poll and every other panel get nothing. Fifteen seconds is half the inherited 30 s, which halves
-    /// that worst-case hold.</para>
+    /// poll and every other panel get nothing.</para>
+    ///
+    /// <para>ABOVE the managed store's shipped server-side ceiling, since #4442: a locked-down Viewer seat
+    /// (<c>postgres.connectAs = "viewer"</c>) runs these same reads under the <c>viewer</c> role's
+    /// <c>statement_timeout</c>, now shipped at 60 s. Before #4442 that ceiling and this deadline were both
+    /// 15 s — numerically equal, so neither reliably preempted the other — and #4442's own rule is that a
+    /// client deadline must sit STRICTLY above the server ceiling so the store's <c>57014</c> is what a user
+    /// sees. Seventy-five seconds keeps this deadline the looser of the two by the same margin
+    /// <see cref="!:McpCommandDeadlines.ReadSeconds"/> carries above the identical ceiling on the MCP
+    /// surface, while remaining 25x the measured worst-case read (3.01 s) and so no looser than the pool
+    /// permit argument below can tolerate.</para>
     ///
     /// <para><b>A read that cannot get a permit never reaches this deadline, so it is not the thing that
     /// bounds one</b> (#3016). It waits <c>ConnectionTimeoutSeconds</c> (default 5) for a slot and then
@@ -106,7 +115,7 @@ public static class ViewerCommandDeadlines
     /// unprompted. Too long and the user watches a spinner while a pooled connection is held, which is
     /// the failure mode that cannot be diagnosed from the UI. Erring short is right here.</para>
     /// </summary>
-    public const int InteractiveReadSeconds = 15;
+    public const int InteractiveReadSeconds = 75;
 
     /// <summary>
     /// The per-lane contention allowance a concurrent read is granted on top of

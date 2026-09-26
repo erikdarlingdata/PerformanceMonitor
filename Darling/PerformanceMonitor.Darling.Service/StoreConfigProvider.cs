@@ -1366,7 +1366,7 @@ ON CONFLICT (server_id) DO NOTHING", connection) { CommandTimeout = ServiceComma
     internal const int MaxComposeStatementTimeoutSeconds = 600;
 
     internal static int ClampComposeStatementTimeoutSeconds(int value) =>
-        Math.Clamp(value <= 0 ? 15 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
+        Math.Clamp(value <= 0 ? 60 : value, MinComposeStatementTimeoutSeconds, MaxComposeStatementTimeoutSeconds);
 
     /// <summary>#2171: unknown values normalize to 'gzip' (fail to the shipped default) so a hand-edited
     /// row cannot switch the writer into an undefined mode; the V62 CHECK constraint enforces the same
@@ -2039,7 +2039,7 @@ public sealed class StoreConfigView
     /// clamped to [5,600]; 15 reproduces the constant it replaced. The provisioning DDL applies it, and that
     /// DDL re-runs on every managed start, so a change here reaches an existing install on its next restart.
     /// </summary>
-    public int ComposeStatementTimeoutSeconds { get; init; } = 15;
+    public int ComposeStatementTimeoutSeconds { get; init; } = 60;
 
     /// <summary>
     /// The #2171 plan-XML storage codec (config_service, V62), already normalized to 'gzip' or 'none'.

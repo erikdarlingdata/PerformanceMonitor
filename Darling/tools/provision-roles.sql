@@ -119,11 +119,12 @@ ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';
 --     ComposeLimits.StatementTimeout in the service. It bounds the web dashboard and the MCP server only when
 --     postgres.webConnectionString / postgres.mcpConnectionString name these roles (#3914); a surface left on
 --     the owner login has no backstop at all.
-ALTER ROLE viewer SET statement_timeout = '15s';
-ALTER ROLE mcp    SET statement_timeout = '15s';
+ALTER ROLE viewer SET statement_timeout = '60s';
+ALTER ROLE mcp    SET statement_timeout = '60s';
 
 -- 1b. Slow-statement logging on viewer and mcp (#3899): a statement from either that runs past a third of its
---     15s statement_timeout is written to the server log with its text, so a slow read can be named instead
+--     statement_timeout, capped at 5s so raising the ceiling never widens the unlogged band (#4442), is written
+--     to the server log with its text, so a slow read can be named instead
 --     of guessed at, and the service's store-log sweep keeps it (literals masked). Bind parameters are not
 --     logged: mcp also writes the alert settings, whose values include secrets. Managed mode derives the same
 --     line from its own ceiling (a third of it): keep this in step if you change 1a. Both settings are

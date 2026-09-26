@@ -38,15 +38,18 @@ public static class StorageCommandDeadlines
     /// <c>min(collection_time)</c> class on the largest store's 23 GB hypertable, which TimescaleDB
     /// answers by chunk exclusion. The shipped trend reads are all per-server and time-windowed; a
     /// deliberately HARDER superset (the same aggregate unfiltered, fleet-wide, over seven days)
-    /// measured 35.2 s, bounding any single shipped read far below it. 30 s keeps ≥8× headroom over
-    /// the most pessimistic estimate and ~44× over anything actually observed.</para>
+    /// measured 35.2 s, bounding any single shipped read far below it.</para>
     ///
-    /// <para>BELOW the point where a hung interactive read is worse than a failed one: these calls
-    /// hold a pooled store connection with no enclosing budget and no retry cadence, so the deadline
-    /// is the only thing standing between one stalled read and a tool that hangs until the client
-    /// abandons it. Sixty seconds is where the budgeted analysis pass put a read that a 120 s
-    /// <c>CancelAfter</c> would still rescue (#2871); an unbudgeted interactive read must sit
-    /// strictly under that, not above it.</para>
+    /// <para>ABOVE the managed store's shipped server-side ceiling too, since #4442 raised that ceiling
+    /// to 60 s and put this family on the SAME least-privilege pool the role GUC bounds
+    /// (<see cref="!:McpCommandDeadlines.ReadSeconds"/> is this surface's sibling half, at 75 s). Ninety
+    /// seconds keeps this the looser-by-a-fixed-margin of the two client deadlines — the relation
+    /// <c>McpReadCommandTimeoutTests</c> pins — while staying well under the point a hung interactive read
+    /// is worse than a failed one: these calls hold a pooled store connection with no enclosing budget and
+    /// no retry cadence, so the deadline is the only thing standing between one stalled read and a tool
+    /// that hangs until the client abandons it. Ninety seconds is where the budgeted analysis pass put a
+    /// read that a 120 s <c>CancelAfter</c> would still rescue (#2871); an unbudgeted interactive read must
+    /// sit strictly under that, not above it.</para>
     /// </summary>
-    public const int McpReadSeconds = 30;
+    public const int McpReadSeconds = 90;
 }

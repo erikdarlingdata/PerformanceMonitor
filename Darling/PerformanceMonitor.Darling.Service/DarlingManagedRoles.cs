@@ -446,14 +446,17 @@ ALTER ROLE {mcp}    SET log_min_duration_statement = '{slowStatement}';";
     /// <summary>
     /// The slow-statement line on the two read identities (#3899), in milliseconds: a statement from
     /// <c>viewer</c> or <c>mcp</c> that runs this long is written to the store's own log, where the store-log
-    /// sweep retains it under <c>slow_statement</c>. A THIRD of the same clamped <c>statement_timeout</c>, so a
-    /// read that is drifting toward the kill is named while it still completes: 15 s gives 5000 ms. Derived
-    /// rather than fixed because the ceiling is an operator knob that goes down to 5 s, where a fixed 5 s line
-    /// could never fire (the statement is cancelled at the line, and a cancel logs no duration); 5 s gives
-    /// 1666 ms.
+    /// sweep retains it under <c>slow_statement</c>. A THIRD of the same clamped <c>statement_timeout</c>,
+    /// CAPPED at 5000 ms (#4442): a read that is drifting toward the kill is named while it still completes,
+    /// but the cap keeps the unlogged band from widening every time the ceiling is raised — the shipped
+    /// default's own tail (5 s-60 s) is exactly what #4442 raised the ceiling to measure, and an uncapped
+    /// third would push its own logging line to 20000 ms and stop logging it. 5 s gives 1666 ms (uncapped, the
+    /// floor); 15 s gives 5000 ms (the cap, exactly); 60 s and above all give 5000 ms (the cap, clamped).
+    /// Derived rather than fixed because the ceiling is an operator knob that goes down to 5 s, where a fixed
+    /// 5 s line could never fire (the statement is cancelled at the line, and a cancel logs no duration).
     /// </summary>
     public static int SlowStatementThresholdMs(int composeStatementTimeoutSeconds) =>
-        StoreConfigProvider.ClampComposeStatementTimeoutSeconds(composeStatementTimeoutSeconds) * 1000 / 3;
+        Math.Min(5000, StoreConfigProvider.ClampComposeStatementTimeoutSeconds(composeStatementTimeoutSeconds) * 1000 / 3);
 
     /// <summary>
     /// <c>log_parameter_max_length = 0</c> on the <c>viewer</c> and <c>mcp</c> roles, as SQL (#3899): the
