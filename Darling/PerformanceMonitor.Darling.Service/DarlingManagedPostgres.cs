@@ -504,16 +504,16 @@ public sealed class DarlingManagedPostgres
     /// already proves lz4 ships in the bundled runtime; it costs less CPU than zstd for a few GB/hour of
     /// image data, the same trade the TOAST setting already made.</para>
     ///
-    /// <para><b>The checkpoint interval is held, not shipped.</b> A longer <c>checkpoint_timeout</c> would cut
-    /// WAL further by re-imaging each hot page less often — #4246 found roughly two-thirds of one 5-minute
-    /// cycle's images repeated the previous cycle's — but it risks the store's own checkpointer self-alert:
-    /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a checkpoint's sync phase
-    /// averages more than 10 seconds, a bar that exists because sync phases of 14.0s and 25.2s killed reads on
-    /// a production store. #3892 found that a longer interval puts more files into each checkpoint, which
-    /// makes each sync phase longer, so a 15-minute interval risks trading WAL volume for killed reads and for
-    /// alerts firing on a healthy store. One production store measures the interval first, through <c>ALTER
-    /// SYSTEM</c> and a reload rather than this block; it ships here later, in its own marker, only if that
-    /// measurement stays under the sync bar.</para>
+    /// <para><b>The checkpoint interval ships separately, in v16.</b> A longer <c>checkpoint_timeout</c> would
+    /// cut WAL further by re-imaging each hot page less often — #4246 found roughly two-thirds of one
+    /// 5-minute cycle's images repeated the previous cycle's — but it risks the store's own checkpointer
+    /// self-alert: <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a
+    /// checkpoint's sync phase averages more than 10 seconds, a bar that exists because sync phases of 14.0s
+    /// and 25.2s killed reads on a production store. #3892 found that a longer interval puts more files into
+    /// each checkpoint, which makes each sync phase longer, so a 15-minute interval risks trading WAL volume
+    /// for killed reads and for alerts firing on a healthy store. One production store measured the interval
+    /// first, through <c>ALTER SYSTEM</c> and a reload rather than this block; it now ships as
+    /// <see cref="ConfMarkerV16"/>, its own marker, gated on that measurement staying under the sync bar.</para>
     ///
     /// <para><b>Does not touch <c>max_wal_size</c>.</b> <see cref="ConfMarkerV12"/> (#3802) already bounds it
     /// by free disk, and this block leaves that bound alone.</para>
@@ -534,6 +534,32 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV15 = "# Managed by PerformanceMonitor Darling (v15 WAL compression) -- do not remove this block";
 
     /// <summary>
+    /// The v16 marker (#4246): <c>checkpoint_timeout = 15min</c> only, up from PostgreSQL's 5-minute default.
+    /// The interval was held back from v15 (see <see cref="ConfMarkerV15"/>) pending a 24-hour trial on one
+    /// production store, applied there through <c>ALTER SYSTEM</c> and a reload rather than this block. That
+    /// trial's verdict: pending the 24 h measurement on one production store.
+    ///
+    /// <para><b>The risk this carries.</b> A longer interval puts more dirty pages, and so more files, into
+    /// each checkpoint's sync phase, which is what makes the phase take longer.
+    /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/> (#4037) fires when a checkpoint's sync
+    /// phase averages more than 10 seconds — the bar #3892 traced to sync phases of 14.0s and 25.2s that
+    /// killed reads on a production store. This block ships only because the trial's measurement stayed
+    /// under that bar; a store that regresses past it needs a shorter interval, not a self-alert override.</para>
+    ///
+    /// <para><b>Does not touch <c>max_wal_size</c>.</b> <see cref="ConfMarkerV12"/> (#3802) already bounds it
+    /// by free disk, and this block leaves that bound alone.</para>
+    ///
+    /// <para><c>checkpoint_timeout</c> is <c>sighup</c>-context in PostgreSQL, so a running store could take it
+    /// from a reload alone — but like the other <c>sighup</c> settings this service manages, this append runs
+    /// before <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes the
+    /// block, the v9-v11 story. Managed stores only; a bring-your-own store keeps whatever
+    /// <c>checkpoint_timeout</c> its owner set. A later change to this value needs a NEW marker (the
+    /// v11/v14/v15 precedent): this block heals by its marker's absence, so an edited value in an
+    /// already-marked file would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV16 = "# Managed by PerformanceMonitor Darling (v16 checkpoint interval) -- do not remove this block";
+
+    /// <summary>
     /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
     /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
     /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
@@ -546,7 +572,7 @@ public sealed class DarlingManagedPostgres
     [
         ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
         ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
-        ConfMarkerV15,
+        ConfMarkerV15, ConfMarkerV16,
     ];
 
     /// <summary>
@@ -2245,6 +2271,22 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
+    /* ===================== v16 checkpoint interval (#4246) ===================== */
+
+    /// <summary>
+    /// The v16 block: <c>checkpoint_timeout = 15min</c> only. See <see cref="ConfMarkerV16"/> for the trial,
+    /// the sync-bar risk, and why this deliberately does not touch <c>max_wal_size</c>. Carries no fingerprint
+    /// or stamp line, so the v8 and v12 staleness checks are untouched by this block.
+    /// </summary>
+    public static string BuildCheckpointIntervalConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV16).Append('\n');
+        builder.Append("checkpoint_timeout = 15min\n");
+        return builder.ToString();
+    }
+
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
 
     /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:
@@ -3655,6 +3697,19 @@ public sealed class DarlingManagedPostgres
             File.AppendAllText(confPath, BuildWalVolumeConfAppend());
             _logger.LogInformation(
                 "Appended v15 WAL compression to postgresql.conf (wal_compression = lz4): most of this store's WAL is full-page images, and compression shrinks every one of them. Effective on this start when the service owns it.");
+        }
+
+        /* v16 (#4246): keyed on its marker's absence like v9-v11, v13 and v15, and placed last so it stays
+           the block this method appends LAST on any start that fires it, matching its place at the end of
+           AllManagedConfMarkers. Carries no fingerprint or stamp line, so v8 and v12 read exactly what they
+           did before this block existed. checkpoint_timeout is sighup-context, but like the other sighup
+           settings this service manages, this is appended before pg_ctl start, so a service-owned start
+           applies it on the very start that writes the block. */
+        if (!conf.Contains(ConfMarkerV16, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildCheckpointIntervalConfAppend());
+            _logger.LogInformation(
+                "Appended v16 checkpoint interval to postgresql.conf (checkpoint_timeout = 15min): a longer interval re-images each hot page less often, cutting write-ahead log volume. Effective on this start when the service owns it.");
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);
