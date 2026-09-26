@@ -1805,20 +1805,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     return DefinitionValidation.Fail($"panel {i} is missing 'read' or 'source'.");
                 }
 
-                if (!reads.ContainsKey(read))
+                if (ValidateReadPanelSpec(panel, read, reads, $"panel {i}") is string readPanelError)
                 {
-                    return DefinitionValidation.Fail($"panel {i} references unknown read '{read}'.");
-                }
-
-                var viz = TryGetString(panel, "viz");
-                if (string.IsNullOrEmpty(viz))
-                {
-                    return DefinitionValidation.Fail($"panel {i} is missing 'viz'.");
-                }
-
-                if (!KnownViz.Contains(viz))
-                {
-                    return DefinitionValidation.Fail($"panel {i} has unknown viz '{viz}'.");
+                    return DefinitionValidation.Fail(readPanelError);
                 }
             }
 
@@ -1854,6 +1843,89 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
 
         return DefinitionValidation.Valid;
+    }
+
+    /// <summary>The extra keys a notebook READ cell carries beyond the shared v1 read-panel keys (design D7,
+    /// #4222): the cell discriminator plus a title, mirroring <see cref="s_notebookPanelCellExtraKeys"/>'s shape
+    /// for the composed arm.</summary>
+    private static readonly IReadOnlySet<string> s_notebookReadCellExtraKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "title",
+    };
+
+    /// <summary>
+    /// PURE structural validation of a v1 READ panel spec (<c>{read, params, viz}</c>) — the SAME rules a
+    /// dashboard read panel is checked against, shared here so a notebook <c>read</c> cell (design D7, #4222)
+    /// runs through one authority instead of a second copy that would decay. Checks, in order: <c>read</c> names
+    /// an entry on the <paramref name="reads"/> allowlist (<see cref="BuildReadDispatch"/>); <c>viz</c> is present
+    /// and in <see cref="KnownViz"/>; every key inside <c>params</c> is a declared <see cref="CatalogParam"/> for
+    /// that read; every REQUIRED param for that read is present in <c>params</c> with a non-null, non-empty value.
+    /// Returns the first caller-facing error (already prefixed with <paramref name="label"/>, e.g. "panel 0" or
+    /// "cell 2 (read)"), or null when the spec is valid.
+    /// </summary>
+    private static string? ValidateReadPanelSpec(JsonObject spec, string read, IReadOnlyDictionary<string, ReadToolHandler> reads, string label)
+    {
+        if (!reads.ContainsKey(read))
+        {
+            return $"{label} references unknown read '{read}'.";
+        }
+
+        var viz = TryGetString(spec, "viz");
+        if (string.IsNullOrEmpty(viz))
+        {
+            return $"{label} is missing 'viz'.";
+        }
+
+        if (!KnownViz.Contains(viz))
+        {
+            return $"{label} has unknown viz '{viz}'.";
+        }
+
+        if (!CatalogDescriptors.TryGetValue(read, out var descriptor))
+        {
+            /* Every dispatch entry has a catalog entry (a test pins CatalogDescriptors.Keys ==
+               BuildReadDispatch().Keys), so this is unreachable in practice; treat it as no declared params
+               rather than throwing, so a validator never 500s on a data-shape it cannot itself produce. */
+            return null;
+        }
+
+        var declaredParams = descriptor.Params.ToDictionary(p => p.Name, StringComparer.Ordinal);
+
+        if (spec["params"] is JsonObject paramsObject)
+        {
+            foreach (var property in paramsObject)
+            {
+                if (!declaredParams.ContainsKey(property.Key))
+                {
+                    return $"{label} has an unknown parameter '{property.Key}' for read '{read}'.";
+                }
+            }
+
+            foreach (var param in descriptor.Params)
+            {
+                if (param.Required)
+                {
+                    var value = paramsObject[param.Name];
+                    var isEmpty = value is null
+                        || (value is JsonValue paramValue && paramValue.TryGetValue<string>(out var s) && string.IsNullOrEmpty(s));
+                    if (isEmpty)
+                    {
+                        return $"{label} is missing the required parameter '{param.Name}'.";
+                    }
+                }
+            }
+        }
+        else if (spec["params"] is not null)
+        {
+            return $"{label} 'params' must be an object.";
+        }
+        else if (descriptor.Params.Any(p => p.Required))
+        {
+            var missing = descriptor.Params.First(p => p.Required);
+            return $"{label} is missing the required parameter '{missing.Name}'.";
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -1996,9 +2068,34 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                     break;
 
+                case "read":
+                    /* Strict keys first (#2733): a read cell is FLAT, same shape as a dashboard v1 read panel
+                       (design D7, #4222) — its discriminator plus title/read/params/viz, nothing else. v1 read
+                       panels are deliberately not key-checked beyond this (see the note on the key sets above),
+                       so the walk only closes off keys a read cell cannot carry at all. */
+                    if (ComposeSpec.UnknownKeyError(cell, s_notebookReadCellExtraKeys.Concat(new[] { "read", "params", "viz" }).ToHashSet(StringComparer.Ordinal), $"cell {i} (read)") is string readKeyError)
+                    {
+                        return DefinitionValidation.Fail(readKeyError);
+                    }
+
+                    var read = TryGetString(cell, "read");
+                    if (string.IsNullOrEmpty(read))
+                    {
+                        return DefinitionValidation.Fail($"cell {i} (read) is missing 'read'.");
+                    }
+
+                    /* The SAME v1 read-panel rules a dashboard read panel is checked against (#4222) — shared,
+                       not copied, so a rename that reds the dashboard path reds this one too. */
+                    if (ValidateReadPanelSpec(cell, read, BuildReadDispatch(), $"cell {i} (read)") is string readCellError)
+                    {
+                        return DefinitionValidation.Fail(readCellError);
+                    }
+
+                    break;
+
                 default:
                     return DefinitionValidation.Fail(
-                        $"cell {i} has an unknown type '{type}'; expected 'markdown' or 'panel'.");
+                        $"cell {i} has an unknown type '{type}'; expected 'markdown', 'panel', or 'read'.");
             }
         }
 

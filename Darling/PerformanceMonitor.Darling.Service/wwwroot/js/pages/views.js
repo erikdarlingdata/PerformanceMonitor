@@ -558,6 +558,12 @@ function renderCell(cell, readSet, sourceSet, scope) {
   if (cell.type === "panel") {
     return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope)]);
   }
+  /* A `read` cell (design D7, #4222) is a v1 read panel, FLAT like a panel cell: routed through the exact same
+     panelOrError -> renderPanel path a dashboard read panel uses (its own fixed params, scope-independent).
+     Minimal routing only; renderNotebookDoc's broader refactor is a later slice's job. */
+  if (cell.type === "read") {
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope)]);
+  }
   return null;
 }
 
