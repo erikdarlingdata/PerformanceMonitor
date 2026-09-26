@@ -374,6 +374,8 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
         (new[] { "Deadlocks Detected" },
             new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
+        (new[] { "High CPU" },
+            new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCpuCells)),
     };
 
     /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
@@ -413,6 +415,12 @@ internal static partial class AlertNotebookEndpoint
     private static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_deadlock_trend",
+        /* #4223: get_top_queries_by_cpu / get_top_procedures_by_cpu / get_cpu_scheduler_pressure declare no
+           'limit' param at all -- the first two cap with 'top' (carried explicitly below), the last has no
+           row cap to carry. */
+        "get_top_queries_by_cpu",
+        "get_top_procedures_by_cpu",
+        "get_cpu_scheduler_pressure",
     };
 
     /// <summary>An authored template's read cell (spec §1 binding): <c>server</c>, <c>as_of = window_end</c>
