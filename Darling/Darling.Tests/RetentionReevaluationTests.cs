@@ -189,15 +189,17 @@ public sealed class RetentionReevaluationTests
 
         Assert.Contains("IS DISTINCT FROM", TimescaleSupport.ConvergeRetentionHorizonSql(Relation), StringComparison.Ordinal);
 
-        /* And the sweep reads the flag BEFORE it measures, through the read above — the order that makes the
-           transition attributable to this pass's flip and nothing else. */
+        /* And the sweep reads the prior verdict BEFORE it measures, through the read above — the order that
+           makes the transition attributable to this pass's flip and nothing else. #4299 (d′) split the read
+           into raw (RawArmedStateSql) and non-raw (RetentionPolicyScheduledSql) branches of one ternary; the
+           non-raw statement name still has to appear in that ternary for this pin to mean anything. */
         var sweep = MethodBody(ReadStorageSource(), "public static async Task<RetentionPolicySweepSummary> EnsureRetentionPoliciesAsync(");
-        var readAt = sweep.IndexOf("new NpgsqlCommand(RetentionPolicyScheduledSql(relation), connection)", StringComparison.Ordinal);
+        var readAt = sweep.IndexOf("isRawRelation ? RawArmedStateSql(relation) : RetentionPolicyScheduledSql(relation)", StringComparison.Ordinal);
         var measureAt = sweep.IndexOf("await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);", StringComparison.Ordinal);
         var armAt = sweep.IndexOf("new NpgsqlCommand(ArmRetentionPolicySql(relation), connection)", StringComparison.Ordinal);
         var holdAt = sweep.IndexOf("new NpgsqlCommand(HoldRetentionPolicySql(relation), connection)", StringComparison.Ordinal);
         Assert.True(readAt > 0 && measureAt > readAt && armAt > measureAt && holdAt > armAt,
-            "the sweep reads scheduled, then measures coverage, then flips — in that order");
+            "the sweep reads the prior verdict, then measures coverage, then flips — in that order");
 
         /* The transition counts are decided on the prior flag, never on the verdict alone. */
         Assert.Contains("if (wasScheduled == false)", sweep, StringComparison.Ordinal);
@@ -561,7 +563,10 @@ VALUES (1, $1, 9138, '" + Seed + "', 'TestDb', decode(md5('reeval'), 'hex'), dec
             Assert.True(start.InPlace == total, $"the start pass should apply all {total} policies, got {start.InPlace}; {startLog.Joined}");
             Assert.True(start.Failed == 0, $"the start pass isolated a failure; {startLog.Joined}");
             Assert.True(start.Held >= 1, $"query_stats must be HELD at creation on short coverage; {startLog.Joined}");
-            Assert.False(await ScheduledAsync(connection, HeldRelation, ct), "short coverage must HOLD the policy at creation");
+            /* #4299 (d′): query_stats is raw — scheduled converges to false unconditionally now, so the real
+               verdict this pin needs is the armed key, not the flag. */
+            Assert.False(await RawArmedAsync(connection, HeldRelation, ct), "short coverage must HOLD the policy at creation");
+            Assert.False(await ScheduledAsync(connection, HeldRelation, ct), "a raw relation is never scheduled by TimescaleDB’s own runner (#4299 d′)");
             Assert.Contains($"Information: Retention evaluation at startup: {start.Held} policies held, {start.Armed} armed this pass, {start.Unchanged} unchanged", startLog.Joined, StringComparison.Ordinal);
             /* The startup pass keeps its WARNING per held policy — the line the runbook sends an operator to. */
             Assert.Contains($"Warning: Retention policy for {HeldRelation} HELD PAUSED", startLog.Joined, StringComparison.Ordinal);
@@ -582,9 +587,14 @@ VALUES (1, $1, 9138, '" + Seed + "', 'TestDb', decode(md5('reeval'), 'hex'), dec
 
             /* ── PASS 1b: the hand-arm the runbook forbids, undone on the next pass and counted as a RE-HOLD.
                   Parked with next_start => 'infinity' so the armed job cannot run and drop the seeded chunk out
-                  from under the rest of this test; scheduled = true is all the prior read sees. ── */
+                  from under the rest of this test; for a raw relation the prior read the sweep takes is
+                  config->>'darling_armed' (RawArmedStateSql), not scheduled — #4299 (d′) unconditionally
+                  converges scheduled to false on every pass regardless of the hand-arm, so hand-arming via
+                  scheduled alone would leave the prior-armed read false and the re-hold below would prove
+                  nothing. next_start => 'infinity' keeps TimescaleDB's own scheduler from running the drop in
+                  between, in case some future build re-honors scheduled for a raw relation. ── */
             using (var handArm = new NpgsqlCommand(@"
-SELECT alter_job(j.job_id, scheduled => true, next_start => 'infinity'::timestamptz)
+SELECT alter_job(j.job_id, scheduled => true, next_start => 'infinity'::timestamptz, config => j.config || jsonb_build_object('darling_armed', true))
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
@@ -593,13 +603,20 @@ AND   j.hypertable_name = '" + HeldRelation + "'", connection) { CommandTimeout 
                 await handArm.ExecuteNonQueryAsync(ct);
             }
 
+            /* The hand-arm the runbook forbids writes BOTH flags directly — that mechanism is unchanged; what
+               changes under #4299 (d′) is that the NEXT pass’s unconditional converge reverts scheduled
+               regardless of the coverage verdict (asserted below), while darling_armed is the flag the sweep's
+               prior-state read actually consults for a raw relation, which is what makes the re-hold below a
+               transition rather than a no-op. */
             Assert.True(await ScheduledAsync(connection, HeldRelation, ct), "the hand-arm must have taken, or the re-hold below proves nothing");
+            Assert.True(await RawArmedAsync(connection, HeldRelation, ct), "the hand-arm must set darling_armed too, or the sweep's prior-state read for a raw relation sees no transition to re-hold");
 
             var pass1bLog = new CapturingTestLogger();
             var pass1b = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, pass1bLog, TimescaleSupport.RetentionSweepPass.Periodic, ct);
             Assert.True((pass1b.Held, pass1b.Armed, pass1b.Unchanged, pass1b.ReHeld, pass1b.Failed) == (1, 0, total - 1, 1, 0),
                 $"pass 1b expected (held 1, armed 0, unchanged {total - 1}, re-held 1, failed 0), got ({pass1b.Held}, {pass1b.Armed}, {pass1b.Unchanged}, {pass1b.ReHeld}, {pass1b.Failed}); {pass1bLog.Joined}");
-            Assert.False(await ScheduledAsync(connection, HeldRelation, ct), "the hourly pass must re-hold a hand-armed policy whose coverage is still short (#1877)");
+            Assert.False(await ScheduledAsync(connection, HeldRelation, ct), "the hourly pass converges every raw relation back to scheduled = false unconditionally (#4299 d′)");
+            Assert.False(await RawArmedAsync(connection, HeldRelation, ct), "the hourly pass must re-hold a hand-armed policy whose coverage is still short (#1877)");
             Assert.Contains($"Warning: Retention policy for {HeldRelation} RE-HELD", pass1bLog.Joined, StringComparison.Ordinal);
             Assert.Contains($"Information: Retention re-evaluation: 1 policies held, 0 armed this pass, {total - 1} unchanged", pass1bLog.Joined, StringComparison.Ordinal);
 
@@ -622,7 +639,9 @@ AND   j.hypertable_name = '" + HeldRelation + "'", connection) { CommandTimeout 
             var pass2 = await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, pass2Log, TimescaleSupport.RetentionSweepPass.Periodic, ct);
             Assert.True((pass2.Held, pass2.Armed, pass2.Unchanged, pass2.ReHeld, pass2.Failed) == (0, 1, total - 1, 0, 0),
                 $"pass 2 expected (held 0, armed 1, unchanged {total - 1}, re-held 0, failed 0), got ({pass2.Held}, {pass2.Armed}, {pass2.Unchanged}, {pass2.ReHeld}, {pass2.Failed}); {pass2Log.Joined}");
-            Assert.True(await ScheduledAsync(connection, HeldRelation, ct), "the policy must be ARMED once its consumer covers everything it holds");
+            /* #4299 (d′): query_stats never schedules again — the armed verdict is the config key. */
+            Assert.False(await ScheduledAsync(connection, HeldRelation, ct), "a raw relation stays unscheduled even once armed (#4299 d′)");
+            Assert.True(await RawArmedAsync(connection, HeldRelation, ct), "the policy must be ARMED once its consumer covers everything it holds");
             // #3653 LC: coverage is now string.Join(" + ", [query_stats_interval_hourly, query_stats_db_interval_hourly])
             Assert.Contains($"Information: Retention policy for {HeldRelation} ARMED - {TimescaleSupport.QueryStatsIntervalHourlyView} + {TimescaleSupport.QueryStatsDbIntervalHourlyView} now covers everything it holds", pass2Log.Joined, StringComparison.Ordinal);
             Assert.Contains($"Information: Retention re-evaluation: 0 policies held, 1 armed this pass, {total - 1} unchanged", pass2Log.Joined, StringComparison.Ordinal);
@@ -678,6 +697,19 @@ AND   j.hypertable_name = '" + HeldRelation + "'", connection) { CommandTimeout 
         Assert.True(flag is bool, $"no policy_retention job found for collect.{relation}");
         return (bool)flag!;
     }
+
+    /// <summary>#4299 (d′): query_stats is a raw relation now — its armed verdict is read off
+    /// config->>'darling_armed' through the shipped RawArmedStateSql, never off scheduled (which this pass
+    /// converges to false unconditionally). Mirrors ScheduledAsync's shape for the config-key verdict.</summary>
+    private static async Task<bool> RawArmedAsync(NpgsqlConnection connection, string relation, System.Threading.CancellationToken ct)
+    {
+        using var read = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql(relation), connection) { CommandTimeout = PolicyReadTimeoutSeconds };
+        var flag = await read.ExecuteScalarAsync(ct);
+        Assert.True(flag is bool, $"no policy_retention job found for collect.{relation}");
+        return (bool)flag!;
+    }
+
+
 
     /// <summary>A manual refresh over a window — what <c>--backfill-rollups</c> does one chunk at a time. Outside
     /// a transaction because TimescaleDB requires it; the window is generous on both sides so the bucket the

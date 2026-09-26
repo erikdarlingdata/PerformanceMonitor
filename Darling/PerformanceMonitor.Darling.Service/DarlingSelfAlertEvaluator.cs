@@ -851,6 +851,27 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>#3297: the Retention Held CRITICAL tier, read live like its warning sibling.</summary>
     private readonly Func<double> _retentionHoldCriticalRatio;
 
+    /* Raw Purge Over Horizon edge state (#4299). FLEET-level, MULTI-keyed by raw job_id, STANDING
+       like Retention Held: active flag + cooldown re-fire while a raw relation stays over-horizon with a
+       last-recorded outcome that is not "ran", one "Raw Purge Over Horizon Cleared" resolution when a later
+       record says "ran" and the ratio is back under. A SEPARATE metric from Retention Held so its standing
+       state does not collide with the generic hold's — a raw relation reads BOTH conditions' readings from
+       the same RetentionHoldReading.OverHorizonRatio, but this one fires on the RECORDED REASON the trigger
+       did not run, not on the armed flag alone (darling_armed=true does not suppress it: it fires WHATEVER
+       the recorded verdict says). */
+    private readonly ConcurrentDictionary<string, bool> _activeRawPurgeOverHorizon = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTime> _lastRawPurgeOverHorizonAlert = new(StringComparer.Ordinal);
+
+    /// <summary>The #4299 alert metric name — deliberately distinct from <see cref="RetentionHoldMetric"/>
+    /// so the two conditions' standing state and cooldowns never collide.</summary>
+    internal const string RawPurgeOverHorizonMetric = "Raw Purge Over Horizon";
+
+    /// <summary>The resolution title <see cref="RawPurgeOverHorizonMetric"/> clears with.</summary>
+    internal const string RawPurgeOverHorizonClearedMetric = "Raw Purge Over Horizon Cleared";
+
+    /// <summary>Prefixes the fleet-level raw-purge-over-horizon alert serverKey so it never parses as a server_id.</summary>
+    private const string RawPurgeOverHorizonKeyPrefix = "rawpurgehorizon:";
+
     /* -------- the store's own TOAST slack and checkpointer (#3783) -------- */
 
     /* Store TOAST Slack edge state (#3783). FLEET-level (the dimensions are the store's own tables), MULTI-keyed
@@ -5500,6 +5521,152 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
+    /// The isolating entry point for the #4299 Raw Purge Over Horizon check — rides the SAME hourly
+    /// pass that already reads <see cref="RetentionHoldReading"/>s (<see cref="EvaluateRetentionHoldsAsync"/>'s
+    /// sibling). Same failure isolation.
+    /// </summary>
+    public async Task EvaluateRawPurgeOverHorizonAsync(
+        IReadOnlyList<RawPurgeOverHorizonReading> readings, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyRawPurgeOverHorizonAsync(readings, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the readings are a parameter; the reads that
+               produce them are counted in DarlingWorker.EvaluateCompressionJobHealthAsync. */
+            _logger?.LogError("Raw-purge-over-horizon self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Raw Purge Over Horizon condition (#4299): for a raw relation whose
+    /// <see cref="RetentionHoldReading.OverHorizonRatio"/> breaches the SAME warn/critical ratio pair
+    /// <see cref="ApplyRetentionHoldsAsync"/> judges non-raw policies on, this fires whenever the LAST
+    /// RECORDED trigger outcome (<see cref="TimescaleSupport.RecordRawLastPurgeOutcomeAsync"/>) is not
+    /// <c>"ran"</c> — unconditionally on the recorded reason, WHATEVER <c>darling_armed</c> says, because
+    /// <c>darling_armed=true</c> only means the coverage
+    /// gate would allow a purge — it says nothing about whether the SEPARATE hourly trigger actually ran one
+    /// (a hole, a stale epoch or a run failure can all block it even while armed). This is the gap the
+    /// existing Retention Held alert (#2813) cannot close: that check reads only the armed flag, so a raw
+    /// relation that is armed but whose trigger keeps failing reports healthy there while staying held here.
+    ///
+    /// <para>A raw relation with no recorded outcome yet (a store that has not run a Periodic pass since this
+    /// build shipped) reads as unmeasured and is skipped without touching standing state — the same
+    /// agent-status discipline <see cref="ApplyRetentionHoldsAsync"/> follows for an unreadable span.</para>
+    ///
+    /// <para>The alert text names the recorded outcome in plain words: "repair pending"
+    /// (<c>epoch_stale</c>), "a hole in the range" (<c>hole</c>), "not covered" (<c>not_covered</c>), or
+    /// "the purge failed" with the SqlState (<c>run_failed</c>). A STANDING condition, same idiom as Retention
+    /// Held: fire once on breach, re-fire only on cooldown while it persists, one clearing resolution when a
+    /// LATER record says <c>"ran"</c> AND the ratio is back under the warning tier — both conditions, so a
+    /// relation that just ran once but is still numerically over-horizon (retention drops whole chunks; the
+    /// first successful run after a long hold does not instantly return to under-horizon) does not falsely
+    /// clear. Gated on the master alerts switch. Internal so it pins directly with a recording deliverer and
+    /// a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyRawPurgeOverHorizonAsync(
+        IReadOnlyList<RawPurgeOverHorizonReading> readings, CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var warnRatio = _retentionHoldWarnRatio();
+        var criticalRatio = _retentionHoldCriticalRatio();
+
+        foreach (var reading in readings)
+        {
+            var key = reading.JobId.ToString(CultureInfo.InvariantCulture);
+
+            if (reading.LastPurgeReadFailed)
+            {
+                _readFailures?.RecordReadFailure(null, RawPurgeOverHorizonReadName, 0);
+                continue;
+            }
+
+            var label = string.IsNullOrEmpty(reading.HypertableName)
+                ? $"raw retention job {key}"
+                : $"{reading.HypertableName} raw retention [{key}]";
+
+            var overHorizon = reading.OverHorizonRatio is double ratio && ratio >= warnRatio;
+            var lastRan = string.Equals(reading.LastPurge?.Outcome, "ran", StringComparison.Ordinal);
+            var recordStale = reading.LastPurge is { } rec && now - rec.At > RawPurgeRecordStaleAfter;
+
+            if (overHorizon && (!lastRan || recordStale))
+            {
+                _activeRawPurgeOverHorizon[key] = true;
+                if (CooldownElapsed(_lastRawPurgeOverHorizonAlert, key, now))
+                {
+                    _lastRawPurgeOverHorizonAlert[key] = now;
+                    var ratioValue = reading.OverHorizonRatio!.Value;
+                    bool critical = ratioValue >= criticalRatio;
+                    var reasonText = recordStale
+                        ? $"the purge trigger has not recorded a pass since {reading.LastPurge!.At:yyyy-MM-dd HH:mm} UTC"
+                        : RawPurgeOutcomeReasonText(reading.LastPurge);
+                    await FireAsync(
+                        StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
+                        $"{ratioValue:F1}x its {reading.DropAfter} horizon", $"{warnRatio:F1}x",
+                        detail: $"Store {label} is {ratioValue:F1}x its configured {reading.DropAfter} horizon, " +
+                            $"and the last recorded purge-trigger pass did not run it — {reasonText}. " +
+                            (critical
+                                ? "The tier is now several times its intended depth and still growing. "
+                                : "") +
+                            "This is the hourly Periodic trigger's own record (#4299), separate from the " +
+                            "Retention Held coverage gate: the relation may already read covered and still " +
+                            "not be purging if a hole or a run failure keeps blocking the trigger. Check the " +
+                            "service log's 'Raw retention purge for' lines for this relation to see the gate " +
+                            "the trigger is failing.",
+                        severity: critical ? AlertSeverityLevel.Critical : AlertSeverityLevel.Warning,
+                        shortMessage: $"{label} over horizon — {reasonText}",
+                        numericCurrentValue: Math.Round(ratioValue, 2),
+                        numericThresholdValue: critical ? criticalRatio : warnRatio,
+                        cancellationToken);
+                }
+            }
+            else if (_activeRawPurgeOverHorizon.TryRemove(key, out var was) && was)
+            {
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
+                    RawPurgeOverHorizonClearedMetric,
+                    $"{_storeLabel}: {label} purged successfully and is back under {warnRatio:F1}x its {reading.DropAfter} horizon"), cancellationToken);
+            }
+        }
+    }
+
+    /// <summary>Plain-words rendering of a <see cref="RawLastPurgeRecord"/>'s outcome: the alert names the
+    /// reason, one of repair pending, a hole, not covered, or a failed run (with SqlState).
+    /// <c>null</c> (never recorded yet) reads as "not covered" — the trigger has not recorded a run for this
+    /// relation at all, which is the same unmeasured-as-not-covered posture the coverage gate itself takes.</summary>
+    private static string RawPurgeOutcomeReasonText(RawLastPurgeRecord? lastPurge) => lastPurge?.Outcome switch
+    {
+        "epoch_stale" => "repair pending (the materialization-hole repair epoch is stale or missing)",
+        "hole" => "a hole was found in the range about to be dropped",
+        "not_covered" => "not covered (the coverage sweep measured Short or Unknown for it)",
+        "no_chunks" => "no chunks to evaluate",
+        "run_failed" => $"the purge failed (SqlState {lastPurge!.SqlState ?? "(none)"})",
+        "gate_unknown" => "a successor rollup could not be resolved, so coverage could not be confirmed",
+        "gate_error" => "the trigger's own gate check failed; the service log's 'Raw retention purge for' warning names the error",
+        _ => "not covered (no purge-trigger pass has recorded an outcome for it yet)",
+    };
+
+    /// <summary>
+    /// #4391: how old a last-purge record can be before the Raw Purge Over Horizon alert stops trusting a
+    /// recorded <c>"ran"</c> outcome to mean the trigger is still running. Twice the hourly store-maintenance
+    /// tick the trigger rides on (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>), so one missed tick
+    /// does not false-fire but two in a row does: an old <c>"ran"</c> record must not keep the alert quiet
+    /// forever once the trigger itself has stopped running.
+    /// </summary>
+    internal static readonly TimeSpan RawPurgeRecordStaleAfter = TimeSpan.FromHours(2);
+
+    /// <summary>
     /// The isolating entry point for the #3783 Store TOAST Slack check — rides the worker's hourly store
     /// self-metrics tick, right after the sweep that wrote the rows it reads, the way the collector-cost
     /// check does. Reads the latest-per-object rows through the SAME reader <c>get_store_metrics</c> uses, so
@@ -5902,6 +6069,18 @@ internal sealed class DarlingSelfAlertEvaluator
                job instead. */
             if (!job.Scheduled)
             {
+                /* #4299: one of the three raw retention jobs (TimescaleSupport.RawRelations) is
+                   permanently unscheduled by DESIGN, not by the #1680/#1877 coverage gate — its verdict
+                   lives in config->>'darling_armed', not in j.scheduled, so reaching here for one of them
+                   every hourly pass is expected, not a detector defect. */
+                if (!string.IsNullOrEmpty(job.HypertableName) && TimescaleSupport.RawRelations.Contains(job.HypertableName))
+                {
+                    _logger?.LogDebug(
+                        "TimescaleDB {Label} was reported as stuck while NOT scheduled — this is one of the three raw retention jobs, permanently unscheduled by design (#4299), not a #1680/#1877 coverage hold. Nothing re-armed, nothing alerted; no action needed",
+                        label);
+                    continue;
+                }
+
                 _logger?.LogWarning(
                     "TimescaleDB {Label} was reported as stuck while NOT scheduled — a paused policy is a HELD one, not an abandoned job, and re-arming it would drop history the #1680/#1877 coverage gate is protecting. Nothing re-armed, nothing alerted; this is a detector defect worth reporting (#3816)",
                     label);
@@ -6375,6 +6554,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// replica grain and the database grain are separately freshness-gated but failure-isolated together.
     /// </summary>
     internal const string AgStateReadName = "Availability-Group self-alert";
+
+    /// <summary>The counter's name for the Raw Purge Over Horizon condition's last-purge-record read (#4391).</summary>
+    internal const string RawPurgeOverHorizonReadName = "raw purge over horizon self-alert";
 
     /// <summary>
     /// One round trip for the collection-stopped signals: the newest SUCCESS/SKIPPED time across all of the

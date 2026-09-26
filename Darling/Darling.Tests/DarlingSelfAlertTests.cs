@@ -216,6 +216,11 @@ public sealed class DarlingSelfAlertTests
         /// harness IS the byte-identical arm every pre-#3500 pin in this suite runs on.</summary>
         public string? StoreName { get; set; }
 
+        /// <summary>#3013: the swallowed-read counter, null by default so most pins build an evaluator that
+        /// counts nothing (matching AlertEngineTests' ReadFailures seam). #4391 pins set it to see the Raw
+        /// Purge Over Horizon read-failure count.</summary>
+        public AlertReadFailureCounter? ReadFailures { get; set; }
+
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
         /// <summary>#1681: captures what the evaluator writes to the service log, so the firing/recovery pair
@@ -236,6 +241,7 @@ public sealed class DarlingSelfAlertTests
             storeJobCadenceWarnPercent: WireCadenceKnob ? () => StoreJobCadenceWarnPercent : null,
             retentionHoldWarnRatio: WireRetentionHoldKnobs ? () => RetentionHoldWarnRatio : null,
             retentionHoldCriticalRatio: WireRetentionHoldKnobs ? () => RetentionHoldCriticalRatio : null,
+            readFailures: ReadFailures,
             storeName: StoreName);
     }
 
@@ -3380,7 +3386,7 @@ public sealed class DarlingSelfAlertTests
             Reading(new[]
             {
                 new StuckPolicyJob(
-                    9100, "query_store_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    9100, "wait_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
                     Family: TimescaleSupport.StorePolicyJobFamily.Retention,
                     Scheduled: false,
                     Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
@@ -3397,6 +3403,73 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("HELD", warned.Message, StringComparison.Ordinal);
         Assert.Contains("#1680/#1877", warned.Message, StringComparison.Ordinal);
         Assert.Contains("retention job 9100", warned.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4299: a raw job (<see cref="TimescaleSupport.RawRelations"/>) reported as "stuck" is NEVER re-armed
+    /// — the same second gate proven for a non-raw held policy above, exercised for one of the three raw
+    /// relations specifically, because the gate already structurally skips every <c>!Scheduled</c> row
+    /// regardless of WHY it is unscheduled. GREEN on both the pre-fix and post-fix commit: the fix changes
+    /// the WARNING text (see the next pin), not this gate.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_ARawJobReportedAsStuck_IsNeverRearmed_M4()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            Reading(new[]
+            {
+                new StuckPolicyJob(
+                    9200, "query_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    Family: TimescaleSupport.StorePolicyJobFamily.Retention,
+                    Scheduled: false,
+                    Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+            }),
+            rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// #4299: the not-scheduled line for one of the three raw relations must say it is unscheduled by
+    /// design (#4299), not the #1680/#1877 coverage-gate text a non-raw held policy gets — the OLD text logged
+    /// a false "detector defect" WARNING for every raw job, every hourly pass, forever. #4391 demotes this
+    /// expected-every-pass line to Debug (it is not a WARNING-worthy condition once it is known to be
+    /// by design), so this pin now also asserts no WARNING is logged for it.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_ARawJobReportedAsStuck_LogsUnscheduledByDesignAtDebug_NotACoverageHold()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            Reading(new[]
+            {
+                new StuckPolicyJob(
+                    9201, "procedure_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    Family: TimescaleSupport.StorePolicyJobFamily.Retention,
+                    Scheduled: false,
+                    Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+            }),
+            rearm.Delegate, Ct);
+
+        var warned = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Debug);
+        Assert.Contains("#4299", warned.Message, StringComparison.Ordinal);
+        Assert.Contains("unscheduled by design", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("detector defect", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("drop history", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
     }
 
     /// <summary>
@@ -5152,6 +5225,212 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Null(new RetentionHoldReading(1, "t", false, "", 19, 1_561_449, null).OverHorizonRatio);
         Assert.Null(new RetentionHoldReading(1, "t", false, "0", 19, 1_561_449, 0).OverHorizonRatio);
         Assert.Equal(4.52, new RetentionHoldReading(1, "t", false, "4 days", 19, 1_561_449, 345_600).OverHorizonRatio!.Value, 2);
+    }
+
+    /* ---------------- #4299 Raw Purge Over Horizon ---------------- */
+
+    private static RawPurgeOverHorizonReading RawReading(
+        long jobId = 2001, string hypertable = "query_stats", string dropAfter = "4 days",
+        double? ratio = 4.5, RawLastPurgeRecord? lastPurge = null, bool lastPurgeReadFailed = false) =>
+        new(jobId, hypertable, dropAfter, ratio,
+            lastPurgeReadFailed ? null : lastPurge ?? new RawLastPurgeRecord(DateTime.UtcNow, "hole", null, null),
+            lastPurgeReadFailed);
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_OverHorizonWithAHole_Fires_AndSaysAHole()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric, fired.MetricName);
+        Assert.Contains("a hole was found in the range", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_UnderHorizon_DoesNotFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading(ratio: 0.5) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_LastOutcomeRan_DoesNotFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_234)) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_FiredThenRanAndUnder_Resolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(ratio: 0.5, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_234)) },
+            Ct);
+
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonClearedMetric, resolved.MetricName);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RunFailed_NamesTheSqlState()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "run_failed", "55P03", null)) },
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("55P03", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RecordStale_Fires_AndSaysNotRecordedSince()
+    {
+        /* #4391: an old "ran" record must not keep the alert quiet forever once the trigger itself has
+           stopped running. RED at 34064e99e: the evaluator only checks the outcome string, never the
+           record's age, so this stays silent on the pre-fix code. */
+        var h = new Harness();
+        var e = h.Build();
+        var staleAt = h.Now - TimeSpan.FromHours(3);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(staleAt, "ran", null, 1_234)) }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("has not recorded a pass since", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RecordRecent_DoesNotFire()
+    {
+        /* The companion to the stale pin: a record inside the staleness window still clears the alert on
+           "ran", same as before #4391. RED at 34064e99e would ALSO pass here (no alert either way) — this
+           pin exists to prove the new staleness check does not over-fire, not to distinguish the commits. */
+        var h = new Harness();
+        var e = h.Build();
+        var recentAt = h.Now - TimeSpan.FromMinutes(30);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(recentAt, "ran", null, 1_234)) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_ReadFailedWhileActive_NeitherFiresNorResolves_AndCountsTheFailure()
+    {
+        /* #4391: an unreadable record must not falsely clear a standing alert. Fire on a hole first, then
+           feed a read failure that WOULD resolve if read as "never written" (ratio under horizon) — the
+           active state must survive untouched, and the failure must be counted rather than silently
+           swallowed. This is compile-RED at 34064e99e: RawPurgeOverHorizonReading has no
+           LastPurgeReadFailed parameter on that commit. */
+        var readFailures = new AlertReadFailureCounter(() => DateTime.UtcNow);
+        var h = new Harness { ReadFailures = readFailures };
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(ratio: 0.5, lastPurgeReadFailed: true) }, Ct);
+
+        Assert.Empty(h.History.Records);
+        Assert.Equal(1, readFailures.ReadFor(null).InstanceReadFailures);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_ReadFailedWhileInactive_DoesNotFire_AndCountsTheFailure()
+    {
+        var readFailures = new AlertReadFailureCounter(() => DateTime.UtcNow);
+        var h = new Harness { ReadFailures = readFailures };
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurgeReadFailed: true) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Equal(1, readFailures.ReadFor(null).InstanceReadFailures);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_GateUnknown_And_GateError_NameTheReason()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(jobId: 1, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "gate_unknown", null, null)) },
+            Ct);
+        var gateUnknown = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("could not be resolved", gateUnknown.DetailText, StringComparison.Ordinal);
+
+        h.Deliverer.Outcomes.Clear();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(jobId: 2, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "gate_error", null, null)) },
+            Ct);
+        var gateError = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("trigger's own gate check failed", gateError.DetailText, StringComparison.Ordinal);
+    }
+
+    /* Armed can't suppress this alert by construction: RawPurgeOverHorizonReading carries no armed flag at
+       all (unlike RetentionHoldReading) — ApplyRawPurgeOverHorizonAsync fires unconditionally on the
+       recorded outcome. There is nothing to pin here; a test that tried to pass an armed flag would not
+       compile, which IS the guarantee. */
+
+    [Fact]
+    public void RawCadenceReadings_OnlyRanWithElapsed_YieldsOneReadingAtTheTriggerInterval()
+    {
+        var readings = new[]
+        {
+            RawReading(jobId: 1, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_800_000)),
+            RawReading(jobId: 2, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "hole", null, null)),
+            RawReading(jobId: 3, lastPurge: null),
+        };
+
+        var result = DarlingWorker.RawCadenceReadings(readings, TimeSpan.FromHours(1));
+
+        var only = Assert.Single(result);
+        Assert.Equal(1_800_000, only.LastRunDurationMs);
+        Assert.Equal(3_600_000, only.ScheduleIntervalMs);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_RawReadingOverItsInterval_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var readings = new[]
+        {
+            RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 5_400_000)),
+        };
+        var cadenceReadings = DarlingWorker.RawCadenceReadings(readings, TimeSpan.FromHours(1));
+
+        await e.ApplyStoreJobCadenceAsync(cadenceReadings, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.JobCadenceMetric, fired.MetricName);
     }
 
     /* ---------------- #2136 Store Job Over Cadence ---------------- */
