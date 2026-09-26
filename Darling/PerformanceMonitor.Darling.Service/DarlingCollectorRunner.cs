@@ -1578,6 +1578,16 @@ public sealed class DarlingCollectorRunner
             }
         }
 
+        /* #4197: PostgreSQL's `timestamp` truncates to microsecond resolution (10 .NET ticks) on write —
+           the same resolution CollectionTimeClock stores. A row's in-memory value can carry finer ticks
+           than what the store actually persisted, so the cache must floor to what a fresh read would
+           return, or the equivalence pin (cached vs. a fresh GetLastCollectedTimeAsync) drifts by those
+           sub-microsecond ticks. */
+        if (batchMax is { } batchMaxValue)
+        {
+            batchMax = new DateTime(batchMaxValue.Ticks - (batchMaxValue.Ticks % TimeSpan.TicksPerMicrosecond), batchMaxValue.Kind);
+        }
+
         long? batchMaxNumeric = null;
         if (definition.NumericWatermarkValueAccessor is { } numericAccessor)
         {

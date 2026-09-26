@@ -106,7 +106,7 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
     private static async Task<long> CallsForTableAsync(NpgsqlConnection connection, string table, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(
-            "SELECT COALESCE(SUM(calls), 0) FROM pg_stat_statements WHERE query ILIKE '%' || @table || '%' AND query ILIKE '%max(%'", connection);
+            "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE query ILIKE '%' || @table || '%' AND query ILIKE '%max(%'", connection);
         command.Parameters.AddWithValue("table", table);
         return (long)(await command.ExecuteScalarAsync(ct))!;
     }
@@ -302,6 +302,22 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
         var bodySucceeded = false;
         try
         {
+            /* The watermark reads (both timestamp and numeric) fall back from a bounded probe to an
+               unbounded MAX whenever the probe finds no row — which an EMPTY table always does, so a
+               "resolve on a table with nothing written yet" call is not the cache's read-count contract,
+               it is the probe/fallback shape underneath it. Seed one real row through WriteBatchAsync +
+               Advance first (the SAME move RunCoreAsync makes after a batch commits) so the cache already
+               holds an entry before the reset; only then does "exactly zero further statement calls"
+               isolate the cache, not the probe/fallback path. */
+            var seedTime = new DateTime(2026, 9, 20, 9, 0, 0, DateTimeKind.Unspecified);
+            var seedBatch = new List<JobHistoryCollector.Row>
+            {
+                new() { InstanceId = 1, JobId = Guid.NewGuid().ToString(), JobName = "seed", RunDateTime = seedTime, RunStatus = 1 },
+            };
+            var seedContext = MakeContext(server, DateTime.UtcNow);
+            await WriteBatchAsync(runner, connection, definition, seedBatch, server, seedContext.CollectionTime, seedContext, ct);
+            Advance(runner, server, definition, seedBatch, fromUtc: false);
+
             await ResetPgStatStatementsAsync(connection, ct);
 
             for (var i = 0; i < 20; i++)
@@ -310,7 +326,7 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             }
 
             var calls = await CallsForTableAsync(connection, "job_history", ct);
-            Assert.Equal(1, calls);
+            Assert.Equal(0, calls);
 
             bodySucceeded = true;
         }
@@ -354,6 +370,20 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
         var bodySucceeded = false;
         try
         {
+            /* Seed a real row first — an empty table makes the timestamp AND numeric watermark reads each
+               fall back from their bounded probe to an unbounded MAX (no row in the window), doubling the
+               statement count on any cold-cache first call regardless of restart. With a row present the
+               probe hits and the fallback never fires, so "one read" below is the cache's cold-start cost,
+               not the probe/fallback shape. */
+            var seedTime = new DateTime(2026, 9, 20, 9, 0, 0, DateTimeKind.Unspecified);
+            var seedBatch = new List<JobHistoryCollector.Row>
+            {
+                new() { InstanceId = 1, JobId = Guid.NewGuid().ToString(), JobName = "seed", RunDateTime = seedTime, RunStatus = 1 },
+            };
+            var seedContext = MakeContext(server, DateTime.UtcNow);
+            await WriteBatchAsync(firstRunner, connection, definition, seedBatch, server, seedContext.CollectionTime, seedContext, ct);
+            Advance(firstRunner, server, definition, seedBatch, fromUtc: false);
+
             /* Warm the first runner's cache, then reset the statement counter so this test measures only
                the RESTARTED runner's behaviour. */
             await ResolveAsync(firstRunner, server, definition, ct);
@@ -368,8 +398,11 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             await ResolveAsync(restartedRunner, server, definition, ct);
             await ResolveAsync(restartedRunner, server, definition, ct);
 
+            /* job_history declares BOTH a timestamp watermark (run_datetime) and a numeric twin
+               (instance_id) — a cold-cache seed reads each once, so the first (seeding) call issues TWO
+               MAX statements against job_history, not one; every call after is a hit and reads neither. */
             var calls = await CallsForTableAsync(connection, "job_history", ct);
-            Assert.Equal(1, calls);
+            Assert.Equal(2, calls);
 
             bodySucceeded = true;
         }
@@ -429,7 +462,19 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
         var bodySucceeded = false;
         try
         {
-            /* Seed. */
+            /* Seed a real row first, for the same reason as the restart pin: an empty table doubles the
+               statement count on any cold-cache read via the probe/fallback pair, on both the timestamp
+               and numeric watermark reads, which would otherwise swamp the post-invalidate "reads exactly
+               once" assertion below. */
+            var seedTime = new DateTime(2026, 9, 20, 9, 0, 0, DateTimeKind.Unspecified);
+            var seedBatch = new List<JobHistoryCollector.Row>
+            {
+                new() { InstanceId = 1, JobId = Guid.NewGuid().ToString(), JobName = "seed", RunDateTime = seedTime, RunStatus = 1 },
+            };
+            var seedContext = MakeContext(server, DateTime.UtcNow);
+            await WriteBatchAsync(runner, connection, definition, seedBatch, server, seedContext.CollectionTime, seedContext, ct);
+            Advance(runner, server, definition, seedBatch, fromUtc: false);
+
             await ResolveAsync(runner, server, definition, ct);
             await ResetPgStatStatementsAsync(connection, ct);
 
@@ -442,10 +487,12 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
                RunCoreAsync (see the try/catch this branch added). That invalidation is exactly this call. */
             invalidateMethod.Invoke(cache, new object?[] { server.ServerId, definition.Name });
 
-            /* The next resolve must now read the store again exactly once. */
+            /* The next resolve must now read the store again — job_history declares both a timestamp
+               AND a numeric watermark, so a reseed after invalidation issues TWO MAX statements, same as
+               any other cold-cache seed for this collector (see the restart pin's remark). */
             await ResetPgStatStatementsAsync(connection, ct);
             await ResolveAsync(runner, server, definition, ct);
-            Assert.Equal(1, await CallsForTableAsync(connection, "job_history", ct));
+            Assert.Equal(2, await CallsForTableAsync(connection, "job_history", ct));
 
             /* And the call after THAT is a hit again — the reseed is a one-time cost, not a re-entry into
                always-read mode. */
