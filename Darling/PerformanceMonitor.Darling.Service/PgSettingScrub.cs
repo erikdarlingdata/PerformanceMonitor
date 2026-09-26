@@ -346,9 +346,14 @@ AND   t.server_id = $11";
 
             foreach (var c in dayCandidates)
             {
-                var newSetting = PgSettingRedactor.Redact(c.Name, c.Setting);
-                var newBootVal = PgSettingRedactor.Redact(c.Name, c.BootVal);
-                var newResetVal = PgSettingRedactor.Redact(c.Name, c.ResetVal);
+                // #4348: a pattern that times out on one of these three values masks it whole and warns
+                // with the setting's NAME only — never the value or any fragment of it.
+                void LogTimeout(string? name) =>
+                    logger?.LogWarning("PgSettingRedactor timed out matching setting '{Name}'; the value was masked whole.", name);
+
+                var newSetting = PgSettingRedactor.Redact(c.Name, c.Setting, LogTimeout);
+                var newBootVal = PgSettingRedactor.Redact(c.Name, c.BootVal, LogTimeout);
+                var newResetVal = PgSettingRedactor.Redact(c.Name, c.ResetVal, LogTimeout);
 
                 if (newSetting == c.Setting && newBootVal == c.BootVal && newResetVal == c.ResetVal)
                 {

@@ -1,7 +1,10 @@
 // Copyright (c) Erik Darling Data. All rights reserved.
 // Licensed under the terms in the LICENSE file in the repository root.
 
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -359,7 +362,7 @@ public sealed class PgSettingRedactorTests
         Assert.Equal("password=********", result);
     }
 
-    // L3, round 2: these three names are password POLICY settings, not secrets — the allowlist keeps them
+    // These three names are password POLICY settings, not secrets — the allowlist keeps them
     // unmasked even though "password" sits in the dotted name.
     [Theory]
     [InlineData("rds.accepted_password_auth_method", "md5+password")]
@@ -371,12 +374,148 @@ public sealed class PgSettingRedactorTests
         Assert.Equal(value, PgSettingRedactor.Redact(name, value));
     }
 
-    // L3 negative: a REAL secret next to an allowlisted name in the same batch is still masked — the
+    // Negative case: a REAL secret next to an allowlisted name in the same batch is still masked — the
     // allowlist is name-exact, not a blanket "don't touch anything dotted with .password. in it" escape.
     [Fact]
     public void AllowlistedPolicyName_DoesNotShieldARealSecretElsewhere()
     {
         Assert.Equal("md5+password", PgSettingRedactor.Redact("rds.accepted_password_auth_method", "md5+password"));
         Assert.Equal("********", PgSettingRedactor.Redact("app.db_password", "fake-secret-value"));
+    }
+
+    /// <summary>
+    /// #4348: a frozen list of inputs whose expected output is hard-coded from dev's redactor (pre-lookahead),
+    /// captured independently of <see cref="RedactionCases"/> above. Its job is narrower than that member's:
+    /// it pins that the linear-pre-check change added to <c>AssignmentSecretName</c>, <c>OptionSecretSpaced</c>
+    /// and <c>QuotedSpacedAssignment</c> (#4348) changed no match, only how the engine gets there. A
+    /// regression there would show up here even if a future edit also touched the corpus above.
+    /// </summary>
+    [Theory]
+    [InlineData("archive_command", "xpassword=s", "xpassword=********")]
+    [InlineData("archive_command", "a.password=s", "a.password=********")]
+    [InlineData("archive_command", "my-token=s", "my-token=********")]
+    [InlineData("archive_command", "env PGPASSWORD=s cmd", "env PGPASSWORD=******** cmd")]
+    [InlineData("archive_command", "--db.password=s", "--db.password=********")]
+    [InlineData("archive_command", "-Dpassword=s", "-Dpassword=********")]
+    [InlineData("archive_command", "foo.bar.PGPASSWORD=s", "foo.bar.PGPASSWORD=********")]
+    [InlineData("archive_command", "a;PGPASSWORD=s", "a;PGPASSWORD=********")]
+    [InlineData("archive_command", "sslkey=s", "sslkey=s")]
+    [InlineData("archive_command", "ab-KEY-cd=s", "ab-KEY-cd=********")]
+    [InlineData("archive_command", "abc--password=s", "abc--password=********")]
+    [InlineData("archive_command", "password = \"hunter2\"", "password=********")]
+    [InlineData("archive_command", "postgresql://u:p@h/db", "postgresql://u:********@h/db")]
+    [InlineData("archive_command", "host=h password=p", "host=h password=********")]
+    [InlineData("archive_command", "https://h/?password=p&x=1", "https://h/?password=********")]
+    [InlineData("archive_command", "sshpass -p p ssh h", "sshpass -p ******** ssh h")]
+    [InlineData("archive_command", "curl -u a:b", "curl -u a:********")]
+    [InlineData("password_encryption", "password_encryption", "password_encryption")]
+    [InlineData("archive_command", "host=localhost port=5432 dbname=mydb", "host=localhost port=5432 dbname=mydb")]
+    [InlineData("archive_command", "application_name=myapp", "application_name=myapp")]
+    [InlineData("archive_command", "sslmode=verify-full", "sslmode=verify-full")]
+    [InlineData("archive_command", "passfile=/x/.pgpass", "passfile=********")]
+    [InlineData("archive_command", "keep_alive=on", "keep_alive=on")]
+    [InlineData("archive_command", "monkey=1", "monkey=1")]
+    [InlineData("archive_command", "user=alice dbname=x", "user=alice dbname=x")]
+    [InlineData("archive_command", "connect_timeout=10", "connect_timeout=10")]
+    [InlineData("archive_command", "statement_timeout=5000", "statement_timeout=5000")]
+    [InlineData("archive_command", "search_path=public", "search_path=public")]
+    [InlineData("archive_command", "log_min_duration_statement=250", "log_min_duration_statement=250")]
+    [InlineData("archive_command", "archive_command=/bin/true", "archive_command=/bin/true")]
+    [InlineData("archive_command", "-Dpassword hunter2", "-Dpassword ********")]
+    [InlineData("archive_command", "--passphrase secret123", "--passphrase ********")]
+    [InlineData("archive_command", "openssl enc -pass pass:x", "openssl enc -pass ********")]
+    [InlineData("archive_command", "rds.accepted_password_auth_method", "rds.accepted_password_auth_method")]
+    [InlineData("vault.secret", "anything", "********")]
+    [InlineData("anon.salt", "seedvalue", "********")]
+    [InlineData("myext.api_key", "kv", "********")]
+    [InlineData("myext.keep_alive", "on", "on")]
+    [InlineData("ssl_passphrase_command", "echo x", "********")]
+    [InlineData("archive_command", "pg_password=abc", "pg_password=********")]
+    public void FrozenParityWithPreviousRedactor(string name, string value, string expectedFromDev)
+    {
+        Assert.Equal(expectedFromDev, PgSettingRedactor.Redact(name, value));
+    }
+
+    /// <summary>
+    /// #4348: a long input with no separator must finish well inside a human-perceptible delay, not spend
+    /// seconds backtracking. Warms up once (first call pays JIT/regex-compile cost, not what this pins),
+    /// then asserts on the second run.
+    /// </summary>
+    [Theory]
+    [InlineData(3200, true)]
+    [InlineData(3200, false)]
+    [InlineData(32000, true)]
+    [InlineData(32000, false)]
+    public void LongInputWithNoSeparator_MatchesWellUnderBudget(int repeatLength, bool trailingAssignment)
+    {
+        var body = string.Concat(Enumerable.Repeat("pass", repeatLength / 4));
+        var value = trailingAssignment ? body + "=x" : body;
+
+        // Warm-up run: pays JIT/regex-compile cost, not measured.
+        _ = PgSettingRedactor.Redact("archive_command", value);
+
+        var stopwatch = Stopwatch.StartNew();
+        _ = PgSettingRedactor.Redact("archive_command", value);
+        stopwatch.Stop();
+
+        Assert.True(
+            stopwatch.ElapsedMilliseconds < 50,
+            $"Expected under 50ms, took {stopwatch.ElapsedMilliseconds}ms for length {value.Length}.");
+    }
+
+    /// <summary>
+    /// #4348: forcing a timeout via the <see cref="PgSettingRedactor.MatchTimeoutForTest"/> seam must mask
+    /// the whole value, invoke the timeout callback with the setting's NAME only, and never throw.
+    /// </summary>
+    [Fact]
+    public void ForcedTimeout_MasksWholeValue_AndNamesOnlyTheSetting()
+    {
+        var longValue = string.Concat(Enumerable.Repeat("ZQXV", 2000)) + "=x";
+        string? loggedName = null;
+        var callbackCount = 0;
+
+        PgSettingRedactor.MatchTimeoutForTest = new TimeSpan(1);
+        try
+        {
+            var result = PgSettingRedactor.Redact("archive_command", longValue, name =>
+            {
+                loggedName = name;
+                callbackCount++;
+            });
+
+            Assert.Equal("********", result);
+            Assert.Equal(1, callbackCount);
+            Assert.Equal("archive_command", loggedName);
+            Assert.DoesNotContain("ZQXV", loggedName ?? string.Empty);
+        }
+        finally
+        {
+            PgSettingRedactor.MatchTimeoutForTest = null;
+        }
+    }
+
+    /// <summary>
+    /// #4348: <see cref="PgSettingRedactor.Redact"/> is documented as never throwing. A callback that throws
+    /// must not escape past a forced timeout — the value is already masked by that point.
+    /// </summary>
+    [Fact]
+    public void ForcedTimeout_ThrowingCallback_StillReturnsMaskAndDoesNotThrow()
+    {
+        var longValue = string.Concat(Enumerable.Repeat("ZQXV", 2000)) + "=x";
+
+        PgSettingRedactor.MatchTimeoutForTest = new TimeSpan(1);
+        try
+        {
+            string? result = null;
+            var ex = Record.Exception(() =>
+                result = PgSettingRedactor.Redact("archive_command", longValue, _ => throw new InvalidOperationException("boom")));
+
+            Assert.Null(ex);
+            Assert.Equal("********", result);
+        }
+        finally
+        {
+            PgSettingRedactor.MatchTimeoutForTest = null;
+        }
     }
 }
