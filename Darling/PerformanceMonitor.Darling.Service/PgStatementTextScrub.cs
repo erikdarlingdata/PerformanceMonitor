@@ -149,7 +149,7 @@ AND   queryid = ANY($3::bigint[])";
     /// also handles a chunk that is not exactly one day long. Crossed with the caller's own <c>serverIds</c>
     /// (already read at that call site) to make the (server, day) pairs the candidate read and UPDATE both
     /// key on — days alone are not enough, since a server can be silent on a day another server has rows
-    /// for. See <see cref="ReadDistinctServerDaysAsync"/> for the plain-table fallback this drives when the
+    /// for. See <see cref="ReadServerDaysAsync"/> for the plain-table fallback this drives when the
     /// table is not a hypertable on this store shape.</summary>
     private const string ChunkDaysSql = @"
 SELECT DISTINCT d::date AS day
