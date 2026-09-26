@@ -1468,11 +1468,16 @@ public sealed class DarlingWorker : BackgroundService
            there. */
         var managedUsedLastGoodConf = OperatingSystem.IsWindows() && (managedPostgres?.LastStartUsedLastGoodManagedConf ?? false);
 
+        /* #4336 lane 6b: this start's darling-managed.conf verification outcome, carried out of the
+           bootstrap the same way managedConfWriteResult and managedUsedLastGoodConf already are. Null on a
+           BYO store, off Windows, and on the adopted-listener path, for the same reasons those are. */
+        var managedConfVerification = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfVerification : null;
+
         try
         {
             await RunCollectionLoopAsync(
                 config, storeConnectionString, storeUpgradeReport, storeTimescaleReport,
-                managedDataDirectory, managedConfWriteResult, managedUsedLastGoodConf, stoppingToken);
+                managedDataDirectory, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
         }
         finally
         {
@@ -1777,6 +1782,7 @@ public sealed class DarlingWorker : BackgroundService
         string? managedDataDirectory,
         ManagedConfWriteResult? managedConfWriteResult,
         bool managedUsedLastGoodConf,
+        ManagedConfMigrationOutcome? managedConfVerification,
         CancellationToken stoppingToken)
     {
         /* Carry the collect/config search path on the store connection string BEFORE the data
@@ -2817,7 +2823,7 @@ public sealed class DarlingWorker : BackgroundService
             if (_selfAlerts is not null && DateTime.UtcNow >= _nextStoreSettingsCheckUtc)
             {
                 _nextStoreSettingsCheckUtc = DateTime.UtcNow.Add(s_storeSettingsCheckInterval);
-                await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, stoppingToken);
+                await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
             }
 
             /* #1581: the compression-job self-heal backstop. TimescaleDB compression policy jobs can silently
@@ -6346,6 +6352,7 @@ LIMIT 1";
     /// </summary>
     private async Task EvaluateStoreSettingsAsync(
         DarlingConfig config, ManagedConfWriteResult? managedConfWriteResult, bool managedUsedLastGoodConf,
+        ManagedConfMigrationOutcome? managedConfVerification,
         CancellationToken cancellationToken)
     {
         var isManagedStore = config.Postgres.Managed && OperatingSystem.IsWindows();
@@ -6354,7 +6361,8 @@ LIMIT 1";
             : [];
 
         var report = new DarlingSelfAlertEvaluator.StoreSettingsReport(
-            isManagedStore, managedUsedLastGoodConf, managedConfWriteResult?.HandEdited ?? false, rejectedSettingNames);
+            isManagedStore, managedUsedLastGoodConf, managedConfWriteResult?.HandEdited ?? false, rejectedSettingNames,
+            managedConfVerification);
 
         /* EvaluateStoreSettingsAsync (not ApplyStoreSettingsAsync) so a throwing seam — the shared mute check —
            is isolated inside the evaluator, exactly like the disk-pressure call just above. */
