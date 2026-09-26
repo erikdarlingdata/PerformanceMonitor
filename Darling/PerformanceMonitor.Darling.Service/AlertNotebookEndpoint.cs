@@ -12,11 +12,13 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
@@ -58,6 +60,13 @@ internal static partial class AlertNotebookEndpoint
     /// does not bump it, because the conversion rule — not the per-metric read list — is what "mechanical/…"
     /// versions.</summary>
     internal const int MechanicalTemplateVersion = 1;
+
+    /// <summary>Test-only seam (#4425): counts every call into <see cref="PrefetchAsync"/>, so a unit test can
+    /// pin "a no-context family makes zero pre-fetch calls" against the SAME <see cref="ShouldPrefetch"/> gate
+    /// <see cref="BuildCellsAsync"/> and <see cref="Map"/> use, instead of only asserting the gate function's
+    /// return value in isolation. Never read or reset by production code; a test that reads it must snapshot
+    /// the count before and after and diff, since the counter is process-wide and not reset between tests.</summary>
+    internal static int s_prefetchCallsForTest;
 
     /// <summary>Maps <c>GET /api/alert-notebook</c>. Called once from <see cref="DarlingWebEndpoints.MapAll"/>,
     /// after the auth middleware like every sibling route.</summary>
@@ -202,10 +211,11 @@ internal static partial class AlertNotebookEndpoint
             int templateVersion;
 
             /* #4223: reports (the collector-cost digest, the fleet sweep rollup, the analysis singles
-               digest) declare no notebook at all, mechanical or authored -- checked BEFORE AuthoredTemplate
-               so a report never builds either template. Same 200-with-notes degrade every other empty/stale
-               link on this endpoint takes (class summary's "degrade, never error"): no cells, an honest note,
-               and for the one report with somewhere to send a reader, the note names it. */
+               digest) declare no notebook at all, mechanical or authored -- checked BEFORE BuildCellsAsync
+               (and so before either template path it resolves to) so a report never reaches pre-fetch or a
+               template. Same 200-with-notes degrade every other empty/stale link on this endpoint takes
+               (class summary's "degrade, never error"): no cells, an honest note, and for the one report
+               with somewhere to send a reader, the note names it. */
             if (IsDeclaredNoNotebook(trimmedMetric))
             {
                 cells = new JsonArray();
@@ -216,30 +226,11 @@ internal static partial class AlertNotebookEndpoint
                         ? "Reports have no notebook; the Fleet Sweep Rollup opens the sweeps page."
                         : "Reports have no notebook."));
             }
-            else if (AuthoredTemplate(trimmedMetric) is { } authored)
-            {
-                var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
-                cells = authored.BuildCells(
-                    metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status);
-                templateId = authored.Id;
-                templateVersion = authored.Version;
-            }
             else
             {
-                var sections = DarlingTriageEndpoint.SectionsFor(metric);
-                cells = new JsonArray
-                {
-                    HeaderCell(metric, serverName, matchedIncident, matchedRow),
-                    StatusCell(status),
-                };
-
-                foreach (var section in sections)
-                {
-                    cells.Add(ReadCell(section, serverName, asOf, lookbackHours));
-                }
-
-                templateId = "mechanical/" + (trimmedMetric ?? "default");
-                templateVersion = MechanicalTemplateVersion;
+                (cells, templateId, templateVersion) = await BuildCellsAsync(
+                    metric, serverName, asOf, windowEnd, serverId, anchor, postgres, analysis, context.RequestAborted,
+                    logger, notes, matchedIncident, matchedRow, status, lookbackHours);
             }
 
             var body = new JsonObject
@@ -261,6 +252,49 @@ internal static partial class AlertNotebookEndpoint
 
             return Results.Text(body.ToJsonString(), "application/json");
         });
+    }
+
+    /// <summary>The decide-and-build step <see cref="Map"/>'s handler delegates to (extracted for #4425 so a
+    /// unit test can drive the exact same routing + pre-fetch-gate + builder-invoke path <c>Map</c> uses,
+    /// without standing up a full <see cref="WebApplication"/>). Resolves the authored template for
+    /// <paramref name="metric"/>, applies <see cref="ShouldPrefetch"/>'s gate, and returns the cells plus the
+    /// template id/version — the SAME three values <c>Map</c>'s handler assembles the response body from.
+    /// Falls back to the mechanical per-metric read list when no authored template matches, unchanged from
+    /// before this extraction.</summary>
+    internal static async Task<(JsonArray Cells, string TemplateId, int TemplateVersion)> BuildCellsAsync(
+        string? metric, string? serverName, string? asOf, DateTime windowEnd, int? serverId, DateTime anchor,
+        NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct,
+        ILogger? logger, JsonArray? notes, AlertIncident? matchedIncident,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow, string status, string lookbackHours)
+    {
+        var trimmedMetric = string.IsNullOrWhiteSpace(metric) ? null : metric.Trim();
+        var resolvedAuthored = ResolveAuthored(trimmedMetric);
+
+        if (resolvedAuthored is not null)
+        {
+            var (authored, kind) = resolvedAuthored.Value;
+            var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
+            var authoredContext = ShouldPrefetch(authored, kind)
+                ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, ct, logger, notes)
+                : AuthoredContext.Empty;
+            var authoredCells = authored.Invoke(
+                metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status, authoredContext);
+            return (authoredCells, authored.Id, authored.Version);
+        }
+
+        var sections = DarlingTriageEndpoint.SectionsFor(metric);
+        var mechanicalCells = new JsonArray
+        {
+            HeaderCell(metric, serverName, matchedIncident, matchedRow),
+            StatusCell(status),
+        };
+
+        foreach (var section in sections)
+        {
+            mechanicalCells.Add(ReadCell(section, serverName, asOf, lookbackHours));
+        }
+
+        return (mechanicalCells, "mechanical/" + (trimmedMetric ?? "default"), MechanicalTemplateVersion);
     }
 
     /// <summary>The header cell every mechanical template opens with: a markdown-shaped read-only summary of
@@ -368,15 +402,78 @@ internal static partial class AlertNotebookEndpoint
     /// day comes without touching this one's callers.</summary>
     private static TimeSpan AuthoredLookback(string metric) => TimeSpan.FromHours(24);
 
+    /// <summary>The pre-fetched, immutable data an authored template's context builder gets to read — never
+    /// the store itself (#4223). A missing rule or finding (deleted since the firing) is an honest empty
+    /// context, per #2710's degrade rule: the missing flag is set, never an exception.</summary>
+    internal sealed record AuthoredContext(CustomAlertRule? CustomRule, bool CustomRuleMissing, AnalysisFinding? Finding, bool FindingMissing)
+    {
+        /// <summary>The context every no-context family gets — no rule, no finding, nothing missing.</summary>
+        public static readonly AuthoredContext Empty = new(null, false, null, false);
+    }
+
+    /// <summary>Which pre-fetch (if any) a prefix-routed authored template needs before its context builder
+    /// runs. <see cref="PrefetchAsync"/> switches on this; <c>None</c> costs zero store reads.</summary>
+    internal enum AuthoredContextKind
+    {
+        None,
+        CustomRule,
+        AnalysisFinding,
+    }
+
+    /// <summary>The endpoint's pre-fetch gate (#4223): an entry pays for <see cref="PrefetchAsync"/> only
+    /// when it registered a <see cref="AuthoredTemplateEntry.BuildCellsWithContext"/> builder AND the
+    /// resolved <paramref name="kind"/> is not <see cref="AuthoredContextKind.None"/> — every plain family
+    /// (the overwhelming majority) reads neither the custom-rule nor the finding store.</summary>
+    internal static bool ShouldPrefetch(AuthoredTemplateEntry entry, AuthoredContextKind kind) =>
+        entry.BuildCellsWithContext is not null && kind != AuthoredContextKind.None;
+
     /// <summary>One authored template's cell-building delegate plus its id/version — the server-side
     /// evolution of a mechanical conversion for a metric whose forensic shape (spec §3) is worth composing
-    /// by hand instead of listing reads. <c>BuildCells</c> takes exactly what <see cref="Map"/> already has in
-    /// scope for the mechanical path, so an authored template is a drop-in alternative at the same call
-    /// site.</summary>
-    internal readonly record struct AuthoredTemplateEntry(
-        string Id,
-        int Version,
-        Func<string?, string?, string?, DateTime, DateTime, AlertIncident?, DarlingAlertReader.AlertHistoryReadRow?, string, JsonArray> BuildCells);
+    /// by hand instead of listing reads. Exactly one of <see cref="BuildCells"/> (the plain, no-context
+    /// shape every existing family registration uses, unchanged) and <see cref="BuildCellsWithContext"/> (a
+    /// #4223 family whose template needs the pre-fetched <see cref="AuthoredContext"/>) is set — enforced at
+    /// construction, not by a caller checking for null. <see cref="Invoke"/> is the single call site both
+    /// shapes go through.</summary>
+    internal readonly record struct AuthoredTemplateEntry
+    {
+        public AuthoredTemplateEntry(
+            string Id,
+            int Version,
+            Func<string?, string?, string?, DateTime, DateTime, AlertIncident?, DarlingAlertReader.AlertHistoryReadRow?, string, JsonArray>? BuildCells,
+            Func<string?, string?, string?, DateTime, DateTime, AlertIncident?, DarlingAlertReader.AlertHistoryReadRow?, string, AuthoredContext, JsonArray>? BuildCellsWithContext = null)
+        {
+            if ((BuildCells is null) == (BuildCellsWithContext is null))
+            {
+                throw new ArgumentException(
+                    $"authored template '{Id}' must set exactly one of BuildCells or BuildCellsWithContext.");
+            }
+
+            this.Id = Id;
+            this.Version = Version;
+            this.BuildCells = BuildCells;
+            this.BuildCellsWithContext = BuildCellsWithContext;
+        }
+
+        public string Id { get; }
+
+        public int Version { get; }
+
+        public Func<string?, string?, string?, DateTime, DateTime, AlertIncident?, DarlingAlertReader.AlertHistoryReadRow?, string, JsonArray>? BuildCells { get; }
+
+        public Func<string?, string?, string?, DateTime, DateTime, AlertIncident?, DarlingAlertReader.AlertHistoryReadRow?, string, AuthoredContext, JsonArray>? BuildCellsWithContext { get; }
+
+        /// <summary>Calls whichever builder this entry set — <see cref="BuildCellsWithContext"/> with
+        /// <paramref name="context"/> for a #4223 context family, or the plain <see cref="BuildCells"/> for
+        /// every existing family (ignoring <paramref name="context"/>, which the caller passes
+        /// <see cref="AuthoredContext.Empty"/> for by convention). The one call site every template goes
+        /// through, in <see cref="Map"/> and in the shared test theories alike.</summary>
+        public JsonArray Invoke(
+            string? metric, string? serverName, string? asOf, DateTime windowStart, DateTime windowEnd,
+            AlertIncident? incident, DarlingAlertReader.AlertHistoryReadRow? row, string status, AuthoredContext context) =>
+            BuildCellsWithContext is not null
+                ? BuildCellsWithContext(metric, serverName, asOf, windowStart, windowEnd, incident, row, status, context)
+                : BuildCells!(metric, serverName, asOf, windowStart, windowEnd, incident, row, status);
+    }
 
     /// <summary>The authored-template registration table, sorted case-insensitively by the metric name each
     /// row matches on. One row per family, holding every alert-engine <c>MetricName</c> string that routes to
@@ -446,6 +543,179 @@ internal static partial class AlertNotebookEndpoint
 
         return null;
     }
+
+    /// <summary>The prefix-routed authored templates (#4223): a metric that fails the exact-name lookup
+    /// above falls through to here, EMPTY in this step — the families that register a <c>Custom:</c> or
+    /// <c>Analysis: </c> row, and the pre-fetch each needs, follow in the next PRs. Ordered by nothing in
+    /// particular yet; <see cref="ResolveAuthoredPrefixed(string, (string Prefix, AuthoredContextKind Kind, AuthoredTemplateEntry Entry)[])"/>
+    /// picks the LONGEST matching prefix, so table order never matters.</summary>
+    internal static readonly (string Prefix, AuthoredContextKind Kind, AuthoredTemplateEntry Entry)[] s_authoredPrefixTemplates =
+        Array.Empty<(string Prefix, AuthoredContextKind Kind, AuthoredTemplateEntry Entry)>();
+
+    /// <summary>Exact-then-prefix resolution, with the kind the caller needs to run the right pre-fetch
+    /// (<see cref="PrefetchAsync"/>) before invoking the entry. Exact names win outright (unchanged
+    /// behavior); failing that, the LONGEST registered prefix that matches wins, ordinal case-insensitive
+    /// like every other metric lookup on this endpoint; no match falls through to the mechanical
+    /// template.</summary>
+    internal static (AuthoredTemplateEntry Entry, AuthoredContextKind Kind)? ResolveAuthored(string? metric)
+    {
+        if (string.IsNullOrWhiteSpace(metric))
+        {
+            return null;
+        }
+
+        var exact = AuthoredTemplate(metric);
+        if (exact is not null)
+        {
+            return (exact.Value, AuthoredContextKind.None);
+        }
+
+        return ResolveAuthoredPrefixed(metric, s_authoredPrefixTemplates);
+    }
+
+    /// <summary>The prefix half of <see cref="ResolveAuthored"/>, taking the table as a parameter so the test
+    /// theories can exercise exact-vs-prefix and longest-prefix-wins against a table the production one
+    /// isn't (this step's table is empty).</summary>
+    internal static (AuthoredTemplateEntry Entry, AuthoredContextKind Kind)? ResolveAuthoredPrefixed(
+        string metric, (string Prefix, AuthoredContextKind Kind, AuthoredTemplateEntry Entry)[] prefixTable)
+    {
+        (string Prefix, AuthoredContextKind Kind, AuthoredTemplateEntry Entry)? best = null;
+
+        foreach (var row in prefixTable)
+        {
+            if (metric.StartsWith(row.Prefix, StringComparison.OrdinalIgnoreCase)
+                && (best is null || row.Prefix.Length > best.Value.Prefix.Length))
+            {
+                best = row;
+            }
+        }
+
+        return best is null ? null : (best.Value.Entry, best.Value.Kind);
+    }
+
+    /// <summary>The async pre-fetch behind a #4223 context family (spec §4): read exactly the store the
+    /// resolved <see cref="AuthoredContextKind"/> names, into an <see cref="AuthoredContext"/> the builder
+    /// reads but never writes through. <c>None</c> touches no store at all — the caller only invokes this for
+    /// an entry whose <see cref="AuthoredTemplateEntry.BuildCellsWithContext"/> is set, so a plain family
+    /// never pays for a read it doesn't use. A deleted rule or finding degrades to the matching "missing"
+    /// flag (#2710), never an exception; only cancellation propagates.</summary>
+    internal static async Task<AuthoredContext> PrefetchAsync(
+        AuthoredContextKind kind, string metric, int? serverId, DateTime anchor,
+        NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct)
+    {
+        return await PrefetchAsync(kind, metric, serverId, anchor, postgres, analysis, ct, logger: null, notes: null);
+    }
+
+    /// <summary>The full pre-fetch, with the optional logger/notes the endpoint's call site passes so a store
+    /// failure (not cancellation) is reported the same way every sibling read on this endpoint reports one,
+    /// AND surfaces as a note on the response instead of vanishing silently.</summary>
+    internal static async Task<AuthoredContext> PrefetchAsync(
+        AuthoredContextKind kind, string metric, int? serverId, DateTime anchor,
+        NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct,
+        ILogger? logger, JsonArray? notes)
+    {
+        Interlocked.Increment(ref s_prefetchCallsForTest);
+
+        switch (kind)
+        {
+            case AuthoredContextKind.None:
+                return AuthoredContext.Empty;
+
+            case AuthoredContextKind.CustomRule:
+                return await PrefetchCustomRuleAsync(metric, postgres, ct, logger, notes);
+
+            case AuthoredContextKind.AnalysisFinding:
+                return await PrefetchAnalysisFindingAsync(metric, serverId, anchor, analysis, ct, logger, notes);
+
+            default:
+                return AuthoredContext.Empty;
+        }
+    }
+
+    /// <summary>Parses the <c>Custom:&lt;id&gt;</c> metric (the exact inverse of
+    /// <see cref="CustomAlertEvaluator.MetricNameFor"/>) and reads the rule. A bad parse or a store
+    /// <c>NotFound</c>/null-<c>Ok</c> row is an honest missing context, not an error.</summary>
+    private static async Task<AuthoredContext> PrefetchCustomRuleAsync(
+        string metric, NpgsqlDataSource postgres, CancellationToken ct, ILogger? logger, JsonArray? notes)
+    {
+        var idText = metric.Length > "Custom:".Length ? metric["Custom:".Length..] : string.Empty;
+        if (!long.TryParse(idText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ruleId))
+        {
+            return AuthoredContext.Empty with { CustomRuleMissing = true };
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var result = await new CustomAlertRuleStore(postgres).GetAsync(ruleId, ct);
+            return result switch
+            {
+                CustomAlertRuleResult.Ok(CustomAlertRule rule) => new AuthoredContext(rule, false, null, false),
+                _ => AuthoredContext.Empty with { CustomRuleMissing = true },
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (logger is not null)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex);
+            }
+
+            notes?.Add((JsonNode)"The rule could not be read.");
+            return AuthoredContext.Empty with { CustomRuleMissing = true };
+        }
+    }
+
+    /// <summary>Parses the 8-character story-path-hash suffix off an <c>Analysis: {category} [{hash8}]</c>
+    /// metric (<see cref="FindingMessageFormatter.MetricName"/>'s exact format) and matches it against the
+    /// server's recent findings — the finding whose FULL <c>StoryPathHash</c> STARTS WITH all 8 characters,
+    /// so two findings sharing a shorter prefix but differing at the 8th are never confused. None found (aged
+    /// past retention, muted, or the parse itself failed) is an honest missing context.</summary>
+    private static async Task<AuthoredContext> PrefetchAnalysisFindingAsync(
+        string metric, int? serverId, DateTime anchor, DarlingAnalysisService analysis, CancellationToken ct,
+        ILogger? logger, JsonArray? notes)
+    {
+        var openBracket = metric.LastIndexOf('[');
+        var closeBracket = metric.LastIndexOf(']');
+        var hash8 = openBracket >= 0 && closeBracket > openBracket
+            ? metric[(openBracket + 1)..closeBracket]
+            : string.Empty;
+
+        if (hash8.Length != 8 || serverId is null)
+        {
+            return AuthoredContext.Empty with { FindingMissing = true };
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            var findings = await analysis.GetRecentFindingsAsync(serverId.Value, hoursBack: 24, limit: 200, asOfUtc: anchor, ct);
+            var match = PickFindingByHash(findings, hash8);
+
+            return match is null
+                ? AuthoredContext.Empty with { FindingMissing = true }
+                : new AuthoredContext(null, false, match, false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (logger is not null)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:prefetch", stopwatch.ElapsedMilliseconds, ex);
+            }
+
+            notes?.Add((JsonNode)"The finding could not be read.");
+            return AuthoredContext.Empty with { FindingMissing = true };
+        }
+    }
+
+    /// <summary>The eight-character finding match (#4223): the first finding whose FULL <c>StoryPathHash</c>
+    /// starts with all of <paramref name="hash8"/> (ordinal), skipping any finding with no hash at all — the
+    /// same first-match rule <see cref="PrefetchAnalysisFindingAsync"/> always used, unchanged. Two findings
+    /// sharing a shorter prefix but differing at the 8th character are never confused, because the compare is
+    /// always all 8 characters.</summary>
+    internal static AnalysisFinding? PickFindingByHash(IEnumerable<AnalysisFinding> findings, string hash8) =>
+        findings.FirstOrDefault(f =>
+            !string.IsNullOrEmpty(f.StoryPathHash) && f.StoryPathHash.StartsWith(hash8, StringComparison.Ordinal));
 
     /// <summary>The reads this endpoint's authored templates call that declare no <c>limit</c> param at all
     /// (<see cref="DarlingWebEndpoints.BuildReadDispatch"/>'s own catalog) — a chart/trend read whose budget

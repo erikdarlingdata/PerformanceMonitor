@@ -647,7 +647,7 @@ public sealed class AlertNotebookEndpointTests
 
         /* #4223 gave "High CPU" an authored template -- this shape check now needs a metric that STAYS
            mechanical, so it exercises the fallback path it documents rather than an authored one. "Poison
-           Wait" is excluded here because a later PR makes it authored too; "tempdb Space" has no row in
+           Wait" is excluded here because it is authored too (its own template); "tempdb Space" has no row in
            s_authoredTemplates. */
         var ctx = await SendAuthenticated(
             server, "/api/alert-notebook?server=probe&metric=" + Uri.EscapeDataString("tempdb Space"),

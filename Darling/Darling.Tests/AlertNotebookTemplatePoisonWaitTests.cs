@@ -67,8 +67,8 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
         var row = RowWithWaitType("RESOURCE_SEMAPHORE");
 
-        var cells = template.BuildCells(
-            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, row, "Unknown");
+        var cells = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, row, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var reads = cells.OfType<JsonObject>()
             .Where(c => (string?)c["type"] == "read")
@@ -90,8 +90,8 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
         var row = RowWithWaitType("resource_semaphore");
 
-        var cells = template.BuildCells(
-            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, row, "Unknown");
+        var cells = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, row, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var reads = cells.OfType<JsonObject>()
             .Where(c => (string?)c["type"] == "read")
@@ -110,8 +110,8 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
         var row = RowWithWaitType(waitType);
 
-        var cells = template.BuildCells(
-            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, row, "Unknown");
+        var cells = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, row, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var reads = cells.OfType<JsonObject>()
             .Where(c => (string?)c["type"] == "read")
@@ -128,8 +128,8 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
         var row = RowWithWaitType("THREADPOOL");
 
-        var cells = template.BuildCells(
-            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, row, "Unknown");
+        var cells = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, row, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var trend = cells.OfType<JsonObject>()
             .Single(c => (string?)c["type"] == "read" && (string?)c["read"] == "get_wait_trend");
@@ -143,8 +143,8 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
 
-        var cells = template.BuildCells(
-            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown");
+        var cells = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var reads = cells.OfType<JsonObject>()
             .Where(c => (string?)c["type"] == "read")
@@ -162,11 +162,11 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
 
-        var withRow = template.BuildCells(
+        var withRow = template.Invoke(
             "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null,
-            RowWithWaitType("THREADPOOL"), "Unknown");
-        var withoutRow = template.BuildCells(
-            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown");
+            RowWithWaitType("THREADPOOL"), "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
+        var withoutRow = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         /* Both degrade to "no wait type" cell counts identically -- the with-row case here carries a wait
            type (adds the trend read), the without-row case adds the note markdown cell instead: same count,
@@ -180,9 +180,9 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
     public void BuildPoisonWaitCells_PassesValidateNotebookDefinition()
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
-        var cells = template.BuildCells(
+        var cells = template.Invoke(
             "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null,
-            RowWithWaitType("RESOURCE_SEMAPHORE"), "Unknown");
+            RowWithWaitType("RESOURCE_SEMAPHORE"), "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var definition = new JsonObject { ["kind"] = "notebook", ["cells"] = cells };
         var validation = DarlingWebEndpoints.ValidateNotebookDefinition(definition);
@@ -194,8 +194,8 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
     public void BuildPoisonWaitCells_NoWaitType_AlsoPassesValidateNotebookDefinition()
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate("Poison Wait")!.Value;
-        var cells = template.BuildCells(
-            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown");
+        var cells = template.Invoke(
+            "Poison Wait", "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var definition = new JsonObject { ["kind"] = "notebook", ["cells"] = cells };
         var validation = DarlingWebEndpoints.ValidateNotebookDefinition(definition);

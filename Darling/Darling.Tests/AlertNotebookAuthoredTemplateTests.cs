@@ -95,8 +95,8 @@ public sealed class AlertNotebookAuthoredTemplateTests
         Assert.NotNull(template);
 
         var incident = IncidentWithDatabase("SalesDb");
-        var cells = template!.Value.BuildCells(
-            metric, "SRV1", AsOf, WindowStart, WindowEnd, incident, null, "Unknown (not collected since " + AsOf + ")");
+        var cells = template!.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, incident, null, "Unknown (not collected since " + AsOf + ")", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var definition = new JsonObject
         {
@@ -116,11 +116,11 @@ public sealed class AlertNotebookAuthoredTemplateTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
-            metric, "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown (not collected since " + AsOf + ")");
+        var cells = template!.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown (not collected since " + AsOf + ")", AlertNotebookEndpoint.AuthoredContext.Empty);
 
-        var withIncident = template.Value.BuildCells(
-            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var withIncident = template.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         // Degrade: same cell count with or without a matched incident -- only the bound database filter differs.
         Assert.Equal(withIncident.Count, cells.Count);
@@ -145,8 +145,8 @@ public sealed class AlertNotebookAuthoredTemplateTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
-            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var cells = template!.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var offenders = cells
             .OfType<JsonObject>()
@@ -174,8 +174,8 @@ public sealed class AlertNotebookAuthoredTemplateTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
-            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var cells = template!.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var panelCells = cells.OfType<JsonObject>().Where(cell => (string?)cell["type"] == "panel").ToArray();
 
@@ -225,8 +225,8 @@ public sealed class AlertNotebookAuthoredTemplateTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
-            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var cells = template!.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         foreach (var cellNode in cells)
         {
@@ -282,8 +282,8 @@ public sealed class AlertNotebookAuthoredTemplateTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
-            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var cells = template!.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         foreach (var cellNode in cells)
         {
@@ -329,8 +329,8 @@ public sealed class AlertNotebookAuthoredTemplateTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
-            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var cells = template!.Value.Invoke(
+            metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         foreach (var cellNode in cells)
         {
@@ -352,8 +352,8 @@ public sealed class AlertNotebookAuthoredTemplateTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Blocking Detected");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
-            "Blocking Detected", "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
+        var cells = template!.Value.Invoke(
+            "Blocking Detected", "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown", AlertNotebookEndpoint.AuthoredContext.Empty);
 
         var byDatabase = cells.OfType<JsonObject>().Single(c => (string?)c["title"] == "Blocking by database");
 
@@ -387,9 +387,9 @@ public sealed class AlertNotebookAuthoredTemplateTests
                 Assert.NotNull(resolved);
                 Assert.Equal(entry.Id, resolved!.Value.Id);
 
-                var cells = resolved.Value.BuildCells(
+                var cells = resolved.Value.Invoke(
                     metric, "SRV1", AsOf, WindowStart, WindowEnd, incident, null,
-                    "Unknown (not collected since " + AsOf + ")");
+                    "Unknown (not collected since " + AsOf + ")", AlertNotebookEndpoint.AuthoredContext.Empty);
 
                 var definition = new JsonObject { ["kind"] = "notebook", ["cells"] = cells };
                 var validation = DarlingWebEndpoints.ValidateNotebookDefinition(definition);
