@@ -33,7 +33,7 @@ namespace Darling.Tests;
 /// data or not, so a substring match on the logged command text is exactly the per-statement count
 /// <c>CallsForTableAsync</c>'s pg_stat_statements-backed SUM(calls) used to give.
 /// </summary>
-private sealed class CommandCountingLoggerProvider : ILoggerProvider
+internal sealed class CommandCountingLoggerProvider : ILoggerProvider
 {
     private readonly ConcurrentBag<string> _messages = new();
 
@@ -68,7 +68,7 @@ private sealed class CommandCountingLoggerProvider : ILoggerProvider
     }
 }
 
-private sealed class CommandCountingLoggerFactory : ILoggerFactory
+internal sealed class CommandCountingLoggerFactory : ILoggerFactory
 {
     public readonly CommandCountingLoggerProvider Provider = new();
 
