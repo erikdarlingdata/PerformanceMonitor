@@ -147,9 +147,15 @@ public sealed class QueryStoreTopMcpLiveTests
             "a pending batch must read raw regardless of coverage");
         await ExecAsync(connection, "DELETE FROM collect.query_store_interval_wide_pending WHERE server_id = @server_id", ct);
 
-        Assert.True((await QueryStoreIntervalWide.ReadsTableAsync(
-            connection, ServerId, WindowStart, queryEnd, queryEnd, DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct)).UseTable,
-            "the passing case, restored, must read the table again");
+        var passingResult = await QueryStoreIntervalWide.ReadsTableAsync(
+            connection, ServerId, WindowStart, queryEnd, queryEnd, DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct);
+        if (!passingResult.UseTable)
+        {
+            var hasLegacyRow = await HasLegacyRowAsync(connection, passingResult.ClampedStart, queryEnd, ct);
+            Assert.Fail(
+                $"the passing case, restored, must read the table again -- HasLegacyRowSql={hasLegacyRow}, " +
+                $"ClampedStart={passingResult.ClampedStart:o}, WindowStart={WindowStart:o}, queryEnd={queryEnd:o}, appliedThrough={appliedThrough:o}");
+        }
     }
 
     /// <summary>
@@ -248,6 +254,7 @@ AND   hypertable_name = 'query_store_stats';";
             IsForcedPlan = false,
             ForceFailureCount = 0,
             RuntimeStatsIntervalId = 600,
+            IntervalStartTimeUtc = moduleDay,
             ModuleName = ModuleName,
         };
 
@@ -406,6 +413,18 @@ ON CONFLICT (server_id) DO UPDATE SET is_enabled = TRUE;", connection);
     private static async Task<bool> ScalarBoolAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(sql, connection);
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>Diagnostic-only: mirrors <see cref="QueryStoreIntervalWide.HasLegacyRowSql"/>'s own probe, so a
+    /// failure of the passing-case gate assertion above can say WHICH clause refused instead of just that one
+    /// did.</summary>
+    private static async Task<bool> HasLegacyRowAsync(NpgsqlConnection connection, DateTime clampedStart, DateTime windowEnd, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(QueryStoreIntervalWide.HasLegacyRowSql, connection);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = ServerId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = clampedStart });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowEnd });
         return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 

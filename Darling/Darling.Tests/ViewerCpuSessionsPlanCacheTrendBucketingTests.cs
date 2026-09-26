@@ -164,11 +164,13 @@ public sealed class ViewerCpuSessionsPlanCacheTrendBucketingLiveTests
         try
         {
             /* A window wide enough (8 days) that TrendBuckets.AutoMinutes picks a bucket wider than the
-               60 seconds between t1/t2 below, so both collections land in the SAME bucket. */
+               30 seconds between t1/t2 below, so both collections land in the SAME bucket. t1 is anchored
+               to a minute boundary (the bucket origin is minute-aligned, TrendBuckets.OriginSql = midnight)
+               so the seed times don't drift across a bucket edge depending on when the test happens to run. */
             var end = TruncateToSeconds(DateTime.UtcNow.AddDays(-60));
             var start = end.AddDays(-8);
-            var t1 = start.AddHours(1);
-            var t2 = t1.AddSeconds(60);
+            var t1 = new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1).AddMinutes(1);
+            var t2 = t1.AddSeconds(30);
 
             await InsertCpuAsync(connection, 1, t1, runnable: 4, blocked: 2, queued: 10);
             await InsertCpuAsync(connection, 2, t2, runnable: 6, blocked: 4, queued: 20);
@@ -246,10 +248,12 @@ public sealed class ViewerCpuSessionsPlanCacheTrendBucketingLiveTests
         var bodySucceeded = false;
         try
         {
+            /* t1 is anchored to a minute boundary (the bucket origin is minute-aligned, TrendBuckets.OriginSql
+               = midnight) so the seed times don't drift across a bucket edge depending on when the test runs. */
             var end = TruncateToSeconds(DateTime.UtcNow.AddDays(-60));
             var start = end.AddDays(-8);
-            var t1 = start.AddHours(1);
-            var t2 = t1.AddSeconds(60);
+            var t1 = new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1).AddMinutes(1);
+            var t2 = t1.AddSeconds(30);
 
             await InsertSessionAsync(connection, 1, t1, total: 100, running: 5,
                 topApp: "OlderApp", topAppConns: 40, topHost: "OlderHost", topHostConns: 30);
@@ -332,10 +336,12 @@ public sealed class ViewerCpuSessionsPlanCacheTrendBucketingLiveTests
         var bodySucceeded = false;
         try
         {
+            /* t1 is anchored to a minute boundary (the bucket origin is minute-aligned, TrendBuckets.OriginSql
+               = midnight) so the seed times don't drift across a bucket edge depending on when the test runs. */
             var end = TruncateToSeconds(DateTime.UtcNow.AddDays(-60));
             var start = end.AddDays(-8);
-            var t1 = start.AddHours(1);
-            var t2 = t1.AddSeconds(60);
+            var t1 = new DateTime(start.Year, start.Month, start.Day, start.Hour, 0, 0, DateTimeKind.Unspecified).AddHours(1).AddMinutes(1);
+            var t2 = t1.AddSeconds(30);
 
             /* Collection 1: single-use 40, multi-use 100 (one group). Collection 2: single-use 60,
                multi-use 200 (one group). Per-collection sums: 40/100 and 60/200; bucket average: 50/150. */

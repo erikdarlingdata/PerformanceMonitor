@@ -179,9 +179,24 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     /// never disagree about what the grants series says.
     /// </summary>
     [Fact]
-    public void MemoryGrantTrendSql_IsTheViewersOverlayRead_ByteForByte()
+    public void MemoryGrantTrendSql_SharesTheViewersPerCollectionRead_ByteForByte()
     {
-        Assert.Equal(ViewerDataService.MemoryGrantTrendSql, DarlingTrendReader.MemoryGrantTrendSql);
+        /* #3548's "one shared read" doctrine, reconciled with #4349's viewer bucketing: MCP's
+           get_memory_trend needs the memory-grant series UNBUCKETED (it does its own date_bin in
+           MemoryGrantTrendBucketedSql), while the viewer's Overview overlay buckets it directly. Rather
+           than one SQL string serving two different callers' bucketing needs, #3548's single shared read
+           is now TrendBucketSql.MemoryGrantPerCollectionSql — the per-collection CTE body both sides read
+           byte-for-byte — and each SKU wraps it in its own, independent outer bucketing select. */
+        Assert.Contains(TrendBucketSql.MemoryGrantPerCollectionSql, DarlingTrendReader.MemoryGrantTrendSql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.MemoryGrantPerCollectionSql, ViewerDataService.MemoryGrantTrendSql, StringComparison.Ordinal);
+
+        /* MCP's unbucketed read IS the shared constant plus only an ORDER BY — no second date_bin wrapper
+           sits between DarlingTrendReader.MemoryGrantTrendSql and the shared per-collection text, or
+           get_memory_trend's own MemoryGrantTrendBucketedSql wrapper would bucket it twice. */
+        Assert.Equal(
+            TrendBucketSql.MemoryGrantPerCollectionSql + "\nORDER BY collection_time",
+            DarlingTrendReader.MemoryGrantTrendSql,
+            ignoreLineEndingDifferences: true);
 
         var sql = DarlingTrendReader.MemoryGrantTrendSql;
         Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);

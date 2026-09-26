@@ -114,7 +114,7 @@ public sealed class PgLoggingCollectorOffTests
         /* And the question is asked about the collector that serves this read — a retyped name would make
            the branch dead against a collection_log that has no rows under it. */
         Assert.Contains(
-            "DarlingRuntimePrecondition.StatusAsync(\n                        postgres, resolved.ServerId, resolved.ServerName, \"pg_deadlocks\")",
+            "DarlingRuntimePrecondition.StatusAsync(\n                        postgres, resolved.ServerId, resolved.ServerName, \"pg_deadlocks\", cancellationToken)",
             source,
             System.StringComparison.Ordinal);
     }

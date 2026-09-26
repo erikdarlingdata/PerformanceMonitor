@@ -529,7 +529,7 @@ public sealed class ViewerCpuTempDbLivePostgresTests
                 userMb: 200.00m, internalMb: 60.00m, versionMb: 20.00m,
                 totalMb: 280.00m, unallocMb: 120.00m, totalSessions: bigSessionCount, topSessionId: 77, topSessionMb: 25.50m);
 
-            var samples = await viewer.GetTempDbTrendAsync(TempDbServerId, t1.AddMinutes(-1));
+            var samples = await viewer.GetTempDbTrendAsync(TempDbServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
 
             Assert.Equal(2, samples.Count);
 

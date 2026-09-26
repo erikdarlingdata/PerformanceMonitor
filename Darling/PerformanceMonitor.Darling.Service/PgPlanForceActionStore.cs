@@ -354,11 +354,12 @@ SELECT
     /// force still being written — are properties of the TABLE, and the only place they can be shown
     /// to hold is against a live store, which is what <c>PlanForceActionStoreTests</c> does.</para>
     ///
-    /// <para>#4346: every row's <c>detail</c> is passed through <see cref="SanitizeDetailForAudit"/> before
-    /// it leaves this method too, on the same reasoning as <see cref="GetRecentActionsAsync"/> — this read
+    /// <para>Every row's <c>detail</c> is sanitized by <see cref="ReadRecord"/> (#4346/#4376): this read
     /// has no caller today, but a row written before #4326 sits in the table regardless, and the day a
     /// review surface calls this it must not be the day someone notices the exception text it has been
-    /// quietly carrying since before this method had a caller.</para>
+    /// quietly carrying since before this method had a caller. Because the sanitizer lives in
+    /// <see cref="ReadRecord"/>, the shared row mapper, it applies here — and to every other current or
+    /// future reader of this table — without a per-method call site to remember.</para>
     /// </summary>
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(
         int serverId, DateTime nowUtc, CancellationToken ct)
@@ -409,8 +410,7 @@ LIMIT 16", connection)
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            var record = ReadRecord(reader);
-            rows.Add(record with { Detail = SanitizeDetailForAudit(record.Detail) });
+            rows.Add(ReadRecord(reader));
         }
 
         return rows;
@@ -499,9 +499,9 @@ LIMIT 16", connection)
     }
 
     /// <summary>The audit read behind <c>get_plan_force_actions</c> — newest first, optional server scope.
-    /// #4346: every row's <c>detail</c> is passed through <see cref="SanitizeDetailForAudit"/> before it
-    /// leaves this method, so a row written before #4326 (which put the read failure's own exception
-    /// message here) cannot reach an MCP or web caller through this read.</summary>
+    /// Every row's <c>detail</c> passes through <see cref="SanitizeDetailForAudit"/> in
+    /// <see cref="ReadRecord"/>, so a row written before #4326 (which put the read failure's own exception
+    /// message here) cannot reach a caller (#4346).</summary>
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetRecentActionsAsync(
         int? serverId, DateTime sinceUtc, int limit, CancellationToken ct)
     {
@@ -528,13 +528,15 @@ LIMIT $3", connection)
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            var record = ReadRecord(reader);
-            rows.Add(record with { Detail = SanitizeDetailForAudit(record.Detail) });
+            rows.Add(ReadRecord(reader));
         }
 
         return rows;
     }
 
+    /// <summary>The single mapper every reader of a <c>collect.plan_force_actions</c> row uses.
+    /// <c>Detail</c> is passed through <see cref="SanitizeDetailForAudit"/> here, once per row, so every
+    /// reader gets it (#4376).</summary>
     private static PlanForceActionRecord ReadRecord(NpgsqlDataReader reader) => new(
         ActionId: reader.GetInt64(0),
         ActionTimeUtc: DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc),
@@ -554,6 +556,6 @@ LIMIT $3", connection)
         ReplicaRole: reader.IsDBNull(15) ? null : reader.GetString(15),
         ParameterSensitivityCoFired: reader.GetBoolean(16),
         Outcome: reader.GetString(17),
-        Detail: reader.IsDBNull(18) ? null : reader.GetString(18),
+        Detail: SanitizeDetailForAudit(reader.IsDBNull(18) ? null : reader.GetString(18)),
         RelatedActionId: reader.IsDBNull(19) ? null : reader.GetInt64(19));
 }

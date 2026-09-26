@@ -6,6 +6,10 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -242,11 +246,12 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.Contains("ran and observed nothing for this target inside the last", detail);
     }
 
-    /// <summary>Both journal reads apply the sanitizer — the review's missing pin. Exercises
-    /// <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/> the same way both
-    /// <c>GetRecentActionsAsync</c> and <c>GetPendingReviewsAsync</c> do at their respective call sites
-    /// (<c>record with { Detail = SanitizeDetailForAudit(record.Detail) }</c>), pinning that a legacy
-    /// exception-bearing line never survives either read's output shape.</summary>
+    /// <summary>Both journal reads apply the sanitizer. Exercises
+    /// <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/> the way both
+    /// <c>GetRecentActionsAsync</c> and <c>GetPendingReviewsAsync</c> get it: both route through
+    /// <see cref="PgPlanForceActionStore"/>'s shared <c>ReadRecord</c> mapper, which
+    /// applies the sanitizer once per row, so a legacy exception-bearing line never survives either
+    /// read's output shape.</summary>
     [Fact]
     public void BothReads_ApplyTheSameSanitizer()
     {
@@ -256,5 +261,320 @@ public sealed class PlanForceActionAuditRedactionTests
 
         Assert.DoesNotContain("db-primary-02", PgPlanForceActionStore.SanitizeDetailForAudit(recentActionsShape));
         Assert.DoesNotContain("db-primary-02", PgPlanForceActionStore.SanitizeDetailForAudit(pendingReviewShape));
+    }
+
+    /// <summary>
+    /// #4376's CENSUS pin: every method on <c>PgPlanForceActionStore</c> that builds a
+    /// <c>PlanForceActionRecord</c> from an <c>NpgsqlDataReader</c> does it by calling the shared
+    /// <c>ReadRecord</c> mapper — the sanitizer's one choke point — rather than constructing the record
+    /// directly, or reaching around it via a target-typed <c>new(...)</c>, a <c>with</c> expression that
+    /// overwrites <c>Detail</c>, or a raw read of the <c>detail</c> column ordinal outside <c>ReadRecord</c>.
+    /// Reads the class's own source text rather than trusting a comment, so a bypass added later fails
+    /// THIS pin, not just a live-store test that may never run against a legacy row.
+    ///
+    /// <para>Comments are stripped and line endings normalized before scanning, so a comment that merely
+    /// mentions a bypass shape can't false-fail the pin. The detection function is exercised against small
+    /// synthetic sources below (the same shape <c>MigrationDataMovingRungCensusPins.TheScan_ActuallyReadsTheLadder</c>
+    /// uses) so a regex that stopped matching anything would fail loudly there instead of leaving this
+    /// pin vacuous.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRecordConstruction_GoesThroughReadRecord()
+    {
+        var source = StripComments(ReadStoreSource().ReplaceLineEndings("\n"));
+
+        const string readRecordSignature = "private static PlanForceActionRecord ReadRecord(";
+        var readRecordStart = source.IndexOf(readRecordSignature, StringComparison.Ordinal);
+        Assert.True(readRecordStart >= 0, "ReadRecord itself was not found in PgPlanForceActionStore.cs — the scan below has nothing to exclude.");
+
+        /* ReadRecord is an expression-bodied member ('=> new(...);'); its body ends at the first ');'
+           after its signature, not at the class's own closing brace (which is what a bare search for
+           "\n}" finds, since ReadRecord is the class's last member and every line inside it is
+           indented). Bound the window there so it actually covers ReadRecord's body. */
+        var readRecordBodyEnd = source.IndexOf(");", readRecordStart, StringComparison.Ordinal);
+        Assert.True(readRecordBodyEnd >= 0, "could not find the end of ReadRecord's body — the exclusion window is unbounded.");
+        readRecordBodyEnd += ");".Length;
+
+        var readRecordWindow = source[readRecordStart..readRecordBodyEnd];
+        Assert.False(string.IsNullOrEmpty(readRecordWindow), "the ReadRecord window is empty — the bounds above are wrong.");
+        Assert.Contains("SanitizeDetailForAudit(", readRecordWindow, StringComparison.Ordinal);
+
+        var beforeReadRecord = source[..readRecordStart];
+        var afterReadRecord = source[readRecordBodyEnd..];
+        var outsideReadRecord = beforeReadRecord + afterReadRecord;
+
+        var constructionSites = CountConstructionSites(source);
+        Assert.Equal(1, constructionSites);
+        Assert.Equal(0, CountConstructionSites(outsideReadRecord));
+
+        Assert.DoesNotContain("with { Detail", outsideReadRecord, StringComparison.Ordinal);
+        Assert.DoesNotContain("with{Detail", outsideReadRecord, StringComparison.Ordinal);
+
+        /* The only raw read of the detail column (ordinal 18, per ReadRecord's own
+           'IsDBNull(18) ? null : reader.GetString(18)' pair) must be inside ReadRecord. */
+        var detailOrdinal = DetailColumnOrdinal(readRecordWindow);
+        Assert.False(
+            outsideReadRecord.Contains($"GetString({detailOrdinal})", StringComparison.Ordinal)
+            || outsideReadRecord.Contains($"IsDBNull({detailOrdinal})", StringComparison.Ordinal),
+            $"the detail column (ordinal {detailOrdinal}) is read outside ReadRecord — that reader bypasses the sanitizer.");
+
+        /* Positive controls: the SAME detection function run against small synthetic sources, so the
+           pin above is proven live rather than trusted to have found nothing by accident. */
+        const string directBypass =
+            "class C {\n" +
+            "    private static PlanForceActionRecord ReadRecord(NpgsqlDataReader reader) => new(\n" +
+            "        ActionId: reader.GetInt64(0));\n" +
+            "    private static PlanForceActionRecord ReadOther(NpgsqlDataReader reader) {\n" +
+            "        return new PlanForceActionRecord(1, DateTime.UtcNow, 1, \"s\", \"d\", 1, 1, \"a\", \"m\", \"actor\", \"dec\", \"r\", 1, 1, 1, null, false, \"o\", null, null);\n" +
+            "    }\n" +
+            "}";
+        Assert.Equal(2, CountConstructionSites(StripComments(directBypass)));
+
+        const string targetTypedBypass =
+            "class C {\n" +
+            "    private static PlanForceActionRecord ReadRecord(NpgsqlDataReader reader) => new(\n" +
+            "        ActionId: reader.GetInt64(0));\n" +
+            "    private static PlanForceActionRecord ReadOther(NpgsqlDataReader reader) {\n" +
+            "        return new(ActionId: reader.GetInt64(0));\n" +
+            "    }\n" +
+            "}";
+        Assert.Equal(2, CountConstructionSites(StripComments(targetTypedBypass)));
+
+        const string withExpressionBypass =
+            "class C {\n" +
+            "    private static PlanForceActionRecord ReadOther(NpgsqlDataReader reader, PlanForceActionRecord r) {\n" +
+            "        return r with { Detail = SanitizeDetailForAudit(reader.GetString(18)) };\n" +
+            "    }\n" +
+            "}";
+        Assert.Contains("with { Detail", StripComments(withExpressionBypass), StringComparison.Ordinal);
+
+        const string commentOnlyMention =
+            "class C {\n" +
+            "    // not a real bypass: new PlanForceActionRecord( is just mentioned here, in a comment\n" +
+            "    /* also new(ActionId: 1) doesn't count */\n" +
+            "    private static PlanForceActionRecord ReadRecord(NpgsqlDataReader reader) => new(\n" +
+            "        ActionId: reader.GetInt64(0));\n" +
+            "}";
+        Assert.Equal(1, CountConstructionSites(StripComments(commentOnlyMention)));
+    }
+
+    /// <summary>Strips <c>//</c> line comments and <c>/* */</c> block comments (crude but adequate for
+    /// this class's own source, which has no such sequence inside a string literal) so a comment that
+    /// mentions a bypass shape can't be counted as one.</summary>
+    private static string StripComments(string source)
+    {
+        var withoutBlocks = Regex.Replace(source, @"/\*.*?\*/", "", RegexOptions.Singleline);
+        return Regex.Replace(withoutBlocks, @"//[^\n]*", "");
+    }
+
+    /// <summary>Counts every construction of <c>PlanForceActionRecord</c>: the explicit
+    /// <c>new PlanForceActionRecord(</c> form, plus every target-typed <c>new(</c> whose argument list
+    /// opens with the record's first named parameter (<c>ActionId:</c>).</summary>
+    private static int CountConstructionSites(string source)
+    {
+        var explicitCtor = Regex.Matches(source, @"new\s+PlanForceActionRecord\s*\(").Count;
+        var targetTyped = Regex.Matches(source, @"new\s*\(\s*ActionId\s*:").Count;
+        return explicitCtor + targetTyped;
+    }
+
+    /// <summary>Derives the detail column's ordinal from ReadRecord's own
+    /// <c>IsDBNull(N) ? null : reader.GetString(N)</c> pair on the <c>Detail:</c> line, rather than
+    /// hard-coding it.</summary>
+    private static int DetailColumnOrdinal(string readRecordWindow)
+    {
+        var match = Regex.Match(
+            readRecordWindow,
+            @"Detail:\s*SanitizeDetailForAudit\(reader\.IsDBNull\((?<ordinal>\d+)\)\s*\?\s*null\s*:\s*reader\.GetString\(\k<ordinal>\)\)");
+        Assert.True(match.Success, "could not find ReadRecord's Detail: line in the expected shape to derive the detail column ordinal.");
+        return int.Parse(match.Groups["ordinal"].Value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// #4376: the raw-<c>detail</c>-read choke point isn't just
+    /// <c>PgPlanForceActionStore</c> — nothing under <c>Darling/</c> (outside <c>Darling.Tests</c>) or
+    /// <c>PerformanceMonitor.Common/</c> may read the <c>detail</c> column of
+    /// <c>collect.plan_force_actions</c> except <see cref="PgPlanForceActionStore.GetRecentActionsAsync"/>
+    /// and <see cref="PgPlanForceActionStore.GetPendingReviewsAsync"/> (the two readers that feed
+    /// <c>ReadRecord</c>). A SELECT list naming <c>detail</c> or <c>pfa.detail</c> in a string that also
+    /// mentions <c>plan_force_actions</c> counts as a read; the INSERT column list in
+    /// <c>JournalAsync</c> (and its <c>RETURNING action_id</c>) does not.
+    ///
+    /// <para>A method may be exempted by adding its fully qualified name to
+    /// <see cref="RawDetailReaderExemptions"/> — capped at one entry, reserved for a future one-time
+    /// audit-detail scrub (#4346), and itself asserted below to return no detail text.</para>
+    /// </summary>
+    [Fact]
+    public void NoOtherProductionCode_ReadsTheDetailColumnDirectly()
+    {
+        Assert.True(RawDetailReaderExemptions.Length <= 1, "at most one raw-detail-reader exemption is allowed.");
+
+        var violations = new System.Collections.Generic.List<string>();
+        foreach (var file in ProductionSourceFiles())
+        {
+            var text = StripComments(File.ReadAllText(file).ReplaceLineEndings("\n"));
+            foreach (var fqName in RawDetailReadersIn(text))
+            {
+                if (Array.IndexOf(RawDetailReaderExemptions, fqName) < 0
+                    && Array.IndexOf(AllowedRawDetailReaders, fqName) < 0)
+                {
+                    violations.Add($"{Path.GetFileName(file)}: {fqName}");
+                }
+            }
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            "raw read(s) of collect.plan_force_actions.detail outside ReadRecord's two callers, not in "
+            + "RawDetailReaderExemptions: " + string.Join("; ", violations));
+
+        /* Positive controls: the SAME detection function, run against synthetic sources. */
+        const string rawSelectBypass =
+            "namespace N {\n" +
+            "class SomeOtherReader {\n" +
+            "    public void ReadIt() {\n" +
+            "        var cmd = new NpgsqlCommand(@\"SELECT detail FROM collect.plan_force_actions WHERE server_id = $1\", connection);\n" +
+            "    }\n" +
+            "}\n" +
+            "}";
+        var found = RawDetailReadersIn(StripComments(rawSelectBypass));
+        Assert.Contains("N.SomeOtherReader.ReadIt", found);
+
+        var exempted = new[] { "N.SomeOtherReader.ReadIt" };
+        var stillViolating = System.Linq.Enumerable.Where(found, n => Array.IndexOf(exempted, n) < 0);
+        Assert.Empty(stillViolating);
+
+        const string insertOnlyMention =
+            "namespace N {\n" +
+            "class Journal {\n" +
+            "    public void JournalAsync() {\n" +
+            "        var cmd = new NpgsqlCommand(@\"INSERT INTO collect.plan_force_actions (action_time, detail) VALUES ($1, $2) RETURNING action_id\", connection);\n" +
+            "    }\n" +
+            "}\n" +
+            "}";
+        Assert.Empty(RawDetailReadersIn(StripComments(insertOnlyMention)));
+    }
+
+    /// <summary>At most ONE entry, reserved for a future one-time audit-detail scrub (#4346). Empty
+    /// today: the scrub doesn't exist yet, so any new raw reader must be named here explicitly before
+    /// it can pass — nothing is grandfathered in silently.</summary>
+    private static readonly string[] RawDetailReaderExemptions = Array.Empty<string>();
+
+    /// <summary>The two readers that feed <c>ReadRecord</c> — the sanitizer's own choke point — are
+    /// allowed to mention the <c>detail</c> column in their SQL text; they never touch it in C# code
+    /// outside the mapper.</summary>
+    private static readonly string[] AllowedRawDetailReaders =
+    [
+        "PerformanceMonitor.Darling.Service.PgPlanForceActionStore.GetRecentActionsAsync",
+        "PerformanceMonitor.Darling.Service.PgPlanForceActionStore.GetPendingReviewsAsync",
+    ];
+
+    /// <summary>Finds every verbatim-string SQL statement mentioning <c>plan_force_actions</c> that reads
+    /// (rather than writes) the <c>detail</c> column, and attributes each to its enclosing
+    /// <c>Namespace.Type.Method</c> by scanning backward from the match for the nearest preceding
+    /// <c>namespace</c>, <c>class</c>, and method signature.</summary>
+    private static System.Collections.Generic.List<string> RawDetailReadersIn(string text)
+    {
+        var results = new System.Collections.Generic.List<string>();
+        foreach (Match sqlMatch in Regex.Matches(text, "@\"[^\"]*\"", RegexOptions.Singleline))
+        {
+            var sql = sqlMatch.Value;
+            if (!sql.Contains("plan_force_actions", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var isInsert = Regex.IsMatch(sql, @"INSERT\s+INTO\s+collect\.plan_force_actions", RegexOptions.IgnoreCase);
+            var mentionsDetail = Regex.IsMatch(sql, @"(?<!insert\s(?:.|\n)*?)\bpfa\.detail\b", RegexOptions.IgnoreCase)
+                || Regex.IsMatch(sql, @"\bpfa\.detail\b", RegexOptions.IgnoreCase)
+                || (Regex.IsMatch(sql, @"\bSELECT\b", RegexOptions.IgnoreCase) && Regex.IsMatch(sql, @"(?<![\w.])detail(?![\w])", RegexOptions.IgnoreCase));
+
+            if (isInsert || !mentionsDetail)
+            {
+                continue;
+            }
+
+            var fqName = EnclosingMethodFqName(text, sqlMatch.Index);
+            if (fqName is not null)
+            {
+                results.Add(fqName);
+            }
+        }
+
+        return results;
+    }
+
+    private static string? EnclosingMethodFqName(string text, int position)
+    {
+        var before = text[..position];
+
+        var methodMatch = LastMatch(before, @"(?:public|private|internal|protected)[^\n{;]*?\b(\w+)\s*\([^;{]*\)\s*(?:=>|\{)");
+        var classMatch = LastMatch(before, @"\bclass\s+(\w+)");
+        var namespaceMatch = LastMatch(before, @"\bnamespace\s+([\w.]+)");
+
+        if (methodMatch is null || classMatch is null)
+        {
+            return null;
+        }
+
+        var ns = namespaceMatch?.Groups[1].Value;
+        var cls = classMatch.Groups[1].Value;
+        var method = methodMatch.Groups[1].Value;
+
+        return ns is null ? $"{cls}.{method}" : $"{ns}.{cls}.{method}";
+    }
+
+    private static Match? LastMatch(string text, string pattern)
+    {
+        Match? last = null;
+        foreach (Match m in Regex.Matches(text, pattern))
+        {
+            last = m;
+        }
+
+        return last;
+    }
+
+    /// <summary>Every <c>.cs</c> file under <c>Darling/</c> (excluding <c>Darling.Tests</c> and build
+    /// output) plus <c>PerformanceMonitor.Common/</c>, resolved from this test file's own path the same
+    /// way <see cref="ReadStoreSource"/> finds the store.</summary>
+    private static System.Collections.Generic.IEnumerable<string> ProductionSourceFiles(
+        [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        var dir = Path.GetDirectoryName(thisFile)!;
+        while (dir is not null && !Directory.Exists(Path.Combine(dir, "Darling")))
+        {
+            dir = Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        var root = dir!;
+
+        var darlingFiles = Directory.EnumerateFiles(Path.Combine(root, "Darling"), "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}Darling.Tests{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
+
+        var commonDir = Path.Combine(root, "PerformanceMonitor.Common");
+        var commonFiles = Directory.Exists(commonDir)
+            ? Directory.EnumerateFiles(commonDir, "*.cs", SearchOption.AllDirectories)
+                .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                    && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            : Enumerable.Empty<string>();
+
+        return darlingFiles.Concat(commonFiles);
+    }
+
+
+    private static string ReadStoreSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        var dir = System.IO.Path.GetDirectoryName(thisFile)!;
+        var relative = System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgPlanForceActionStore.cs");
+        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relative)))
+        {
+            dir = System.IO.Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relative));
     }
 }
