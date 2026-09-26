@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -228,9 +229,10 @@ public sealed class DarlingMcpPgIndexUsageTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (seven days). Widen this to the longest interval any scheduled job runs on before calling an index unused.")] int hours_back = 168,
         [Description("Maximum indexes to return, biggest unscanned first. Default 25. See the tool's reading guide.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -247,12 +249,12 @@ public sealed class DarlingMcpPgIndexUsageTools
                exactly `limit` reportable indexes as a cut page. Bound BEFORE the aggregates below, so every count
                is a count of the page. */
             var fetched = await DarlingPgIndexUsageReader.GetPgIndexUsageAsync(
-                postgres, resolved.ServerId, start, end, limit + 1);
+                postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, cancellationToken);
             }
 
             var unscanned = rows.Where(r => r.ScansInWindow == 0 && r.IsValid && !r.IsPrimaryKey
@@ -366,7 +368,7 @@ public sealed class DarlingMcpPgIndexUsageTools
                 indexes,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_index_usage", ex);
         }
@@ -382,16 +384,17 @@ public sealed class DarlingMcpPgIndexUsageTools
     /// windowed scan count is a difference and needs two.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end)
+        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
+        CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_index_usage_stats");
+            postgres, serverId, serverName, "pg_index_usage_stats", cancellationToken);
         if (gated != null)
         {
             return gated;
         }
 
-        var probe = await DarlingPgIndexUsageReader.ProbePgIndexUsageAsync(postgres, serverId, start, end);
+        var probe = await DarlingPgIndexUsageReader.ProbePgIndexUsageAsync(postgres, serverId, start, end, cancellationToken);
 
         var hints = new
         {
