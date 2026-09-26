@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -67,9 +68,10 @@ public sealed class DarlingMcpPgWaitSamplingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return, most samples first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window whatever this is set to.")] int limit = 20,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -83,12 +85,12 @@ public sealed class DarlingMcpPgWaitSamplingTools
                signal - and the window's sample count rides on the same statement, so the shares below
                have a denominator the cap cannot shrink. */
             var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
 
             /* #3604: which arm fed these rows, off the collector's own state. Read on the empty path too, so
                a service-tier target that is genuinely idle is told it is being sampled at the floor grain
                rather than left to wonder whether the extension tier was ever in play. */
-            var instrument = await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId);
+            var instrument = await DarlingPgWaitSamplingReader.GetWaitInstrumentAsync(postgres, resolved.ServerId, cancellationToken);
 
             if (page.Rows.Count == 0)
             {
@@ -98,9 +100,9 @@ public sealed class DarlingMcpPgWaitSamplingTools
                    pg_wait_sampling needs shared_preload_libraries and a server restart, so an operator
                    who has not done that gets told what to do rather than shown a blank. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_wait_sampling", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No sampled waits for {resolved.ServerName} in the last {hours_back} hour(s). The "
@@ -113,7 +115,7 @@ public sealed class DarlingMcpPgWaitSamplingTools
 
             return BuildWaitSamplingJson(resolved.ServerName, hours_back, page, limit, instrument);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_wait_sampling", ex);
         }
