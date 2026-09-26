@@ -496,7 +496,7 @@ public sealed class PgServerConfigScopeRungTests
         Assert.Contains("node[\"pending_restart_caveat\"] = PgFileSettingsCapability.UnreadableCaveat;", code, StringComparison.Ordinal);
         Assert.DoesNotContain("database_overrides = ", code, StringComparison.Ordinal);
         Assert.DoesNotContain("database_overrides_note = ", code, StringComparison.Ordinal);
-        Assert.Contains("GetOverridesAsync(postgres, resolved.ServerId)", tools, StringComparison.Ordinal);
+        Assert.Contains("GetOverridesAsync(postgres, resolved.ServerId, cancellationToken)", tools, StringComparison.Ordinal);
         /* Uncapped, deliberately: the settings list is paged and this is not. */
         Assert.DoesNotContain("GetOverridesAsync(postgres, resolved.ServerId, limit", tools, StringComparison.Ordinal);
 
