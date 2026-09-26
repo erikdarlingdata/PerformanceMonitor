@@ -133,6 +133,31 @@ A log line comes back. `permission denied for function pg_read_file` means the E
 *in this database*; until both halves are in place, all three collectors fail every cycle as `PERMISSIONS`,
 with an `error_message` naming this exact pair and the database to run it in.
 
+### Windows only: the pg_file_settings grants (pg_server_config's pending_restart)
+
+`pg_server_config` reads `pending_restart` off `pg_settings`, which is per-connection: on Windows, where a
+new backend rebuilds its settings from the postmaster's saved values on every connect, that column can read
+`false` for a setting that changed and reloaded but is still waiting for a restart — and this collector opens
+a fresh connection every cycle. On Unix this does not happen: the postmaster itself applies the reload, and
+every backend it forks inherits the flag, so `pg_settings.pending_restart` is already correct there. Granting
+the two objects below on a non-Windows target fixes nothing, and the collector does not ask for them there —
+skip this section on Linux, RDS, Aurora, Azure and Cloud SQL.
+
+On a Windows target, `pg_file_settings` closes the gap: it is read from the file, not backend-local state. It
+needs two grants, both superuser-only by default:
+
+```sql
+GRANT SELECT ON pg_file_settings TO darling_monitor;
+GRANT EXECUTE ON FUNCTION pg_show_all_file_settings() TO darling_monitor;
+```
+
+Both are superuser-only for a reason: the view returns every uncommented line of every configuration file,
+including lines that are not the running value — a superseded or misspelled `primary_conninfo` with its
+password still sitting above the current one, for example — and each file's path. Grant them only if that
+exposure is acceptable for this role. The collector reads nothing from the view but a setting's name and its
+error text; `get_pg_server_config` and `get_pg_logging_audit` say so in the caveat they attach when the
+grants are missing on a Windows target.
+
 ### IAM, for the three collectors that read the server log (plan capture, deadlocks, log events)
 
 This is a **different axis from the grant above** — it authorizes the **monitoring host's AWS identity**,
