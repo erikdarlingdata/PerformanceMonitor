@@ -2145,7 +2145,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["audit_config"] = R(CatAnalysis, "Configuration-audit findings for a server.", PServer()),
             ["compare_analysis"] = R(CatAnalysis, "Compare a window's analysis facts against an earlier baseline.", PServer(), PHours(4), PInt("baseline_hours_back", 28), PAsOf()),
             ["get_analysis_facts"] = R(CatAnalysis, "Raw analysis facts for a window, filtered by source and minimum severity.", PServer(), PHours(4), PText("source"), PDouble("min_severity", 0), PAsOf()),
-            ["get_analysis_findings"] = R(CatAnalysis, "Persisted analysis findings for a server.", PServer(), PHours(24), PAsOf()),
+            ["get_analysis_findings"] = R(CatAnalysis, "Persisted analysis findings for a server.", PServer(), PHours(24), PAsOf(), PLimit(MaxRowLimit), PBool("include_drilldown", false), PBool("full_text", true)),
 
             /* ── sessions (DarlingMcpSessionTools) ── */
             ["get_active_queries"] = R(CatSessions, "Currently-active queries, optionally blocking-only.", PServer(), PHours(1), PText("database_name"), PBool("blocking_only", false), PLimit(50), PAsOf()),
