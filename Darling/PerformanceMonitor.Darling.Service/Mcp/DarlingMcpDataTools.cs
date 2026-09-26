@@ -745,7 +745,16 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var rows = await DarlingDataReader.GetTopProceduresByCpuAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, cancellationToken);
+            var routed = await DarlingDataReader.GetTopProceduresByCpuRoutedAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, cancellationToken);
+            var rows = routed.Rows;
+            var tierUsed = routed.Tier == RetentionTier.Hourly ? "hourly" : "raw";
+
+            /* #4231 stage 3b: hourly-routed rows have no object_type, sql_handle or plan_handle — stated once
+               here rather than per row, since it is a property of the tier, not the row. */
+            var precisionNote = tierUsed == "hourly"
+                ? "hourly-rollup rows have no object_type, sql_handle, or plan_handle"
+                : null;
+
             if (rows.Count == 0)
                 return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken)
                     ?? McpHelpers.Status(
@@ -753,10 +762,15 @@ public sealed class DarlingMcpDataTools
                         "No procedure stats available. Delta-based collection requires at least two collection cycles (~30 minutes) to produce non-zero values.");
 
             /* #4231: what the raw tier actually held, beside what was asked for — same probe and disclosure as
-               get_top_queries_by_cpu and get_query_store_top (#2364), over procedure_stats. */
-            var floor = await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
-            var effectiveStart = RawWindowFloor.EffectiveStart(floor, requestedStart);
-            var windowTruncated = RawWindowFloor.IsTruncated(floor, requestedStart);
+               get_top_queries_by_cpu and get_query_store_top (#2364), over procedure_stats.
+               #4231 stage 3b: only meaningful for the RAW tier — an hourly-routed read did not touch
+               procedure_stats at all, so the raw floor probe would answer a fact about a table this read
+               never consulted; skip it and report window_truncated = false there. */
+            var floor = tierUsed == "raw"
+                ? await DarlingDataReader.GetProcedureStatsWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken)
+                : null;
+            var effectiveStart = tierUsed == "raw" ? RawWindowFloor.EffectiveStart(floor, requestedStart) : requestedStart;
+            var windowTruncated = tierUsed == "raw" && RawWindowFloor.IsTruncated(floor, requestedStart);
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
                same concurrent independent reads. */
@@ -775,7 +789,10 @@ public sealed class DarlingMcpDataTools
             {
                 database_name = r.DatabaseName,
                 full_name = string.IsNullOrEmpty(r.SchemaName) ? r.ObjectName : $"{r.SchemaName}.{r.ObjectName}",
-                object_type = r.ObjectType,
+                /* #4231 stage 3b: procedure_stats_hourly carries no object_type column, so an hourly-routed
+                   row reports null here rather than the empty string the reader's default carries —
+                   precision_note says so. */
+                object_type = tierUsed == "hourly" ? null : r.ObjectType,
                 sql_handle = r.SqlHandle,
                 plan_handle = r.PlanHandle,
                 execution_count = r.TotalExecutions,
@@ -804,6 +821,11 @@ public sealed class DarlingMcpDataTools
                 /* #4231: what was served, beside what was asked for. */
                 effective_start = effectiveStart.ToString("o"),
                 effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
+                /* #4231 stage 3b: which tier answered — "raw" or "hourly" (never bare truncated/degraded
+                   vocabulary; see McpHelpers.WindowTruncatedDescription's own rule). precision_note explains
+                   what an hourly-routed row is missing versus what raw would have returned. */
+                tier_used = tierUsed,
+                precision_note = precisionNote,
                 cpu_attribution = new
                 {
                     ranked_cpu_seconds = attribution.RankedCpuSeconds,
