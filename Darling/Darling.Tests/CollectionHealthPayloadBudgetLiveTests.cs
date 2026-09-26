@@ -48,7 +48,7 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
         var path = FindRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         var source = System.IO.File.ReadAllText(path);
         Assert.Contains(
-            "[\"get_collection_health\"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true)",
+            "[\"get_collection_health\"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true, cancellationToken: c.RequestAborted)",
             source, StringComparison.Ordinal);
     }
 

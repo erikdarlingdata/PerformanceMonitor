@@ -482,7 +482,7 @@ public sealed class PerServerCollectionHealthMemoTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpDataTools.cs");
 
         Assert.Contains(
-            "var nowUtc = DateTime.UtcNow;\n            var (rows, collectionHealthAgeSeconds) = await DarlingDataReader.GetCollectionHealthMemoizedAsync(\n                postgres, resolved.ServerId, nowUtc.AddDays(-7), nowUtc);",
+            "var nowUtc = DateTime.UtcNow;\n            var (rows, collectionHealthAgeSeconds) = await DarlingDataReader.GetCollectionHealthMemoizedAsync(\n                postgres, resolved.ServerId, nowUtc.AddDays(-7), nowUtc, cancellationToken);",
             tool,
             StringComparison.Ordinal);
 

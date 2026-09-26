@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -52,14 +53,15 @@ public sealed class DarlingMcpHealthTools
     [McpServerTool(Name = "get_server_summary"), Description(ServerSummaryDescription)]
     public static async Task<string> GetServerSummary(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name. Optional if only one server is configured.")] string? server_name = null)
+        [Description("Server name or display name. Optional if only one server is configured.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var summary = await DarlingHealthReader.GetServerSummaryAsync(postgres, resolved.ServerId);
+            var summary = await DarlingHealthReader.GetServerSummaryAsync(postgres, resolved.ServerId, cancellationToken);
             if (summary.HasNoData)
                 return McpHelpers.Status(
                     "unavailable",
@@ -81,7 +83,7 @@ public sealed class DarlingMcpHealthTools
                 last_collection = summary.LastCollectionTime?.ToString("o")
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_server_summary", ex);
         }
@@ -91,9 +93,10 @@ public sealed class DarlingMcpHealthTools
     public static async Task<string> GetDailySummary(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Summary date, ISO-8601 yyyy-MM-dd ONLY (e.g. 2026-07-09), interpreted as a UTC day; any other spelling is refused rather than guessed at. Default is today.")] string? summary_date = null)
+        [Description("Summary date, ISO-8601 yyyy-MM-dd ONLY (e.g. 2026-07-09), interpreted as a UTC day; any other spelling is refused rather than guessed at. Default is today.")] string? summary_date = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* #3541 A9: exact ISO-8601, refused otherwise — McpHelpers.ParseSummaryDate says why the general
@@ -103,7 +106,7 @@ public sealed class DarlingMcpHealthTools
 
         try
         {
-            var row = await DarlingHealthReader.GetDailySummaryAsync(postgres, resolved.ServerId, date);
+            var row = await DarlingHealthReader.GetDailySummaryAsync(postgres, resolved.ServerId, date, cancellationToken);
 
             /* #3541 A9: a day before the retention horizon is "unavailable" in the miss vocabulary's own
                sense — it existed and is not retrievable now — and it is told apart from a never-collected
@@ -174,7 +177,7 @@ public sealed class DarlingMcpHealthTools
                 days_missing = row.UniqueQueries is null ? new[] { row.SummaryDate.ToString("yyyy-MM-dd") } : Array.Empty<string>(),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_daily_summary", ex);
         }
@@ -185,9 +188,10 @@ public sealed class DarlingMcpHealthTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Days of history, ending on the anchor day (inclusive). Default 30; max 366 (a year).")] int days_back = 30,
-        [Description(McpHelpers.AsOfDaysDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDaysDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* A year, not the calendar's month, because "how did last quarter look" is a real question — but
@@ -219,7 +223,7 @@ public sealed class DarlingMcpHealthTools
             /* #4232 ruling item 5: only a read "as of now" (no as_of given) uses the closed-day cache — a
                caller who pinned an explicit end time gets an unmemoized read of exactly that moment every time. */
             var range = await DarlingHealthReader.GetDailySummaryRangeAsync(
-                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd, asOfNow: as_of is null);
+                postgres, resolved.ServerId, fromDate, toDate, referenceUtc: windowEnd, asOfNow: as_of is null, cancellationToken: cancellationToken);
             var rows = range.Rows;
 
             if (rows.Count == 0)
@@ -236,7 +240,7 @@ public sealed class DarlingMcpHealthTools
                     writes a row whatever it found, so its presence is proof somebody looked, and unlike an
                     edge table it cannot report a healthy server as uncollected.
                 */
-                var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId);
+                var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId, cancellationToken);
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
@@ -297,7 +301,7 @@ public sealed class DarlingMcpHealthTools
                 days_missing = range.DaysMissing.Select(day => day.ToString("yyyy-MM-dd")),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_daily_summary_range", ex);
         }
