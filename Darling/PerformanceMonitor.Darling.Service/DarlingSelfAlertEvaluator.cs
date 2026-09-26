@@ -1633,7 +1633,11 @@ internal sealed class DarlingSelfAlertEvaluator
                     shortMessage: $"{regression.CollectorName} collection cost on {regression.ServerName} is {ratio:N1}x its per-run baseline",
                     numericCurrentValue: regression.LatestMsPerRun,
                     numericThresholdValue: threshold,
-                    cancellationToken);
+                    cancellationToken,
+                    /* #4223 self-monitor notebook: the collector this firing is about, as structured data,
+                       so the notebook template can scope its collection-log/cost/stall-probe reads to it
+                       instead of showing every collector's log. */
+                    context: new AlertContext { CollectorName = regression.CollectorName });
             }
         }
 

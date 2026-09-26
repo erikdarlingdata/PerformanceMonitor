@@ -86,6 +86,15 @@ public class AlertContext
     /// member existed.
     /// </summary>
     public string? WaitType { get; set; }
+
+    /// <summary>
+    /// The collector this firing is ABOUT (#4223 self-monitor notebook), as structured data rather than
+    /// something a reader has to regex out of <see cref="Details"/>'s prose. Set by the Collector Cost
+    /// Regression fire site (<c>DarlingSelfAlertEvaluator</c>'s <c>regression.CollectorName</c>, the same
+    /// value the row's cooldown key (<c>cost:{serverId}:{collector}</c>) already carries). Null on every
+    /// other alert and on any row written before this member existed.
+    /// </summary>
+    public string? CollectorName { get; set; }
 }
 
 /// <summary>
@@ -321,7 +330,11 @@ public record AlertContextDto(
     AlertRoutingDto? Routing = null,
     /* #4223 Poison Wait: trailing and nullable like Route/Routing, so a row written before this member
        existed rehydrates to null ("this row carries no wait type") rather than a fabricated value. */
-    string? WaitType = null);
+    string? WaitType = null,
+    /* #4223 self-monitor notebook: trailing and nullable like WaitType, so a row written before this
+       member existed rehydrates to null ("this row carries no collector name") rather than a fabricated
+       value. */
+    string? CollectorName = null);
 
 /// <summary>
 /// The persisted routing DECISION for an analysis finding (#3712): trailing and nullable on
@@ -611,7 +624,9 @@ public static class AlertContextSerializer
             /* #3712: whether the fan-out was allowed to run, and why. Already the persisted shape. */
             context.Routing,
             /* #4223: the wait type this firing is about, as structured data. Already the persisted shape. */
-            context.WaitType);
+            context.WaitType,
+            /* #4223: the collector this firing is about, as structured data. Already the persisted shape. */
+            context.CollectorName);
         return JsonSerializer.Serialize(dto);
     }
 
@@ -637,6 +652,35 @@ public static class AlertContextSerializer
             }
 
             return waitType.GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The collector name a persisted alert-history row carries (#4223 self-monitor notebook), or
+    /// <c>null</c> when it carries none — any non-Collector-Cost-Regression alert, a row written before the
+    /// member existed, or unparseable JSON. Reads the one property rather than rehydrating the whole
+    /// context, for the reason <see cref="TryReadRoute"/> gives.
+    /// </summary>
+    public static string? TryReadCollectorName(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.CollectorName), out var collectorName)
+                || collectorName.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            return collectorName.GetString();
         }
         catch (JsonException)
         {
@@ -827,6 +871,10 @@ public static class AlertContextSerializer
             /* #4223: the wait type this firing is about, null on every non-Poison-Wait alert and every row
                written before this member existed. */
             context.WaitType = dto.WaitType;
+
+            /* #4223: the collector this firing is about, null on every non-Collector-Cost-Regression alert
+               and every row written before this member existed. */
+            context.CollectorName = dto.CollectorName;
 
             foreach (var d in dto.Details)
             {
