@@ -568,6 +568,126 @@ public sealed class EmptySupersededBaselineLiveTests
         Assert.True(await RelationExistsAsync(connection, successor, ct), "the successor must stay regardless");
     }
 
+    /// <summary>#4292: the keep side of the same coverage question. A legacy CONTINUOUS AGGREGATE that HOLDS
+    /// rows, paired with a successor whose own oldest bucket is NEWER than the retention horizon (the
+    /// successor is "short"), must not be dropped: <see cref="TimescaleSupport.SupersededBaselineRelationDropsAt"/>
+    /// only drops a row-holding CAGG once the successor's coverage reaches the horizon. Two hours are planted
+    /// into <c>collect.wait_stats</c> — one 40 days back (older than the 35-day <see
+    /// cref="TimescaleSupport.BaselineRetentionSpan"/> horizon) and one 5 days back — and the LEGACY aggregate
+    /// is never refreshed, so its real-time aggregation (<c>timescaledb.materialized_only = false</c>) unions in
+    /// BOTH raw hours regardless of age, and it holds rows. The SUCCESSOR is refreshed ONLY from the 5-day-back
+    /// hour forward, the same trick <see cref="RetiredBaselineAggregateLiveTests.Supersession_RestartZeroInLegacyNotSuccessor_ProviderFollowsCoverage_SweepWaitsForTheTier_AgainstDevPostgres"/>
+    /// uses to make a successor shallower than its legacy: the un-materialized 40-day-old hour sits BELOW the
+    /// resulting watermark, so it is served by neither the materialization nor the real-time union, and the
+    /// successor's own oldest bucket lands at the 5-day-back hour — newer than the horizon, i.e. short.</summary>
+    [Fact]
+    public async Task NonEmptyLegacyAggregate_SuccessorShort_IsKept()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4292 non-empty-legacy test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #4292 non-empty-legacy test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        /* Same start order as the real service (DailyStitchLiveTests, SuccessorDailyLiveTests): collection_log
+           becomes a hypertable BEFORE the ensure sweep, because collection_health_hourly (one of the ordinary
+           HourlyAggregates the sweep also creates) selects FROM it. */
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        /* Stopped for the same reason as the sibling facts above: a policy firing mid-test must never be able
+           to explain an unexpected row or watermark move. */
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        /* The successor (wait_stats_interval_baseline) comes from the ordinary ensure sweep, WITH NO DATA. */
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        const string legacy = TimescaleSupport.LegacyWaitStatsBaselineView;
+        const string successor = TimescaleSupport.WaitStatsIntervalBaselineView;
+
+        await using (var create = new NpgsqlCommand(TimescaleSupport.LegacyCreateWaitStatsBaselineSql, connection) { CommandTimeout = 120 })
+        {
+            await create.ExecuteNonQueryAsync(ct);
+        }
+
+        const int serverId = 9292; // own id — this own-store scratch database has no sibling rows to collide with
+        const string serverName = "nonempty-legacy-short-successor";
+        const string waitType = "NONEMPTY_LEGACY_SHORT_SUCCESSOR_WAIT";
+        var hourOld = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-40).Date.AddHours(9), DateTimeKind.Unspecified);
+        var hourRecent = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-5).Date.AddHours(9), DateTimeKind.Unspecified);
+
+        await InsertWaitAsync(connection, 929201L, hourOld, serverId, serverName, waitType, 60000, 300, ct);
+        await InsertWaitAsync(connection, 929202L, hourRecent, serverId, serverName, waitType, 60000, 300, ct);
+
+        /* The legacy aggregate is never refreshed: its real-time aggregation (materialized_only = false) unions
+           in every raw row regardless of age when nothing has ever been materialized, so it holds both hours. */
+        Assert.True(await HasRowsAsync(connection, legacy, ct), "the legacy aggregate must hold rows for this test to mean anything");
+
+        /* The successor is refreshed ONLY from the recent hour forward, so the 40-day-old hour falls below the
+           resulting watermark and is invisible to it — the successor's own oldest bucket lands at the recent
+           hour, newer than the 35-day horizon. */
+        await RefreshFromAsync(connection, successor, hourRecent, ct);
+        Assert.Equal(hourRecent, await ScalarAsync<DateTime>(connection, $"SELECT min(bucket) FROM collect.{successor} WHERE server_id = {serverId}", null, ct));
+
+        var verdict = await TimescaleSupport.JudgeSupersededBaselineRelationAsync(connection, legacy, successor, DateTime.UtcNow, ct);
+        Assert.Equal(TimescaleSupport.SupersededBaselineDecision.SuccessorShort, verdict.Decision);
+        Assert.True(verdict.LegacyIsContinuousAggregate);
+        Assert.True(verdict.LegacyHoldsRows);
+        Assert.Equal(hourRecent, verdict.SuccessorOldest);
+
+        Assert.Equal(0, await TimescaleSupport.DropRetiredBaselineAggregatesAsync(connection, null, DateTime.UtcNow, ct));
+        Assert.True(await RelationExistsAsync(connection, legacy, ct), "a row-holding legacy aggregate must survive while its successor is short");
+        Assert.True(await HasRowsAsync(connection, legacy, ct), "the surviving legacy aggregate must still return its rows");
+        Assert.True(await RelationExistsAsync(connection, successor, ct), "the successor must stay regardless");
+    }
+
+    private static async Task InsertWaitAsync(
+        NpgsqlConnection connection, long collectionId, DateTime at, int serverId, string serverName, string waitType, long deltaWaitMs, int? intervalSeconds, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(
+            "INSERT INTO collect.wait_stats (collection_id, collection_time, server_id, server_name, wait_type, delta_waiting_tasks, delta_wait_time_ms, sample_interval_seconds) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            connection);
+        command.Parameters.AddWithValue(collectionId);
+        command.Parameters.AddWithValue(at);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(waitType);
+        command.Parameters.AddWithValue(10L);
+        command.Parameters.AddWithValue(deltaWaitMs);
+        command.Parameters.AddWithValue(intervalSeconds.HasValue ? intervalSeconds.Value : DBNull.Value);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task RefreshFromAsync(NpgsqlConnection connection, string view, DateTime from, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(view), connection) { CommandTimeout = 120 };
+        command.Parameters.AddWithValue(from);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<T> ScalarAsync<T>(NpgsqlConnection connection, string sql, DateTime? at, System.Threading.CancellationToken ct)
+    {
+        using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
+        if (at is DateTime bound)
+        {
+            command.Parameters.AddWithValue(bound);
+        }
+
+        var value = await command.ExecuteScalarAsync(ct);
+        Assert.NotNull(value);
+        return (T)Convert.ChangeType(value, typeof(T), System.Globalization.CultureInfo.InvariantCulture)!;
+    }
+
     private static async Task<bool> HasRowsAsync(NpgsqlConnection connection, string view, System.Threading.CancellationToken ct)
     {
         using var probe = new NpgsqlCommand(TimescaleSupport.BaselineRelationHasRowsSql(view), connection) { CommandTimeout = 120 };
