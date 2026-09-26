@@ -6269,7 +6269,7 @@ AND   j.hypertable_name = '{relation}'";
     /// repair started. Reached ONLY from a completion that did not throw and was not cancelled
     /// (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>): a repair cut short by shutdown or a failure
     /// isolated per aggregate has not shown the store a clean pass, so it must not make the trigger's epoch
-    /// check pass either. Guarded with <c>IS DISTINCT FROM</c> (ruled 2026-09-26 04:26Z) rather than an
+    /// check pass either. Guarded with <c>IS DISTINCT FROM</c> rather than an
     /// unconditional write, for the same reason <see cref="ConvergeRawArmedStateSql"/> merges via <c>||</c>
     /// instead of restating the whole config: a repeat stamp of the SAME value must not write a row every
     /// pass it is already true, which is what lets a second service's own re-stamp (were one ever added) stay

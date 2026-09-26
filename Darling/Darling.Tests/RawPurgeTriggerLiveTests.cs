@@ -92,8 +92,8 @@ SELECT
     1,
     'probe-trigger-pins',
     'ProbeDb',
-    decode(md5('l2d-' || n), 'hex'),
-    decode(md5('l2d-h-' || n), 'hex'),
+    decode(md5('trigger-pins-' || n), 'hex'),
+    decode(md5('trigger-pins-h-' || n), 'hex'),
     1, 1, 1, 30
 FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeoutSeconds };
         await seed.ExecuteNonQueryAsync();
