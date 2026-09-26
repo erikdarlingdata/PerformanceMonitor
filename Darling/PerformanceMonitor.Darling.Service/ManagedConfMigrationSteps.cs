@@ -200,7 +200,7 @@ internal static class ManagedConfMigrationSteps
     /// <summary>
     /// Writes <see cref="PendingFileName"/> atomically (#4336 lane 5b): the BEFORE snapshot (tab-separated,
     /// one row per line, every field escaped so a tab or newline INSIDE a setting's own value round-trips
-    /// exactly — <see cref="EscapeField"/>) plus, on its own leading line, the prior managed-file text (null
+    /// exactly — <see cref="EncodeField(string?)"/>) plus, on its own leading line, the prior managed-file text (null
     /// when none existed — a fresh initdb'd store migrating for the first time). This is the risk called out
     /// in the plan: "the pending file is the only record of 'before' after a crash." If it cannot be written,
     /// the caller must abort before <see cref="BackupOriginal"/> — nothing has changed yet.

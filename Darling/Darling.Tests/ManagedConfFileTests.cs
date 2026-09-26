@@ -228,7 +228,8 @@ public sealed class ManagedConfFileTests
         var rendered = ManagedConfFile.RenderWithValues(inputs, values);
         var body = ManagedConfFile.ParseExisting(rendered).Body;
 
-        Assert.DoesNotContain("work_mem", body, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"(?m)^work_mem\s*=", body);
+        Assert.Contains("maintenance_work_mem", body, StringComparison.Ordinal);
     }
 
     /// <summary>#4336 lane 5b, step 1, pin 4 (the plan's risk 2): a value containing a quote and a backslash
