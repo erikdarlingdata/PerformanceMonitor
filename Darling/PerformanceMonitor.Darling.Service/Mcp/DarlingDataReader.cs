@@ -971,7 +971,7 @@ internal static class DarlingDataReader
     /// tools read it the same way. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database filter (NULL = all),
     /// $6 lifetime max_dop floor (0 = no parallelism filter; #3541 A13).
     /// </summary>
-    public const string TopQueriesSql = """
+    public const string TopQueriesSql = $"""
         WITH ranked AS (
             SELECT
                 database_name,
@@ -1007,6 +1007,10 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
+            /* #4394: excludes a plan's first-collection row, whose "delta" can be cumulative since
+               plan creation rather than a true per-interval delta — the same filter the hourly
+               successor already bakes into its CREATE. */
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
             /* #2012 stage 2: host_object_name splits INSERT...EXEC callers that share a query_hash
                (each proc-hosted statement groups under its own host object), while ad-hoc rows carry
                NULL and keep collapsing into one group per hash exactly as before. */
@@ -1094,7 +1098,7 @@ internal static class DarlingDataReader
     /// <c>query_hash</c> in a rolled-up row is one member of the group, exactly as <c>query_text</c> already
     /// is when <c>distinct_texts &gt; 1</c> — <c>distinct_query_hashes</c> is what says so.</para>
     /// </summary>
-    public const string TopQueriesByHostObjectSql = """
+    public const string TopQueriesByHostObjectSql = $"""
         WITH ranked AS (
             SELECT
                 database_name,
@@ -1125,6 +1129,8 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
+            /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
+            AND   {TimescaleSupport.IntervalHonestSourceFilter}
             /* #2235: proc-hosted rows collapse to one row per (database, host object) — every literal
                fragment of one statement lands together. Ad-hoc rows (host_object_name NULL) fall to the
                CASE and stay keyed on their OWN query_hash, so they group exactly as the default read does;
@@ -1445,7 +1451,7 @@ internal static class DarlingDataReader
     /// <c>delta_worker_time</c> (CPU — the tool's promise; #3523) descending, cap at top. Reads the base <c>procedure_stats</c> table
     /// (no v_ view). $1 server_id, $2/$3 window (naive UTC), $4 top.
     /// </summary>
-    public const string TopProceduresSql = """
+    public const string TopProceduresSql = $"""
         SELECT
             database_name,
             schema_name,
@@ -1469,6 +1475,8 @@ internal static class DarlingDataReader
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($5::text IS NULL OR database_name = $5)
+        /* #4394: same first-collection exclusion as TopQueriesSql — see its note. */
+        AND   {TimescaleSupport.IntervalHonestSourceFilter}
         GROUP BY database_name, schema_name, object_name, object_type
         HAVING SUM(delta_execution_count) > 0 OR SUM(delta_elapsed_time) > 0
         ORDER BY SUM(delta_worker_time) DESC
