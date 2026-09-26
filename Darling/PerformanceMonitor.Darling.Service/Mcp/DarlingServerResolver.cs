@@ -263,9 +263,9 @@ ORDER BY server_name";
     /// accept a <c>dedup_key</c> need both, and reading the registry twice could disagree with itself.
     /// </summary>
     public static async Task<((int ServerId, string ServerName, string FingerprintName) resolved, string? error)>
-        ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName)
+        ResolveWithFingerprintNameAsync(NpgsqlDataSource postgres, string? serverName, CancellationToken cancellationToken = default)
     {
-        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres);
+        var (servers, fault) = await LoadEnabledOrFaultAsync(postgres, cancellationToken);
         if (fault is not null)
         {
             return (default, fault);
