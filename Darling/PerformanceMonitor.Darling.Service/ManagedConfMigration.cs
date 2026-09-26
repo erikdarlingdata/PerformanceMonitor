@@ -107,22 +107,42 @@ internal static class ManagedConfMigration
     /// <see cref="ConfLineClassification.Unclassified"/>.</summary>
     internal static readonly string[] CoveredMarkers =
     [
+        DarlingManagedPostgres.ConfMarker,
         DarlingManagedPostgres.ConfMarkerV4,
         DarlingManagedPostgres.ConfMarkerV6,
+        DarlingManagedPostgres.ConfMarkerV8,
         DarlingManagedPostgres.ConfMarkerV9,
         DarlingManagedPostgres.ConfMarkerV10,
         DarlingManagedPostgres.ConfMarkerV11,
+        DarlingManagedPostgres.ConfMarkerV12,
         DarlingManagedPostgres.ConfMarkerV13,
         DarlingManagedPostgres.ConfMarkerV14,
         DarlingManagedPostgres.ConfMarkerV15,
     ];
 
     /// <summary>
+    /// Classifies every physical line of <paramref name="conf"/>, with no configured port available — v1's
+    /// <c>port = &lt;port&gt;</c> line therefore always classifies <see cref="ConfLineClassification.Unclassified"/>
+    /// (ruling comment-5836185470's item 2: "not guessable, not covered" becomes literally true only when the
+    /// caller has nothing to guess with). Kept so every pre-existing caller and pin keeps compiling.
+    /// </summary>
+    internal static IReadOnlyList<ClassifiedConfLine> ClassifyLines(string conf)
+        => ClassifyLines(conf, configuredPort: null);
+
+    /// <summary>
     /// Classifies every physical line of <paramref name="conf"/>. Pure: the same text and inputs classify
     /// the same way every time, which is what lets the rebuild test in the pins compare this output against
     /// the exact builder call that (in the field) produced the line under test.
+    ///
+    /// <para><paramref name="configuredPort"/> is the store's configured port (#4336 lane c1, ruling
+    /// comment-5836185470 item 2), an input <see cref="DarlingManagedPostgres.BuildConfAppend"/> needs to
+    /// rebuild v1's <c>port = &lt;port&gt;</c> line — the one line in that block this class cannot re-derive
+    /// from the conf text alone. Null (the default; see the overload above) leaves v1 at
+    /// <see cref="ConfLineClassification.Unclassified"/>, exactly as before this parameter existed; a wrong
+    /// port rebuilds to a line that does not match the host's actual <c>port = &lt;port&gt;</c> line and is a
+    /// hand edit, never ours.</para>
     /// </summary>
-    internal static IReadOnlyList<ClassifiedConfLine> ClassifyLines(string conf)
+    internal static IReadOnlyList<ClassifiedConfLine> ClassifyLines(string conf, int? configuredPort)
     {
         var result = new List<ClassifiedConfLine>();
         if (string.IsNullOrEmpty(conf))
@@ -142,7 +162,7 @@ internal static class ManagedConfMigration
 
             if (TryFindSpan(coveredSpans, lineNumber, out var span))
             {
-                result.Add(ClassifyCoveredLine(lineNumber, text, span, assignments));
+                result.Add(ClassifyCoveredLine(lineNumber, text, span, assignments, rawLines, configuredPort));
                 continue;
             }
 
@@ -162,7 +182,9 @@ internal static class ManagedConfMigration
         int lineNumber,
         string text,
         (int StartLine, int EndLine, string Marker) span,
-        Dictionary<int, (string Key, string Value)> assignments)
+        Dictionary<int, (string Key, string Value)> assignments,
+        string[] rawLines,
+        int? configuredPort)
     {
         if (string.Equals(text, span.Marker, StringComparison.Ordinal))
         {
@@ -173,15 +195,38 @@ internal static class ManagedConfMigration
         {
             /* A comment or blank line inside a covered block's span. No covered builder emits one, so this
                is a hand edit spliced in without its own blank-line terminator (the #4207 edge case
-               FindHardwareSizingBlockEnd's own doc comment names). */
+               FindHardwareSizingBlockEnd's own doc comment names) — UNLESS it is v8's fingerprint or v12's
+               stamp comment line, which the rebuild helpers below read directly out of the block's own text. */
+            if (span.Marker == DarlingManagedPostgres.ConfMarkerV8 && text.StartsWith(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, StringComparison.Ordinal))
+            {
+                return new ClassifiedConfLine(lineNumber, text, ConfLineClassification.Ours, span.Marker, Key: null, HandEditReason.None);
+            }
+
+            if (span.Marker == DarlingManagedPostgres.ConfMarkerV12 &&
+                (text.StartsWith(DarlingManagedPostgres.ConfWalSizingStampPrefix, StringComparison.Ordinal) || text.StartsWith("# derived from ", StringComparison.Ordinal)))
+            {
+                return new ClassifiedConfLine(lineNumber, text, ConfLineClassification.Ours, span.Marker, Key: null, HandEditReason.None);
+            }
+
             return new ClassifiedConfLine(lineNumber, text, ConfLineClassification.HandEdit, span.Marker, Key: null, HandEditReason.FormMismatch);
         }
 
         var (key, value) = assignment;
+
+        if (span.Marker == DarlingManagedPostgres.ConfMarker &&
+            string.Equals(key, "port", StringComparison.OrdinalIgnoreCase) && configuredPort is null)
+        {
+            /* No port to rebuild against — not guessable, and not a hand edit either, since every managed
+               store carries this line. See ClassifyV1Line's doc comment. */
+            return new ClassifiedConfLine(lineNumber, text, ConfLineClassification.Unclassified, span.Marker, key, HandEditReason.None);
+        }
+
         var (isOurs, reason) = span.Marker switch
         {
+            _ when span.Marker == DarlingManagedPostgres.ConfMarker => ClassifyV1Line(key, text, configuredPort),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV4 => ClassifyV4Line(key, text),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV6 => ClassifyV6Line(key, text),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV8 => ClassifyV8Line(key, text, span, rawLines),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV9 => ClassifyFixedLine(
                 key, text, "timezone", "timezone = 'UTC'"),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV10 => ClassifyFixedLine(
@@ -189,6 +234,7 @@ internal static class ManagedConfMigration
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV11 => ClassifyFixedLine(
                 key, text, PerformanceMonitor.Darling.Storage.StoreSelfMetrics.JobExecutionLoggingSetting,
                 PerformanceMonitor.Darling.Storage.StoreSelfMetrics.JobExecutionLoggingSetting + " = on"),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV12 => ClassifyV12Line(key, text, span, rawLines),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV13 => ClassifyV13Line(key, value, text),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV14 => ClassifyFixedLine(
                 key, text, DarlingManagedPostgres.MaintenanceWorkMemSetting,
@@ -200,6 +246,192 @@ internal static class ManagedConfMigration
 
         return new ClassifiedConfLine(
             lineNumber, text, isOurs ? ConfLineClassification.Ours : ConfLineClassification.HandEdit, span.Marker, key, isOurs ? HandEditReason.None : reason);
+    }
+
+    /// <summary>
+    /// v1's block (<see cref="DarlingManagedPostgres.BuildConfAppend"/>, #1681/#3175): three fixed lines
+    /// (<c>shared_preload_libraries = 'timescaledb'</c>, <c>listen_addresses = '127.0.0.1'</c>,
+    /// <c>default_toast_compression = lz4</c>) plus <c>port = &lt;port&gt;</c>, the one line that depends on
+    /// an input this class is not always given (#4336 lane c1, ruling comment-5836185470 item 2). With
+    /// <paramref name="configuredPort"/> null, the port line is <see cref="ConfLineClassification.Unclassified"/>
+    /// — not guessable, not a hand edit either, since a port line always exists on every managed store and this
+    /// class simply was not told what it should say. With a port, the line rebuilds exactly like any other
+    /// fixed constant: match is ours, a different port is a hand edit.
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV1Line(string key, string text, int? configuredPort)
+    {
+        if (string.Equals(key, "port", StringComparison.OrdinalIgnoreCase))
+        {
+            if (configuredPort is not { } port)
+            {
+                return (false, HandEditReason.None); /* caller maps this to Unclassified, see below */
+            }
+
+            return ClassifyFixedLine(key, text, "port", FormattableString.Invariant($"port = {port}"));
+        }
+
+        if (string.Equals(key, DarlingManagedPostgres.PreloadSetting, StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyFixedLine(key, text, DarlingManagedPostgres.PreloadSetting, DarlingManagedPostgres.PreloadSetting + " = 'timescaledb'");
+        }
+
+        if (string.Equals(key, "listen_addresses", StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyFixedLine(key, text, "listen_addresses", "listen_addresses = '127.0.0.1'");
+        }
+
+        return ClassifyFixedLine(key, text, "default_toast_compression", "default_toast_compression = lz4");
+    }
+
+    /// <summary>
+    /// v8's block (#2845/#4207, lane c1): re-runs <see cref="DarlingManagedPostgres.BuildHardwareSizingConfAppend"/>
+    /// with the RAM and hypertable count the block's OWN fingerprint line records (ruling comment-5836185470's
+    /// item 1) — not the host's current inputs — and compares byte-for-byte. A block untouched since it was
+    /// written matches at ITS OWN recorded inputs whatever the host is now (a resize since then does not make
+    /// an old, unedited block a hand edit — it makes it stale, which is <see cref="DarlingManagedPostgres.ShouldAppendHardwareSizing"/>'s
+    /// job to notice and replace, not this classifier's to punish). No fingerprint line in the span (an
+    /// operator deleted it, or spliced in a hand-written block using the real marker) fails the rebuild outright.
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV8Line(
+        string key, string text, (int StartLine, int EndLine, string Marker) span, string[] rawLines)
+    {
+        if (!TryFindFingerprintLine(span, rawLines, DarlingManagedPostgres.ConfHardwareFingerprintPrefix, out var fingerprint) ||
+            !TryParseHardwareFingerprint(fingerprint, out var ramMb, out var hypertables))
+        {
+            return (false, HandEditReason.RebuildMismatch);
+        }
+
+        var rebuilt = DarlingManagedPostgres.BuildHardwareSizingConfAppend(ramMb * 1024L * 1024L, hypertables);
+        return ClassifyAgainstRebuiltBlock(key, text, rebuilt);
+    }
+
+    /// <summary>
+    /// v12's block (#3802, lane c1): re-derives from the settings its OWN stamp line records — not from the
+    /// host's current free-disk figure — the same recorded-input rule as v8. The stamp already carries the
+    /// block's derived OUTPUTS (<c>max_wal_size_mb</c>, <c>min_wal_size_mb</c>, <c>pg_major</c>), so the two
+    /// setting lines rebuild directly from it without needing the raw free/total disk bytes the comment line
+    /// carries for a human reader only; that comment line itself is compared verbatim above (it is not an
+    /// assignment, so it never reaches this method).
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV12Line(
+        string key, string text, (int StartLine, int EndLine, string Marker) span, string[] rawLines)
+    {
+        if (!TryFindFingerprintLine(span, rawLines, DarlingManagedPostgres.ConfWalSizingStampPrefix, out var stamp) ||
+            !TryParseWalSizingStamp(stamp, out var maxWalSizeMb, out var minWalSizeMb, out var pgMajor))
+        {
+            return (false, HandEditReason.RebuildMismatch);
+        }
+
+        if (string.Equals(key, "max_wal_size", StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyFixedLine(key, text, "max_wal_size", FormattableString.Invariant($"max_wal_size = {maxWalSizeMb}MB"));
+        }
+
+        if (string.Equals(key, "min_wal_size", StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyFixedLine(key, text, "min_wal_size", FormattableString.Invariant($"min_wal_size = {minWalSizeMb}MB"));
+        }
+
+        if (!DarlingManagedPostgres.PinsCheckpointCompletionTarget(pgMajor))
+        {
+            /* The stamp says this major does not get the pin, so a checkpoint_completion_target line inside
+               the span cannot be this builder's output at these recorded inputs. */
+            return (false, HandEditReason.RebuildMismatch);
+        }
+
+        return ClassifyFixedLine(
+            key, text, "checkpoint_completion_target",
+            "checkpoint_completion_target = " + DarlingManagedPostgres.CheckpointCompletionTargetPin);
+    }
+
+    /// <summary>The one line inside <paramref name="span"/> that starts with <paramref name="prefix"/> — v8's
+    /// fingerprint or v12's stamp — read straight out of the block's own text rather than re-derived, which
+    /// is the whole point of the recorded-inputs rebuild rule (#4336 lane c1).</summary>
+    private static bool TryFindFingerprintLine(
+        (int StartLine, int EndLine, string Marker) span, string[] rawLines, string prefix, out string line)
+    {
+        for (var lineNumber = span.StartLine; lineNumber < span.EndLine; lineNumber++)
+        {
+            var text = TrimTrailingCarriageReturn(rawLines[lineNumber - 1]);
+            if (text.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                line = text;
+                return true;
+            }
+        }
+
+        line = string.Empty;
+        return false;
+    }
+
+    /// <summary>Parses <see cref="DarlingManagedPostgres.BuildHardwareFingerprint"/>'s own format,
+    /// <c>ram_mb=&lt;N&gt; hypertables=&lt;M&gt;</c>, back into the two inputs it recorded. Anything else fails,
+    /// which the caller treats as a rebuild mismatch rather than throwing.</summary>
+    private static bool TryParseHardwareFingerprint(string fingerprint, out long ramMb, out int hypertables)
+    {
+        ramMb = 0;
+        hypertables = 0;
+        var body = fingerprint[DarlingManagedPostgres.ConfHardwareFingerprintPrefix.Length..];
+        var parts = body.Split(' ');
+        if (parts.Length != 2 ||
+            !parts[0].StartsWith("ram_mb=", StringComparison.Ordinal) ||
+            !parts[1].StartsWith("hypertables=", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return long.TryParse(parts[0]["ram_mb=".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out ramMb) &&
+               int.TryParse(parts[1]["hypertables=".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out hypertables);
+    }
+
+    /// <summary>Parses <see cref="DarlingManagedPostgres.BuildWalSizingStamp"/>'s own format,
+    /// <c>max_wal_size_mb=&lt;N&gt; min_wal_size_mb=&lt;M&gt; pg_major=&lt;P&gt;</c>, back into the three
+    /// recorded outputs.</summary>
+    private static bool TryParseWalSizingStamp(string stamp, out int maxWalSizeMb, out int minWalSizeMb, out int pgMajor)
+    {
+        maxWalSizeMb = 0;
+        minWalSizeMb = 0;
+        pgMajor = 0;
+        var body = stamp[DarlingManagedPostgres.ConfWalSizingStampPrefix.Length..];
+        var parts = body.Split(' ');
+        if (parts.Length != 3 ||
+            !parts[0].StartsWith("max_wal_size_mb=", StringComparison.Ordinal) ||
+            !parts[1].StartsWith("min_wal_size_mb=", StringComparison.Ordinal) ||
+            !parts[2].StartsWith("pg_major=", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return int.TryParse(parts[0]["max_wal_size_mb=".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out maxWalSizeMb) &&
+               int.TryParse(parts[1]["min_wal_size_mb=".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out minWalSizeMb) &&
+               int.TryParse(parts[2]["pg_major=".Length..], NumberStyles.Integer, CultureInfo.InvariantCulture, out pgMajor);
+    }
+
+    /// <summary>Whether <paramref name="text"/>, keyed by <paramref name="key"/>, is one of the lines the
+    /// freshly rebuilt block <paramref name="rebuiltBlock"/> contains — the shared byte-for-byte compare v8's
+    /// rebuild test uses once it has re-run the builder at the block's own recorded inputs.</summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyAgainstRebuiltBlock(string key, string text, string rebuiltBlock)
+    {
+        foreach (var (_, rebuiltKey, _) in DarlingManagedPostgres.ParseConfText(rebuiltBlock))
+        {
+            if (!string.Equals(rebuiltKey, key, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var rebuiltLine in rebuiltBlock.Split('\n'))
+            {
+                if (rebuiltLine.TrimStart().StartsWith(key, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(rebuiltLine.Trim(), text.Trim(), StringComparison.Ordinal))
+                {
+                    return (true, HandEditReason.None);
+                }
+            }
+
+            return (false, HandEditReason.RebuildMismatch);
+        }
+
+        return (false, HandEditReason.RebuildMismatch);
     }
 
     /// <summary>v4's two fixed constants (#4214, BuildWriteThroughputConfAppend): <c>max_connections</c> at
