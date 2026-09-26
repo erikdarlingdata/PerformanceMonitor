@@ -228,11 +228,18 @@ public sealed class AlertNotebookAuthoredContextTests
         }
     }
 
-    [Fact]
-    public void ProductionPrefixTable_IsEmptyInThisStep()
-    {
-        Assert.Empty(AlertNotebookEndpoint.s_authoredPrefixTemplates);
-    }
+    /// <summary>Each context family (#4223) adds its own row to <c>s_authoredPrefixTemplates</c>, so this
+     /// assertion grows with them.</summary>
+     [Fact]
+     public void ProductionPrefixTable_HoldsExactlyTheRegisteredContextFamilies()
+     {
+         var row = Assert.Single(AlertNotebookEndpoint.s_authoredPrefixTemplates);
+         Assert.Equal("Custom:", row.Prefix);
+         Assert.Equal(AlertNotebookEndpoint.AuthoredContextKind.CustomRule, row.Kind);
+         Assert.NotNull(row.Entry.BuildCellsWithContext);
+         Assert.Null(row.Entry.BuildCells);
+         Assert.True(AlertNotebookEndpoint.ShouldPrefetch(row.Entry, row.Kind));
+     }
 
     /* ═══════════════════════════ Custom: id parsing ═══════════════════════════ */
 
@@ -355,8 +362,8 @@ public sealed class AlertNotebookAuthoredContextTests
     [Fact]
     public void ShouldPrefetch_NoContextBuilder_IsFalse_ForEveryRegisteredFamily()
     {
-        // s_authoredTemplates and s_authoredPrefixTemplates hold no #4223 context family yet, so this pins
-        // zero store reads for every family that exists today -- the gate the endpoint's call site depends on.
+        // This pins zero store reads for every family WITHOUT a context builder (#4223) -- the gate the
+         // endpoint's call site depends on.
         // A theory can't carry an internal type in a public signature, so this walks both tables in one fact.
         foreach (var kind in new[]
         {
