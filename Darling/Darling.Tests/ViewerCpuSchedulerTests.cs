@@ -27,7 +27,7 @@ namespace Darling.Tests;
 public sealed class ViewerCpuSchedulerSqlTests
 {
     [Fact]
-    public void CpuSchedulerTrendSql_SelectsPressureCounts_OverTheWindow_OrderedByTime()
+    public void CpuSchedulerTrendSql_SelectsPressureCounts_OverTheWindow_ThenBucketed_OrderedByBucket()
     {
         var sql = ViewerDataService.CpuSchedulerTrendSql;
 
@@ -38,11 +38,12 @@ public sealed class ViewerCpuSchedulerSqlTests
         Assert.Contains("WHERE server_id = $1", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
 
-        /* A point-in-time snapshot collector: the counts plot directly — no averaging, no delta. */
-        Assert.DoesNotContain("AVG(", sql, StringComparison.Ordinal);
+        /* #4234/#4349: a point-in-time snapshot collector, no delta math — but bucketed, so the raw
+         * counts are averaged per bucket, and the outer read orders by bucket_start, not collection_time. */
         Assert.DoesNotContain("LAG(", sql, StringComparison.Ordinal);
+        Assert.Contains("AS bucket_start", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY 1\n        ORDER BY 1", sql, StringComparison.Ordinal);
     }
 
     [Fact]
