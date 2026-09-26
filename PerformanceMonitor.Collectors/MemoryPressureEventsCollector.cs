@@ -85,6 +85,9 @@ OPTION(RECOMPILE);";
 
     public override string? WatermarkColumn => "sample_time";
 
+    /// <summary>#4197 part b: lets the host cache this collector's server-scoped watermark in memory.</summary>
+    public override Func<Row, DateTime?>? WatermarkValueAccessor => static row => row.SampleTime;
+
     /// <summary>Ring buffers are not exposed on Azure SQL DB — skip the cycle entirely.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) => !target.IsAzureSqlDb;
 
