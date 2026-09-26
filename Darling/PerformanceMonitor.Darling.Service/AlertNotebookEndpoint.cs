@@ -196,19 +196,33 @@ internal static partial class AlertNotebookEndpoint
 
             var lookbackHours = FamilyLookbackHours(metric);
             var trimmedMetric = string.IsNullOrWhiteSpace(metric) ? null : metric.Trim();
-            var authored = AuthoredTemplate(trimmedMetric);
 
             JsonArray cells;
             string templateId;
             int templateVersion;
 
-            if (authored is not null)
+            /* #4223: reports (the collector-cost digest, the fleet sweep rollup, the analysis singles
+               digest) declare no notebook at all, mechanical or authored -- checked BEFORE AuthoredTemplate
+               so a report never builds either template. Same 200-with-notes degrade every other empty/stale
+               link on this endpoint takes (class summary's "degrade, never error"): no cells, an honest note,
+               and for the one report with somewhere to send a reader, the note names it. */
+            if (IsDeclaredNoNotebook(trimmedMetric))
+            {
+                cells = new JsonArray();
+                templateId = "none/reports";
+                templateVersion = 0;
+                notes.Add((JsonNode)(
+                    string.Equals(trimmedMetric, TriageLink.FleetSweepRollupMetric, StringComparison.Ordinal)
+                        ? "Reports have no notebook; the Fleet Sweep Rollup opens the sweeps page."
+                        : "Reports have no notebook."));
+            }
+            else if (AuthoredTemplate(trimmedMetric) is { } authored)
             {
                 var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
-                cells = authored.Value.BuildCells(
+                cells = authored.BuildCells(
                     metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status);
-                templateId = authored.Value.Id;
-                templateVersion = authored.Value.Version;
+                templateId = authored.Id;
+                templateVersion = authored.Version;
             }
             else
             {
@@ -378,6 +392,8 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/agent-job", AgentJobTemplateVersion, BuildAgentJobCells)),
         (new[] { "Forced Plan Failing" },
             new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
+        (new[] { "High CPU" },
+            new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCpuCells)),
         (new[] { "Long-Running Query" },
             new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
         (new[] { "PostgreSQL Replication Slot Retention" },
@@ -389,6 +405,16 @@ internal static partial class AlertNotebookEndpoint
         (new[] { "Server Unreachable", "Server Restored" },
             new AuthoredTemplateEntry("authored/server-connect", ServerConnectTemplateVersion, BuildServerConnectCells)),
     };
+
+    /// <summary>#4223: is <paramref name="metric"/> one of the three reports (the collector-cost digest, the
+    /// fleet sweep rollup, the analysis singles digest) that are declared to carry no notebook at all — a
+    /// scheduled document read once a day, not an incident with a window worth composing reads over? Keyed on
+    /// <see cref="AlertFamily.Reports"/> (the same census <see cref="TriageLink.Build"/> reads for the Fleet
+    /// Sweep Rollup's own carve-out), not a local name list, so the two call sites can never disagree about
+    /// which metrics are reports. <see cref="Map"/> reads this BEFORE <see cref="AuthoredTemplate"/> and
+    /// degrades honestly instead of building either template for a metric this returns true for.</summary>
+    internal static bool IsDeclaredNoNotebook(string? metric) =>
+        metric is not null && AlertFamily.Of(metric) == AlertFamily.Reports;
 
     /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
     /// conversion — every metric NOT named in <see cref="s_authoredTemplates"/> keeps the byte-identical
@@ -429,6 +455,12 @@ internal static partial class AlertNotebookEndpoint
     internal static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_deadlock_trend",
+        /* #4223: get_top_queries_by_cpu / get_top_procedures_by_cpu / get_cpu_scheduler_pressure declare no
+           'limit' param at all -- the first two cap with 'top' (carried explicitly below), the last has no
+           row cap to carry. */
+        "get_top_queries_by_cpu",
+        "get_top_procedures_by_cpu",
+        "get_cpu_scheduler_pressure",
         /* #4223: get_collection_health and get_running_jobs declare only PServer() — no hours/limit/as_of at
            all — so ServerOnlyReadCell never adds a limit param and this exemption applies here too, even
            though neither is a trend read. */
