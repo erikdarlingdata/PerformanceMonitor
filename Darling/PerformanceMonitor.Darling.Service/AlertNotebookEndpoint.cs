@@ -51,7 +51,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// with data — still answers 200 with honest empty cells and a note, exactly like the triage page it sits
 /// beside.</para>
 /// </summary>
-internal static class AlertNotebookEndpoint
+internal static partial class AlertNotebookEndpoint
 {
     /// <summary>The template id/version pair every mechanical conversion carries. Bumped only if the SHAPE of
     /// the mechanical conversion below changes; a new metric added to <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
@@ -363,19 +363,26 @@ internal static class AlertNotebookEndpoint
         int Version,
         Func<string?, string?, string?, DateTime, DateTime, AlertIncident?, DarlingAlertReader.AlertHistoryReadRow?, string, JsonArray> BuildCells);
 
-    /// <summary>Blocking template version (#4222 slice b). Bumped only if this template's SHAPE changes.</summary>
-    internal const int BlockingTemplateVersion = 1;
-
-    /// <summary>Deadlocks template version (#4222 slice b). Bumped only if this template's SHAPE changes.</summary>
-    internal const int DeadlocksTemplateVersion = 1;
+    /// <summary>The authored-template registration table, sorted case-insensitively by the metric name each
+    /// row matches on. One row per family, holding every alert-engine <c>MetricName</c> string that routes to
+    /// it. <see cref="AuthoredTemplate"/> is a lookup against this table — a new family is added here, not by
+    /// growing an if-chain.</summary>
+    internal static readonly (string[] Metrics, AuthoredTemplateEntry Entry)[] s_authoredTemplates =
+    {
+        (new[] { "Blocking Detected", "Blocking Wait Time" },
+            new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
+        (new[] { "Deadlocks Detected" },
+            new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
+    };
 
     /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
-    /// conversion — every metric NOT named here keeps the byte-identical mechanical path. Keyed on the EXACT
-    /// alert-engine <c>MetricName</c> strings (the same literals <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
-    /// keys on), case-insensitively, matching every other metric lookup on this endpoint.
-    /// Made <c>internal</c> (not private) so <see cref="Darling.Tests.AlertNotebookAuthoredTemplateTests"/>
-    /// can call it directly via <c>InternalsVisibleTo</c> instead of reflection — the same visibility
-    /// <see cref="MatchAlert"/> and <see cref="StatusFromHistory"/> already use for their own pins.</summary>
+    /// conversion — every metric NOT named in <see cref="s_authoredTemplates"/> keeps the byte-identical
+    /// mechanical path. Keyed on the EXACT alert-engine <c>MetricName</c> strings (the same literals
+    /// <see cref="DarlingTriageEndpoint.SectionsByMetric"/> keys on), case-insensitively, matching every other
+    /// metric lookup on this endpoint. Made <c>internal</c> (not private) so
+    /// <see cref="Darling.Tests.AlertNotebookAuthoredTemplateTests"/> can call it directly via
+    /// <c>InternalsVisibleTo</c> instead of reflection — the same visibility <see cref="MatchAlert"/> and
+    /// <see cref="StatusFromHistory"/> already use for their own pins.</summary>
     internal static AuthoredTemplateEntry? AuthoredTemplate(string? metric)
     {
         if (string.IsNullOrWhiteSpace(metric))
@@ -383,77 +390,18 @@ internal static class AlertNotebookEndpoint
             return null;
         }
 
-        if (string.Equals(metric, "Blocking Detected", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(metric, "Blocking Wait Time", StringComparison.OrdinalIgnoreCase))
+        foreach (var (metrics, entry) in s_authoredTemplates)
         {
-            return new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells);
-        }
-
-        if (string.Equals(metric, "Deadlocks Detected", StringComparison.OrdinalIgnoreCase))
-        {
-            return new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells);
+            foreach (var candidate in metrics)
+            {
+                if (string.Equals(metric, candidate, StringComparison.OrdinalIgnoreCase))
+                {
+                    return entry;
+                }
+            }
         }
 
         return null;
-    }
-
-    /// <summary>Blocking Detected / Blocking Wait Time (spec §3): header, status, <c>get_blocking</c> (limit
-    /// 20), a blocked-process-reports timeline with a deadlock annotation, most-blocked objects / by database
-    /// / lock modes (the <c>blocking-rca</c> panel specs, ported), then <c>get_active_queries
-    /// blocking_only</c>.</summary>
-    private static JsonArray BuildBlockingCells(
-        string? metric, string? serverName, string? asOf, DateTime windowStart, DateTime windowEnd,
-        AlertIncident? incident, DarlingAlertReader.AlertHistoryReadRow? row, string status)
-    {
-        var cells = new JsonArray
-        {
-            HeaderCell(metric, serverName, incident, row),
-            StatusCell(status),
-            AuthoredReadCell("get_blocking", "Blocking chains", serverName, asOf,
-                ("hours", "24"), ("limit", "20")),
-            TimelinePanel(
-                "Blocked-process reports over time", "blocked_process_reports", "bpr_wait_time_ms",
-                windowStart, windowEnd, annotation: "deadlocks", databaseFilter: incident?.Database),
-            RankedPanel(
-                "Most-blocked objects", "blocked_process_reports", "bpr_wait_time_ms",
-                windowStart, windowEnd, "contentious_object", databaseFilter: incident?.Database),
-            RankedPanel(
-                "Blocking by database", "blocked_process_reports", "bpr_wait_time_ms",
-                windowStart, windowEnd, "database_name", databaseFilter: null),
-            RankedPanel(
-                "Lock modes", "blocked_process_reports", "bpr_wait_time_ms",
-                windowStart, windowEnd, "lock_mode", databaseFilter: incident?.Database),
-            AuthoredReadCell("get_active_queries", "Active blocking queries", serverName, asOf,
-                ("hours", "1"), ("blocking_only", "true"), ("limit", "25")),
-        };
-
-        return cells;
-    }
-
-    /// <summary>Deadlocks Detected (spec §3): header, status, <c>get_deadlock_detail</c> (limit 3), a
-    /// deadlocks timeline with a blocking annotation, deadlocks by database (the <c>deadlock-postmortem</c>
-    /// panel specs, ported), then <c>get_deadlock_trend</c> over 24h.</summary>
-    private static JsonArray BuildDeadlockCells(
-        string? metric, string? serverName, string? asOf, DateTime windowStart, DateTime windowEnd,
-        AlertIncident? incident, DarlingAlertReader.AlertHistoryReadRow? row, string status)
-    {
-        var cells = new JsonArray
-        {
-            HeaderCell(metric, serverName, incident, row),
-            StatusCell(status),
-            AuthoredReadCell("get_deadlock_detail", "Deadlock detail", serverName, asOf,
-                ("hours", "24"), ("limit", "3")),
-            TimelinePanel(
-                "Deadlocks over time", "deadlocks", "deadlock_count",
-                windowStart, windowEnd, annotation: "blocked_process_reports", databaseFilter: incident?.Database),
-            RankedPanel(
-                "Deadlocks by database", "deadlocks", "deadlock_count",
-                windowStart, windowEnd, "database_name", databaseFilter: null),
-            AuthoredReadCell("get_deadlock_trend", "Deadlock trend", serverName, asOf,
-                ("hours", "24")),
-        };
-
-        return cells;
     }
 
     /// <summary>The reads this endpoint's authored templates call that declare no <c>limit</c> param at all
