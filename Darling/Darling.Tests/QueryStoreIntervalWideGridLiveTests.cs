@@ -195,8 +195,8 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, shortWindowEnd);
 
         /* The viewer reads through its OWN pooled NpgsqlDataSource, a backend this test cannot call
-           pg_stat_force_next_flush() on directly, so a short settle stands in for it here (the ASSIGN's own
-           fallback shape) — long enough to clear PostgreSQL's once-per-second pending-stats throttle
+           pg_stat_force_next_flush() on directly, so a short settle stands in for it here (the same fallback wait
+           used when a backend's pending statistics cannot be flushed directly) — long enough to clear PostgreSQL's once-per-second pending-stats throttle
            (PGSTAT_MIN_INTERVAL) so a real regression (the mutation below) is visible in THIS read rather than
            sitting pending on that backend. Then force THIS test's own backend's stats to report before
            re-reading. */
