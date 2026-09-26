@@ -173,6 +173,13 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             var after = await ChunkCountAsync(connection);
             Assert.True(after < before, $"a Covered, current-epoch, hole-free purge must drop chunks (before={before}, after={after}); log: {logger.Joined}");
 
+            /* #4299 L3d: the trigger records its outcome under the SAME relation name, and a successful
+               run must be recorded "ran" with a positive elapsed time. */
+            var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+            Assert.NotNull(rec);
+            Assert.Equal("ran", rec!.Outcome);
+            Assert.True(rec.ElapsedMs > 0, $"a successful purge must record a positive elapsed time, got {rec.ElapsedMs}");
+
             bodySucceeded = true;
         }
         finally
@@ -218,6 +225,11 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
 
             var after = await ChunkCountAsync(connection);
             Assert.Equal(before, after);
+
+            /* #4299 L3d: Short — never covered, so the record is "not_covered". */
+            var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+            Assert.NotNull(rec);
+            Assert.Equal("not_covered", rec!.Outcome);
 
             bodySucceeded = true;
         }
@@ -272,6 +284,11 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
 
             var after = await ChunkCountAsync(connection);
             Assert.Equal(before, after);
+
+            /* #4299 L3d: the epoch gate blocked the run, so the record is "epoch_stale". */
+            var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+            Assert.NotNull(rec);
+            Assert.Equal("epoch_stale", rec!.Outcome);
 
             bodySucceeded = true;
         }
@@ -333,6 +350,11 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             var after = await ChunkCountAsync(connection);
             Assert.Equal(before, after);
 
+            /* #4299 L3d: the hole gate blocked the run, so the record is "hole". */
+            var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+            Assert.NotNull(rec);
+            Assert.Equal("hole", rec!.Outcome);
+
             bodySucceeded = true;
         }
         finally
@@ -380,6 +402,10 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
 
             var after = await ChunkCountAsync(connection);
             Assert.Equal(before, after);
+
+            /* #4299 L3d: the trigger itself is never called on this path, so no record exists at all. */
+            var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
+            Assert.Null(rec);
 
             bodySucceeded = true;
         }
