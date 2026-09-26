@@ -5746,6 +5746,13 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal("Collector Cost Regression", fired.MetricName);
 
+        /* #4223 self-monitor notebook: the delivered context carries the collector name, through the
+           product's own fire path (ApplyCostRegressionsAsync -> FireAsync -> the deliverer), not a
+           direct call to the helper. RED on dev: before this PR FireAsync is never given a context here,
+           so fired.Context is null and this reads a NullReferenceException, not an assertion failure. */
+        Assert.NotNull(fired.Context);
+        Assert.Equal("query_store", fired.Context!.CollectorName);
+
         /* 2) still regressing on the next tick, inside the cooldown -> no new notification. */
         await e.ApplyCostRegressionsAsync(new[] { Regression() }, Ct);
         Assert.Single(h.Deliverer.Outcomes);
