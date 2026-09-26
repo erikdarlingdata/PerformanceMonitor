@@ -55,12 +55,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class RollupBackfill
 {
-    /// <summary>How much history one refresh call covers. Deliberately ONE source chunk
-    /// (<see cref="TimescaleSupport.ChunkIntervalDays"/>): the slice's read set is then a single chunk, which
-    /// is what keeps the lock window short enough not to sit across a compression job (#1778). Slices are
-    /// midnight-aligned, so they always land on bucket boundaries for both the hourly and daily grains — an
-    /// unaligned window would be silently widened to bucket boundaries by TimescaleDB anyway, making progress
-    /// arithmetic lie.</summary>
+    /// <summary>How much history one refresh call covers. Deliberately <see cref="TimescaleSupport.ChunkIntervalDays"/>
+    /// wide — the ladder's CEILING since #4211, not every source table's actual chunk width: on a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed, one slice now spans at most a few of that table's
+    /// chunks rather than exactly one, but it is still bounded to at most a day, which is what keeps the lock
+    /// window short enough not to sit across a compression job (#1778). Slices are midnight-aligned, so they
+    /// always land on bucket boundaries for both the hourly and daily grains — an unaligned window would be
+    /// silently widened to bucket boundaries by TimescaleDB anyway, making progress arithmetic lie.</summary>
     public static readonly TimeSpan SliceWidth = TimeSpan.FromDays(TimescaleSupport.ChunkIntervalDays);
 
     /// <summary>Measured compression throughput on the field host class this verb exists for (~16 MB/s). Used

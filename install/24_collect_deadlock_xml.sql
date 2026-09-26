@@ -58,7 +58,15 @@ BEGIN
         @is_azure_sql_db bit = 0,
         @session_missing bit = 0,
         @ensure_error nvarchar(4000) = N'',
-        @sql nvarchar(max) = N'';
+        @sql nvarchar(max) = N'',
+        /* #4213: the deprecated Dashboard's own copy of #4212's gate. @execution_count is this
+           cycle's read of the ring_buffer target's own delivered-event counter; @last_execution_count
+           is the prior cycle's read, carried in config.xe_shred_state; @shred_needed says whether the
+           cast+shred further down runs. An exact match between the two counts means nothing has
+           arrived since the last run, so the conversion and node-shred are skipped entirely. */
+        @execution_count bigint = NULL,
+        @last_execution_count bigint = NULL,
+        @shred_needed bit = 1;
 
     BEGIN TRY
         /*
@@ -298,6 +306,16 @@ BEGIN
         END;
 
         /*
+        #4213: the prior cycle's own read of the target's execution_count, per collector. NULL on a
+        first run, a store that lost the row, or a store that has never seen this collector -- all of
+        which the gate below treats as "shred".
+        */
+        SELECT
+            @last_execution_count = xss.last_execution_count
+        FROM config.xe_shred_state AS xss
+        WHERE xss.collector_name = N'deadlock_xml_collector';
+
+        /*
         Collect raw deadlock XML from ring_buffer target
         Azure SQL DB uses database-scoped sessions (dm_xe_database_*)
         On-prem/MI/RDS uses server-scoped sessions (dm_xe_*)
@@ -311,13 +329,15 @@ BEGIN
                 ring_buffer xml NOT NULL
             );
 
-            INSERT
-                @ring_buffer
-            (
-                ring_buffer
-            )
+            DECLARE
+                @shred_needed bit = 1;
+
+            /* #4213: read BEFORE the cast -- no XML materialized, so this costs one integer whether
+               or not anything shreds below. Compared against @last_execution_count (this collector''s
+               prior cycle, from config.xe_shred_state): an exact match means nothing has arrived since
+               then, so the cast+shred is skipped. */
             SELECT
-                ring_xml = TRY_CAST(xet.target_data AS xml)
+                @execution_count = xet.execution_count
             FROM sys.dm_xe_database_session_targets AS xet
             JOIN sys.dm_xe_database_sessions AS xes
               ON xes.address = xet.event_session_address
@@ -325,33 +345,58 @@ BEGIN
             AND   xet.target_name = N''ring_buffer''
             OPTION(RECOMPILE);
 
-            INSERT INTO
-                collect.deadlock_xml
-            (
-                event_time,
-                deadlock_xml
-            )
-            SELECT TOP (1000)
-                event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)''),
-                deadlock_xml = evt.query(''.'')
-            FROM
-            (
+            SET @shred_needed =
+                CASE
+                    WHEN @execution_count IS NULL THEN 1
+                    WHEN @last_execution_count IS NULL THEN 1
+                    WHEN @execution_count <> @last_execution_count THEN 1
+                    ELSE 0
+                END;
+
+            IF @shred_needed = 1
+            BEGIN
+                INSERT
+                    @ring_buffer
+                (
+                    ring_buffer
+                )
                 SELECT
-                    rb.ring_buffer
-                FROM @ring_buffer AS rb
-            ) AS rb
-            CROSS APPLY rb.ring_buffer.nodes(''RingBufferTarget/event[@name="database_xml_deadlock_report"]'') AS q(evt)
-            WHERE evt.value(''(@timestamp)[1]'', ''datetime2(7)'') >= @cutoff_time
-            AND NOT EXISTS
-            (
-                SELECT
-                    1/0
-                FROM collect.deadlock_xml AS dx
-                WHERE dx.event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)'')
-            )
-            ORDER BY
-                evt.value(''(@timestamp)[1]'', ''datetime2(7)'') DESC
-            OPTION(RECOMPILE);';
+                    ring_xml = TRY_CAST(xet.target_data AS xml)
+                FROM sys.dm_xe_database_session_targets AS xet
+                JOIN sys.dm_xe_database_sessions AS xes
+                  ON xes.address = xet.event_session_address
+                WHERE xes.name = @session_name
+                AND   xet.target_name = N''ring_buffer''
+                OPTION(RECOMPILE);
+
+                INSERT INTO
+                    collect.deadlock_xml
+                (
+                    event_time,
+                    deadlock_xml
+                )
+                SELECT TOP (1000)
+                    event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)''),
+                    deadlock_xml = evt.query(''.'')
+                FROM
+                (
+                    SELECT
+                        rb.ring_buffer
+                    FROM @ring_buffer AS rb
+                ) AS rb
+                CROSS APPLY rb.ring_buffer.nodes(''RingBufferTarget/event[@name="database_xml_deadlock_report"]'') AS q(evt)
+                WHERE evt.value(''(@timestamp)[1]'', ''datetime2(7)'') >= @cutoff_time
+                AND NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM collect.deadlock_xml AS dx
+                    WHERE dx.event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)'')
+                )
+                ORDER BY
+                    evt.value(''(@timestamp)[1]'', ''datetime2(7)'') DESC
+                OPTION(RECOMPILE);
+            END;';
         END;
         ELSE
         BEGIN
@@ -362,13 +407,12 @@ BEGIN
                 ring_buffer xml NOT NULL
             );
 
-            INSERT
-                @ring_buffer
-            (
-                ring_buffer
-            )
+            DECLARE
+                @shred_needed bit = 1;
+
+            /* #4213: see the Azure branch''s twin comment above -- same gate, server-scoped session. */
             SELECT
-                ring_xml = TRY_CAST(xet.target_data AS xml)
+                @execution_count = xet.execution_count
             FROM sys.dm_xe_session_targets AS xet
             JOIN sys.dm_xe_sessions AS xes
               ON xes.address = xet.event_session_address
@@ -376,33 +420,58 @@ BEGIN
             AND   xet.target_name = N''ring_buffer''
             OPTION(RECOMPILE);
 
-            INSERT INTO
-                collect.deadlock_xml
-            (
-                event_time,
-                deadlock_xml
-            )
-            SELECT TOP (1000)
-                event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)''),
-                deadlock_xml = evt.query(''.'')
-            FROM
-            (
+            SET @shred_needed =
+                CASE
+                    WHEN @execution_count IS NULL THEN 1
+                    WHEN @last_execution_count IS NULL THEN 1
+                    WHEN @execution_count <> @last_execution_count THEN 1
+                    ELSE 0
+                END;
+
+            IF @shred_needed = 1
+            BEGIN
+                INSERT
+                    @ring_buffer
+                (
+                    ring_buffer
+                )
                 SELECT
-                    rb.ring_buffer
-                FROM @ring_buffer AS rb
-            ) AS rb
-            CROSS APPLY rb.ring_buffer.nodes(''RingBufferTarget/event[@name="xml_deadlock_report"]'') AS q(evt)
-            WHERE evt.value(''(@timestamp)[1]'', ''datetime2(7)'') >= @cutoff_time
-            AND NOT EXISTS
-            (
-                SELECT
-                    1/0
-                FROM collect.deadlock_xml AS dx
-                WHERE dx.event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)'')
-            )
-            ORDER BY
-                evt.value(''(@timestamp)[1]'', ''datetime2(7)'') DESC
-            OPTION(RECOMPILE);';
+                    ring_xml = TRY_CAST(xet.target_data AS xml)
+                FROM sys.dm_xe_session_targets AS xet
+                JOIN sys.dm_xe_sessions AS xes
+                  ON xes.address = xet.event_session_address
+                WHERE xes.name = @session_name
+                AND   xet.target_name = N''ring_buffer''
+                OPTION(RECOMPILE);
+
+                INSERT INTO
+                    collect.deadlock_xml
+                (
+                    event_time,
+                    deadlock_xml
+                )
+                SELECT TOP (1000)
+                    event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)''),
+                    deadlock_xml = evt.query(''.'')
+                FROM
+                (
+                    SELECT
+                        rb.ring_buffer
+                    FROM @ring_buffer AS rb
+                ) AS rb
+                CROSS APPLY rb.ring_buffer.nodes(''RingBufferTarget/event[@name="xml_deadlock_report"]'') AS q(evt)
+                WHERE evt.value(''(@timestamp)[1]'', ''datetime2(7)'') >= @cutoff_time
+                AND NOT EXISTS
+                (
+                    SELECT
+                        1/0
+                    FROM collect.deadlock_xml AS dx
+                    WHERE dx.event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)'')
+                )
+                ORDER BY
+                    evt.value(''(@timestamp)[1]'', ''datetime2(7)'') DESC
+                OPTION(RECOMPILE);
+            END;';
         END;
 
         BEGIN TRY
@@ -416,9 +485,11 @@ BEGIN
 
             EXECUTE sys.sp_executesql
                 @sql,
-                N'@session_name sysname, @cutoff_time datetime2(7)',
+                N'@session_name sysname, @cutoff_time datetime2(7), @execution_count bigint OUTPUT, @last_execution_count bigint',
                 @session_name,
-                @cutoff_time;
+                @cutoff_time,
+                @execution_count OUTPUT,
+                @last_execution_count;
 
             SET @rows_collected = ROWCOUNT_BIG();
 
@@ -436,6 +507,39 @@ BEGIN
 
             THROW;
         END CATCH;
+
+        /*
+        #4213: persist THIS cycle's own read of execution_count regardless of whether it shredded,
+        so the next cycle's comparison is against what actually happened here. A NULL means the read
+        above never ran (e.g. the batch failed before reaching it) -- leave the stored row alone rather
+        than overwrite a good count with nothing.
+        */
+        IF @execution_count IS NOT NULL
+        BEGIN
+            IF EXISTS (SELECT 1/0 FROM config.xe_shred_state WHERE collector_name = N'deadlock_xml_collector')
+            BEGIN
+                UPDATE
+                    config.xe_shred_state
+                SET
+                    last_execution_count = @execution_count,
+                    last_checked_time = SYSUTCDATETIME()
+                WHERE collector_name = N'deadlock_xml_collector';
+            END;
+            ELSE
+            BEGIN
+                INSERT INTO
+                    config.xe_shred_state
+                (
+                    collector_name,
+                    last_execution_count
+                )
+                VALUES
+                (
+                    N'deadlock_xml_collector',
+                    @execution_count
+                );
+            END;
+        END;
 
         /*
         Log successful collection

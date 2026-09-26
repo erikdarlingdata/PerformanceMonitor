@@ -338,13 +338,17 @@ public sealed class DarlingStoreLoginsTests
     {
         try
         {
-            /* A collector that stops before provisioning must not leave a container host waiting forever. */
+            /* A collector that stops before provisioning must not leave a container host waiting forever.
+               #4316 round 1 B1: PublishStopped no longer takes free text, so the reason it settles carries
+               the step's fixed sentence rather than an arbitrary exception message. */
             DarlingStoreLogins.ResetComposeStoreVerdictForTests();
-            new CollectorRuntimeState().PublishStopped(CollectorRuntimeState.StartupStep.Store, "the store is gone\nPOSITION: 3");
+            new CollectorRuntimeState().PublishStopped(CollectorRuntimeState.StartupStep.Store);
             var settled = DarlingStoreLogins.ReadComposeStoreVerdict();
             Assert.NotNull(settled);
             Assert.False(settled.Provisioned);
-            Assert.Contains("The collector stopped before it could provision the store's roles (Store: the store is gone)", settled.NotProvisionedReason, StringComparison.Ordinal);
+            Assert.Contains(
+                $"The collector stopped before it could provision the store's roles (Store: {CollectorRuntimeState.FailureDetailFor(CollectorRuntimeState.StartupStep.Store)})",
+                settled.NotProvisionedReason, StringComparison.Ordinal);
 
             /* A stand-down never reached the worker's directory argument, so the hosts look for an earlier start's
                credential where the shipped image keeps them. */
@@ -847,7 +851,13 @@ public sealed class DarlingStoreLoginsTests
         var start = Body(code, "private async Task<bool> TryStartServerAsync(");
 
         Assert.DoesNotContain("config.Postgres.ConnectionString", start, StringComparison.Ordinal);
-        Assert.Contains("NpgsqlDataSource.Create(storeConnectionString)", start, StringComparison.Ordinal);
+
+        /* #4277: every STORE data source pins its session timezone to UTC, so the resolved
+           storeConnectionString is wrapped before it reaches Create rather than passed bare. */
+        Assert.Contains(
+            "NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString))",
+            start,
+            StringComparison.Ordinal);
 
         var assignments = Regex.Matches(start, @"storeConnectionString\s*=(?!=)").Count;
         Assert.Equal(2, assignments);

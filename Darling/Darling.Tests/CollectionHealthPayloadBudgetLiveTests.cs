@@ -24,8 +24,8 @@ namespace Darling.Tests;
 /// #4198: get_collection_health has no row to drop (every collector on the server is one row, and a health
 /// read must never hide a failing/stale/disabled/erroring one by leaving it off the page), so its default-size
 /// cut is per-field instead. This seeds every SQL Server catalog collector - the realistic per-server shape -
-/// mostly HEALTHY-and-boring, plus four deliberately NOT-boring rows that must never compact even though three
-/// of the four band HEALTHY, and measures the tool method's own UTF-8 byte count. Its own file/seeding per the
+/// mostly HEALTHY-and-boring, plus six deliberately NOT-boring rows that must never compact even though five
+/// of the six band HEALTHY, and measures the tool method's own UTF-8 byte count. Its own file/seeding per the
 /// #4198 common brief: not shared with any other lane's tonight.
 /// </summary>
 [Collection("live-postgres")]
@@ -89,8 +89,8 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
                 .ToArray();
             Assert.True(sqlServerCollectors.Length > 30, "expected a realistic SQL Server catalog width");
 
-            /* four collectors that must NEVER compact, three of them despite banding HEALTHY: */
-            var neverCompact = new[] { "wait_stats", "memory_grant_stats", "query_store_health", "database_scoped_config" };
+            /* six collectors that must NEVER compact, five of them despite banding HEALTHY: */
+            var neverCompact = new[] { "wait_stats", "memory_grant_stats", "query_store_health", "database_scoped_config", "plan_cache_stats", "tempdb_stats" };
             Assert.All(neverCompact, name => Assert.Contains(name, sqlServerCollectors));
 
             foreach (var name in sqlServerCollectors)
@@ -139,6 +139,28 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
                             await InsertLogRowAsync(connection, name, now.AddHours(-i * 18), "SUCCESS", 15, 0, null, ct);
                         break;
 
+                    case "plan_cache_stats":
+                        /* #4198 follow-up: HEALTHY band (a fresh, productive success) but SessionMissingCount > 0
+                           - runs whose XE session was missing. Classify() never takes the count as a parameter, so
+                           nothing about HealthStatus hints at it; IsCollectionHealthCompactEligible checks it
+                           directly, which is why this row must fail the predicate on session_missing ALONE. */
+                        for (var i = 0; i < 2; i++)
+                            await InsertLogRowAsync(connection, name, now.AddDays(-1).AddHours(-i), "SESSION_MISSING", 40, null, null, ct);
+                        for (var i = 0; i < 6; i++)
+                            await InsertLogRowAsync(connection, name, now.AddHours(-i * 24 - 1), "SUCCESS", 100 + i * 15, 50 + i * 5, null, ct);
+                        break;
+
+                    case "tempdb_stats":
+                        /* #4198 follow-up: HEALTHY band (1/250 = 0.4% abandon rate, under the 0.5% WARNING
+                           cutoff) but AbandonedCount > 0 - a cycle the wall-clock budget gave up on, storing
+                           nothing and advancing no watermark. IsCollectionHealthCompactEligible checks the COUNT,
+                           not the rate, so this row fails it on abandoned ALONE even though Classify() reads it
+                           HEALTHY. */
+                        await InsertLogRowAsync(connection, name, now.AddHours(-3), "ABANDONED", 120000, null, null, ct);
+                        for (var i = 0; i < 249; i++)
+                            await InsertLogRowAsync(connection, name, now.AddMinutes(-i * 15 - 5), "SUCCESS", 90, 20, null, ct);
+                        break;
+
                     default:
                         /* The realistic majority: plainly healthy and productive. */
                         for (var i = 0; i < 6; i++)
@@ -153,8 +175,13 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
             var fullBytes = Encoding.UTF8.GetByteCount(fullJson);
             _output.WriteLine($"get_collection_health: default {defaultBytes:N0} bytes, full_detail=true {fullBytes:N0} bytes, budget {McpResponseBudget.DefaultBytes:N0}.");
 
-            Assert.True(defaultBytes <= McpResponseBudget.DefaultBytes,
-                $"default get_collection_health is {defaultBytes:N0} bytes, over the {McpResponseBudget.DefaultBytes:N0}-byte budget.");
+            /* #4198 ruling item 6: a default call must land at 80% of the budget or less, to leave room for a
+               larger fleet than this fixture's collectors. Expressed off McpResponseBudget.DefaultBytes, the
+               same expression Lite's CollectionHealthPayloadBudgetToolTests uses, so the two SKUs' ceilings can
+               never drift apart by one being hand-typed and the other derived. */
+            var ceiling = McpResponseBudget.DefaultBytes * 4 / 5;
+            Assert.True(defaultBytes <= ceiling,
+                $"default get_collection_health is {defaultBytes:N0} bytes, over the {ceiling:N0}-byte (80% of {McpResponseBudget.DefaultBytes:N0}) ceiling.");
             Assert.True(defaultBytes < fullBytes, "the default call should be smaller than full_detail=true.");
 
             using var defaultDoc = JsonDocument.Parse(defaultJson);
@@ -164,20 +191,41 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
 
             foreach (var name in neverCompact)
             {
-                Assert.True(defaultRows[name].TryGetProperty("errors", out _), $"{name} must keep full detail by default (it is not boring-healthy).");
+                Assert.True(defaultRows[name].TryGetProperty("errors", out _), $"{name} must keep at least partial detail by default (it is not boring-healthy).");
                 Assert.False(defaultRows[name].TryGetProperty("compact", out _), $"{name} must not be marked compact.");
+                /* #4198's second tier: a row that needs a look gets partial_detail, never the full ~30-field
+                   shape, and never the compact marker -- reusing `compact` here would teach a `compact != true`
+                   scan to skip a row that needs a look, exactly what #4268's marker exists to prevent. */
+                Assert.True(defaultRows[name].TryGetProperty("partial_detail", out var partial) && partial.GetBoolean(),
+                    $"{name} must carry partial_detail: true.");
+                Assert.False(defaultRows[name].TryGetProperty("avg_duration_ms", out _),
+                    $"{name} is over budget by default and should not carry full-detail-only fields like avg_duration_ms.");
             }
+
+            /* #4198 follow-up: a HEALTHY row failing the predicate on session-missing runs, abandoned cycles, or
+               a denial that a later success cleared must still say WHY in the partial shape - not just that
+               something needs a look. Each reason field is nonzero/non-null on the row whose only issue it is. */
+            Assert.True(defaultRows["plan_cache_stats"].GetProperty("session_missing").GetInt64() > 0,
+                "plan_cache_stats' only issue is session-missing runs; the partial row must say how many.");
+            Assert.True(defaultRows["tempdb_stats"].GetProperty("abandoned").GetInt64() > 0,
+                "tempdb_stats' only issue is abandoned cycles; the partial row must say how many.");
+            Assert.Equal(JsonValueKind.String, defaultRows["query_store_health"].GetProperty("last_denied_at").ValueKind);
+
             Assert.True(defaultRows["deadlocks"].TryGetProperty("compact", out var deadlocksCompact) && deadlocksCompact.GetBoolean(),
                 "an event collector resting at zero rows should compact.");
             Assert.True(defaultRows.Values.Count(r => r.TryGetProperty("compact", out _)) >= sqlServerCollectors.Length - neverCompact.Length,
                 "every boring-healthy collector should compact.");
 
             using var fullDoc = JsonDocument.Parse(fullJson);
-            Assert.All(fullDoc.RootElement.GetProperty("collectors").EnumerateArray(),
-                r => Assert.False(r.TryGetProperty("compact", out _), "full_detail=true must serve every field on every row."));
+            Assert.All(fullDoc.RootElement.GetProperty("collectors").EnumerateArray(), r =>
+            {
+                Assert.False(r.TryGetProperty("compact", out _), "full_detail=true must serve every field on every row.");
+                Assert.False(r.TryGetProperty("partial_detail", out _), "full_detail=true must serve every field on every row, not the leaner shape.");
+            });
 
             var note = defaultDoc.RootElement.GetProperty("collector_detail_note").GetString();
             Assert.Contains($"of {sqlServerCollectors.Length} collector", note, StringComparison.Ordinal);
+            Assert.Contains($"{neverCompact.Length} need a look", note, StringComparison.Ordinal);
 
             bodySucceeded = true;
         }

@@ -292,6 +292,21 @@ public sealed class PgLogEventsPipelineTests
         Assert.NotEqual(waits[0].RawLineHash, waits[1].RawLineHash);
     }
 
+    /// <summary>#4348's review round 1: a reload's <c>parameter "..." changed to "..."</c> line can carry a
+    /// setting's live value in plain text — including <c>primary_conninfo</c>'s password — but it matches no
+    /// parser's shape (not a WARNING+, not one of the five recognised LOG shapes), so
+    /// <see cref="PgLogEventClassifier"/> never emits an event for it and <see cref="PgLogEventsCollector"/>
+    /// never stores it. The redactor (<see cref="PgSettingRedactor"/>) only ever sees the config-settings
+    /// collector's rows, never this line, so this pins that the line truly is dropped rather than relying on
+    /// the redactor to catch it after the fact.</summary>
+    [Fact]
+    public void ReloadParameterChangedLine_IsNotClassified_AndSoIsNeverStored()
+    {
+        var events = Classify(P + "[3001] LOG:  parameter \"primary_conninfo\" changed to \"password=hunter2 host=standby\"\n");
+
+        Assert.Empty(events);
+    }
+
     [Fact]
     public void TheRecognisedOnlyFamily_IsStoredUnderItsOwnName_WithNothingLifted()
     {

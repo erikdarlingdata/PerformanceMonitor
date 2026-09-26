@@ -1512,8 +1512,8 @@ public sealed class McpPayloadContractCensusTests
 
     public static readonly (string Key, string[] Files, string WhatItExplains)[] CutNoteKeys =
     [
-        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs"],
-            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier)"),
+        ("truncation_note", ["DarlingMcpDataTools.cs", "DarlingMcpQueryStoreClutterTools.cs", "DarlingMcpTools.cs", "McpAnalysisTools.cs", "McpQueryTools.cs"],
+            "the prose beside the flag: on get_analysis_findings (both SKUs) beside truncated, the WindowCoveringLimit read cap observed off a cap + 1 fetch; on get_query_store_top and get_query_store_clutter beside window_truncated, the #2364 window floor — the store's raw retention did not reach the whole requested window (on the clutter view, for the two arms that read the raw tier); on Lite's get_top_queries_by_cpu / get_top_procedures_by_cpu / get_query_store_top (#4231), the same window-floor note, from LocalDataService.GetQueryWindowFloorAsync"),
         ("findings_truncated_note", ["DarlingMcpTools.cs", "McpAnalysisTools.cs"],
             "#4198: the prose beside findings_truncated — how many diagnostic chains were active in the window and that raising limit or narrowing hours_back would show more of them"),
     ];
@@ -1539,10 +1539,14 @@ public sealed class McpPayloadContractCensusTests
             "#4198: get_analysis_findings' advice.investigation / advice.remediation — free prose repeated on every finding — preview to 160 characters by default; full_text returns both whole. remediation_command is never previewed at any setting, so it carries no *_truncated key of its own"),
         ("deadlock_graph_xml_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_deadlock_detail's own wide field — deadlock_graph_xml is a 2000-character preview by default (a busy production store measured 120,454 bytes for 3 graphs), full_graph or a dedup_key call gets the whole XML"),
-        ("query_text_truncated", ["DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs"],
-            "#4198: query_text is previewed at read time by three tools: get_active_queries at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped)"),
+        ("query_text_truncated", ["DarlingMcpDataTools.cs", "DarlingMcpPlanCorrectionTools.cs", "DarlingMcpQueryStoreRegressionTools.cs", "DarlingMcpSessionTools.cs", "McpPlanCorrectionTools.cs", "McpQueryTools.cs", "McpSessionTools.cs"],
+            "#4198: query_text is previewed at read time by four tools: get_active_queries at 500 chars (full_text gets the whole text; a synthetic 50-row page measured 81,489 bytes), get_query_store_regressions at 240 chars (full_text opts back in; a busy production store measured 211 KB at default arguments), get_plan_corrections at 150 chars (full_text gets the whole text; the full text IS in the store, not collector-capped), get_query_store_top at 400 chars (full_text gets the whole text; query_store_stats.query_text is not collector-capped either). get_query_store_top's MCP signature forwards to an internal previewLength overload so the web viewer can keep the OLD 2000-char cap that field already had, rather than switching to full text the way get_deadlock_detail's never-capped field does"),
         ("error_message_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
             "#4198: get_collection_log's own wide field — error_message is a 500-character preview by default (a seeded store measured 90,514 bytes for 200 rows at the old 200-row default), full_text opts back into the whole (up to 4000-character, DarlingObservability.LogCollectionAsync's own write-time ceiling) field"),
+        ("last_error_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
+            "#4198: get_collection_health's PartialCollectionHealthRow.last_error preview, the row that fails IsCollectionHealthCompactEligible — the same ErrorMessagePreviewLength (500 chars) get_collection_log's error_message_truncated previews to, so a caller never learns two truncation lengths for what is fundamentally the same raw error text; full_detail=true opts back into the whole field"),
+        ("output_finding_truncated", ["DarlingMcpDataTools.cs", "McpHealthTools.cs"],
+            "#4198: get_collection_health's PartialCollectionHealthRow.output_finding — a template sentence (FormatOutputFinding), not raw free text, and measured as the single dominant cost on a fixture where every row needs a look — previews to OutputFindingPreviewLength (200 chars) by default; full_detail=true opts back into the whole field"),
         ("blocked_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
             "#4198: get_blocking/get_blocked_process_reports' blocked_sql_text previewed to SqlTextPreviewLength (150 chars) — the default row LIMIT also halved (30 -> 15), because the row's other ~37 fields, not this column alone, were most of the default page's weight; full_text or a dedup_key call (Darling only) gets the whole text"),
         ("blocking_sql_text_truncated", ["DarlingMcpBlockingTools.cs", "McpBlockingTools.cs"],
@@ -1754,18 +1758,26 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
     [
-        /* Two: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
-           read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer holds. */
-        ("DarlingMcpDataTools.cs", "initializer", 2),
+        /* Four: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
+           read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer
+           holds; plus (#4231) get_top_queries_by_cpu's and get_top_procedures_by_cpu's payloads, the same
+           disclosure over query_stats and procedure_stats. */
+        ("DarlingMcpDataTools.cs", "initializer", 4),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),
         ("McpQueryTools.cs", "envelope", 1),
+        /* #4231: Lite's own get_query_store_top initializer (mirroring DarlingMcpDataTools.cs's 2, but Lite's
+           get_query_store_top has no module_name-miss hint block of its own, so 1), plus get_top_queries_by_cpu
+           and get_top_procedures_by_cpu, newly given the same raw-tier disclosure. */
+        ("McpQueryTools.cs", "initializer", 4),
     ];
 
     public static readonly (string File, string Tool)[] WindowFloorTools =
     [
         ("DarlingMcpDataTools.cs", "get_query_store_top"),
+        ("DarlingMcpDataTools.cs", "get_top_procedures_by_cpu"),
+        ("DarlingMcpDataTools.cs", "get_top_queries_by_cpu"),
         ("DarlingMcpQueryStoreClutterTools.cs", "get_query_store_clutter"),
         ("DarlingMcpTrendTools.cs", "get_procedure_duration_trend"),
         ("DarlingMcpTrendTools.cs", "get_query_duration_trend"),
@@ -1774,7 +1786,10 @@ public sealed class McpPayloadContractCensusTests
         ("McpQueryTools.cs", "get_procedure_duration_trend"),
         ("McpQueryTools.cs", "get_query_duration_trend"),
         ("McpQueryTools.cs", "get_query_store_duration_trend"),
+        ("McpQueryTools.cs", "get_query_store_top"),
         ("McpQueryTools.cs", "get_query_trend"),
+        ("McpQueryTools.cs", "get_top_procedures_by_cpu"),
+        ("McpQueryTools.cs", "get_top_queries_by_cpu"),
     ];
 
     /// <summary>The reach key: the one neighbour only the window floor has.</summary>

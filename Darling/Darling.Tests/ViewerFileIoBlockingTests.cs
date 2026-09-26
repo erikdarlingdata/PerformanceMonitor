@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -39,20 +40,39 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.Contains("ORDER BY SUM(delta_reads + delta_writes) DESC", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.Contains("LIMIT 10", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
 
-        /* Read/write average latency casts the stall SUM to double before dividing by ops. */
-        Assert.Contains("SUM(CAST(f.delta_stall_read_ms AS double precision)) / SUM(f.delta_reads)", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("SUM(CAST(f.delta_stall_write_ms AS double precision)) / SUM(f.delta_writes)", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        /* #4234: read/write average latency casts the bucket's summed stall to double before dividing by
+           the bucket's summed ops — a rated row's deltas only (unrated ones nulled out by the CASE below). */
+        Assert.Contains("SUM(CAST(rated_stall_read_ms AS double precision)) / SUM(rated_reads)", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("SUM(CAST(rated_stall_write_ms AS double precision)) / SUM(rated_writes)", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
 
         /* Queued latency COALESCEs the queued-stall column to 0 (a pre-queued-column build reads 0). */
         Assert.Contains("COALESCE(f.delta_stall_queued_read_ms, 0)", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.Contains("COALESCE(f.delta_stall_queued_write_ms, 0)", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
 
-        Assert.Contains("GROUP BY f.collection_time, f.database_name, f.file_name", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY f.collection_time, f.database_name, f.file_name", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        /* #4234: buckets by date_bin, grouped per series (database_name, file_name) then the bucket start. */
+        Assert.Contains("GROUP BY database_name, file_name, 3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY database_name, file_name, 3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("HAVING COUNT(rated_reads) > 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
 
         /* Both window bounds are applied (top_files CTE + main query). */
         Assert.Contains("collection_time >= $2", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4234 ruling item 6 (source check): both File I/O reads carry a bucket width and project the
+    /// singleton-detection columns, mirroring <c>WaitTrendsSql</c>. Proven once by hand against the pre-#4234
+    /// text: neither statement had a <c>date_bin</c> anywhere (a per-collection read has no bucket width), so
+    /// this assert fails there.</summary>
+    [Fact]
+    public void FileIoTrendSqls_CarryABucketWidth_AndProjectSingletonDetectionColumns()
+    {
+        foreach (var sql in new[] { ViewerDataService.FileIoLatencyTrendSql, ViewerDataService.FileIoThroughputTrendSql })
+        {
+            Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+            Assert.Contains(TrendBucketSql.OriginSql, sql, StringComparison.Ordinal);
+            Assert.Contains("MIN(collection_time) AS first_collection_time", sql, StringComparison.Ordinal);
+            Assert.Contains("COUNT(*) AS collection_count", sql, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -70,9 +90,11 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.Contains("EXTRACT(EPOCH FROM", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
         Assert.Contains("ELSE NULLIF(f.sample_interval_seconds, 0)", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
 
-        /* Bytes / interval-seconds / 1 MiB, and the NULL-interval rows (first per file, or unknowable) are dropped. */
-        Assert.Contains("/ interval_seconds / 1048576.0", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
-        Assert.Contains("WHERE interval_seconds IS NOT NULL AND interval_seconds > 0", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
+        /* #4234: time-weighted per bucket — summed rated bytes over summed rated interval-seconds / 1 MiB —
+           and a bucket with no rated collection is dropped (HAVING), same as the pre-bucket read always
+           dropped that collection. */
+        Assert.Contains("CAST(SUM(rated_read_bytes) AS double precision) / SUM(rated_seconds) / 1048576.0", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
+        Assert.Contains("HAVING COUNT(rated_seconds) > 0", ViewerDataService.FileIoThroughputTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -120,18 +142,26 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.Contains("FROM v_wait_stats", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("wait_type LIKE 'LCK%'", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         ViewerLatchSpinlockSqlTests.AssertStoredIntervalIdiom(ViewerDataService.LockWaitTrendSql, "wait_type");
-        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        /* #4349: bucketed into a rated CTE, same idiom as WaitStatsTrendsSql — the per-second rate is now
+           time-weighted (summed rated wait time over summed rated seconds) rather than a per-row
+           delta/interval division, so a wide bucket that merges collections never averages per-collection
+           rates. For a singleton bucket (one collection) this is the same number as the pre-#4349 division. */
+        Assert.Contains("CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_wait_ms) AS double precision) / SUM(rated_seconds) AS wait_time_ms_per_second", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
     }
 
-    /// <summary>#3540: the latency reads drop rows whose stored interval is 0 — the calculator's "no delta
-    /// knowable" marker — so a restart renders as an absent point, never "0.00 ms". IS DISTINCT FROM 0 keeps
-    /// pre-V127 rows (NULL). Both the File I/O tab's read and the tempdb tab's file read.</summary>
+    /// <summary>#3540: the latency reads null out rows whose stored interval is 0 — the calculator's "no
+    /// delta knowable" marker — so a restart renders as an absent point, never "0.00 ms". IS DISTINCT FROM 0
+    /// keeps pre-V127 rows (NULL). Both the File I/O tab's read and the tempdb tab's file read (#4234:
+    /// bucketed, so both null the marker out of a <c>rated</c> CTE rather than filtering the row out of the
+    /// FROM clause — the row still counts toward <c>collection_count</c>).</summary>
     [Fact]
     public void FileIoLatencyReads_DropTheUnknowableMarker_KeepPreV127Rows()
     {
-        Assert.Contains("AND   f.sample_interval_seconds IS DISTINCT FROM 0", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN f.delta_reads END AS rated_reads", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN delta_reads END AS rated_reads", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -232,8 +262,110 @@ public sealed class ViewerFileIoBlockingLivePostgresTests
     private const int LockWaitServerId = -971005;
     private const int WaitingTaskServerId = -971006;
     private const int BlockedSessionServerId = -971007;
+    private const int FileIoBudgetServerId = -971008;
+    private const int FileIoSingletonServerId = -971009;
 
     private const string ServerName = "viewer-w1c-e2e";
+
+    /// <summary>#4234 ruling items 2/6: a 7-day window at the real 1-minute file_io_stats cadence used to
+    /// return every collection (85,010 rows for one production store, per #4234's body) — now capped to
+    /// <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (file). Bulk-seeded server-side
+    /// (generate_series) rather than one round trip per minute.</summary>
+    [Fact]
+    public async Task FileIoLatencyAndThroughput_SevenDayWindow_ReturnAtMostBudgetTimesSeriesRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live File I/O budget-cap test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "file_io_stats", FileIoBudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+            var files = new[] { "f1", "f2" };
+            var baseId = CollectionIdGenerator.Next() * 1_000_000L;
+            foreach (var file in files)
+            {
+                await BulkSeedFileIoAsync(connection, TestContext.Current.CancellationToken, baseId, FileIoBudgetServerId, start, end, "db1", file);
+                baseId += 20_000;
+            }
+
+            var latency = await viewer.GetFileIoLatencyTrendAsync(FileIoBudgetServerId, start, end);
+            var throughput = await viewer.GetFileIoThroughputTrendAsync(FileIoBudgetServerId, start, end);
+            var budget = TrendBudget.Chart.AutoPoints * files.Length;
+
+            Assert.True(latency.Count > 0 && latency.Count <= budget, $"latency: {latency.Count} rows over a {files.Length}-series budget of {budget}");
+            Assert.True(throughput.Count > 0 && throughput.Count <= budget, $"throughput: {throughput.Count} rows over a {files.Length}-series budget of {budget}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "file_io_stats", FileIoBudgetServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 3/6: when the budget covers every collection in the window, both File I/O
+    /// reads return the raw points unchanged, stamped at their own raw collection time — proven off the
+    /// minute grid (:37 seconds), which the pre-#4234 date_bin-always-floors code would have lost.</summary>
+    [Fact]
+    public async Task FileIoLatencyAndThroughput_BudgetCoversEveryCollection_ReturnsRawTimestampsUnchanged()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live File I/O singleton-bucket test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "file_io_stats", FileIoSingletonServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var baseTime = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-30));
+            var t1 = baseTime.AddSeconds(37 - baseTime.Second);
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+
+            /* t1..t3 are 5 minutes apart, so 1.0 MB/s needs bytes calibrated to a 300-second interval
+               (unlike the 60-second-spaced throughput test above). */
+            const long oneMbPerSecOverFiveMinutes = 1048576L * 300L;
+            foreach (var t in new[] { t1, t2, t3 })
+            {
+                await InsertFileIoAsync(connection, FileIoSingletonServerId, t, "db1", "f1",
+                    deltaReads: 10, deltaWrites: 4, deltaReadBytes: oneMbPerSecOverFiveMinutes, deltaWriteBytes: oneMbPerSecOverFiveMinutes,
+                    deltaStallReadMs: 100, deltaStallWriteMs: 20, deltaStallQueuedReadMs: 0, deltaStallQueuedWriteMs: 0);
+            }
+
+            var latency = await viewer.GetFileIoLatencyTrendAsync(FileIoSingletonServerId, t1.AddMinutes(-1), t3.AddMinutes(1));
+            Assert.Equal(new[] { t1, t2, t3 }, latency.Select(p => p.CollectionTime).ToArray());
+            Assert.All(latency, p => Assert.Equal(10.0, p.AvgReadLatencyMs, precision: 3));
+
+            /* Throughput drops the first collection (no prior LAG interval), leaving t2/t3. */
+            var throughput = await viewer.GetFileIoThroughputTrendAsync(FileIoSingletonServerId, t1.AddMinutes(-1), t3.AddMinutes(1));
+            Assert.Equal(new[] { t2, t3 }, throughput.Select(p => p.CollectionTime).ToArray());
+            Assert.All(throughput, p => Assert.Equal(1.0, p.ReadMbPerSec, precision: 3));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "file_io_stats", FileIoSingletonServerId, cleanupCt));
+        }
+    }
 
     [Fact]
     public async Task FileIoLatency_PerFileAverage_WithQueuedOverlay_AgainstDevPostgres()
@@ -609,6 +741,31 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)", connectio
         command.Parameters.AddWithValue(deltaStallQueuedReadMs);
         command.Parameters.AddWithValue(deltaStallQueuedWriteMs);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>One row per minute from <paramref name="start"/> to <paramref name="end"/> inclusive,
+    /// generated server-side (the real file_io_stats cadence) — the #4234 budget-cap live test's seed,
+    /// avoiding a round trip per minute over a 7-day window. Mirrors
+    /// <c>ViewerTrendBucketingReviewTests.BulkSeedWaitAsync</c>.</summary>
+    private static async Task BulkSeedFileIoAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken ct, long baseId, int serverId,
+        DateTime start, DateTime end, string databaseName, string fileName)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO file_io_stats
+    (collection_id, collection_time, server_id, server_name,
+     database_name, file_name, delta_reads, delta_writes, delta_read_bytes, delta_write_bytes,
+     delta_stall_read_ms, delta_stall_write_ms, delta_stall_queued_read_ms, delta_stall_queued_write_ms)
+SELECT $1 + row_number() OVER (), g, $2, $3, $4, $5, 10, 4, 655360, 262144, 100, 20, 0, 0
+FROM generate_series($6::timestamp, $7::timestamp, interval '1 minute') AS g", connection);
+        command.Parameters.AddWithValue(baseId);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(ServerName);
+        command.Parameters.AddWithValue(databaseName);
+        command.Parameters.AddWithValue(fileName);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task InsertBlockedProcessReportAsync(

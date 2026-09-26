@@ -1098,6 +1098,17 @@ public sealed class DarlingComposeTests
         Assert.NotNull(compose["aggregates"]);
         Assert.NotNull(compose["timeBuckets"]);
         Assert.NotNull(compose["filterOps"]);
+
+        /* #4198: describe_custom_view_catalog's MCP default is now COMPACT (measures grouped by source, most
+           fields dropped) to fit the tool's 32 KB response budget, but /api/catalog routes here — straight to
+           BuildComposeCatalogNode(), never through the MCP tool method or its new compact/source-filter logic —
+           so the web Custom Views editor must still see every measure at full per-field detail, unfiltered and
+           ungrouped. A regression that wired /api/catalog through the compact builder would drop these fields. */
+        var firstMeasure = Assert.IsType<JsonObject>(measures[0]);
+        Assert.NotNull(firstMeasure["appliesTo"]);
+        Assert.NotNull(firstMeasure["allowedDimensions"]);
+        Assert.NotNull(firstMeasure["category"]);
+        Assert.Null(compose["compact"]);
     }
 
     /* ─────────────────────────── DoS backstop + loopback scrub (provisioning) ─────────────────────────── */
@@ -2105,6 +2116,60 @@ public sealed class DarlingComposeTests
         var ok = DarlingWebEndpoints.ValidateDefinition(
             "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"markdown\",\"text\":\"just prose, no panels\"}]}");
         Assert.True(ok.IsValid, ok.Error);
+    }
+
+    /* ─────────────────────────── D7: notebook 'read' cell (#4222) ─────────────────────────── */
+
+    [Fact]
+    public void ValidateDefinition_AcceptsANotebook_WithAValidReadCell()
+    {
+        var ok = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"read\",\"read\":\"get_blocking\",\"params\":{\"server\":\"S1\",\"hours\":24},\"viz\":\"table\",\"title\":\"Blocking\"}]}");
+        Assert.True(ok.IsValid, ok.Error);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsANotebookReadCell_WithAnUnknownRead_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"read\",\"read\":\"get_totally_not_a_read\",\"viz\":\"table\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("unknown read", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsANotebookReadCell_WithAnUndeclaredParam_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"read\",\"read\":\"get_blocking\",\"params\":{\"not_a_real_param\":1},\"viz\":\"table\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("unknown parameter", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsANotebookReadCell_MissingARequiredParam_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"read\",\"read\":\"get_wait_trend\",\"viz\":\"line\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("missing the required parameter", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsANotebookReadCell_MissingViz_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"read\",\"read\":\"get_blocking\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("missing 'viz'", result.Error!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

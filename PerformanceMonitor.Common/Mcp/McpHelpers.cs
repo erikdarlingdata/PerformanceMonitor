@@ -232,8 +232,9 @@ internal static class McpHelpers
     /// without the filters returns rows: Query Store is collecting and the window has rows, just none from that
     /// module, so it is a measured zero rather than the "may not be enabled" guess. Names an <c>execution_type</c>
     /// filter too when one rode along, since either can be why nothing matched. Shared so both SKUs say it in the
-    /// same words. Darling passes its window floor (<paramref name="windowTruncated"/> and the served window as
-    /// <paramref name="hints"/>), because the raw tier can stop short of the window asked for; Lite has no floor.
+    /// same words. Both SKUs pass their window floor (<paramref name="windowTruncated"/> and the served window as
+    /// <paramref name="hints"/>), because the raw tier can stop short of the window asked for (#2364 on Darling,
+    /// #4231 on Lite).
     /// </summary>
     public static string QueryStoreModuleEmpty(
         string moduleName, string? executionType, int hoursBack, string? databaseName,

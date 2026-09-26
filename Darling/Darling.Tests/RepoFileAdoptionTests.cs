@@ -114,6 +114,10 @@ public sealed class RepoFileAdoptionTests
            its four source lines as one literal, so the guard's return is told apart from just those words
            appearing somewhere else in the file. */
         "AlertHistoryLazyRenderTests.cs",
+        /* #4368: its innerHTML-ban pin anchors renderAlertHeaderCell's own function body across the lines
+           between its declaration and the next top-level function, so the ban is scoped to real code and
+           not tripped by the file's own prose comment saying "never innerHTML". */
+        "AlertNotebookRenderClientTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
         "ChartWindowDomainTests.cs",
         "DarlingPathFilterGateTests.cs",
@@ -165,6 +169,9 @@ public sealed class RepoFileAdoptionTests
            column list), and its dispatch pin anchors `case QueryStoreClutterSubTabIndex:` on the awaited
            loader call on the NEXT line — anchors that a CRLF read would miss on every arm. */
         "QueryStoreClutterViewerSurfacesTests.cs",
+        /* #4231: its web source pin counts noteKey: "truncation_note" occurrences across server-tabs.js and
+           view-templates.js, which an LF-normalised read makes exact instead of CRLF-fragile. */
+        "RawWindowFloorViewerPortTests.cs",
         /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */

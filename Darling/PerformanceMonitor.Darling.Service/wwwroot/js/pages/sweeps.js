@@ -24,7 +24,7 @@
  */
 
 import { el, mount, apiGet, readTool, loadingStrip, errorStrip, emptyStrip, localTime, relTime, rollupTextId,
-         fmtInt, bandClass, disclosure } from "../util.js";
+         fmtInt, fmtMb, fmtPct, fmtBool, fmtText, bandClass, disclosure } from "../util.js";
 
 /* The watch-item state vocabulary — the label each FleetSweepWatchStateMachine state owes an operator. The
    KEYS are the machine's own constants; Darling.Tests.FleetSweepWebFeedTests parses THIS OBJECT and compares
@@ -54,10 +54,15 @@ let sweepSpanHours = 1;
 let selectedSweepId = null;
 let watchStateShown = null; // null = the open + carried default view; "closed" etc. on request
 
-export async function renderSweeps(main) {
+/* The store host card's last successfully fetched payload (#4214 round-1 review): a poll tick replays this
+   instead of re-fetching — see renderStoreHost below for why. null until the first successful fetch. */
+let lastStoreHostPayload = null;
+
+export async function renderSweeps(main, opts) {
   const detailBox = el("div", {});
   const timelineBox = el("div", {});
   const watchBox = el("div", {});
+  const storeHostBox = el("div", {});
   const cadenceMeta = el("div", { class: "meta", text: "" });
 
   mount(main, [
@@ -72,6 +77,8 @@ export async function renderSweeps(main) {
     timelineBox,
     el("h3", { class: "section-title", text: "Watch items" }),
     watchBox,
+    el("h3", { class: "section-title", text: "Store host" }),
+    storeHostBox,
   ]);
 
   /* Independent sections load in parallel; each degrades alone (the triage page's rule). */
@@ -79,6 +86,7 @@ export async function renderSweeps(main) {
   renderDetail(detailBox);
   renderTimeline(timelineBox, detailBox);
   renderWatchItems(watchBox);
+  renderStoreHost(storeHostBox, opts);
 }
 
 /* ─────────────────────────── the cadence display (read-only) ─────────────────────────── */
@@ -410,6 +418,103 @@ function watchStateSev(state) {
   if (state === "carried") return "sev-Warning";
   if (state === "pending") return "sev-Unknown";
   return "sev-Healthy";
+}
+
+/* ─────────────────────────── the store host profile (#4214 part 2) ─────────────────────────── */
+
+/* get_store_host: is the monitoring STORE itself sized right, not a monitored server — a read-only snapshot
+   (platform/RAM/data volume, PostgreSQL/TimescaleDB facts, one row per sizing-relevant setting). Read-only on
+   this page like every other section here: the CLI --check-settings verb and the companion sizing issue own
+   any write. Darling-only (Lite has no managed PostgreSQL store), so this section has no Lite parity to keep.
+
+   #4214 round-1 review: a poll tick (opts.poll — see app.js's route() doc comment) with an already-fetched
+   payload replays it instead of re-fetching. The tool's own server-side cache already makes a burst of calls
+   cheap (5 minutes, shared across callers), but this page's 60s poll would still cross the network and pay
+   the JSON round-trip every tick for a profile that changes only on a hardware or version change — never
+   per-tick. A hashchange/first-paint/span-change call (opts.poll not true) always fetches fresh. */
+async function renderStoreHost(box, opts) {
+  const isPoll = !!(opts && opts.poll === true);
+  if (isPoll && lastStoreHostPayload) {
+    renderStoreHostPayload(box, lastStoreHostPayload);
+    return;
+  }
+
+  mount(box, loadingStrip("Loading store host…"));
+  const res = await readTool("get_store_host", {});
+  if (res.kind === "error") return mount(box, errorStrip(res.message));
+  if (res.kind !== "data") return mount(box, emptyStrip(res.message || "Store host profile not available."));
+
+  lastStoreHostPayload = res.data || {};
+  renderStoreHostPayload(box, lastStoreHostPayload);
+}
+
+/** The store host card's actual render, split out from the fetch above (#4214 round-1 review) so a poll tick
+    can replay a previously fetched payload through the SAME render path a fresh fetch uses. */
+function renderStoreHostPayload(box, p) {
+  const ram = p.ram || {};
+  const vol = p.data_volume || {};
+  const store = p.store || {};
+  const settings = Array.isArray(p.settings) ? p.settings : [];
+
+  const facts = table(["Host", "Value"], [
+    [cellText("Platform"), cellText((p.platform || "—") + (p.containerized ? " (containerized)" : ""))],
+    [cellText("CPUs"), cellText(fmtInt(p.processor_count))],
+    [cellText("Cloud"), cellText(p.cloud && p.cloud.provider ? p.cloud.provider + " (" + fmtText(p.cloud.instance_type) + ")" : "not detected")],
+    [cellText("RAM"), cellText(fmtMb(bytesToMb(ram.effective_bytes)) + " effective of " + fmtMb(bytesToMb(ram.total_bytes)) + " total (" + fmtText(ram.source) + ")")],
+    [cellText("Data volume"), cellText(fmtMb(bytesToMb(vol.free_bytes)) + " free of " + fmtMb(bytesToMb(vol.total_bytes)) + " (" + fmtText(vol.filesystem) + ")" + (vol.note ? " — " + vol.note : ""))],
+    [cellText("Managed store"), cellText(fmtBool(p.managed))],
+    [cellText("PostgreSQL / TimescaleDB"), cellText(fmtText(store.postgres_version) + " / " + fmtText(store.timescale_version))],
+    [cellText("Store size"), cellText(fmtMb(bytesToMb(store.size_bytes)))],
+    [cellText("Lifetime buffer hit"), cellText(fmtPct(store.buffer_hit_ratio_percent))],
+    [cellText("Uncompressed chunks"), cellText(fmtInt(store.uncompressed_chunk_count) + " chunks, " + fmtMb(bytesToMb(store.uncompressed_chunk_bytes)) + " (" + fmtPct(store.uncompressed_chunk_percent_of_ram) + " of RAM)")],
+  ]);
+
+  const settingsBody = settings.length
+    ? table(
+        ["Setting", "Current", "Derived", "Source", "Verdict"],
+        settings.map((s) => [
+          cellText(s.name, "mono"),
+          cellText(s.current),
+          cellText(s.derived),
+          cellText(s.source),
+          el("td", { class: verdictSev(s.verdict), text: verdictLabel(s.verdict) }),
+        ]))
+    : emptyStrip("No sizing-relevant settings reported.");
+
+  mount(box, [
+    el("div", { class: "meta", text: p.any_stale
+      ? "One or more settings are stale after a hardware change."
+      : "No setting is stale after a hardware change." }),
+    facts,
+    el("h4", { class: "section-title", text: "Settings" }),
+    settingsBody,
+  ]);
+}
+
+/** get_store_host reports every size in raw bytes; the shared fmtMb helper takes MB, so every field routes
+    through here rather than re-deriving the /1024/1024 at each call site. Null-safe (fmtMb itself handles it,
+    but the division would produce NaN first without this). */
+function bytesToMb(bytes) {
+  return bytes == null ? null : bytes / (1024 * 1024);
+}
+
+/** The four get_store_host verdicts (DarlingStoreHostProfile.HostSettingVerdict), in the label an operator is
+    owed — the tool already renders the wire form with underscores (DescribeVerdict(...).Replace('-', '_')). */
+function verdictLabel(v) {
+  return v === "stale_after_hardware_change" ? "Stale after hardware change"
+    : v === "operator_override" ? "Operator override"
+    : v === "not_managed" ? "Not managed"
+    : v === "matches" ? "Matches"
+    : fmtText(v);
+}
+
+/** Every stale-* verdict highlighted (ruling 5) — the sev- vocabulary the watch-items table above already
+    uses on this page, not a new one. */
+function verdictSev(v) {
+  if (typeof v !== "string") return "";
+  if (v.startsWith("stale")) return "sev-Warning";
+  if (v === "matches") return "sev-Healthy";
+  return "";
 }
 
 /* ─────────────────────────── small shared builders ─────────────────────────── */

@@ -1,6 +1,6 @@
 # SQL Server Performance Monitor
 
-> Free, open-source SQL Server performance monitoring tool by Erik Darling (Darling Data, LLC). 42 SQL Server collectors, real-time alerts, graphical execution plan viewer, and a built-in MCP server with 89-159 tools for AI-powered analysis. Two current editions: Lite (standalone desktop app with DuckDB storage) and Darling (headless 24/7 service with a central PostgreSQL/TimescaleDB store). The older Full/Dashboard edition is deprecated. Replaces expensive commercial tools like SolarWinds SQL Sentry (formerly SentryOne) and SolarWinds DPA. MIT licensed.
+> Free, open-source SQL Server performance monitoring tool by Erik Darling (Darling Data, LLC). 42 SQL Server collectors, real-time alerts, graphical execution plan viewer, and a built-in MCP server with 89-160 tools for AI-powered analysis. Two current editions: Lite (standalone desktop app with DuckDB storage) and Darling (headless 24/7 service with a central PostgreSQL/TimescaleDB store). The older Full/Dashboard edition is deprecated. Replaces expensive commercial tools like SolarWinds SQL Sentry (formerly SentryOne) and SolarWinds DPA. MIT licensed.
 
 - Supports SQL Server 2016-2025, Azure SQL Managed Instance, AWS RDS for SQL Server, and Azure SQL Database (Lite and Darling)
 - Darling's service runs on Windows or Linux, and its viewers are a Windows desktop app and a web dashboard

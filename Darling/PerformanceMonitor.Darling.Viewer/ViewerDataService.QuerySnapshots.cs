@@ -22,9 +22,12 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// adds (all verified present in the query_snapshots store). A captured
 /// running request from one collection cycle. <see cref="CollectionTime"/> is the collector's naive-UTC
 /// capture time, so <see cref="CollectionTimeLocal"/> converts through <see cref="ViewerTimeHelper.ForDisplay"/>
-/// (Lite's <c>ServerTimeHelper.FormatServerTime</c>). <see cref="QueryPlan"/> / <see cref="LiveQueryPlan"/>
-/// are the stored estimated / live plan XML the collector now captures inline; <see cref="HasQueryPlan"/> /
-/// <see cref="HasLiveQueryPlan"/> gate the grid's Estimated / Actual plan buttons.
+/// (Lite's <c>ServerTimeHelper.FormatServerTime</c>). <see cref="HasQueryPlan"/> / <see cref="HasLiveQueryPlan"/>
+/// are independent flags — set directly from the store's presence check on a stored-row read, or from a
+/// non-empty in-row plan on the live DMV read — and gate the grid's Estimated / Actual plan buttons.
+/// <see cref="QueryPlan"/> / <see cref="LiveQueryPlan"/> carry plan XML only for the live path; a stored-row
+/// read leaves them null and fetches on demand via
+/// <see cref="ViewerDataService.GetQuerySnapshotPlanXmlAsync"/> when a plan button is clicked (#4239).
 /// </summary>
 public sealed class ViewerQuerySnapshotRow
 {
@@ -75,8 +78,8 @@ public sealed class ViewerQuerySnapshotRow
     public int BlockedSessionCount { get; set; }
     public string ChainBlockingPath { get; set; } = "";
 
-    public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
-    public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
+    public bool HasQueryPlan { get; set; }
+    public bool HasLiveQueryPlan { get; set; }
     public string CollectionTimeLocal =>
         CollectionTime == DateTime.MinValue ? "" : ViewerTimeHelper.ForDisplay(CollectionTime).ToString("yyyy-MM-dd HH:mm:ss");
 
@@ -115,8 +118,8 @@ public sealed partial class ViewerDataService
             transaction_isolation_level,
             dop,
             parallel_worker_count,
-            query_plan,
-            live_query_plan,
+            query_plan IS NOT NULL AS has_query_plan,
+            live_query_plan IS NOT NULL AS has_live_query_plan,
             collection_time,
             login_name,
             host_name,
@@ -134,21 +137,30 @@ public sealed partial class ViewerDataService
             request_id
         """;
 
+    /// <summary>The Active-Queries grid cap (#4239) — the newest this many rows of the matched window, so a
+    /// wide window with a busy server can't pull an unbounded amount of plan-bearing data into the viewer.</summary>
+    private const int MaxLatestQuerySnapshotRows = 1000;
+
     /// <summary>
     /// The Active-Queries grid read — Lite's <c>GetLatestQuerySnapshotsAsync</c> (v_query_snapshots,
     /// ORDER BY collection_time DESC, cpu_time_ms DESC, WAITFOR shells dropped) against the base
-    /// <c>query_snapshots</c> table. $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// <c>query_snapshots</c> table, capped to the newest <see cref="MaxLatestQuerySnapshotRows"/> (#4239) —
+    /// the only one of the three snapshot reads that caps; <c>session_id, request_id</c> break ties so the
+    /// cap is deterministic. The trailing <c>total_count</c> column is the pre-cap match count, read by
+    /// <see cref="ReadQuerySnapshotsWithTotalAsync"/>. $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public static readonly string LatestQuerySnapshotsSql = $"""
         SELECT
-        {QuerySnapshotColumns}
+        {QuerySnapshotColumns},
+            COUNT(*) OVER () AS total_count
         FROM query_snapshots
         WHERE server_id = $1
         AND   collection_time >= $2
         AND   collection_time <= $3
         AND   ($4::text[] IS NULL OR database_name = ANY($4))
         AND   query_text NOT LIKE 'WAITFOR%'
-        ORDER BY collection_time DESC, cpu_time_ms DESC
+        ORDER BY collection_time DESC, cpu_time_ms DESC, session_id, request_id
+        LIMIT {MaxLatestQuerySnapshotRows}
         """;
 
     /// <summary>
@@ -168,15 +180,17 @@ public sealed partial class ViewerDataService
         ORDER BY cpu_time_ms DESC
         """;
 
-    /// <summary>Active-Queries grid rows over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
-    public async Task<List<ViewerQuerySnapshotRow>> GetLatestQuerySnapshotsAsync(
+    /// <summary>Active-Queries grid rows over [<paramref name="startUtc"/>, <paramref name="endUtc"/>], newest
+    /// <see cref="MaxLatestQuerySnapshotRows"/> only. TotalCount is the full window's pre-cap match count, so
+    /// the caller can show a "showing newest N of total" note when the window holds more than the cap.</summary>
+    public async Task<(int TotalCount, List<ViewerQuerySnapshotRow> Rows)> GetLatestQuerySnapshotsAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
     {
         await using var command = _dataSource.CreateCommand(LatestQuerySnapshotsSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddServerWindowParameters(command, serverId, startUtc, endUtc);
         command.Parameters.Add(DatabaseFilterParameter(databaseNames));
-        return await ReadQuerySnapshotsAsync(command, cancellationToken);
+        return await ReadQuerySnapshotsWithTotalAsync(command, cancellationToken);
     }
 
     /// <summary>
@@ -227,6 +241,114 @@ public sealed partial class ViewerDataService
         return (batchTime, rows);
     }
 
+    /// <summary>
+    /// The stored estimated execution plan for one Active-Queries / wait drill-down snapshot row, keyed by
+    /// its natural key (server, collection_time, session_id, request_id). All four key columns are
+    /// equality-bound, so <c>ORDER BY collection_time DESC</c> would be a no-op here; <c>LIMIT 1</c> plus the
+    /// <c>IS NOT NULL</c> guard exist only to protect against a hypothetical duplicate row sharing that key
+    /// (query_snapshots has no enforced uniqueness on it) shadowing the real one.
+    ///
+    /// <para><c>COALESCE(request_id, 0)</c>: <see cref="ReadQuerySnapshotRow"/> maps a NULL
+    /// <c>request_id</c> to 0 for every row it reads (ordinal 34), so a row collected with no request_id
+    /// must be matched the same way here, or it can never be fetched — a plain <c>request_id = $4</c> never
+    /// matches NULL, whatever value 0 is bound as. Mirrors Lite's #4297 fetcher (#4239).</para>
+    /// </summary>
+    public const string QuerySnapshotEstimatedPlanSql = """
+        SELECT query_plan
+        FROM query_snapshots
+        WHERE server_id = $1
+        AND   collection_time = $2
+        AND   session_id = $3
+        AND   COALESCE(request_id, 0) = $4
+        AND   query_plan IS NOT NULL
+        LIMIT 1
+        """;
+
+    /// <summary>The stored live/actual execution plan for one snapshot row. See
+    /// <see cref="QuerySnapshotEstimatedPlanSql"/> for the key-uniqueness and NULL-request_id notes.</summary>
+    public const string QuerySnapshotLivePlanSql = """
+        SELECT live_query_plan
+        FROM query_snapshots
+        WHERE server_id = $1
+        AND   collection_time = $2
+        AND   session_id = $3
+        AND   COALESCE(request_id, 0) = $4
+        AND   live_query_plan IS NOT NULL
+        LIMIT 1
+        """;
+
+    /// <summary>
+    /// On-demand plan fetch for one Active-Queries / wait drill-down snapshot row (#4239) — a stored-row
+    /// read no longer carries full plan XML in every row (only the has-plan flags), so a plan button click
+    /// fetches the one row's XML by its natural key. <paramref name="collectionTimeUtc"/> must be the row's
+    /// <see cref="ViewerQuerySnapshotRow.CollectionTime"/> exactly (naive UTC, microsecond-preserving) —
+    /// never <c>CollectionTimeLocal</c>, which has already been shifted for display. Returns null when no
+    /// plan was captured for that request.
+    /// </summary>
+    public async Task<string?> GetQuerySnapshotPlanXmlAsync(
+        int serverId, DateTime collectionTimeUtc, int sessionId, int requestId, bool live, CancellationToken cancellationToken = default)
+    {
+        await using var command = _dataSource.CreateCommand(live ? QuerySnapshotLivePlanSql : QuerySnapshotEstimatedPlanSql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified) });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = sessionId });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = requestId });
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result is string s ? s : null;
+    }
+
+    /// <summary>
+    /// Maps one <c>query_snapshots</c> row (<see cref="QuerySnapshotColumns"/> shape, ordinals 0-34) — shared
+    /// by every store-read snapshot query. <see cref="ViewerQuerySnapshotRow.HasQueryPlan"/> /
+    /// <see cref="ViewerQuerySnapshotRow.HasLiveQueryPlan"/> come straight from the <c>IS NOT NULL</c> presence
+    /// columns at 18/19 (never DBNull), and the plan XML properties stay null — a stored-row read fetches plan
+    /// text on demand via <see cref="GetQuerySnapshotPlanXmlAsync"/> instead of carrying it in every row (#4239).
+    /// </summary>
+    private static ViewerQuerySnapshotRow ReadQuerySnapshotRow(NpgsqlDataReader reader)
+    {
+        return new ViewerQuerySnapshotRow
+        {
+            SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+            DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
+            ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
+            QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
+            Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
+            BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
+            WaitType = reader.IsDBNull(6) ? "" : reader.GetString(6),
+            WaitTimeMs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            WaitResource = reader.IsDBNull(8) ? "" : reader.GetString(8),
+            CpuTimeMs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+            TotalElapsedTimeMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+            Reads = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+            Writes = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
+            LogicalReads = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
+            GrantedQueryMemoryGb = reader.IsDBNull(14) ? 0 : Convert.ToDouble(reader.GetValue(14)),
+            TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
+            Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
+            ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
+            HasQueryPlan = reader.GetBoolean(18),
+            HasLiveQueryPlan = reader.GetBoolean(19),
+            QueryPlan = null,
+            LiveQueryPlan = null,
+            CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
+            LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
+            HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
+            ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
+            OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
+            PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25)),
+            QueryHash = reader.IsDBNull(26) ? "" : reader.GetString(26),
+            RequestedMemoryMb = reader.IsDBNull(27) ? 0 : Convert.ToDouble(reader.GetValue(27)),
+            UsedMemoryMb = reader.IsDBNull(28) ? 0 : Convert.ToDouble(reader.GetValue(28)),
+            MaxUsedMemoryMb = reader.IsDBNull(29) ? 0 : Convert.ToDouble(reader.GetValue(29)),
+            TempdbCurrentMb = reader.IsDBNull(30) ? 0 : Convert.ToDouble(reader.GetValue(30)),
+            TempdbAllocationsMb = reader.IsDBNull(31) ? 0 : Convert.ToDouble(reader.GetValue(31)),
+            TranLogUsedMb = reader.IsDBNull(32) ? 0 : Convert.ToDouble(reader.GetValue(32)),
+            TranStartTime = reader.IsDBNull(33) ? null : reader.GetDateTime(33),
+            RequestId = reader.IsDBNull(34) ? 0 : reader.GetInt32(34),
+        };
+    }
+
     private static async Task<List<ViewerQuerySnapshotRow>> ReadQuerySnapshotsAsync(
         NpgsqlCommand command, CancellationToken cancellationToken)
     {
@@ -235,47 +357,29 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new ViewerQuerySnapshotRow
-            {
-                SessionId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                ElapsedTimeFormatted = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                QueryText = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                Status = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                BlockingSessionId = reader.IsDBNull(5) ? 0 : reader.GetInt32(5),
-                WaitType = reader.IsDBNull(6) ? "" : reader.GetString(6),
-                WaitTimeMs = reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                WaitResource = reader.IsDBNull(8) ? "" : reader.GetString(8),
-                CpuTimeMs = reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                TotalElapsedTimeMs = reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                Reads = reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                Writes = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
-                LogicalReads = reader.IsDBNull(13) ? 0 : reader.GetInt64(13),
-                GrantedQueryMemoryGb = reader.IsDBNull(14) ? 0 : Convert.ToDouble(reader.GetValue(14)),
-                TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
-                Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
-                ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
-                QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
-                LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
-                CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
-                LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
-                HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
-                ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
-                OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
-                PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25)),
-                QueryHash = reader.IsDBNull(26) ? "" : reader.GetString(26),
-                RequestedMemoryMb = reader.IsDBNull(27) ? 0 : Convert.ToDouble(reader.GetValue(27)),
-                UsedMemoryMb = reader.IsDBNull(28) ? 0 : Convert.ToDouble(reader.GetValue(28)),
-                MaxUsedMemoryMb = reader.IsDBNull(29) ? 0 : Convert.ToDouble(reader.GetValue(29)),
-                TempdbCurrentMb = reader.IsDBNull(30) ? 0 : Convert.ToDouble(reader.GetValue(30)),
-                TempdbAllocationsMb = reader.IsDBNull(31) ? 0 : Convert.ToDouble(reader.GetValue(31)),
-                TranLogUsedMb = reader.IsDBNull(32) ? 0 : Convert.ToDouble(reader.GetValue(32)),
-                TranStartTime = reader.IsDBNull(33) ? null : reader.GetDateTime(33),
-                RequestId = reader.IsDBNull(34) ? 0 : reader.GetInt32(34),
-            });
+            rows.Add(ReadQuerySnapshotRow(reader));
         }
 
         return rows;
+    }
+
+    /// <summary>The capped-read counterpart of <see cref="ReadQuerySnapshotsAsync"/> — also reads the
+    /// trailing <c>total_count</c> column (ordinal 35, <see cref="LatestQuerySnapshotsSql"/> only) carrying
+    /// the pre-cap match count, constant across every returned row.</summary>
+    private static async Task<(int TotalCount, List<ViewerQuerySnapshotRow> Rows)> ReadQuerySnapshotsWithTotalAsync(
+        NpgsqlCommand command, CancellationToken cancellationToken)
+    {
+        var rows = new List<ViewerQuerySnapshotRow>();
+        var totalCount = 0;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(ReadQuerySnapshotRow(reader));
+            totalCount = (int)reader.GetInt64(35);
+        }
+
+        return (totalCount, rows);
     }
 
     /// <summary>

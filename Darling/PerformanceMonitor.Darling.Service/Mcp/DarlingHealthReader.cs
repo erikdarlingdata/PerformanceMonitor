@@ -380,6 +380,21 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         return overrides;
     }
 
+    /// <summary>#4232: ONE cache for every store this reader serves — <c>get_daily_summary_range</c> shares it
+    /// between the web viewer's <c>/api/read</c> mirror and MCP clients, because both paths call this same
+    /// method. Keyed inside <see cref="DailySummaryRangeCache{TRow}"/> by (store, server, range, routed
+    /// statement); <see cref="NpgsqlDataSource"/> has no value-equality override, so distinct stores — including
+    /// a live test's own <c>ScratchPostgres</c> database — never collide on one store's cached block.</summary>
+    internal static readonly DailySummaryRangeCache<DailySummaryReadRow> RangeCache = new();
+
+    /// <summary>#4232: test-only reset for <see cref="RangeCache"/>. This cache is by design one hour stale for
+    /// a closed day -- a row that lands late for a closed day (an outage catch-up, a backfill) shows within the
+    /// hour, not immediately (the #4232 ruling). A live test that mutates a closed day's rows and reads the same
+    /// server/range again through the same store object is testing THAT contract, not a product bug, unless it
+    /// calls this between the mutation and the re-read to force the re-read to hit the store. Never call this
+    /// from product code -- only <c>Darling.Tests</c> can even see it (Service's own <c>InternalsVisibleTo</c>).</summary>
+    internal static void ResetRangeCacheForTests() => RangeCache.Clear();
+
     /// <summary>One <see cref="DailySummaryReadRow"/> per collected day in the half-open [fromDate, toDate)
     /// window (the viewer's <c>GetDailySummaryRangeAsync</c>).
     ///
@@ -392,7 +407,7 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
     /// </summary>
     public static async Task<DailySummaryRangeReadResult> GetDailySummaryRangeAsync(
         NpgsqlDataSource postgres, int serverId, DateTime fromDate, DateTime toDate,
-        DateTime? referenceUtc = null, CancellationToken cancellationToken = default)
+        DateTime? referenceUtc = null, bool asOfNow = true, CancellationToken cancellationToken = default)
     {
         /* #1664: gate the age decision on the rollups actually existing — a plain-PostgreSQL store has none
            (and never drops raw, so raw is complete there). #1759: and on what they have MATERIALIZED, which is
@@ -434,28 +449,57 @@ SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY colle
         var shortestRetentionDays = ShortestSignalRetentionDays(fleetOverrides);
         var horizon = DailySummaryRetention.HorizonFor(DateTime.UtcNow, shortestRetentionDays);
 
-        var results = new List<DailySummaryReadRow>();
         /* #3653 (Q12): tier over the legacy pair above; the hourly RELATION by the supply rule — the
            interval-honest successor where it reaches as far back as the legacy for this window. The viewer's
-           calendar makes the identical call, so the two still count the same queries for the same day. */
-        await using var command = postgres.CreateCommand(DailySummarySql.RangeSqlFor(tier, coverage, fromDate));
-        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-        DarlingMcpReadParameters.AddInt(command, serverId);
-        DarlingMcpReadParameters.AddTimestamp(command, fromDate.Date);
-        DarlingMcpReadParameters.AddTimestamp(command, toDate.Date);
+           calendar makes the identical call, so the two still count the same queries for the same day.
+           #4232: resolved ONCE for the range as a whole and reused for every sub-range RunRangeAsync below is
+           asked to read (see DailySummaryRangeCache's own doc) — a sub-range resolved on its own could route to
+           a different tier than the range it is part of, which would silently change what a day's
+           unique_queries means between two rows of the same read. */
+        var routedSql = DailySummarySql.RangeSqlFor(tier, coverage, fromDate);
 
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
+        async Task<List<DailySummaryReadRow>> RunRangeAsync(DateTime start, DateTime end, CancellationToken ct)
         {
-            var row = ReadDailySummaryRow(reader);
-            results.Add(row with
+            var rows = new List<DailySummaryReadRow>();
+            await using var command = postgres.CreateCommand(routedSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            DarlingMcpReadParameters.AddInt(command, serverId);
+            DarlingMcpReadParameters.AddTimestamp(command, start.Date);
+            DarlingMcpReadParameters.AddTimestamp(command, end.Date);
+
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
             {
-                RateTiers = rateTiers,
-                ReferenceUtc = referenceUtc ?? DateTime.UtcNow,
-                DataState = DailySummaryRetention.StateFor(row.SummaryDate, row.CollectionRuns, row.SignalSourcesPresent, horizon),
-                RetentionHorizon = horizon,
-            });
+                rows.Add(ReadDailySummaryRow(reader));
+            }
+
+            return rows;
         }
+
+        /* #4232: the closed-day cache. ReadDailySummaryRow above returns the row from BEFORE the RateTiers /
+           ReferenceUtc / DataState / RetentionHorizon stamp below — that raw row is what gets cached, and every
+           row (cached or freshly read) is re-stamped from THIS call's live thresholds and horizon, never from
+           whatever a cached block happened to compute them as up to an hour ago (ruling item 7: no column the
+           statement itself returns spans more than one day, but these post-read judgments do move between
+           refreshes, so they are re-applied after the join every time). */
+        var rawResults = await RangeCache.GetRangeAsync(
+            storeKey: postgres,
+            serverId: serverId,
+            fromDate: fromDate,
+            toDate: toDate,
+            routedSql: routedSql,
+            asOfNow: asOfNow,
+            day: row => row.SummaryDate,
+            runRange: RunRangeAsync,
+            cancellationToken: cancellationToken);
+
+        var results = rawResults.Select(row => row with
+        {
+            RateTiers = rateTiers,
+            ReferenceUtc = referenceUtc ?? DateTime.UtcNow,
+            DataState = DailySummaryRetention.StateFor(row.SummaryDate, row.CollectionRuns, row.SignalSourcesPresent, horizon),
+            RetentionHorizon = horizon,
+        }).ToList();
 
         return new DailySummaryRangeReadResult(results, horizon, shortestRetentionDays);
     }

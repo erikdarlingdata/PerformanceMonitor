@@ -448,6 +448,12 @@ public sealed class DailySummaryNotCarriedLiveTests
         Assert.Equal(new long?[] { 3L, 5L, 7L, 2L }, repaired.Select(r => r.UniqueQueries).ToArray());
         Assert.Equal(new[] { 1, 1, 1, 1 }, repaired.Select(r => r.SignalSourcesPresent).ToArray());
 
+        /* #4232: the repair above never touches the old cluster (it is past the scan horizon), so this
+           assertion is not chasing a mutation -- but the FIRST read of this exact (postgres, OldServerId,
+           O(0), O(5)) range at the top of the test already warmed the closed-day block, and without a reset
+           this read would be served from that block and never reach the store at all. Reset so the read
+           actually re-queries and the assertion still means what it says: the old cluster still stands. */
+        DarlingHealthReader.ResetRangeCacheForTests();
         var oldAfter = await DarlingHealthReader.GetDailySummaryRangeAsync(postgres, OldServerId, O(0), O(5), cancellationToken: ct);
         Assert.Equal(new[] { O(2) }, oldAfter.DaysMissing);
     }

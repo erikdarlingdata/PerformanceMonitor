@@ -179,9 +179,24 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     /// never disagree about what the grants series says.
     /// </summary>
     [Fact]
-    public void MemoryGrantTrendSql_IsTheViewersOverlayRead_ByteForByte()
+    public void MemoryGrantTrendSql_SharesTheViewersPerCollectionRead_ByteForByte()
     {
-        Assert.Equal(ViewerDataService.MemoryGrantTrendSql, DarlingTrendReader.MemoryGrantTrendSql);
+        /* #3548's "one shared read" doctrine, reconciled with #4349's viewer bucketing: MCP's
+           get_memory_trend needs the memory-grant series UNBUCKETED (it does its own date_bin in
+           MemoryGrantTrendBucketedSql), while the viewer's Overview overlay buckets it directly. Rather
+           than one SQL string serving two different callers' bucketing needs, #3548's single shared read
+           is now TrendBucketSql.MemoryGrantPerCollectionSql — the per-collection CTE body both sides read
+           byte-for-byte — and each SKU wraps it in its own, independent outer bucketing select. */
+        Assert.Contains(TrendBucketSql.MemoryGrantPerCollectionSql, DarlingTrendReader.MemoryGrantTrendSql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.MemoryGrantPerCollectionSql, ViewerDataService.MemoryGrantTrendSql, StringComparison.Ordinal);
+
+        /* MCP's unbucketed read IS the shared constant plus only an ORDER BY — no second date_bin wrapper
+           sits between DarlingTrendReader.MemoryGrantTrendSql and the shared per-collection text, or
+           get_memory_trend's own MemoryGrantTrendBucketedSql wrapper would bucket it twice. */
+        Assert.Equal(
+            TrendBucketSql.MemoryGrantPerCollectionSql + "\nORDER BY collection_time",
+            DarlingTrendReader.MemoryGrantTrendSql,
+            ignoreLineEndingDifferences: true);
 
         var sql = DarlingTrendReader.MemoryGrantTrendSql;
         Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
@@ -457,8 +472,9 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     /// — the A11a residual is reported, not silently rewritten") is retired: the shape is now the three-state
     /// read the procedure trends have carried since V128 — <c>MAX(sample_interval_seconds)</c> per collection,
     /// <c>0 → NULL</c> (unrated), <c>NULL →</c> the LAG — built ONCE in Storage
-    /// (<see cref="DurationTrendRouting.BuildRawTrendSql"/>) and read by the viewer's <c>QueryDurationTrendSql</c>
-    /// as the builder's output with its database filter. The wrong spelling is pinned by absence:
+    /// (<see cref="DurationTrendRouting.BuildRawTrendSql"/>, and since #4234 its bucketed twin
+    /// <see cref="DurationTrendRouting.BuildBucketedRawTrendSql"/>, which the viewer's <c>QueryDurationTrendSql</c>
+    /// now reads with its database filter). The wrong spelling is pinned by absence:
     /// <c>COALESCE(NULLIF(sample_interval_seconds, 0), LAG)</c> would fall back to a fabricated interval on
     /// exactly the restart row the marker flags.
     ///
@@ -468,14 +484,16 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
     /// lane's file boundary, still the LAG-only text — was named here as the residual with a must-move pin
     /// (<c>DoesNotContain("sample_interval_seconds")</c> on the const). That pin is retired by the PR that made
     /// the const an alias, and what stands in its place is stronger than the equality it grew from: the three
-    /// raw consts (the MCP reader's query and procedure texts, the viewer's procedure text) are DECLARED as the
+    /// raw consts (the MCP reader's query and procedure texts, the viewer's procedure text) are DECLARED as a
     /// builder's output, read off the source because that is the only place an alias is visible — a static
     /// readonly bound to a builder call is a fresh string each time, so a value comparison cannot tell an alias
     /// from a faithful copy, which is exactly why the equality pins could not prevent the drift they measured.
-    /// The value comparisons that survive below pin the alias's ARGUMENT (the MCP text is the builder's output
-    /// WITHOUT the viewer's filter, the viewer's WITH it), which a source pin names but only a value proves the
-    /// builder honours. The negative half is the one that bites: the two files must carry NONE of the retired
-    /// definition text, because a restatement beside an alias is drift with a head start.</para>
+    /// The value comparisons that survive below pin the alias's ARGUMENT (the MCP text is the bucketed
+    /// builder's output WITHOUT the viewer's filter, the viewer's WITH it — both the query and procedure texts,
+    /// since #4234 moved the viewer's duration pair onto the bucketed builder too), which a source pin names but
+    /// only a value proves the builder honours. The negative half is the one that bites: the two files must
+    /// carry NONE of the retired definition text, because a restatement beside an alias is drift with a head
+    /// start.</para>
     /// </summary>
     [Fact]
     public void RawDurationTrendSql_ReadsTheStoredInterval_ThreeState_AndTheRawConstsAreItsAliases()
@@ -498,21 +516,24 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
             Assert.Contains("CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second", sql, StringComparison.Ordinal);
         }
 
-        /* The viewer's duration copy IS the builder's output with the filter; the filter is the ONLY difference. */
-        Assert.Equal(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true), ViewerDataService.QueryDurationTrendSql);
+        /* #4234: the viewer's duration pair moved onto the BUCKETED builder (the MCP shape since #3897), so
+           they are now compared against that builder rather than the per-collection BuildRawTrendSql; the
+           filter is still the ONLY difference between the viewer's call and the MCP reader's. */
+        Assert.Equal(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: true), ViewerDataService.QueryDurationTrendSql);
         Assert.Equal(
             Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true)).Where(l => !l.Contains("$4::text[]", StringComparison.Ordinal)).ToArray(),
             Lines(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)));
 
         /* The alias's ARGUMENT, by value: since #3897 the MCP reader's two raw texts are the BUCKETED builder's
            output, byte for byte (line endings aside) — not line-trimmed, because an alias has no indentation of
-           its own to forgive — and the viewer's procedure text is the per-collection builder's output WITH its
-           filter. The two builders share one per-collection CTE (DurationTrendRouting.RawCollectionsCte): the
-           MCP statement's CTE IS the viewer's minus the filter line, so the tool's buckets and the chart's points
-           are built from the same collections with the same three-state interval. */
-        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats")), Lf(DarlingTrendReader.QueryDurationTrendSql));
-        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats")), Lf(DarlingTrendReader.ProcedureDurationTrendSql));
-        Assert.Equal(Lf(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true)), Lf(ViewerDataService.ProcedureDurationTrendSql));
+           its own to forgive — and since #4234 the viewer's query AND procedure texts are the SAME bucketed
+           builder's output WITH its filter. The two calls share one per-collection CTE
+           (DurationTrendRouting.RawCollectionsCte): the MCP statement's CTE IS the viewer's minus the filter
+           line, so the tool's buckets and the chart's buckets are built from the same collections with the same
+           three-state interval. */
+        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false)), Lf(DarlingTrendReader.QueryDurationTrendSql));
+        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: false)), Lf(DarlingTrendReader.ProcedureDurationTrendSql));
+        Assert.Equal(Lf(DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: true)), Lf(ViewerDataService.ProcedureDurationTrendSql));
         Assert.Equal(Cte(Lf(DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: false)), "raw AS\n("), Cte(Lf(DarlingTrendReader.QueryDurationTrendSql), "raw AS\n("));
         Assert.Equal(Cte(Lf(DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: false)), "raw AS\n("), Cte(Lf(DarlingTrendReader.ProcedureDurationTrendSql), "raw AS\n("));
         /* The MCP text has no database filter; its one $4 is the bucket width. */
@@ -526,11 +547,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
            LF-normalised first — the positive half would fail loudly on CRLF, which is why it is asserted on
            the normalised text rather than left to a DoesNotContain that could never fire. */
         var reader = Lf(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingTrendReader.cs"));
-        Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"query_stats\");", reader, StringComparison.Ordinal);
-        Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"procedure_stats\");", reader, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"query_stats\", withDatabaseFilter: false);", reader, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"procedure_stats\", withDatabaseFilter: false);", reader, StringComparison.Ordinal);
         var viewer = Lf(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.QueryTrends.cs"));
-        Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.ProcedureDurationTrendRawSql(withDatabaseFilter: true);", viewer, StringComparison.Ordinal);
-        Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.QueryDurationTrendRawSql(withDatabaseFilter: true);", viewer, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string ProcedureDurationTrendSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"procedure_stats\", withDatabaseFilter: true);", viewer, StringComparison.Ordinal);
+        Assert.Contains("public static readonly string QueryDurationTrendSql =\n        DurationTrendRouting.BuildBucketedRawTrendSql(\"query_stats\", withDatabaseFilter: true);", viewer, StringComparison.Ordinal);
 
         /* None of the retired definitions survive as text. The MCP reader's file held two raw trend bodies
            (query LAG-only, procedure three-state) and now holds neither: no summed-elapsed projection, no

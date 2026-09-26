@@ -224,15 +224,16 @@ SELECT
     transaction_isolation_level,
     dop,
     parallel_worker_count,
-    query_plan,
-    live_query_plan,
+    query_plan IS NOT NULL AS has_query_plan,
+    live_query_plan IS NOT NULL AS has_live_query_plan,
     collection_time,
     login_name,
     host_name,
     program_name,
     open_transaction_count,
     percent_complete,
-    query_hash
+    query_hash,
+    request_id
 FROM v_query_snapshots
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -270,19 +271,108 @@ ORDER BY collection_time DESC, cpu_time_ms DESC";
                 TransactionIsolationLevel = reader.IsDBNull(15) ? "" : reader.GetString(15),
                 Dop = reader.IsDBNull(16) ? 0 : reader.GetInt32(16),
                 ParallelWorkerCount = reader.IsDBNull(17) ? 0 : reader.GetInt32(17),
-                QueryPlan = reader.IsDBNull(18) ? null : reader.GetString(18),
-                LiveQueryPlan = reader.IsDBNull(19) ? null : reader.GetString(19),
+                HasQueryPlan = reader.IsDBNull(18) ? false : reader.GetBoolean(18),
+                HasLiveQueryPlan = reader.IsDBNull(19) ? false : reader.GetBoolean(19),
                 CollectionTime = reader.IsDBNull(20) ? DateTime.MinValue : reader.GetDateTime(20),
                 LoginName = reader.IsDBNull(21) ? "" : reader.GetString(21),
                 HostName = reader.IsDBNull(22) ? "" : reader.GetString(22),
                 ProgramName = reader.IsDBNull(23) ? "" : reader.GetString(23),
                 OpenTransactionCount = reader.IsDBNull(24) ? 0 : reader.GetInt32(24),
                 PercentComplete = reader.IsDBNull(25) ? 0m : Convert.ToDecimal(reader.GetValue(25)),
-                QueryHash = reader.IsDBNull(26) ? "" : reader.GetString(26)
+                QueryHash = reader.IsDBNull(26) ? "" : reader.GetString(26),
+                RequestId = reader.IsDBNull(27) ? 0 : reader.GetInt32(27)
             });
         }
 
         return items;
+    }
+
+    /// <summary>Selects <c>query_plan</c> on <c>false</c>, <c>live_query_plan</c> on <c>true</c> — SQL can't
+    /// parameterize a column name, so <see cref="GetSnapshotPlanTextAsync"/> picks the text at call time.</summary>
+    private static string SnapshotPlanColumn(bool live) => live ? "live_query_plan" : "query_plan";
+
+    /// <summary>
+    /// On-demand fetch of ONE snapshot's plan XML, by its capture key (#4239). The bulk reads
+    /// (<see cref="GetLatestQuerySnapshotsAsync"/>, <see cref="GetQuerySnapshotsByWaitTypeAsync"/>,
+    /// <see cref="GetAllQuerySnapshotsInRangeAsync"/>) stopped selecting this payload for every row in the
+    /// window — on a busy server it was megabytes of plan XML for grid rows nobody clicks. The plan buttons
+    /// call this instead, scoped to the one row the user picked.
+    ///
+    /// <para>Reads <c>v_query_snapshots</c> — the SAME archive-aware view the three bulk reads use — not the
+    /// bare <c>query_snapshots</c> table. A snapshot old enough to have been archived to parquet is still
+    /// shown by those reads (and its plan is still in the parquet copy), so a fetcher scoped to the live
+    /// table alone would silently regress every archived row to "no plan available".</para>
+    ///
+    /// <para><c>(server_id, collection_time, session_id, request_id)</c> is unique by construction — the SQL
+    /// Server collector query is provably unique per (session_id, request_id) per collection tick (the only
+    /// join that could fan out is wrapped in an aggregate with no GROUP BY, so it always collapses to one
+    /// row: see QuerySnapshotsCollector.cs). It is NOT enforced by a constraint — query_snapshots is
+    /// bulk-appended with no PK, same as its Postgres counterpart — so LIMIT 1 is a defensive guard against a
+    /// freak duplicate, not a real expectation. <c>request_id</c> reads back NULL for rows collected before
+    /// schema v34 added the column (DuckDbInitializer ~1066) or archived before that migration, via parquet's
+    /// union-by-name; every reader above already defaults a null request_id to 0, so the match does too.</para>
+    ///
+    /// <para>The codebase's usual tie-break idiom for "no PK, need one deterministic row"
+    /// (<c>QueryStoreSliceRepairService</c>'s <c>ORDER BY ... , rowid DESC</c>) does not reach here:
+    /// <c>v_query_snapshots</c> is a UNION ALL of a live table and <c>read_parquet()</c> (query_snapshots
+    /// carries no entry in <c>ArchiveViewDedupKeys</c>, so there is no QUALIFY dedup either), and DuckDB does
+    /// not propagate the <c>rowid</c> pseudocolumn through a UNION or a <c>SELECT *</c> view. Unlike
+    /// <c>config_alert_log</c>, this view carries no 'live'/'archive' <c>source</c> literal to break a tie on
+    /// either — there is nothing left to order by beyond the WHERE match itself.</para>
+    ///
+    /// <para><c>AND {column} IS NOT NULL</c> (#4297) is that missing tie-break for the ONE thing that
+    /// matters: on a freak duplicate sharing this key, <c>LIMIT 1</c> alone can land on the row whose plan is
+    /// NULL while a sibling matching row carries the real one — silently reporting "no plan available" for a
+    /// row that has one. The guard drops the NULL-plan candidate first, so <c>LIMIT 1</c> only ever breaks a
+    /// tie among plan-bearing rows (the same captured plan either way). Mirrors Darling's
+    /// <c>QuerySnapshotEstimatedPlanSql</c> / <c>QuerySnapshotLivePlanSql</c>
+    /// (<c>ViewerDataService.QuerySnapshots.cs</c>), which guards this same read the same way.</para>
+    /// </summary>
+    public async Task<string?> GetSnapshotPlanTextAsync(int serverId, DateTime collectionTime, int sessionId, int requestId, bool live)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+        var column = SnapshotPlanColumn(live);
+
+        command.CommandText = $@"
+SELECT {column}
+FROM v_query_snapshots
+WHERE server_id = $1
+AND   collection_time = $2
+AND   session_id = $3
+AND   COALESCE(request_id, 0) = $4
+AND   {column} IS NOT NULL
+LIMIT 1";
+
+        command.Parameters.Add(new DuckDBParameter { Value = serverId });
+        command.Parameters.Add(new DuckDBParameter { Value = collectionTime });
+        command.Parameters.Add(new DuckDBParameter { Value = sessionId });
+        command.Parameters.Add(new DuckDBParameter { Value = requestId });
+
+        var result = await command.ExecuteScalarAsync();
+        return result is null or DBNull ? null : (string)result;
+    }
+
+    /// <summary>Estimated plan for a grid row: the in-row <see cref="QuerySnapshotRow.QueryPlan"/> when a
+    /// caller (the Live Snapshot handler) already populated it, else a store fetch gated on
+    /// <see cref="QuerySnapshotRow.HasQueryPlan"/> so a row that never had a plan never reaches the store.</summary>
+    public Task<string?> ResolveSnapshotEstimatedPlanAsync(int serverId, QuerySnapshotRow row)
+    {
+        if (row.QueryPlan != null)
+            return Task.FromResult<string?>(row.QueryPlan);
+        if (!row.HasQueryPlan)
+            return Task.FromResult<string?>(null);
+        return GetSnapshotPlanTextAsync(serverId, row.CollectionTime, row.SessionId, row.RequestId, live: false);
+    }
+
+    /// <summary>The actual/live-captured plan counterpart of <see cref="ResolveSnapshotEstimatedPlanAsync"/>.</summary>
+    public Task<string?> ResolveSnapshotLivePlanAsync(int serverId, QuerySnapshotRow row)
+    {
+        if (row.LiveQueryPlan != null)
+            return Task.FromResult<string?>(row.LiveQueryPlan);
+        if (!row.HasLiveQueryPlan)
+            return Task.FromResult<string?>(null);
+        return GetSnapshotPlanTextAsync(serverId, row.CollectionTime, row.SessionId, row.RequestId, live: true);
     }
 
     /// <summary>
@@ -1121,23 +1211,10 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
-    /// Returns per-second rates grouped by wait type.
-    ///
-    /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
-    /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
-    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
-    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
-    /// this read windows on the UTC bounds.</para>
+    /// The bucketed statement text (#4349, matching #4234/#4340's shape), pulled out of
+    /// <see cref="GetLockWaitTrendAsync"/> so its shape is checkable without a live DuckDB.
     /// </summary>
-    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-
-        command.CommandText = @"
+    internal static readonly string LockWaitTrendSql = $@"
 WITH raw AS
 (
     SELECT
@@ -1155,34 +1232,84 @@ WITH raw AS
     AND   wait_type LIKE 'LCK%'
     AND   collection_time >= $2
     AND   collection_time <= $3
+),
+rated AS
+(
+    SELECT
+        collection_time,
+        wait_type,
+        CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms,
+        CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds
+    FROM raw
 )
 SELECT
-    collection_time,
     wait_type,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
-FROM raw
-WHERE delta_wait_time_ms >= 0
-ORDER BY collection_time, wait_type";
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    SUM(rated_wait_ms) / SUM(rated_seconds) AS wait_time_ms_per_second,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY wait_type, 2
+HAVING COUNT(rated_seconds) > 0
+ORDER BY wait_type, 2";
+
+    /// <summary>
+    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
+    /// Returns per-second rates grouped by wait type.
+    ///
+    /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
+    /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
+    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
+    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
+    /// this read windows on the UTC bounds.</para>
+    /// <para>#4349: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (wait type), matching
+    /// #4234/#4340's shape — <c>seriesCount</c> is always 1 into <see cref="TrendBuckets.AutoMinutes"/>. When
+    /// every bucket the call returns holds exactly one physical collection, every point is stamped at its own
+    /// raw collection time instead of the <c>time_bucket</c> grid line.</para>
+    /// </summary>
+    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = LockWaitTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<LockWaitTrendPoint>();
+        var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, double Rate)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
-            if (reader.IsDBNull(2))
+            if (Convert.ToInt64(reader.GetValue(4)) != 1)
             {
-                continue;
+                everyBucketSingleton = false;
             }
 
+            rows.Add((
+                reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(3),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))));
+        }
+
+        var items = new List<LockWaitTrendPoint>();
+        foreach (var row in rows)
+        {
             items.Add(new LockWaitTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                WaitTimeMsPerSecond = reader.GetDouble(2)
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                WaitType = row.WaitType,
+                WaitTimeMsPerSecond = row.Rate
             });
         }
         return items;
@@ -1349,8 +1476,20 @@ public class QuerySnapshotRow
     /// page is drawn from (it may still be past the page — the tool checks that). MCP read only.</summary>
     public bool BlockerInPopulation { get; set; }
 
-    public bool HasQueryPlan => !string.IsNullOrEmpty(QueryPlan);
-    public bool HasLiveQueryPlan => !string.IsNullOrEmpty(LiveQueryPlan);
+    /// <summary>
+    /// Whether a plan exists for this capture (#4239). Independent of <see cref="QueryPlan"/>: the three
+    /// snapshot reads (<see cref="LocalDataService.GetLatestQuerySnapshotsAsync"/>,
+    /// <see cref="LocalDataService.GetQuerySnapshotsByWaitTypeAsync"/>,
+    /// <see cref="LocalDataService.GetAllQuerySnapshotsInRangeAsync"/>) set this from
+    /// <c>query_plan IS NOT NULL</c> without selecting the payload, leaving <see cref="QueryPlan"/> null on
+    /// the row; the plan buttons fetch it on click via <see cref="LocalDataService.ResolveSnapshotEstimatedPlanAsync"/>.
+    /// The one path that still builds a row with the payload already in hand — <c>ServerTab.xaml.cs</c>'s
+    /// Live Snapshot handler, whose rows are never in the store — sets this explicitly alongside
+    /// <see cref="QueryPlan"/> instead of relying on a read.
+    /// </summary>
+    public bool HasQueryPlan { get; set; }
+    /// <summary>See <see cref="HasQueryPlan"/> — the same independence, for <see cref="LiveQueryPlan"/>.</summary>
+    public bool HasLiveQueryPlan { get; set; }
     public string CollectionTimeLocal => CollectionTime == DateTime.MinValue ? "" : ServerTimeHelper.FormatServerTime(CollectionTime);
 
     // Sessions this session is blocking at the same collection_time (SQL-derived in the

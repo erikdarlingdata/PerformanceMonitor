@@ -20,7 +20,11 @@ namespace PerformanceMonitorLite.Analysis;
 /// computed for, and the compute's window ends AT that hour (<see cref="BaselineProvider"/> snaps it), so every caller
 /// in the hour is asking for the same 30 days of rows and the cached answer is the fresh one. Time: an entry is dead
 /// <see cref="BaselineProvider.CacheTtl"/> after its compute whatever its hour — the bound on anything that moved inside
-/// the window (a late row, a retention purge, the target's clock changing zone) — and dead entries are swept. Failure:
+/// the window (a late row, a retention purge, the target's clock changing zone) — and dead entries are swept. Except
+/// (#4248): a successful compute of a daily-cache metric (<see cref="BaselineProvider.IsDailyCacheMetric"/>) is never
+/// eroded by the TTL — the EntryKey's analysis-day component already stops matching once that UTC day ends, exactly as
+/// the hourly case's analysis-hour component always has; see <see cref="BaselineProvider.IsFresh"/>, which this tier's
+/// live check and sweep both call. Failure:
 /// only a SUCCESSFUL compute is shared; a failed one stays the failing provider's "no baseline this pass", and a shared
 /// success beats it. What does not invalidate: thresholds and settings (nothing configurable reaches the baseline SQL —
 /// every threshold is applied after the lookup), and a server's removal (its history stays in the store).</para>
@@ -78,7 +82,7 @@ public sealed class BaselineCache
     internal void Clear() => _entries.Clear();
 
     private static bool IsLive(BaselineProvider.CachedBaseline entry, DateTime nowUtc)
-        => nowUtc - entry.RealTime < BaselineProvider.CacheTtl;
+        => BaselineProvider.IsFresh(entry, nowUtc);
 
     /// <summary>At most once per quarter of <see cref="BaselineProvider.CacheTtl"/>, drops the entries no lookup can take
     /// any more, so the tier holds little beyond one TTL of computes.</summary>

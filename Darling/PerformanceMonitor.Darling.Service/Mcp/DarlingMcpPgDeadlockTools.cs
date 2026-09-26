@@ -5,6 +5,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -26,9 +27,10 @@ public sealed class DarlingMcpPgDeadlockTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum deadlocks to return. Default 25. See the tool's reading guide.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -46,7 +48,7 @@ public sealed class DarlingMcpPgDeadlockTools
                plausible shape for a bad afternoon, not a corner. McpHelpers.BoundPage trims the page back to
                `limit`, so deadlock_count below stays a count of what is returned. */
             var fetched = await DarlingPgDeadlockReader.GetDeadlocksAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
@@ -58,9 +60,9 @@ public sealed class DarlingMcpPgDeadlockTools
                    not-collected WITH THE REASON. get_pg_plans already asks #2546's question for
                    pg_plan_capture; the deadlock read reads the same file the same way and had never asked. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks", cancellationToken)
                     ?? McpHelpers.Status(
                         "no_deadlocks",
                         $"No deadlock was reported on {resolved.ServerName} in the last {hours_back} "
@@ -112,7 +114,7 @@ public sealed class DarlingMcpPgDeadlockTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_deadlocks", ex);
         }
@@ -123,9 +125,10 @@ public sealed class DarlingMcpPgDeadlockTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("A deadlock_hash from get_pg_deadlocks. Omit for the most recent graphs.")] string? deadlock_hash = null,
-        [Description("Maximum graphs to return when no hash is given. Default 5.")] int limit = 5)
+        [Description("Maximum graphs to return when no hash is given. Default 5.")] int limit = 5,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var limitError = McpHelpers.ValidateTop(limit);
@@ -134,13 +137,13 @@ public sealed class DarlingMcpPgDeadlockTools
         try
         {
             var rows = await DarlingPgDeadlockReader.GetDeadlockDetailAsync(
-                postgres, resolved.ServerId, deadlock_hash, limit);
+                postgres, resolved.ServerId, deadlock_hash, limit, cancellationToken);
 
             if (rows.Count == 0)
             {
                 return string.IsNullOrWhiteSpace(deadlock_hash)
                     ? await DarlingEngineCapability.NotCollectedStatusAsync(
-                          postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks")
+                          postgres, resolved.ServerId, resolved.ServerName, "pg_deadlocks", cancellationToken)
                       ?? McpHelpers.Status(
                           "empty",
                           $"No deadlock graph is stored for {resolved.ServerName}. Either the server had no "
@@ -178,7 +181,7 @@ public sealed class DarlingMcpPgDeadlockTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_deadlock_detail", ex);
         }

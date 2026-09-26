@@ -354,7 +354,7 @@ public class PgBaselineProvider
         int serverId, string metricName, DateTime analysisTime, CancellationToken cancellationToken)
     {
         var cacheKey = CacheKeyFor(serverId, metricName, key: null);
-        var roundedHour = RoundedHour(analysisTime);
+        var roundedHour = RoundedKeyTime(metricName, analysisTime);
 
         if (TryGetFresh(serverId, cacheKey, roundedHour, out var cached))
         {
@@ -363,11 +363,14 @@ public class PgBaselineProvider
 
         var (byMember, clock, utcOffsetMinutes, timeZoneId) = await ComputeBaselinesAsync(serverId, metricName, keys: null, analysisTime, cancellationToken);
 
+        var buckets = BucketsOf(byMember, UnkeyedMember);
+        var realTime = DateTime.UtcNow;
         var entry = new CachedBaseline
         {
             ComputedAt = roundedHour,
-            RealTime = DateTime.UtcNow,
-            Buckets = BucketsOf(byMember, UnkeyedMember),
+            RealTime = realTime,
+            Buckets = buckets,
+            FreshUntilUtc = buckets is not null && IsDailyCacheArm(metricName) ? realTime.AddDays(1) : null,
             Clock = clock,
             UtcOffsetMinutes = utcOffsetMinutes,
             TimeZoneId = timeZoneId
@@ -397,7 +400,7 @@ public class PgBaselineProvider
     private async Task<Dictionary<string, CachedBaseline>> GetOrComputeKeyedBaselinesAsync(
         int serverId, string metricName, IReadOnlyCollection<string> keys, DateTime analysisTime, CancellationToken cancellationToken)
     {
-        var roundedHour = RoundedHour(analysisTime);
+        var roundedHour = RoundedKeyTime(metricName, analysisTime);
         var entries = new Dictionary<string, CachedBaseline>(StringComparer.Ordinal);
         var misses = new List<string>();
         var asked = new HashSet<string>(StringComparer.Ordinal);
@@ -435,11 +438,13 @@ public class PgBaselineProvider
             for (var member = 1; member <= set.Length; member++)
             {
                 var key = set[member - 1];
+                var memberBuckets = BucketsOf(byMember, member);
                 var entry = new CachedBaseline
                 {
                     ComputedAt = roundedHour,
                     RealTime = computedAt,
-                    Buckets = BucketsOf(byMember, member),
+                    Buckets = memberBuckets,
+                    FreshUntilUtc = memberBuckets is not null && IsDailyCacheArm(metricName) ? computedAt.AddDays(1) : null,
                     Clock = clock,
                     UtcOffsetMinutes = utcOffsetMinutes,
                     TimeZoneId = timeZoneId,
@@ -460,6 +465,46 @@ public class PgBaselineProvider
     internal static DateTime RoundedHour(DateTime analysisTime)
         => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, analysisTime.Hour, 0, 0);
 
+    /// <summary>Midnight UTC of <paramref name="analysisTime"/>'s day (#4248) — the key time and window end for an
+    /// arm that reads a RAW hypertable at full grain over the 30-day window (<see cref="IsDailyCacheArm"/>),
+    /// playing <see cref="RoundedHour"/>'s role at day grain instead of hour grain. The underlying rows move by
+    /// about 1/720 an hour, so an hourly key bought nothing but 24x the recomputes.</summary>
+    internal static DateTime RoundedDay(DateTime analysisTime)
+        => new(analysisTime.Year, analysisTime.Month, analysisTime.Day, 0, 0, 0);
+
+    /// <summary>#4248: the two arms of THIS class whose <c>clean</c> CTE reads a RAW hypertable
+    /// (<c>cpu_utilization_stats</c>, <c>file_io_stats</c> — the #1743 follow-up pair, see
+    /// <see cref="GetBaselineQuery"/>'s remarks) rather than a pre-aggregated <c>CREATE MATERIALIZED VIEW ...
+    /// _baseline</c> supply. Both tables carry their own 30-day service-side retention floor
+    /// (<c>DarlingRetentionHorizons.BaselineServingRawCollectors</c>), so the 30-day WINDOW does not change here —
+    /// only the cache KEY's grain does, because a full-grain 30-day read is what made an hourly recompute expensive
+    /// (measured: ~50 MB of temp per <see cref="MetricNames.IoLatency"/> call). The other seven
+    /// <see cref="RobustTierScaffold"/> arms and the two event arms read an already-aggregated view — far fewer rows
+    /// for the same 30 days — and keep the hourly key. This is the BASE class's own answer; <see cref="IsDailyCacheArm"/>
+    /// is the seam a derived provider reads instead, and need not agree with it.</summary>
+    internal static bool IsDailyCacheMetric(string metricName)
+        => metricName is MetricNames.Cpu or MetricNames.IoLatency;
+
+    /// <summary>The fourth seam a derived provider overrides (#4298, after <see cref="ResolveBaselineQuery"/>,
+    /// <see cref="ReadServerClockAsync"/> and <see cref="ResolveKeyedBaselineQuery"/>): does <paramref
+    /// name="metricName"/>'s arm belong in the daily cache tier — the day-grain key <see cref="RoundedKeyTime"/>
+    /// hands both the compute and the entry's freshness clock (<see cref="CachedBaseline.FreshUntilUtc"/>)? The
+    /// base answers from <see cref="IsDailyCacheMetric"/> — Cpu and IoLatency are its only two raw-hypertable arms.
+    /// <see cref="PgTargetBaselineProvider"/> overrides this to return true unconditionally: EVERY one of its arms
+    /// reads a raw PostgreSQL-target hypertable at full grain over the 30-day window, measured up to 2.45 s and
+    /// 262 MB of temp per hourly recompute (<c>pg_statement_mean_ms</c> keyed, the worst of the 15), so there is no
+    /// PostgreSQL-target arm this cache should ever recompute more than once a UTC day.</summary>
+    protected virtual bool IsDailyCacheArm(string metricName) => IsDailyCacheMetric(metricName);
+
+    /// <summary>The cache key's time AND the compute's window end (#3941's invariant, restated for #4248 and
+    /// #4298): whichever grain <paramref name="metricName"/> uses for THIS provider (<see cref="IsDailyCacheArm"/>)
+    /// — the day for a daily-cache arm, the hour for every other one. Both call sites (the key and the window)
+    /// read this ONE seam so they can never diverge — a key that named a different instant than the window it was
+    /// computed over would be sharing an answer that is not the answer a fresh compute at that key would give.
+    /// Instance rather than static since #4298, so the decision dispatches through <see cref="IsDailyCacheArm"/>.</summary>
+    internal DateTime RoundedKeyTime(string metricName, DateTime analysisTime)
+        => IsDailyCacheArm(metricName) ? RoundedDay(analysisTime) : RoundedHour(analysisTime);
+
     /// <summary>This provider's engine in the shared tier's key (#3941): a SQL Server series and a PostgreSQL-target
     /// series of one server id are never each other's.</summary>
     private string SharedKind => GetType().FullName ?? GetType().Name;
@@ -474,7 +519,7 @@ public class PgBaselineProvider
     {
         var local = _cache.TryGetValue(cacheKey, out var own)
                     && own.ComputedAt == roundedHour
-                    && (DateTime.UtcNow - own.RealTime) < CacheTtl;
+                    && IsFresh(own, DateTime.UtcNow);
         if (local && own!.Buckets is not null)
         {
             cached = own;
@@ -491,6 +536,22 @@ public class PgBaselineProvider
         cached = local ? own : null;
         return local;
     }
+
+    /// <summary>#4248: is <paramref name="entry"/> still good to return? A successful compute of a daily-cache
+    /// metric (<see cref="CachedBaseline.FreshUntilUtc"/> set, a rolling 24 hours from <see cref="CachedBaseline.RealTime"/>
+    /// — never eroded by <see cref="CacheTtl"/>) stays live for a full day of real time no matter when in the UTC
+    /// day it ran, so it is never the TTL that ends it: the CALLER'S key (<c>ComputedAt == roundedHour</c> in
+    /// <see cref="TryGetFresh"/> and <see cref="BaselineCache.TryGet"/>) already stops matching the instant the
+    /// requested day rolls over, which is what actually bounds an entry to "the rest of the UTC day it was computed
+    /// in" — the whole point, two calls an hour or more apart on the same day share the one compute. Every
+    /// hourly-cache metric, and a FAILED compute of ANY metric (<see cref="CachedBaseline.FreshUntilUtc"/> null — a
+    /// failure never earns the day-long trust), keep the original rolling <see cref="CachedBaseline.RealTime"/> plus
+    /// <see cref="CacheTtl"/> bound, so a timeout still retries within the hour. Shared by <see cref="BaselineCache"/>'s
+    /// live check and sweep, so the shared tier never evicts a still-fresh daily entry early.</summary>
+    internal static bool IsFresh(CachedBaseline entry, DateTime nowUtc)
+        => entry.FreshUntilUtc is DateTime freshUntil
+            ? nowUtc < freshUntil
+            : (nowUtc - entry.RealTime) < CacheTtl;
 
     /// <summary>Files a compute in this provider's cache and, when it SUCCEEDED, in the shared tier (#3941). A failed
     /// compute (null buckets) is this caller's "no baseline this pass" and nobody else's.</summary>
@@ -623,9 +684,10 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// The first of the three seams a derived provider overrides (#3542; it was "the one seam" until #3691 added
+    /// The first of the four seams a derived provider overrides (#3542; it was "the one seam" until #3691 added
     /// <see cref="ReadServerClockAsync"/> for the local clock and <see cref="ResolveKeyedBaselineQuery"/> for one
-    /// member of a population — <c>PgTargetClockTests</c> counts the three): which SQL computes
+    /// member of a population, and #4298 added <see cref="IsDailyCacheArm"/> for the cache grain —
+    /// <c>PgTargetClockTests</c> counts the four): which SQL computes
     /// <paramref name="metricName"/>'s buckets. The base answers from <see cref="GetBaselineQuery"/> — the SQL Server store tables and CAGGs.
     /// <see cref="PgTargetBaselineProvider"/> answers from its own <c>clean</c> CTEs over the PostgreSQL raw
     /// hypertables and inherits everything else here unchanged: the hour×dow cache, the parameter binding,
@@ -803,7 +865,7 @@ LIMIT 1";
            in the hour ask for the SAME rows — what lets the process share one compute between the scheduled pass,
            analyze_server and compare_analysis (BaselineCache) without changing anyone's answer. The lookup still keys
            the bucket on the analysis instant (LookUp); its hour-of-week is the hour's. */
-        var windowEnd = RoundedHour(analysisTime);
+        var windowEnd = RoundedKeyTime(metricName, analysisTime);
         var windowStart = windowEnd.AddDays(-BaselineMath.BaselineWindowDays);
         var clock = LocalClockWindow.Utc(windowEnd);
 
@@ -1507,6 +1569,13 @@ clean AS (
         public DateTime ComputedAt { get; init; }
         public DateTime RealTime { get; init; }
         public Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>? Buckets { get; init; }
+
+        /// <summary>#4248: for a successful compute of a daily-cache metric, <see cref="RealTime"/> plus 24 hours —
+        /// null for every hourly-cache metric and for a failed compute of any metric. See <see cref="IsFresh"/>,
+        /// the only reader: this bound alone would outlive the metric's own UTC day, but <c>ComputedAt</c>'s key
+        /// match already stops answering the moment that day ends, so in practice this is the "still trustworthy in
+        /// real time" backstop, not the day boundary itself.</summary>
+        public DateTime? FreshUntilUtc { get; init; }
 
         /// <summary>The clock the buckets were keyed with (#3653 Q6) — the lookup must use the SAME one.</summary>
         public LocalClockWindow Clock { get; init; } = LocalClockWindow.Utc(DateTime.MinValue);

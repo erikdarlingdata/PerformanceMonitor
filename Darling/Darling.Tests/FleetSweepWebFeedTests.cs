@@ -558,6 +558,25 @@ public sealed class FleetSweepWebFeedTests
         Assert.DoesNotContain("update_alert_settings", src, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The Store host section (#4214 part 2): the sweeps page's own "is the STORE sized right" panel, below
+    /// Watch items. Reads <c>get_store_host</c> through <c>/api/read</c> (never a raw fetch, never a second
+    /// implementation of the verdict math #4214 part 1 already owns) and highlights every stale-* verdict —
+    /// source pins, the file's own convention for a branch there is no JS runner to execute.
+    /// </summary>
+    [Fact]
+    public void TheSweepPage_HasAStoreHostSection_AndHighlightsEveryStaleVerdict()
+    {
+        var src = FrontendSource("js/pages/sweeps.js");
+
+        Assert.Contains("el(\"h3\", { class: \"section-title\", text: \"Store host\" })", src, StringComparison.Ordinal);
+        Assert.Contains("readTool(\"get_store_host\", {})", src, StringComparison.Ordinal);
+
+        /* Every stale-* verdict highlighted, not just the exact stale_after_hardware_change string — a
+           future fifth verdict named "stale_something_else" must not silently fall through unhighlighted. */
+        Assert.Contains("v.startsWith(\"stale\")", src, StringComparison.Ordinal);
+    }
+
     /// <summary>The page is reachable: the shell carries the nav entry and the router routes the hash
     /// to the renderer — the two wiring points a new page can silently miss.</summary>
     [Fact]
@@ -567,7 +586,9 @@ public sealed class FleetSweepWebFeedTests
 
         var app = FrontendSource("js/app.js");
         Assert.Contains("import { renderSweeps } from \"./pages/sweeps.js\";", app, StringComparison.Ordinal);
-        Assert.Contains("renderSweeps(main)", app, StringComparison.Ordinal);
+        /* renderSweeps(main, opts) (#4214 round-1 review), not renderSweeps(main) — opts carries the poll
+           tick's { poll: true } through to the store host card, so it replays instead of re-fetching. */
+        Assert.Contains("renderSweeps(main, opts)", app, StringComparison.Ordinal);
         Assert.Contains("#/sweeps", app, StringComparison.Ordinal);
     }
 
@@ -606,8 +627,52 @@ public sealed class FleetSweepWebFeedTests
             "Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
         Assert.Contains("builder.Logging.ClearProviders();", host, StringComparison.Ordinal);
         Assert.Contains(
-            "DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache);",
+            "DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig);",
             host, StringComparison.Ordinal);
+    }
+
+    /* ---- #4283: the two sweep GETs carry no local catch; the #4281 backstop answers instead ------------- */
+
+    /// <summary>
+    /// #4283 supersedes #4286 round-1 review, Low 3: rather than <c>/api/sweeps/latest</c> and
+    /// <c>/api/sweeps/{id}</c> each carrying its own <c>DarlingWebFailureLog</c> catch, #4283 removes every
+    /// route's local catch project-wide, so the #4281 top-of-pipeline backstop
+    /// (<c>ReadDispatchCatch_AnswersTheRuledBodyAndStatus_NotFormatError</c> in
+    /// <see cref="DarlingWebFailureHandlingTests"/> pins the dispatcher's twin of this same backstop) answers
+    /// every unhandled throw from these two GETs the same ruled way. Neither handler may reach for
+    /// <c>ex.Message</c> on its own, because neither has an <c>ex</c> to reach for. Source pin, not a
+    /// TestServer test: producing a genuine store fault needs a broken NpgsqlDataSource this file otherwise
+    /// never builds.
+    /// </summary>
+    [Fact]
+    public void TheSweepReads_HaveNoLocalCatch_NotExMessage()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingFleetSweepEndpoints.cs");
+
+        AssertNoLocalCatch(raw, "/api/sweeps", "\"/api/sweeps\"");
+        AssertNoLocalCatch(raw, "/api/sweeps/latest", "\"/api/sweeps/latest\"");
+        AssertNoLocalCatch(raw, "/api/sweeps/{id:long}", "\"/api/sweeps/{id:long}\"");
+        AssertNoLocalCatch(raw, "/api/sweeps/watch-items", "\"/api/sweeps/watch-items\"");
+    }
+
+    /// <summary>Slices ONE MapGet's body out of the endpoint file (from its route literal to the next
+    /// MapGet, or end of file for the last one) and asserts it has no local catch and never writes
+    /// <c>ex.Message</c> to the wire -- the shape #4283 leaves so the #4281 backstop is the only thing that
+    /// answers an unhandled throw here. Boundaries are found in RAW source, because the route literal itself
+    /// is plain string CONTENT that <see cref="CSharpSourceWalker.StripCommentsAndStrings"/> blanks; the
+    /// slice is then stripped before the content assertions, so a doc comment mentioning "catch" or
+    /// "ex.Message" (this file's own review-note comments do) cannot produce a false failure.</summary>
+    private static void AssertNoLocalCatch(string raw, string routeForMessage, string routeLiteral)
+    {
+        var start = raw.IndexOf(routeLiteral, StringComparison.Ordinal);
+        Assert.True(start >= 0, $"{routeForMessage}'s MapGet was not found; this pin is reading nothing.");
+
+        var nextMapGet = raw.IndexOf("app.MapGet(", start + routeLiteral.Length, StringComparison.Ordinal);
+        var end = nextMapGet >= 0 ? nextMapGet : raw.Length;
+        var body = CSharpSourceWalker.StripCommentsAndStrings(raw[start..end]);
+
+        Assert.DoesNotContain("catch", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("ex.Message", body, StringComparison.Ordinal);
     }
 
     /* ---- helpers --------------------------------------------------------------------------------------- */

@@ -164,6 +164,37 @@ FROM running
 CROSS JOIN (VALUES ('Lock', 'relation', 1001::bigint), ('IO', 'DataFileRead', 1003::bigint), ('CPU', 'Running', 0::bigint)) AS s(event_type, event, query_id)",
                 ct, CollectionIdGenerator.Next() + 4_000_000L, youngStart, YoungId, YoungName, youngMinutes, youngHotMinute);
 
+            /* #4298: PgSampledWaitMsPerSec is a daily-cache arm now, so its 30-day baseline window ends at the UTC
+               day boundary at or before windowStart (PgBaselineProvider.RoundedDay), not at windowStart's hour — a
+               boundary that can sit anywhere up to 24 hours before windowStart depending on the minute the test
+               runs, well before the six hours above (all anchored on "end"). None of those rows are visible to that
+               window, so the baseline plants its own: two quiet hours anchored AT the boundary, entirely on the one
+               calendar date before it, so youngBucket keeps samples without crossing the three-distinct-day
+               trustworthy floor. */
+            var dailyBoundary = PgBaselineProvider.RoundedDay(windowStart);
+            const int paddingMinutes = 115;
+            var paddingStart = dailyBoundary.AddHours(-2);
+            await PlantAsync(connection, @"
+WITH cycles AS (
+    SELECT n, " + QuietRelationBase + @" + ((n / " + CycleMinutes + @") % 3) AS relation_inc
+    FROM generate_series(0, $5, " + CycleMinutes + @") AS n
+),
+running AS (
+    SELECT n,
+           SUM(relation_inc) OVER (ORDER BY n) AS relation_total,
+           (n / " + CycleMinutes + @") * " + ReadPerCycle + @" AS read_total,
+           (n / " + CycleMinutes + @") * " + CpuPerCycle + @" AS cpu_total
+    FROM cycles
+)
+INSERT INTO pg_wait_sampling
+    (collection_id, collection_time, server_id, server_name, event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms)
+SELECT $1 + n, $2 + (n * interval '1 minute'), $3, $4, s.event_type, s.event, s.query_id,
+       CASE s.query_id WHEN 1001 THEN 100000 + relation_total WHEN 1003 THEN 200000 + read_total ELSE 900000 + cpu_total END,
+       " + PeriodMs + @", CASE s.query_id WHEN 1001 THEN 3 WHEN 1003 THEN 2 ELSE 8 END, " + SampledMs + @"
+FROM running
+CROSS JOIN (VALUES ('Lock', 'relation', 1001::bigint), ('IO', 'DataFileRead', 1003::bigint), ('CPU', 'Running', 0::bigint)) AS s(event_type, event, query_id)",
+                ct, CollectionIdGenerator.Next() + 6_000_000L, paddingStart, YoungId, YoungName, paddingMinutes);
+
             /* The BOTH server also carries the engine's exact deltas for the window: 241 one-minute pg_wait_stats
                collections with the stored interval 60 (Lock:Relation 12 s a minute = 0.20 of a backend). */
             for (var minute = 0; minute <= 240; minute++)

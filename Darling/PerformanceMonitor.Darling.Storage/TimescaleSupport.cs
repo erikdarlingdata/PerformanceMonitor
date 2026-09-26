@@ -60,12 +60,20 @@ public static partial class TimescaleSupport
     /// Compress chunks older than this many days — hardcoded (defaults over speculative config).
     /// Compressed chunks remain fully queryable, just columnar and ~10-20x smaller: this IS
     /// Darling's archival tier, the centralized-store answer to Lite's parquet archive, keeping the
-    /// full retention horizon cheap instead of splitting hot/cold stores. Kept short (1 day) to
-    /// match <see cref="ChunkIntervalDays"/>: at the collectors' 1-minute cadence a longer lag left
-    /// the whole store uncompressed (a chunk cannot compress until it closes AND then ages past
-    /// this), so even a near-idle fleet grew ~1 GB in a couple of days of hot data. Collectors only
-    /// ever append current-time rows, so a day-old chunk never takes another write — safe to
-    /// compress. Measured on this data: perfmon ~16.7x, plan-XML-heavy query_stats ~6.4x.
+    /// full retention horizon cheap instead of splitting hot/cold stores. Kept short (1 day):
+    /// at the collectors' 1-minute cadence a longer lag left the whole store uncompressed (a chunk
+    /// cannot compress until it closes AND then ages past this), so even a near-idle fleet grew
+    /// ~1 GB in a couple of days of hot data. Collectors only ever append current-time rows, so a
+    /// day-old chunk never takes another write — safe to compress. Measured on this data: perfmon
+    /// ~16.7x, plan-XML-heavy query_stats ~6.4x.
+    ///
+    /// <para><b>Fixed at 1 day on EVERY table, even where <see cref="RawChunkIntervalPlanner"/> narrows a raw
+    /// table's <c>chunk_time_interval</c> below a day (#4211).</b> This is the ladder's CEILING now, not "the"
+    /// delay tied one-for-one to chunk width: the #4211 ruling (issuecomment-5836205190, decision 1) keeps
+    /// <c>compress_after</c> here regardless of I, because a shorter delay below
+    /// <see cref="HourlyRefreshStartOffset"/> removes the gap the product's lock safety relies on, and
+    /// lowering it needs its own design built from field reads. Pinned at least
+    /// <see cref="HourlyRefreshStartOffset"/> by <c>TimescaleSupportTests</c> for exactly that reason.</para>
     /// </summary>
     public const int CompressAfterDays = 1;
 
@@ -79,10 +87,13 @@ public static partial class TimescaleSupport
     /// 2.28.1, a hypertable with <see cref="ChunkIntervalDays"/> = 1 gets exactly <c>12:00:00</c>. The rule is
     /// half the chunk interval CAPPED at 12 hours, not floored at it: a 6-hour chunk interval gets
     /// <c>03:00:00</c>, while 2-day and 7-day intervals both get <c>12:00:00</c> rather than 24h or 84h. The cap
-    /// is what makes 12 hours the default on EVERY store shape this product can produce — the 1-day chunks it
-    /// creates today, and the 7-day-chunk hypertables an adopted store may still carry from before
-    /// <see cref="ChunkIntervalDays"/> was passed (existing chunks keep their original width). That is the
-    /// field's "twice-daily fixed tick": a chunk that had already aged
+    /// is what makes 12 hours the default on every DAY-OR-WIDER store shape this product can produce — the
+    /// 1-day chunks a fresh hypertable still starts at, and the 7-day-chunk hypertables an adopted store may
+    /// still carry from before <see cref="ChunkIntervalDays"/> was passed (existing chunks keep their original
+    /// width). Below a day the cap stops applying and the rule floors instead: since #4211, a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed to 12h or 6h chunks would compute a 6h or 3h
+    /// automatic default, one more reason this is passed explicitly rather than left to fall out of chunk
+    /// width. That is the field's "twice-daily fixed tick", from before narrowing existed: a chunk that had already aged
     /// past the delay still sat uncompressed for up to another half-day, and on a pre-dedup field store the
     /// newest closed chunk reached 81 GB before its scheduled compression ever reached it. The newest closed
     /// chunk is always the least-compressed data on disk, so the tick is the width of that exposure.</para>
@@ -108,11 +119,22 @@ public static partial class TimescaleSupport
     public static readonly TimeSpan CompressScheduleSpan = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// Hypertable chunk width in days. TimescaleDB's 7-day default is far too coarse for
-    /// 1-minute-cadence monitoring data: a chunk stays open (and uncompressible) for its whole
-    /// span, so 7-day chunks meant nothing compressed for ~2 weeks. 1-day chunks close daily and
-    /// become compressible within <see cref="CompressAfterDays"/>, keeping the store compact.
-    /// Applies at hypertable creation (fresh stores); existing chunks keep their original width.
+    /// Hypertable chunk width in days at CREATION (fresh stores; existing chunks keep their original width).
+    /// TimescaleDB's 7-day default is far too coarse for 1-minute-cadence monitoring data: a chunk stays open
+    /// (and uncompressible) for its whole span, so 7-day chunks meant nothing compressed for ~2 weeks. 1-day
+    /// chunks close daily and become compressible within <see cref="CompressAfterDays"/>, keeping the store
+    /// compact.
+    ///
+    /// <para><b>Since #4211, this is the ladder's CEILING, not every raw table's actual width.</b>
+    /// <see cref="RawChunkIntervalPlanner"/> derives a narrower <c>chunk_time_interval</c> — 12 or 6 hours —
+    /// for whichever raw hypertables' own ingest rate needs it to keep the store's open-chunk bytes under a
+    /// RAM budget, using this constant only as the widest rung. Every OTHER dependent still reads this as a
+    /// safe upper bound / margin rather than an exact width, and stays correct as chunks narrow:
+    /// <c>DarlingDimensionGcBound</c>, <c>QueryStorePlanMap.MarginOrderingHolds</c>,
+    /// <c>RollupBackfill.SliceWidth</c> and the aggregate compress margin. <see cref="CompressAfterDays"/>
+    /// does NOT follow the derived width down — it stays fixed at 1 day on every table (#4211 ruling decision
+    /// 1). <see cref="EventWindowFloor.SkewAllowance"/> has its own 1-day constant rather than reading this
+    /// one, since it is a clock-skew tolerance that only happens to equal this value today.</para>
     /// </summary>
     public const int ChunkIntervalDays = 1;
 
@@ -436,8 +458,8 @@ public static partial class TimescaleSupport
 
     /// <summary>
     /// Baseline relations SUPERSEDED by an interval-honest successor (#3653, A6): each legacy aggregate is
-    /// dropped only once its successor COVERS the baseline tier, and <see cref="DropRetiredBaselineAggregatesAsync"/>
-    /// evaluates that condition on every service start until it holds.
+    /// dropped only once its successor COVERS the baseline tier, or it holds no rows (#4289), and
+    /// <see cref="DropRetiredBaselineAggregatesAsync"/> evaluates that condition on every service start until it holds.
     ///
     /// <para><b>Why a condition and not the #2007 list.</b> <see cref="RetiredBaselineRelations"/> drops on
     /// sight, which was right for aggregates nothing read. These two ARE read: they hold up to
@@ -477,6 +499,15 @@ public static partial class TimescaleSupport
     /// <para>Once the fleet has passed the condition these names can move to <see cref="RetiredBaselineRelations"/>
     /// as pure hygiene (so no future aggregate reuses them); nothing depends on that move, because a dropped
     /// legacy relation is never re-created — the ensure sweep no longer knows its name.</para>
+    ///
+    /// <para><b>The wait is for HISTORY, and an empty legacy aggregate has none (#4289).</b> A store where
+    /// nothing ever fed the legacy aggregate's source (no <c>wait_stats</c> or <c>perfmon_stats</c> rows for
+    /// this collector) leaves it holding zero rows forever, and its successor — backfilled from the same empty
+    /// source — empty too. The coverage condition above can never resolve against a <c>NULL</c> successor
+    /// oldest bucket, so without a separate check the legacy relation, its refresh job, its retention job and
+    /// its compression job would all outlive every store that has data. <see cref="JudgeSupersededBaselineRelationAsync"/>
+    /// therefore asks whether the legacy relation holds any rows of its own BEFORE it asks about coverage: an
+    /// empty one drops on sight, whatever the successor holds, because there is nothing in it to protect.</para>
     /// </summary>
     public static readonly (string Legacy, string Successor)[] SupersededBaselineRelations =
     {
@@ -1088,8 +1119,8 @@ $do$";
     /// Returns how many relations were actually dropped.
     ///
     /// <para>Since #3653 the same pass also walks <see cref="SupersededBaselineRelations"/>, dropping each
-    /// legacy relation ONLY when its successor covers the baseline tier (see
-    /// <see cref="SupersededBaselineRelationDropsAt"/>). The two lists ride one sweep because they need the
+    /// legacy relation once its successor covers the baseline tier, or once the legacy holds no rows of its
+    /// own (#4289) — see <see cref="SupersededBaselineRelationDropsAt"/>. The two lists ride one sweep because they need the
     /// same connection, the same ordering against the ensure (before it) and the same failure isolation; the
     /// worker's call site is unchanged. This overload takes the host clock itself, which is what the
     /// production call site wants; the tests pass a clock to walk the condition across time.</para>
@@ -1140,11 +1171,13 @@ $do$";
 
                 dropped++;
                 logger?.LogInformation(
-                    "Dropped superseded baseline relation {Legacy} (#3653) — its interval-honest successor {Successor} {Reason}, so nothing reads it any more; its refresh, retention and compression jobs went with it.",
-                    legacy, successor,
+                    "Dropped superseded baseline relation {Legacy} (#3653) — {Reason}, so nothing reads it any more; its refresh, retention and compression jobs went with it.",
+                    legacy,
                     verdict.LegacyIsContinuousAggregate
-                        ? $"covers the baseline tier (from {verdict.SuccessorOldest:O}, horizon {verdict.Horizon:O})"
-                        : "exists and, like this plain view, reads raw directly");
+                        ? verdict.LegacyHoldsRows
+                            ? $"its interval-honest successor {successor} covers the baseline tier (from {verdict.SuccessorOldest:O}, horizon {verdict.Horizon:O})"
+                            : "it held no rows through its own view (#4289) — an empty aggregate has no baseline history to protect, whatever its successor holds"
+                        : $"its interval-honest successor {successor} exists and, like this plain view, reads raw directly");
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1201,30 +1234,40 @@ $do$";
         /// so this is the expected verdict of that one start; the next start finds the successor.</summary>
         SuccessorAbsent,
 
-        /// <summary>The legacy relation is a continuous aggregate and the successor's oldest bucket is later than
-        /// the tier horizon (or the successor is empty) — the legacy still holds history the successor lacks.</summary>
+        /// <summary>The legacy relation is a continuous aggregate that holds rows of its own, and the successor's
+        /// oldest bucket is later than the tier horizon (or the successor is empty) — the legacy still holds
+        /// history the successor lacks.</summary>
         SuccessorShort,
 
-        /// <summary>Drop: the successor covers the tier, or the legacy relation is a plain view (nothing of its
-        /// own to lose).</summary>
+        /// <summary>Drop: the successor covers the tier, the legacy relation is a plain view (nothing of its
+        /// own to lose), or the legacy is a continuous aggregate that holds no rows of its own (#4289 — it has
+        /// no history to protect, whatever the successor holds).</summary>
         Drop,
     }
 
-    /// <summary>The superseded pass's evidence for one legacy relation: the decision plus the three facts it
-    /// rests on, so the log line can show its working and the live test can assert each fact.</summary>
+    /// <summary>The superseded pass's evidence for one legacy relation: the decision plus the four facts it
+    /// rests on, so the log line can show its working and the live test can assert each fact.
+    /// <see cref="LegacyHoldsRows"/> is meaningful only when <see cref="LegacyIsContinuousAggregate"/> is
+    /// true (#4289) — a plain view is never asked, so it reads <c>true</c> (the neutral, non-triggering
+    /// value) on that path and on <see cref="SupersededBaselineDecision.LegacyAbsent"/> /
+    /// <see cref="SupersededBaselineDecision.SuccessorAbsent"/>, where nothing asked it either.</summary>
     public readonly record struct SupersededBaselineVerdict(
         SupersededBaselineDecision Decision,
         bool LegacyIsContinuousAggregate,
+        bool LegacyHoldsRows,
         DateTime? SuccessorOldest,
         DateTime Horizon);
 
     /// <summary>
-    /// THE RETIREMENT CONDITION (#3653), as a pure predicate so the tests can walk it across time without a
-    /// store: a legacy CONTINUOUS AGGREGATE drops once its successor's oldest bucket is at or before the tier
-    /// horizon (<paramref name="utcNow"/> minus <see cref="BaselineRetentionSpan"/>); a legacy PLAIN VIEW drops as
-    /// soon as a successor exists (<paramref name="successorOldest"/> is not consulted — a raw-backed view has
-    /// nothing of its own to hand over). An EMPTY successor (<c>null</c> oldest) never releases a legacy
-    /// aggregate: an un-backfilled successor covers nothing, whatever the clock says.
+    /// THE RETIREMENT CONDITION (#3653, #4289), as a pure predicate so the tests can walk it across time without
+    /// a store: a legacy CONTINUOUS AGGREGATE that holds no rows of its own (<paramref name="legacyHoldsRows"/>
+    /// false) drops on sight, whatever the successor holds — it has no history to protect. A legacy CONTINUOUS
+    /// AGGREGATE that DOES hold rows drops once its successor's oldest bucket is at or before the tier horizon
+    /// (<paramref name="utcNow"/> minus <see cref="BaselineRetentionSpan"/>); an EMPTY successor (<c>null</c>
+    /// oldest) never releases it: an un-backfilled successor covers nothing, whatever the clock says. A legacy
+    /// PLAIN VIEW drops as soon as a successor exists (<paramref name="legacyHoldsRows"/> and
+    /// <paramref name="successorOldest"/> are both ignored — a raw-backed view has nothing of its own to hand
+    /// over, empty or not).
     ///
     /// <para><b>Why the TIER horizon and not the provider's 30-day window.</b> The window is the weaker sufficient
     /// condition — once the successor reaches it, nothing reads the legacy relation — but "covers the tier" is
@@ -1240,9 +1283,14 @@ $do$";
     /// on any start is enough. <c>&lt;=</c> rather than <c>&lt;</c> so a bucket that lands exactly on the horizon
     /// counts as coverage.</para>
     /// </summary>
-    public static bool SupersededBaselineRelationDropsAt(bool legacyIsContinuousAggregate, DateTime? successorOldest, DateTime utcNow)
+    public static bool SupersededBaselineRelationDropsAt(bool legacyIsContinuousAggregate, bool legacyHoldsRows, DateTime? successorOldest, DateTime utcNow)
     {
         if (!legacyIsContinuousAggregate)
+        {
+            return true;
+        }
+
+        if (!legacyHoldsRows)
         {
             return true;
         }
@@ -1251,10 +1299,12 @@ $do$";
     }
 
     /// <summary>
-    /// Reads the three facts <see cref="SupersededBaselineRelationDropsAt"/> needs off the store and returns the
-    /// verdict. Four small catalog reads at most, once per start; the only one that touches data is the
-    /// successor's <c>min(bucket)</c>, the same probe <see cref="BaselineBackfillProbeSql"/> already runs for
-    /// every registered aggregate on every start.
+    /// Reads the four facts <see cref="SupersededBaselineRelationDropsAt"/> needs off the store and returns the
+    /// verdict. Five small catalog reads at most, once per start; the two that touch data are the legacy's own
+    /// <c>EXISTS</c> probe (<see cref="BaselineRelationHasRowsSql"/>, #4289) and the successor's <c>min(bucket)</c>
+    /// — the same probe <see cref="BaselineBackfillProbeSql"/> already runs for every registered aggregate on
+    /// every start — and the second runs ONLY when the first found rows: an empty legacy aggregate drops before
+    /// the coverage read, so that read (and the query plan it costs) never fires for it.
     ///
     /// <para>The continuous-aggregate question is asked in two statements on purpose:
     /// <c>timescaledb_information</c> does not exist on a store that never created the extension, and a
@@ -1277,7 +1327,7 @@ $do$";
         {
             if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
             {
-                return new SupersededBaselineVerdict(SupersededBaselineDecision.LegacyAbsent, false, null, horizon);
+                return new SupersededBaselineVerdict(SupersededBaselineDecision.LegacyAbsent, false, true, null, horizon);
             }
         }
 
@@ -1285,7 +1335,7 @@ $do$";
         {
             if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
             {
-                return new SupersededBaselineVerdict(SupersededBaselineDecision.SuccessorAbsent, false, null, horizon);
+                return new SupersededBaselineVerdict(SupersededBaselineDecision.SuccessorAbsent, false, true, null, horizon);
             }
         }
 
@@ -1296,18 +1346,30 @@ $do$";
             legacyIsContinuousAggregate = await probe.ExecuteScalarAsync(cancellationToken) is true;
         }
 
-        DateTime? successorOldest = null;
+        /* #4289: asked BEFORE the coverage read, and only for a CAGG — a plain view has nothing of its own to
+           lose either way, so SupersededBaselineRelationDropsAt never consults this for one. */
+        var legacyHoldsRows = true;
         if (legacyIsContinuousAggregate)
+        {
+            using var probe = new NpgsqlCommand(BaselineRelationHasRowsSql(legacy), connection) { CommandTimeout = SetupTimeoutSeconds };
+            /* is not false, not is true: only a definite false answer means empty. A later edit that lets this
+               read return null (a swallowed error, or SQL changed to return no row) must NOT read as "empty"
+               and drop a legacy that holds rows -- the safe default for an unrecognized answer is "holds rows". */
+            legacyHoldsRows = await probe.ExecuteScalarAsync(cancellationToken) is not false;
+        }
+
+        DateTime? successorOldest = null;
+        if (legacyIsContinuousAggregate && legacyHoldsRows)
         {
             using var probe = new NpgsqlCommand(BaselineCoverageOldestSql(successor), connection) { CommandTimeout = SetupTimeoutSeconds };
             successorOldest = await probe.ExecuteScalarAsync(cancellationToken) is DateTime oldest ? oldest : null;
         }
 
-        var decision = SupersededBaselineRelationDropsAt(legacyIsContinuousAggregate, successorOldest, utcNow)
+        var decision = SupersededBaselineRelationDropsAt(legacyIsContinuousAggregate, legacyHoldsRows, successorOldest, utcNow)
             ? SupersededBaselineDecision.Drop
             : SupersededBaselineDecision.SuccessorShort;
 
-        return new SupersededBaselineVerdict(decision, legacyIsContinuousAggregate, successorOldest, horizon);
+        return new SupersededBaselineVerdict(decision, legacyIsContinuousAggregate, legacyHoldsRows, successorOldest, horizon);
     }
 
     /// <summary>Is this baseline relation a CONTINUOUS AGGREGATE (as opposed to the plain fallback view a
@@ -1321,6 +1383,16 @@ $do$";
     /// materialization is non-empty, which is the coverage question the superseded pass asks.</summary>
     public static string BaselineCoverageOldestSql(string view)
         => $"SELECT min(bucket) FROM collect.{view}";
+
+    /// <summary>Does this baseline relation hold any rows through its own view (#4289)? Read through the VIEW
+    /// rather than the materialization hypertable, so on a legacy aggregate's <c>timescaledb.materialized_only =
+    /// false</c> shape this sees the same real-time-aggregated rows a reader — <see cref="PgBaselineProvider"/>
+    /// included — would see, not just what has materialized so far. <see cref="JudgeSupersededBaselineRelationAsync"/>
+    /// asks this ONLY of a legacy relation already known to be a CONTINUOUS AGGREGATE, before it ever reads the
+    /// successor's coverage: an empty legacy aggregate holds no history to protect, so the successor's coverage
+    /// is moot and the drop does not wait on it.</summary>
+    public static string BaselineRelationHasRowsSql(string view)
+        => $"SELECT EXISTS (SELECT 1 FROM collect.{view})";
 
     /// <summary>The raw table each baseline aggregate is sourced from, for the backfill's coverage probe.</summary>
     public static string SourceTableFor(string view) => view switch
@@ -4599,9 +4671,11 @@ WITH NO DATA";
     /// minutes a uniform refresh step left over, and how thinly 70 hypertables spread across them was a
     /// consequence nobody chose — a test asserted the resulting ceiling was 3 and would have accepted 4 or 5
     /// from a moved step. The thing that has an operational meaning is the spread: every hypertable's newest
-    /// 1-day chunk becomes eligible at the same UTC midnight (see <see cref="CompressionPhaseMinutes"/>), so
-    /// the count sharing a minute is the count of simultaneous chunk rewrites at that boundary. So the spread
-    /// is stated and the width follows from the catalog.</para>
+    /// chunk becomes eligible at a shared UTC boundary (see <see cref="CompressionPhaseMinutes"/>) — midnight
+    /// holds for every rung on the ladder, 1-day, 12h or 6h (#4211), since each divides a day evenly — so the
+    /// count sharing a minute is still the count of simultaneous chunk rewrites at that boundary; a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed only adds boundaries of its own besides it. So the
+    /// spread is stated and the width follows from the catalog.</para>
     ///
     /// <para><b>3 preserves the shipped behaviour rather than proposing new behaviour</b>, which is the
     /// reason to prefer it to any other number here: it is the spread the grid has always produced, so a
@@ -4659,10 +4733,13 @@ WITH NO DATA";
     /// <para><b>Why a spread rather than one shared minute.</b> All the compression policies would happily
     /// share a minute as far as LOCKS go — they compress different hypertables, so they do not contend with
     /// each other at all — but they would then do their real work simultaneously. <see cref="CompressAfterDays"/>
-    /// and <see cref="ChunkIntervalDays"/> are both 1 and TimescaleDB aligns 1-day chunks to the epoch, so
-    /// every hypertable's newest closed chunk becomes eligible at the same UTC midnight. Drifting policies
-    /// discover that eligibility at whatever minute they have drifted to, which spreads the daily rewrite
-    /// across the hour; collapsing them onto one minute would concentrate it into one. That is a burst this
+    /// is 1 day on every table (#4211 ruling decision 1) and TimescaleDB epoch-aligns every rung of the chunk
+    /// ladder — 1-day, 12h or 6h (#4211) — so every hypertable's newest closed chunk becomes eligible at the
+    /// same UTC midnight regardless of which rung it is on; a table <see cref="RawChunkIntervalPlanner"/> has
+    /// narrowed also becomes eligible at its OTHER chunk boundaries through the day, which is more spread to
+    /// account for, not less. Drifting policies discover eligibility at whatever minute they have drifted to,
+    /// which spreads the daily rewrite across the hour; collapsing them onto one minute would concentrate it
+    /// into one. That is a burst this
     /// change would be INTRODUCING, not removing, so the grid keeps the spread and takes only the drift away.
     /// How thin the spread has to be is <see cref="CompressionPhaseMaxPerMinute"/>, and the band's width
     /// follows from it — so the re-derivation moves WHERE compression runs without changing how concentrated
@@ -7086,9 +7163,11 @@ AND   j.hypertable_name = '{relation}'";
     ///
     /// <para><b>What sits on either side, and why neither is a lock hazard.</b> The minute after this one is
     /// <see cref="CompressionPhaseMinutes"/>' first, where the raw compression policies start; they lock raw
-    /// chunks and this family locks materialization chunks, so the two cannot queue on each other, and on
-    /// twenty-three hours of the day those policies find nothing eligible and finish in tens of milliseconds.
-    /// The next refresh START is the next hour's <c>:00</c>, 25 minutes away — and a compression run cannot
+    /// chunks and this family locks materialization chunks, so the two cannot queue on each other, and on most
+    /// hours of the day those policies find nothing eligible and finish in tens of milliseconds — twenty-three
+    /// of twenty-four for a table still at the 1-day chunk ceiling, fewer for a table the reconcile has
+    /// narrowed to 12h or 6h chunks (#4211). The next refresh START is the next hour's <c>:00</c>, 25 minutes
+    /// away — and a compression run cannot
     /// block an aggregate's own refresh in any case: <c>compress_chunk</c> on 2.28.1 holds
     /// <c>AccessShareLock</c> on the materialization hypertable and escalates only on the CHUNK it is rewriting
     /// (<c>ShareLock</c>, <c>ExclusiveLock</c>, then <c>AccessExclusiveLock</c> at the swap — all three observed
@@ -7123,14 +7202,17 @@ AND   j.hypertable_name = '{relation}'";
     /// The hour of the day (UTC) the first registered aggregate compresses at; each later one takes the next
     /// hour (<see cref="AggregateCompressionBandHourFor"/>).
     ///
-    /// <para><b>One, and it is the hour AFTER the one that carries the raw tier's daily rewrite.</b>
-    /// <see cref="CompressAfterDays"/> and <see cref="ChunkIntervalDays"/> are both one, and 1-day chunks are
-    /// epoch-aligned, so every raw hypertable's newest closed chunk becomes eligible at the same UTC midnight and
-    /// the <c>00:</c> hour's compression band is the one that does a day's compressing (#3112's midnight band —
-    /// its largest run, <c>query_store_stats</c>, measured at 552 s from <c>:42</c>). The aggregates' chunks
-    /// become eligible at the same midnight, for the same epoch-alignment reason, so the earliest hour that both
-    /// sees the new eligibility and is clear of that rewrite is the next one. Later hours would only add
-    /// latency to the newest eligible chunk; earlier there is none.</para>
+    /// <para><b>One, and it is the hour AFTER the one that carries the raw tier's shared daily rewrite.</b>
+    /// <see cref="CompressAfterDays"/> is 1 day on every table (#4211 ruling decision 1) and TimescaleDB
+    /// epoch-aligns every rung of the chunk ladder, so every raw hypertable's newest closed chunk becomes
+    /// eligible at the same UTC midnight regardless of its own chunk width — a table
+    /// <see cref="RawChunkIntervalPlanner"/> has narrowed to 12h or 6h (#4211) shares that boundary too, plus
+    /// others through the day this hour does not try to clear — and the <c>00:</c> hour's compression band is
+    /// the one every raw table shares (#3112's midnight band — its largest run, <c>query_store_stats</c>,
+    /// measured at 552 s from <c>:42</c>). The aggregates' chunks become eligible at the same midnight, for the
+    /// same epoch-alignment reason, so the earliest hour that both sees the new eligibility and is clear of
+    /// that shared rewrite is the next one. Later hours would only add latency to the newest eligible chunk;
+    /// earlier there is none.</para>
     /// </summary>
     public const int AggregateCompressionBandFirstHour = 1;
 
@@ -11028,7 +11110,7 @@ WHERE j.proc_name LIKE '%compression%'
             {
                 case CompressionClearanceBand.RefreshOverrun when item.PercentOfClearance is not null:
                     logger.LogWarning(
-                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is the daily chunk close: every hypertable's newest {Days}d chunk becomes eligible at the same UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
+                        "TimescaleDB: compression of {Hypertable} last ran {Seconds:F0}s from :{Minute:00}, at or past the {Clearance}s it had before the next hourly refresh started ({Over:F0}s past it) — so it was still holding AccessExclusiveLock when a refresh wanted the table. This is a chunk close: a chunk becomes eligible {Days}d after it closes, and a hypertable still at the 1-day chunk ceiling closes only one a day, at UTC midnight, so one tick a day carries a full day's rewrite while the other twenty-three find nothing; a table the reconcile has narrowed to 12h or 6h chunks (#4211) closes more of them and carries that rewrite at each of its own chunk boundaries instead (#3112). The grid's guard is one-sided by decision, so the tail of the compression band has one refresh step of clearance and this is that residual being spent. Widening it costs minutes the heaviest refresh's window is holding (#3174).",
                         item.HypertableName, duration.TotalSeconds, minute, clearance, -clear, CompressAfterDays);
                     break;
 
@@ -11572,8 +11654,9 @@ public sealed record CompressionActivity(
     /// <para><b>Null for the continuous aggregates' compression jobs too, deliberately (#3581).</b> Those jobs
     /// are on <see cref="TimescaleSupport.AggregateCompressionBandMinute"/> once a day rather than on this
     /// hourly grid, and the clearance findings below reason from the raw tier's geometry — the #3112 overrun
-    /// text explains a run by the daily chunk close of a 1-day raw chunk, which is not what an aggregate's
-    /// run is. Reporting an aggregate job through that text would name the wrong mechanism; a watch over the
+    /// text explains a run by a raw chunk's own close, daily for a table still at the 1-day ceiling and more
+    /// often for a table the reconcile has narrowed (#4211), which is not what an aggregate's run is. Reporting
+    /// an aggregate job through that text would name the wrong mechanism; a watch over the
     /// daily band's own clearance (25 minutes to the next hour's first refresh) is a separate instrument, and
     /// until it exists these jobs are silent here the way a foreign hypertable is, rather than misdescribed.
     /// The #1778 backlog count above DOES cover them, at their own delay.</para>

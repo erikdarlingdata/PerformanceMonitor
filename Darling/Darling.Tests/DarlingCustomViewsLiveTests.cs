@@ -8,6 +8,7 @@
 
 using System;
 using System.Linq;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -30,6 +31,13 @@ public sealed class DarlingCustomViewsLiveTests
 {
     private const string SampleDefinition = "{\"panels\":[{\"read\":\"get_wait_stats\",\"viz\":\"table\",\"span\":1}]}";
     private const string SampleDefinitionV2 = "{\"panels\":[{\"read\":\"get_cpu_utilization\",\"viz\":\"line\",\"span\":2}]}";
+
+    /// <summary>A notebook (design D7, #4222) carrying one <c>read</c> cell — the shape
+    /// <see cref="NotebookReadCellRoundTrips_ThroughTheStore_ByteForByte"/> proves survives the store's JSONB
+    /// column unchanged.</summary>
+    private const string SampleNotebookWithReadCell =
+        "{\"kind\":\"notebook\",\"cells\":[" +
+        "{\"type\":\"read\",\"read\":\"get_blocking\",\"params\":{\"server\":\"S1\",\"hours\":24},\"viz\":\"table\",\"title\":\"Blocking\"}]}";
 
     /// <summary>
     /// The create's <c>updated_by</c>, and deliberately NOT the <c>web</c> constant. A fixture that passes the
@@ -162,6 +170,71 @@ public sealed class DarlingCustomViewsLiveTests
                 using var command = new NpgsqlCommand("DELETE FROM config.custom_views WHERE name = $1 OR name = $2", cleanup);
                 command.Parameters.AddWithValue(name1);
                 command.Parameters.AddWithValue(name2);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// The #4222 slice's round-trip pin: a notebook carrying a <c>read</c> cell (with its <c>params</c>) survives
+    /// <see cref="CustomViewStore.CreateAsync"/> -> <see cref="CustomViewStore.GetAsync"/> through the JSONB
+    /// column unchanged. <see cref="CrudRoundTrip_Create_Get_List_Update_StaleConflict_DupConflict_Delete_NotFound"/>
+    /// proves the store's CRUD + concurrency machinery with a plain dashboard definition; this proves the NEW D7
+    /// shape specifically, since a store bug that mangled only notebook-shaped JSON (e.g. a column default, a
+    /// trigger, or a lossy round-trip through a text cast) would pass every other fixture in this file. Compared
+    /// with <see cref="JsonNode.DeepEquals"/> rather than raw string equality, since Postgres's jsonb storage does
+    /// not promise to preserve source key order or whitespace — only value-for-value fidelity is the store's
+    /// actual contract, and this pin does not assert more than that.
+    /// </summary>
+    [Fact]
+    public async Task NotebookReadCellRoundTrips_ThroughTheStore_ByteForByte()
+    {
+        var connectionString = RequireLivePostgres();
+        var ct = TestContext.Current.CancellationToken;
+
+        await using (var migrate = new NpgsqlConnection(connectionString))
+        {
+            await migrate.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(migrate, ct);
+        }
+
+        var dataSourceConnectionString = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            SearchPath = "collect,config,public",
+        }.ConnectionString;
+
+        await using var dataSource = NpgsqlDataSource.Create(dataSourceConnectionString);
+        var store = new CustomViewStore(dataSource);
+
+        var name = "cv_live_notebook_" + Guid.NewGuid().ToString("N");
+        var bodySucceeded = false;
+        long viewId = -1;
+        try
+        {
+            var created = Assert.IsType<CustomViewResult.Ok>(
+                await store.CreateAsync(name, "notebook with a read cell", SampleNotebookWithReadCell, CreatePrincipal, ct));
+            viewId = created.View!.Id;
+
+            var fetched = Assert.IsType<CustomViewResult.Ok>(await store.GetAsync(viewId, ct));
+
+            var expected = JsonNode.Parse(SampleNotebookWithReadCell);
+            var actual = JsonNode.Parse(fetched.View!.DefinitionJson);
+            Assert.True(
+                JsonNode.DeepEquals(expected, actual),
+                $"read cell definition did not round-trip byte-for-byte; expected {expected}, got {actual}");
+
+            /* The kind scalar the list read pulls out of the stored JSON: a notebook, not the dashboard default. */
+            var list = await store.ListAsync(ct);
+            Assert.Equal("notebook", list.Single(s => s.Id == viewId).Kind);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand("DELETE FROM config.custom_views WHERE name = $1", cleanup);
+                command.Parameters.AddWithValue(name);
                 await command.ExecuteNonQueryAsync(cleanupCt);
             });
         }

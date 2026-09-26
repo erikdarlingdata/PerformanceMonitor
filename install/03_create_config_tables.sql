@@ -92,6 +92,48 @@ BEGIN
         SET @log_to_table = 1;
 
         /*
+        Create config.xe_shred_state (#4213) -- the deprecated Dashboard's own copy of the
+        execution_count gate #4212 added to Darling and Lite. One row per collector, storing the
+        ring_buffer target's execution_count as of the last cycle that read it. The collectors
+        (22_collect_blocked_processes.sql, 24_collect_deadlock_xml.sql) compare their current read
+        against this row: an exact match means nothing has arrived since, so the cast+shred of
+        target_data is skipped. No row, or a count that has gone down (session restart), means a
+        full read runs and this row is written.
+        */
+        IF OBJECT_ID(N'config.xe_shred_state', N'U') IS NULL
+        BEGIN
+            IF @debug = 1
+            BEGIN
+                RAISERROR(N'Creating config.xe_shred_state table', 0, 1) WITH NOWAIT;
+            END;
+
+            CREATE TABLE
+                config.xe_shred_state
+            (
+                collector_name sysname NOT NULL,
+                last_execution_count bigint NOT NULL,
+                last_checked_time datetime2(7) NOT NULL DEFAULT SYSUTCDATETIME(),
+                CONSTRAINT PK_xe_shred_state PRIMARY KEY CLUSTERED (collector_name) WITH (DATA_COMPRESSION = PAGE)
+            );
+
+            SET @tables_created = @tables_created + 1;
+
+            INSERT INTO
+                config.collection_log
+            (
+                collector_name,
+                collection_status,
+                error_message
+            )
+            VALUES
+            (
+                N'ensure_config_tables',
+                N'TABLE_CREATED',
+                N'Created config.xe_shred_state table'
+            );
+        END;
+
+        /*
         Create config.collection_schedule
         */
         IF OBJECT_ID(N'config.collection_schedule', N'U') IS NULL

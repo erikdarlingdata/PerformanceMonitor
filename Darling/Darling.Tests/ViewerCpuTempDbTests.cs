@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -20,17 +21,20 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Pins the CPU-tab and tempdb-tab reads (W1a viewer copy-parity) against the Darling store contract,
-/// no live Postgres. The CPU tab (and, since W1d, the Overview's CPU lane) plots RAW per-sample rows
-/// (windowed on the naive-UTC collection_time, ordered by the server-local sample_time) — deliberately
-/// not an average-per-collection roll-up. The tempdb reads mirror Lite's view-based queries
-/// (v_tempdb_stats / v_file_io_stats): the numeric(18,2) MB columns are CAST to double precision for
-/// the typed reader, total_sessions_using_tempdb stays bigint (GetInt64), and the file-I/O read filters
-/// to tempdb and averages stall/op per file.
+/// no live Postgres. The CPU tab (and, since W1d, the Overview's CPU lane) plots the de-skewed
+/// per-sample series bucketed to <see cref="TrendBudget.Chart"/>'s width (#4234): a bucket wider than
+/// one sample averages the two gauge columns, and a bucket holding exactly one physical sample is
+/// stamped at that sample's own raw time by the C# reader rather than the bucket grid (ruling item 3).
+/// The tempdb reads mirror Lite's view-based queries (v_tempdb_stats / v_file_io_stats): the numeric(18,2)
+/// MB columns are CAST to double precision for the typed reader, total_sessions_using_tempdb stays bigint
+/// (GetInt64). The usage read (TempDbTrendSql) is unaffected by #4234 — still one row per collection. The
+/// file-I/O read filters to tempdb, averages stall/op per file, and — since #4234 — is bucketed the same
+/// way as the File I/O tab's own per-file reads (Lite's twin bucketed first, #4340).
 /// </summary>
 public sealed class ViewerCpuTempDbSqlTests
 {
     [Fact]
-    public void CpuUtilizationSql_SelectsRawSamples_WindowedOnCollectionTime_OrderedBySampleTime()
+    public void CpuUtilizationSql_SelectsFromRawCte_WindowedOnCollectionTime_OrderedByBucketStart()
     {
         Assert.Contains("FROM cpu_utilization_stats", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("sample_time", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
@@ -38,17 +42,35 @@ public sealed class ViewerCpuTempDbSqlTests
         Assert.Contains("other_process_cpu_utilization", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY sample_time", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        /* The outer bucketed query groups/orders by the bucket_start ordinal, not the raw column name
+           (#4234 — the pre-bucketing read ordered by the bare sample_time column). */
+        Assert.Contains("GROUP BY 1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY 1", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void CpuUtilizationSql_IsRawNotAveraged_NoAvgOrGroupBy()
+    public void CpuUtilizationSql_IsBucketedWithGaugeAveragesAndNullAsZero()
     {
-        /* The CPU tab (and the Overview's CPU lane) plots every ring-buffer sample; it must NOT
-           average per collection. The de-skew uses a window MAX (one value per row, no roll-up) and a
-           PARTITION BY, never AVG or GROUP BY. */
-        Assert.DoesNotContain("AVG(", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("GROUP BY", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        /* #4234: both CPU columns are gauges (ruling item 2), averaged per bucket. A NULL
+           other_process_cpu_utilization (SQL on Linux, #1048) is COALESCEd to 0 BEFORE the AVG, matching
+           the pre-bucketing reader's per-row "NULL reads as 0" rule exactly rather than letting
+           Postgres's NULL-skipping AVG silently change a mixed-OS bucket's value. */
+        Assert.Contains("AVG(COALESCE(sqlserver_cpu_utilization, 0))", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+        Assert.Contains("AVG(COALESCE(other_process_cpu_utilization, 0))", ViewerDataService.CpuUtilizationSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4234: the source check ruling item 6 asks for — every bucketed WPF trend statement carries
+    /// a width parameter and buckets via the shared origin, so the width the C# picks (<c>TrendBuckets.AutoMinutes</c>)
+    /// is the width the SQL actually bins on.</summary>
+    [Fact]
+    public void CpuUtilizationSql_CarriesABucketWidth_AndTheSingletonColumnsForRawPassthrough()
+    {
+        var sql = ViewerDataService.CpuUtilizationSql;
+        Assert.Contains("date_bin(CAST($3 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.OriginSql, sql, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(sample_time) AS first_sample_time", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS sample_count", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -132,16 +154,35 @@ public sealed class ViewerCpuTempDbSqlTests
     }
 
     [Fact]
-    public void TempDbFileIoTrendSql_FiltersToTempDb_GroupsPerFile_CastsStallToDouble()
+    public void TempDbFileIoTrendSql_FiltersToTempDb_GroupsPerFileAndBucket_CastsStallToDouble()
     {
         Assert.Contains("FROM v_file_io_stats", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         Assert.Contains("WHERE server_id = $1", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
+        Assert.Contains("collection_time <= $3", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         Assert.Contains("database_name = 'tempdb'", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY collection_time, file_name", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time, file_name", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
+        /* #4234: grouped on file_name plus the bucket_start ordinal, not the raw collection_time column
+           (the pre-bucketing read grouped/ordered on the bare column). */
+        Assert.Contains("GROUP BY file_name, 2", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY file_name, 2", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         Assert.Contains("CAST(delta_stall_read_ms AS double precision)", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
         Assert.Contains("CAST(delta_stall_write_ms AS double precision)", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4234 ruling item 6 (source check): the tempdb file-I/O read carries a bucket width and
+    /// projects the singleton-detection columns, mirroring <c>FileIoLatencyTrendSql</c>. Proven once by
+    /// hand against the pre-#4234 text: no <c>date_bin</c> anywhere (a per-collection read has no bucket
+    /// width), so this assert fails there.</summary>
+    [Fact]
+    public void TempDbFileIoTrendSql_CarriesABucketWidth_AndProjectsSingletonDetectionColumns()
+    {
+        var sql = ViewerDataService.TempDbFileIoTrendSql;
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.OriginSql, sql, StringComparison.Ordinal);
+        Assert.Contains("GREATEST(date_bin(", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS collection_count", sql, StringComparison.Ordinal);
+        Assert.Contains("HAVING COUNT(rated_reads) > 0", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -187,9 +228,10 @@ public sealed class ViewerCpuTempDbSqlTests
 /// naive UTC by the per-batch offset, and a UTC batch left untouched, both landing on collection_time);
 /// the tempdb usage read (MB-as-double and — the load-bearing check — the bigint
 /// total_sessions_using_tempdb read via GetInt64, which GetInt32 would throw on); and the tempdb
-/// file-I/O read (tempdb-only filtering + per-file average-latency computation). Shares the serialized
-/// "live-postgres" collection so the row churn can't race another class; uses negative sentinel
-/// server_ids and cleans up in finally.
+/// file-I/O read (tempdb-only filtering, per-file average-latency computation, and — since #4234 — the
+/// same per-file bucket cap and singleton pass-through as the File I/O tab's own reads). Shares the
+/// serialized "live-postgres" collection so the row churn can't race another class; uses negative
+/// sentinel server_ids and cleans up in finally.
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ViewerCpuTempDbLivePostgresTests
@@ -200,11 +242,16 @@ public sealed class ViewerCpuTempDbLivePostgresTests
     private const int SkewServerId = -979797;
     private const string SkewServerName = "viewer-cpu-skew-e2e";
 
+    private const int BudgetServerId = -989898;
+    private const string BudgetServerName = "viewer-cpu-budget-e2e";
+
     private const int TempDbServerId = -959595;
     private const string TempDbServerName = "viewer-tempdb-tab-e2e";
 
     private const int FileIoServerId = -969696;
     private const string FileIoServerName = "viewer-tempdb-fileio-e2e";
+
+    private const int FileIoBudgetServerId = -969697;
 
     [Fact]
     public async Task Cpu_ReadsRawSamplesInOrder_NullOtherAsZero_AgainstDevPostgres()
@@ -241,9 +288,9 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             Assert.Equal(3, samples.Count);
             /* Raw (not averaged), ordered by sample_time. */
             Assert.Equal(new[] { s1.Ticks, s2.Ticks, s3.Ticks }, samples.Select(s => s.SampleTime.Ticks));
-            Assert.Equal(new[] { 10, 20, 30 }, samples.Select(s => s.SqlServerCpu));
+            Assert.Equal(new[] { 10.0, 20.0, 30.0 }, samples.Select(s => s.SqlServerCpu));
             /* Middle sample's NULL other-process CPU reads as 0. */
-            Assert.Equal(new[] { 5, 0, 15 }, samples.Select(s => s.OtherProcessCpu));
+            Assert.Equal(new[] { 5.0, 0.0, 15.0 }, samples.Select(s => s.OtherProcessCpu));
 
             bodySucceeded = true;
         }
@@ -310,7 +357,10 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             await InsertCpuAsync(connection, SkewServerId, SkewServerName, collUtc, trueUtcOld + utc, sqlCpu: 41, otherCpu: 9);
             await InsertCpuAsync(connection, SkewServerId, SkewServerName, collUtc, trueUtcNew + utc, sqlCpu: 42, otherCpu: 10);
 
-            var samples = await viewer.GetCpuUtilizationAsync(SkewServerId, collPdt.AddMinutes(-10));
+            /* #4234: an explicit endUtc close to the fixture's own fixed 2026-06-01 window — the default
+               (the wall clock) would otherwise size the bucket width off a multi-month gap and merge these
+               hour-apart batches together. */
+            var samples = await viewer.GetCpuUtilizationAsync(SkewServerId, collPdt.AddMinutes(-10), collUtc.AddMinutes(10));
 
             Assert.Equal(8, samples.Count);
 
@@ -319,7 +369,7 @@ public sealed class ViewerCpuTempDbLivePostgresTests
                Paired with its (unique) CPU value so the assertion pins which row de-skewed to which
                instant. */
             Assert.Equal(
-                new[]
+                new (long, double)[]
                 {
                     (truePdtOld.Ticks, 11),
                     (truePdtNew.Ticks, 12),
@@ -360,6 +410,94 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         }
     }
 
+    /// <summary>#4234 ruling item 6: a 7-day window (one sample per minute, the ring buffer's real cadence)
+    /// must not hand back all 10,080 raw rows — the bucketed read caps at <see cref="TrendBudget.Chart"/>'s
+    /// single-series budget.</summary>
+    [Fact]
+    public async Task Cpu_SevenDayWindow_ReturnsAtMostBudgetRows_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live CPU budget-cap test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", BudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+
+            await BulkSeedCpuAsync(connection, BudgetServerId, BudgetServerName, start, end);
+
+            var samples = await viewer.GetCpuUtilizationAsync(BudgetServerId, start, end);
+
+            var budget = TrendBudget.Chart.AutoPoints;
+            Assert.True(samples.Count > 0 && samples.Count <= budget, $"{samples.Count} rows over a budget of {budget}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", BudgetServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 3: when the window's budget covers every collection (three samples, five
+    /// minutes apart, each its own bucket), every point is stamped at its own raw sample_time — seeded off
+    /// the minute grid (:37 seconds) so a fix that floors to the date_bin grid line instead would lose the
+    /// seconds and fail this.</summary>
+    [Fact]
+    public async Task Cpu_BudgetCoversEveryCollection_ReturnsRawTimestampsAndValuesUnchanged_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live CPU singleton-passthrough test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "cpu_utilization_stats", BudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var t1 = new DateTime(2026, 3, 10, 9, 0, 37);
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+
+            /* collection_time == sample_time (a UTC batch): the #1262 de-skew is a no-op, so the raw
+               sample_time survives unchanged if every bucket the read returns is a true singleton. */
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t1, t1, sqlCpu: 10, otherCpu: 5);
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t2, t2, sqlCpu: 20, otherCpu: 6);
+            await InsertCpuAsync(connection, BudgetServerId, BudgetServerName, t3, t3, sqlCpu: 30, otherCpu: 7);
+
+            /* Explicit endUtc close to the fixed fixture window — the default (the wall clock) would
+               otherwise size the bucket width off a multi-month gap and merge these 5-minute-apart
+               collections into one bucket. */
+            var samples = await viewer.GetCpuUtilizationAsync(BudgetServerId, t1.AddMinutes(-1), t3.AddMinutes(1));
+
+            Assert.Equal(new[] { t1.Ticks, t2.Ticks, t3.Ticks }, samples.Select(s => s.SampleTime.Ticks));
+            Assert.Equal(new[] { 10.0, 20.0, 30.0 }, samples.Select(s => s.SqlServerCpu));
+            Assert.Equal(new[] { 5.0, 6.0, 7.0 }, samples.Select(s => s.OtherProcessCpu));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "cpu_utilization_stats", BudgetServerId, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task TempDb_ReadsMbAsDouble_AndBigintSessionCount_AgainstDevPostgres()
     {
@@ -391,7 +529,7 @@ public sealed class ViewerCpuTempDbLivePostgresTests
                 userMb: 200.00m, internalMb: 60.00m, versionMb: 20.00m,
                 totalMb: 280.00m, unallocMb: 120.00m, totalSessions: bigSessionCount, topSessionId: 77, topSessionMb: 25.50m);
 
-            var samples = await viewer.GetTempDbTrendAsync(TempDbServerId, t1.AddMinutes(-1));
+            var samples = await viewer.GetTempDbTrendAsync(TempDbServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
 
             Assert.Equal(2, samples.Count);
 
@@ -419,6 +557,10 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         }
     }
 
+    /// <summary>#4234 ruling item 3: at a short window the budget covers every collection (one per file
+    /// here), so both reads return the raw points UNCHANGED, stamped at their own raw collection time
+    /// rather than the date_bin grid — proven by the exact-tick equality below, which the always-floors
+    /// pre-#4234 read also happened to satisfy only because it never bucketed at all.</summary>
     [Fact]
     public async Task TempDbFileIo_TempDbOnly_PerFileAverageLatency_AgainstDevPostgres()
     {
@@ -446,10 +588,12 @@ public sealed class ViewerCpuTempDbLivePostgresTests
             await InsertFileIoAsync(connection, t1, "StackOverflow2010", "so_data",
                 deltaReads: 1000, deltaWrites: 1000, deltaStallReadMs: 999999, deltaStallWriteMs: 999999);
 
-            var rows = await viewer.GetTempDbFileIoTrendAsync(FileIoServerId, t1.AddMinutes(-1));
+            var rows = await viewer.GetTempDbFileIoTrendAsync(FileIoServerId, t1.AddMinutes(-1), t1.AddMinutes(1));
 
             /* Only the two tempdb files survive the database_name = 'tempdb' filter. */
             Assert.Equal(2, rows.Count);
+            /* #4234: one collection per file over the whole window — the budget covers it, so every
+               point is stamped at its own raw collection_time, not a bucket_start grid line. */
             Assert.All(rows, r => Assert.Equal(t1.Ticks, r.CollectionTime.Ticks));
             /* Ordered by file_name. */
             Assert.Equal(new[] { "tempdb_data", "tempdb_log" }, rows.Select(r => r.FileName));
@@ -467,6 +611,51 @@ public sealed class ViewerCpuTempDbLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "file_io_stats", FileIoServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling items 2/6: a 7-day window at the real 1-minute file_io_stats cadence used to
+    /// return every collection per file — now capped to <see cref="TrendBudget.Chart"/>'s point budget PER
+    /// FILE, exactly like the File I/O tab's own per-file reads. Bulk-seeded server-side (generate_series)
+    /// rather than one round trip per minute.</summary>
+    [Fact]
+    public async Task TempDbFileIo_SevenDayWindow_ReturnsAtMostBudgetTimesFileCount_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live tempdb-file-I/O budget-cap test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "file_io_stats", FileIoBudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+            var files = new[] { "tempdb_data", "tempdb_data2", "tempdb_log", "tempdb_data3" };
+            var baseId = CollectionIdGenerator.Next() * 1_000_000L;
+            foreach (var file in files)
+            {
+                await BulkSeedTempDbFileIoAsync(connection, TestContext.Current.CancellationToken, baseId, FileIoBudgetServerId, start, end, file);
+                baseId += 20_000;
+            }
+
+            var rows = await viewer.GetTempDbFileIoTrendAsync(FileIoBudgetServerId, start, end);
+            var budget = TrendBudget.Chart.AutoPoints * files.Length;
+
+            Assert.True(rows.Count > 0 && rows.Count <= budget, $"tempdb file I/O: {rows.Count} rows over a {files.Length}-file budget of {budget}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "file_io_stats", FileIoBudgetServerId, cleanupCt));
         }
     }
 
@@ -489,6 +678,26 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         command.Parameters.AddWithValue(DateTime.SpecifyKind(sampleTimeLocal, DateTimeKind.Unspecified));
         command.Parameters.AddWithValue(sqlCpu);
         command.Parameters.Add(new NpgsqlParameter { Value = (object?)otherCpu ?? DBNull.Value, NpgsqlDbType = NpgsqlDbType.Integer });
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>One collection (one ring-buffer sample) per minute from <paramref name="start"/> to
+    /// <paramref name="end"/> inclusive, generated server-side — the real cadence a 7-day CPU window would
+    /// see — without a per-row round trip. A UTC batch (sample_time == collection_time), so the #1262
+    /// de-skew is a no-op throughout.</summary>
+    private static async Task BulkSeedCpuAsync(
+        NpgsqlConnection connection, int serverId, string serverName, DateTime start, DateTime end)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO cpu_utilization_stats
+    (collection_id, collection_time, server_id, server_name, sample_time,
+     sqlserver_cpu_utilization, other_process_cpu_utilization)
+SELECT 1, g, $1, $2, g, 50, 10
+FROM generate_series($3::timestamp, $4::timestamp, interval '1 minute') AS g", connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(serverName);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
     }
 
@@ -540,6 +749,30 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)", connection);
         command.Parameters.AddWithValue(deltaStallReadMs);
         command.Parameters.AddWithValue(deltaStallWriteMs);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>One tempdb file_io_stats collection per minute from <paramref name="start"/> to
+    /// <paramref name="end"/> inclusive, generated server-side — the real cadence a 7-day tempdb-file-I/O
+    /// window would see — without a per-row round trip. Mirrors ViewerFileIoBlockingTests's
+    /// BulkSeedFileIoAsync, database_name fixed to 'tempdb'.</summary>
+    private static async Task BulkSeedTempDbFileIoAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken ct, long baseId, int serverId,
+        DateTime start, DateTime end, string fileName)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO file_io_stats
+    (collection_id, collection_time, server_id, server_name,
+     database_name, file_name, delta_reads, delta_writes,
+     delta_stall_read_ms, delta_stall_write_ms)
+SELECT $1 + row_number() OVER (), g, $2, $3, 'tempdb', $4, 10, 4, 100, 20
+FROM generate_series($5::timestamp, $6::timestamp, interval '1 minute') AS g", connection);
+        command.Parameters.AddWithValue(baseId);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(FileIoServerName);
+        command.Parameters.AddWithValue(fileName);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static DateTime TruncateToSeconds(DateTime value) =>

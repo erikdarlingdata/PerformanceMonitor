@@ -13,6 +13,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -67,7 +68,17 @@ public sealed class DarlingMcpPgLoggingAuditTools
                         + "server's logging - it is the absence of the evidence.");
             }
 
-            return BuildAuditJson(resolved.ServerName, DarlingPgLoggingAudit.Audit(snapshot));
+            /* #4251: the collector's own cached verdict, no store read - see the identical comment on
+               get_pg_server_config, which this tool's own reading guide already points readers at for
+               pending_restart's other trap. #4251 round-1 review, H1(a): also gated on Windows - the
+               grants this caveat asks for fix nothing on a non-Windows target. */
+            var fileSettingsUnreadable =
+                PgFileSettingsCapability.TryGetCachedVerdict(
+                    resolved.ServerName, out var fileSettingsReadable, out var fileSettingsIsWindows)
+                && fileSettingsIsWindows
+                && !fileSettingsReadable;
+
+            return BuildAuditJson(resolved.ServerName, DarlingPgLoggingAudit.Audit(snapshot), fileSettingsUnreadable);
         }
         catch (Exception ex)
         {
@@ -89,7 +100,10 @@ public sealed class DarlingMcpPgLoggingAuditTools
     /// The response body, split out so the WIRE SHAPE can be asserted without a live store — the reason
     /// <c>BuildReadinessJson</c> is separate on the plan tools.
     /// </summary>
-    internal static string BuildAuditJson(string serverName, DarlingPgLoggingAudit.Result audit)
+    internal static string BuildAuditJson(
+        string serverName,
+        DarlingPgLoggingAudit.Result audit,
+        bool fileSettingsUnreadable = false)
     {
         var facets = audit.Facets;
 
@@ -122,6 +136,10 @@ public sealed class DarlingMcpPgLoggingAuditTools
             unknown_settings = unknown,
             pending_restart_count = pendingRestart.Length,
             pending_restart_settings = pendingRestart,
+            /* #4251: null (McpHelpers.JsonOptions writes it) unless the collector's cached verdict says this
+               target's monitoring role cannot read pg_file_settings - the same fact get_pg_server_config
+               attaches, worded once on PgFileSettingsCapability so the two readers cannot disagree. */
+            pending_restart_caveat = fileSettingsUnreadable ? PgFileSettingsCapability.UnreadableCaveat : null,
             note = "One facet per logging setting, in the order an operator reaches for them - statements, "
                  + "locks, spills, maintenance, checkpoints, connections - not a causal order; nothing here "
                  + "gates anything else. verdict describes the LINES: instrumented writes every line the "

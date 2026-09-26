@@ -386,7 +386,15 @@ public sealed class PgServerConfigScopeRungTests
                 var excludes = statement.Contains("database_name IS NULL", StringComparison.Ordinal)
                             && statement.Contains("role_name IS NULL", StringComparison.Ordinal);
                 var selects = statement.Contains("database_name IS NOT NULL OR", StringComparison.Ordinal);
-                if (!excludes && !selects)
+
+                /* #4348 S1b: the one-time secret scrub is the census's third answer, not a missed choice.
+                   A secret can land in a per-database or per-role override exactly as easily as in the
+                   server-wide setting (the ruling's own test shape seeds both), so the scrub's candidate
+                   read must carry NEITHER arm — it wants every row, whichever scope it is, and decides
+                   row-by-row in C# via PgSettingRedactor rather than in this SQL. */
+                var scrubsEveryScopeDeliberately = Path.GetFileName(file) == "PgSettingScrub.cs";
+
+                if (!excludes && !selects && !scrubsEveryScopeDeliberately)
                 {
                     undecided.Add($"{Path.GetFileName(file)} @ {match.Index}");
                 }
@@ -394,8 +402,9 @@ public sealed class PgServerConfigScopeRungTests
         }
 
         /* 10 -> 12 (#3937): ScopedConfigChangesSql's `snapshots` subquery and `overrides` CTE, both aliased
-           `FROM pg_server_config AS c`, both classified "selects" above. */
-        Assert.Equal(12, reads);
+           `FROM pg_server_config AS c`, both classified "selects" above. 12 -> 13 (#4348 S1b): the scrub's
+           one candidate read, classified above as the deliberate third answer. */
+        Assert.Equal(13, reads);
         Assert.True(undecided.Count == 0,
             "a pg_server_config read carries neither arm of the V138 scope split, so it will see per-database "
           + "and per-role override rows as if they were the server's settings: ["
@@ -486,13 +495,17 @@ public sealed class PgServerConfigScopeRungTests
            (PgServerConfigOverrideLivePostgresTests). The page is serialized as-is when there is nothing to say, and
            the two keys are added to the JSON node only when there is. */
         var code = StripComments(tools);
-        Assert.Contains("if (overrides.Count == 0)", code, StringComparison.Ordinal);
+        /* #4251 added a second, independent reason to leave the fast path: the file-settings caveat attaches
+           the same way, so the condition below now reads overrides.Count == 0 AND the caveat does not apply
+           either — still the same attach pattern, one more term. */
+        Assert.Contains("if (overrides.Count == 0 && !fileSettingsUnreadable)", code, StringComparison.Ordinal);
         Assert.Contains("return JsonSerializer.Serialize(configPage, McpHelpers.JsonOptions);", code, StringComparison.Ordinal);
         Assert.Contains("node[\"database_overrides\"] = JsonSerializer.SerializeToNode(", code, StringComparison.Ordinal);
         Assert.Contains("node[\"database_overrides_note\"] =", code, StringComparison.Ordinal);
+        Assert.Contains("node[\"pending_restart_caveat\"] = PgFileSettingsCapability.UnreadableCaveat;", code, StringComparison.Ordinal);
         Assert.DoesNotContain("database_overrides = ", code, StringComparison.Ordinal);
         Assert.DoesNotContain("database_overrides_note = ", code, StringComparison.Ordinal);
-        Assert.Contains("GetOverridesAsync(postgres, resolved.ServerId)", tools, StringComparison.Ordinal);
+        Assert.Contains("GetOverridesAsync(postgres, resolved.ServerId, cancellationToken)", tools, StringComparison.Ordinal);
         /* Uncapped, deliberately: the settings list is paged and this is not. */
         Assert.DoesNotContain("GetOverridesAsync(postgres, resolved.ServerId, limit", tools, StringComparison.Ordinal);
 
@@ -555,6 +568,37 @@ public sealed class PgServerConfigScopeRungTests
     {
         var noBlocks = Regex.Replace(source, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline);
         return Regex.Replace(noBlocks, @"^\s*///?.*$", string.Empty, RegexOptions.Multiline);
+    }
+
+    /// <summary>
+    /// #4251 round-1 review, L1: nothing offline kept <see cref="PgServerConfigCollector"/>'s two query texts
+    /// (plain, and the <c>pg_file_settings</c> route) in step — only a live run with a granted role ever
+    /// exercised the second one. This pins that the two BuildQuery outputs differ in exactly one span: the
+    /// <c>pending_restart</c> column. A column added to one text alone, or a file-settings predicate that
+    /// drifted from what <c>PayloadColumns</c> expects, fails this without needing a live database.
+    /// </summary>
+    [Fact]
+    public void TheFileSettingsQuery_IsTheDefaultQuery_WithOnlyThePendingRestartColumnChanged()
+    {
+        static string Text(bool readable) => PgServerConfigCollector.Instance.BuildQuery(new CollectorContext
+        {
+            ServerId = -4251,
+            ServerName = "pin-4251",
+            CollectionTime = DateTime.UtcNow,
+            Deltas = NoDeltas.Instance,
+            PgFileSettingsReadable = readable,
+        }).Text;
+
+        var plain = Text(false);
+        var withFile = Text(true);
+        const string plainColumn = "    s.pending_restart                       AS pending_restart,";
+        Assert.Single(Regex.Matches(plain, Regex.Escape(plainColumn)));
+
+        var start = withFile.IndexOf("    (s.pending_restart", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        const string tail = "AS pending_restart,";
+        var end = withFile.IndexOf(tail, start, StringComparison.Ordinal) + tail.Length;
+        Assert.Equal(plain, withFile[..start] + plainColumn + withFile[end..]);
     }
 
     private sealed class NoDeltas : ICollectorDeltaCalculator

@@ -228,20 +228,16 @@ internal static class DarlingTrendReader
     }
 
     /// <summary>
-    /// The memory-grant trend — the viewer's <c>MemoryGrantTrendSql</c> (Lite's
-    /// <c>GetMemoryGrantTrendAsync</c>): total granted MB across all pools per grants collection over the
-    /// window, for the join get_memory_trend makes onto the memory series (#3548). $1 server_id, $2/$3
-    /// window (naive UTC).
+    /// The memory-grant trend — Lite's <c>GetMemoryGrantTrendAsync</c>: total granted MB across all pools
+    /// per grants collection over the window, for the join get_memory_trend makes onto the memory series
+    /// (#3548). This IS <see cref="TrendBucketSql.MemoryGrantPerCollectionSql"/>, the same per-collection
+    /// read the viewer's <c>ViewerDataService.MemoryGrantTrendSql</c> wraps in its own outer bucketing
+    /// select (#4349) — unbucketed here, because <see cref="MemoryGrantTrendBucketedSql"/> below is this
+    /// tool's own outer bucketing wrapper; bucketing it a second time here would double-bucket
+    /// <c>get_memory_trend</c>. $1 server_id, $2/$3 window (naive UTC).
     /// </summary>
-    public const string MemoryGrantTrendSql = """
-        SELECT
-            collection_time,
-            CAST(SUM(granted_memory_mb) AS double precision) AS total_granted_mb
-        FROM v_memory_grant_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY collection_time
+    public const string MemoryGrantTrendSql = $"""
+        {TrendBucketSql.MemoryGrantPerCollectionSql}
         ORDER BY collection_time
         """;
 
@@ -747,7 +743,7 @@ internal static class DarlingTrendReader
     /// denominator is the bucket width, known for every bucket.</para>
     /// </summary>
     public static readonly string QueryDurationTrendSql =
-        DurationTrendRouting.BuildBucketedRawTrendSql("query_stats");
+        DurationTrendRouting.BuildBucketedRawTrendSql("query_stats", withDatabaseFilter: false);
 
     /* ───────────── the tier ladder and the hourly-tier SQL: aliases of DurationTrendRouting (#3653) ─────────────
 
@@ -992,7 +988,7 @@ internal static class DarlingTrendReader
     /// builder's remarks carry it once for both tables.</para>
     /// </summary>
     public static readonly string ProcedureDurationTrendSql =
-        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats");
+        DurationTrendRouting.BuildBucketedRawTrendSql("procedure_stats", withDatabaseFilter: false);
 
     /// <summary>
     /// The Query Store duration trend - the viewer's <c>QueryStoreDurationTrendSql</c>, verbatim apart from

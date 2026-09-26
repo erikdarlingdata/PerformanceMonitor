@@ -125,8 +125,10 @@ public sealed class TimescaleSupportTests
             + waitStatsPhase.ToString(CultureInfo.InvariantCulture) + " minutes')",
             TimescaleSupport.AddCompressionPolicySql(byName["wait_stats"]));
 
-        /* 1 day matches the 1-day chunk interval so chunks become compressible quickly, keeping the
-           managed store compact (#1458). */
+        /* 1 day, fixed on every table since #4211 (decision 1: A no longer tracks a narrowed raw table's
+           chunk_time_interval — RawChunkIntervalPlanner only ever moves I). Originally chosen to match the
+           1-day chunk interval so chunks become compressible quickly, keeping the managed store compact
+           (#1458). */
         Assert.Equal(1, TimescaleSupport.CompressAfterDays);
 
         /* #1778: schedule_interval is passed EXPLICITLY on every table. Omitting it does not mean "some
@@ -154,6 +156,22 @@ public sealed class TimescaleSupportTests
             + "initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '"
             + logPhase.ToString(CultureInfo.InvariantCulture) + " minutes')",
             TimescaleSupport.AddCompressionPolicySql(TimescaleSupport.CollectionLogTable));
+    }
+
+    /* ---------------- raw compress_after floor (#4211) ---------------- */
+
+    [Fact]
+    public void CompressAfterDays_IsAtLeastTheHourlyRefreshStartOffset()
+    {
+        /* #4211 ruling decision 1: a raw table's compress_after (A) stays fixed regardless of how far
+           RawChunkIntervalPlanner narrows that table's own chunk_time_interval (I). The reason is this
+           invariant — A below HourlyRefreshStartOffset would let a chunk compress before the hourly
+           continuous-aggregate refresh has finished reading it uncompressed, removing the gap the product's
+           lock safety relies on. Pinned as a span comparison, not a re-parse of the "1 day" strings, so it
+           breaks loudly if either side ever moves without the other. */
+        Assert.True(
+            TimeSpan.FromDays(TimescaleSupport.CompressAfterDays) >= TimescaleSupport.HourlyRefreshStartSpan,
+            $"CompressAfterDays ({TimescaleSupport.CompressAfterDays} days) must stay at least HourlyRefreshStartOffset ({TimescaleSupport.HourlyRefreshStartSpan}).");
     }
 
     /* ---------------- compression-job self-heal (#1581) — pure predicate ---------------- */

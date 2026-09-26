@@ -1278,19 +1278,20 @@ public sealed class DarlingWorker : BackgroundService
                 && StartupFailureTriage.IsRetryable(ex))
             {
                 _logger.LogWarning(
+                    ex,
                     "Cannot load configuration yet ({Message}) — attempt {Attempt} of {Total}, retrying in " +
                     "{Delay}s. A file another process is mid-write recovers on its own; a missing, malformed " +
                     "or unreadable one does not and is not retried.",
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Configuration, ex.Message, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Configuration, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex)
             {
-                _logger.LogCritical("Cannot load configuration: {Message}", ex.Message);
-                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration, ex.Message);
+                _logger.LogCritical(ex, "Cannot load configuration: {Message}", ex.Message);
+                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Configuration);
                 return;
             }
         }
@@ -1311,9 +1312,11 @@ public sealed class DarlingWorker : BackgroundService
 
             /* #2953: every problem, joined, rather than the first — Validate is all-fatal and reports the whole
                set, so a ping body carrying one of several would send an operator to fix a config that still
-               does not start. */
-            _collectorState.PublishStopped(
-                CollectorRuntimeState.StartupStep.Configuration, string.Join("; ", problems));
+               does not start. PublishConfigurationProblems takes the config, not this `problems` list — it
+               calls Validate itself, so there is no string/list parameter here for a future caller to hand
+               exception text instead (#4316 round 1 B1, round 2 L1-r2 a). `problems` above stays local, for
+               the per-problem critical log lines just above. */
+            _collectorState.PublishConfigurationProblems(config);
             return;
         }
 
@@ -1376,16 +1379,13 @@ public sealed class DarlingWorker : BackgroundService
                 _logger.LogCritical(
                     "postgres.managed = true requires Windows (the bundled runtime and the DPAPI-protected credential); " +
                     "set postgres.managed = false and point postgres.connectionString at your own PostgreSQL instead.");
-                _collectorState.PublishStopped(
-                    CollectorRuntimeState.StartupStep.ManagedStore,
-                    "postgres.managed = true requires Windows; set postgres.managed = false and point "
-                    + "postgres.connectionString at your own PostgreSQL instead.");
+                _collectorState.PublishManagedStoreNeedsWindows();
                 return;
             }
 
             managedPostgres = new DarlingManagedPostgres(config.Postgres, _logger);
             /* #2936: the sharpest of the three sites, because the judgment already existed and was being
-               thrown away. EnsureDatabaseAsync inside this bootstrap classifies transient connection
+               thrown away. OpenProbedMaintenanceConnectionAsync inside this bootstrap classifies transient connection
                faults and retries 6 times 2 s apart — and when that runs out it throws, and this catch
                discarded the fact that the failure had been RULED transient. Re-classifying here is what
                makes that verdict mean something.
@@ -1421,6 +1421,7 @@ public sealed class DarlingWorker : BackgroundService
                     && StartupFailureTriage.IsRetryable(ex))
                 {
                     _logger.LogWarning(
+                        ex,
                         "Managed Postgres bootstrap failed, retrying ({Message}) — attempt {Attempt} of " +
                         "{Total}, retrying in {Delay}s. A transiently locked file or a store still coming " +
                         "up recovers on its own; a broken package or a stale credential does not and is " +
@@ -1428,13 +1429,13 @@ public sealed class DarlingWorker : BackgroundService
                         ex.Message, attempt, StartupFailureTriage.Attempts,
                         (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                     _collectorState.PublishRetrying(
-                        CollectorRuntimeState.StartupStep.ManagedStore, ex.Message, attempt, StartupFailureTriage.Attempts);
+                        CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts);
                     await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogCritical("Managed Postgres bootstrap failed: {Message}", ex.Message);
-                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore, ex.Message);
+                    _logger.LogCritical(ex, "Managed Postgres bootstrap failed: {Message}", ex.Message);
+                    _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.ManagedStore);
                     return;
                 }
             }
@@ -1737,9 +1738,12 @@ public sealed class DarlingWorker : BackgroundService
            best-effort ALTER DATABASE ... SET search_path. Without this a FRESH bring-your-own
            store silently collects nothing until the service is restarted; see
            EnsureStoreSearchPath for the pool-timing root cause. Managed mode already sets it, so
-           this is a no-op there. */
-        storeConnectionString = EnsureStoreSearchPath(storeConnectionString);
-        await using var postgres = NpgsqlDataSource.Create(storeConnectionString);
+           this is a no-op there. The pin has to sit OUTSIDE EnsureStoreSearchPath (wrapping its
+           result rather than the two being one call), so the census below only has to look for the
+           pin on the Create line itself — no reassignment in between for a future edit to slip
+           an unpinned read behind. */
+        await using var postgres = NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(EnsureStoreSearchPath(storeConnectionString)));
         _postgres = postgres;
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
            a moment — restarting, failing over, still coming up alongside this service — and a sibling
@@ -1755,8 +1759,8 @@ public sealed class DarlingWorker : BackgroundService
            spend MigrationLockWaitTimeoutSeconds — so the wall-clock budget is what stops 25 attempts from
            becoming ten hours, and the attempt count is what the warning line reports.
            A FRESH connection per attempt, not a reuse of the old one — its connector is dead after a
-           transport failure, the same reason DarlingManagedPostgres.EnsureDatabaseAsync retries the whole
-           unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
+           transport failure, the same reason DarlingManagedPostgres.OpenProbedMaintenanceConnectionAsync retries
+           the connect and its first query as one unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
            each rung's DDL and its darling_schema_version stamp in ONE transaction: a rung that failed
            part-way left nothing applied and nothing stamped, and rungs at or below the stamp are skipped,
            so a retry resumes at the rung that failed instead of redoing the ladder. That rests on the
@@ -1793,6 +1797,7 @@ public sealed class DarlingWorker : BackgroundService
                    this BackgroundService, and StopHost then takes the process down - a retry path that
                    kills the service harder than the failure it was retrying. */
                 _logger.LogWarning(
+                    ex,
                     "Cannot reach or migrate the Postgres store yet ({Message}) — attempt {Attempt} of " +
                     "{Total}, retrying in {Delay}s. A store that is restarting, failing over or still " +
                     "coming up recovers on its own; after the last attempt this becomes a critical line " +
@@ -1800,19 +1805,26 @@ public sealed class DarlingWorker : BackgroundService
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Store, ex.Message, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogCritical("Cannot reach or migrate the Postgres store: {Message}", ex.Message);
+                _logger.LogCritical(ex, "Cannot reach or migrate the Postgres store: {Message}", ex.Message);
                 /* #2953: AFTER the critical line, deliberately. The log line is the diagnosis of record and
                    predates this seam; publishing first would put a new call between the failure and the one
                    message an operator greps for. */
-                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store, ex.Message);
+                _collectorState.PublishStopped(CollectorRuntimeState.StartupStep.Store);
                 return;
             }
         }
+
+        /* #4348 S1b: the one-time scrub of secrets an older collector build stored in plain text (a
+           standby's replication password inside primary_conninfo, most notably). Launched here, right
+           after migrations confirm collect.pg_server_config and collect.collector_state exist, and NOT
+           gated on TimescaleDB — the scrub works the same on plain PostgreSQL, it just has fewer chunks to
+           reason about. Drained with the other background startup work below. */
+        var settingScrub = RunPgSettingScrubAsync(postgres, stoppingToken);
 
         /* #4214 ruling 9: the once-per-start store host/settings profile log — host facts, pg_settings and
            the managed conf files only, never the store-size/chunk-total reads --check-settings and the MCP
@@ -2222,7 +2234,9 @@ public sealed class DarlingWorker : BackgroundService
         }
 
         await using var customAlertViewerSource =
-            customAlertViewerConnString is not null ? NpgsqlDataSource.Create(customAlertViewerConnString) : null;
+            customAlertViewerConnString is not null
+                ? NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(customAlertViewerConnString))
+                : null;
         if (customAlertViewerSource is not null)
         {
             _customAlertEvaluator = new CustomAlertEvaluator(
@@ -2340,7 +2354,7 @@ public sealed class DarlingWorker : BackgroundService
            connection factory — because phase 1 has no write path at all; the store it writes to is
            the monitoring store, never a monitored server. */
         _planForceBot = new PlanForceBot(
-            new PgPlanForceActionStore(postgres),
+            new PgPlanForceActionStore(postgres, _loggerFactory.CreateLogger<PgPlanForceActionStore>()),
             config.ForcePlanBot.ToSettings(),
             _loggerFactory.CreateLogger<PlanForceBot>());
 
@@ -3072,6 +3086,17 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
+        /* And the setting scrub (#4348 S1b): a run cut short by shutdown left its marker unwritten (the
+           marker is only written after every batch completes), so the next start tries again from the top. */
+        try
+        {
+            await settingScrub;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
 
@@ -3405,6 +3430,43 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogWarning(
                 "Materialization-hole repair could not run — any pre-outage tail the refresh policies skipped stays unmaterialized until the next start retries: {Message}",
+                ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="PgSettingScrub.RunAsync"/> once (#4348 S1b), concurrently with the rest of startup.
+    /// Its own connection and its own catch, the same isolation as <see cref="RunMaterializationHoleRepairAsync"/>:
+    /// a store this cannot reach degrades to whatever plaintext it already had, never to a service that did
+    /// not start. One INFORMATION line whatever the run found, so "nothing to do" (already scrubbed) is
+    /// visibly different from "never ran" in the log.
+    /// </summary>
+    private async Task RunPgSettingScrubAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await PgSettingScrub.RunAsync(postgres, _logger, stoppingToken);
+            if (summary.AlreadyDone)
+            {
+                _logger.LogInformation("Postgres setting scrub (#4348): already scrubbed at the current rules version — nothing to do.");
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Postgres setting scrub (#4348): {Candidates} candidate row(s) read, {Updated} row(s) redacted across {Days} day(s).",
+                    summary.CandidatesRead, summary.RowsUpdated, summary.DaysTouched);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation(
+                "Postgres setting scrub (#4348) was cancelled before it could report — at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Postgres setting scrub (#4348) could not run — any row an older collector build stored unredacted stays as it is until the next start retries: {Message}",
                 ex.Message);
         }
     }
@@ -4387,15 +4449,19 @@ public sealed class DarlingWorker : BackgroundService
         var builder = new NpgsqlConnectionStringBuilder(connectionString);
         if (string.IsNullOrWhiteSpace(builder.SearchPath))
         {
-            /* DarlingManagedPostgres is annotated [SupportedOSPlatform("windows")] for its DPAPI /
+            /* Append, don't rewrite through the builder: round-1 review on #4285's PR found the builder's
+               writer erases a caller keyword set to an explicit empty value (Password='', ...), because it
+               emits that as a bare Key=, which its own reader treats as "not set". Appending keeps every
+               other keyword byte for byte. The constant below holds no ';', '=' or quote character, so it
+               never needs quoting — a plain "Search Path=<value>" is unambiguous.
+               DarlingManagedPostgres is annotated [SupportedOSPlatform("windows")] for its DPAPI /
                bundled-cluster surface, but SearchPath is a platform-neutral compile-time constant
                with no runtime dependency, and BYO mode runs on any OS — so the CA1416 cross-platform
                reachability flag is spurious for this const reference. Suppressed narrowly rather than
                forking the constant, keeping managed and BYO byte-identical (a test pins them equal). */
 #pragma warning disable CA1416
-            builder.SearchPath = DarlingManagedPostgres.SearchPath;
+            return connectionString + ";Search Path=" + DarlingManagedPostgres.SearchPath;
 #pragma warning restore CA1416
-            return builder.ConnectionString;
         }
 
         return connectionString;
@@ -7770,6 +7836,75 @@ LIMIT 1";
            CAGG windows). Rides the daily purge; failure-isolated inside RefreshAsync. */
         await using var moduleMapConnection = await postgres.OpenConnectionAsync(stoppingToken);
         await DarlingModuleMap.RefreshAsync(moduleMapConnection, _logger, stoppingToken);
+
+        /* #4211: the raw hypertable chunk-interval reconcile. Rides the daily purge tick like every other
+           maintenance chore above — first pass after startup (TryStartScheduledPurge's own MinValue seed),
+           then every 24h. TimescaleDB-only (chunk_time_interval has no meaning on plain PostgreSQL) and
+           behind its own off switch; never throws — a bad reading on one run degrades to "no changes" on the
+           next, the same failure shape as the AN3 cleanup just above. */
+        if (_timescaleAvailable && config.RawChunkIntervalReconcileEnabled)
+        {
+            try
+            {
+                var budgetBytes = await ResolveRawChunkIntervalBudgetBytesAsync(postgres, config, stoppingToken);
+                if (budgetBytes is double resolvedBudget)
+                {
+                    await using var reconcileConnection = await postgres.OpenConnectionAsync(stoppingToken);
+                    await RawChunkIntervalReconciler.ReconcileAsync(
+                        reconcileConnection, resolvedBudget, DateTime.UtcNow, _logger, stoppingToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown drain. */
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "raw chunk interval reconcile failed");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Budget B for <see cref="RawChunkIntervalReconciler.ReconcileAsync"/> (#4211 ruling decision 2). A
+    /// managed store reads the SAME raw RAM figure <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>
+    /// sizes Postgres itself from — <see cref="DarlingStoreHostProfile.GatherHostFacts"/>'s
+    /// <c>Memory.TotalBytes</c>, which on Windows is already the reused
+    /// <see cref="DarlingManagedPostgres.TryReadWindowsPhysicalMemoryBytes"/> read (ruling 2's "reuse the
+    /// authoritative read", never a second <c>GlobalMemoryStatusEx</c>), quantized the same way — NOT
+    /// <see cref="DarlingManagedPostgres.MemorySettings.SharedBuffersMb"/>, which is capped at 1 GB for the
+    /// co-located / Windows 487 mitigation (#1559) and is a real setting, not a sizing ceiling (see
+    /// <see cref="RawChunkIntervalPlanner.ManagedBudgetBytes"/>'s remarks). A bring-your-own store instead reads
+    /// <c>shared_buffers</c>/<c>effective_cache_size</c> live off <c>pg_settings</c>, through
+    /// <c>pg_size_bytes(current_setting(...))</c> so the GUC's storage unit (blocks, kB, whatever) never has to
+    /// be parsed by hand. Returns null only when the BYO read fails (an unreachable store on this tick) —
+    /// the caller then skips the whole reconcile pass rather than plan against a made-up budget.
+    ///
+    /// <para>Internal, not private, so a live test can drive the bring-your-own <c>pg_settings</c> path against
+    /// a real connection without constructing the whole worker — the same reach
+    /// <see cref="DarlingManagedPostgres.TryReadWindowsPhysicalMemoryBytes"/> is internal for.</para>
+    /// </summary>
+    internal static async Task<double?> ResolveRawChunkIntervalBudgetBytesAsync(
+        NpgsqlDataSource postgres, DarlingConfig config, CancellationToken cancellationToken)
+    {
+        if (config.Postgres.Managed)
+        {
+            var hostFacts = DarlingStoreHostProfile.GatherHostFacts();
+            return RawChunkIntervalPlanner.ManagedBudgetBytes(DarlingManagedPostgres.QuantizeRam(hostFacts.Memory.TotalBytes));
+        }
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(
+            "SELECT pg_size_bytes(current_setting('shared_buffers')), pg_size_bytes(current_setting('effective_cache_size'))",
+            connection)
+        { CommandTimeout = 30 };
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (await reader.ReadAsync(cancellationToken))
+        {
+            return RawChunkIntervalPlanner.BringYourOwnBudgetBytes(reader.GetInt64(0), reader.GetInt64(1));
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -9255,11 +9390,19 @@ LIMIT 1";
     /// The sentence is built first, because it reads the verdict that the second step can drop. Nothing here
     /// allocates on the way to null for a fault that is not a <see cref="PostgresException"/>, because the general
     /// handler is also the OutOfMemoryException landing pad.
+    ///
+    /// <para>#4251 round-1 review, M1: also drops a stale pg_file_settings verdict through
+    /// <see cref="DarlingCollectorRunner.ForgetStaleFileSettingsVerdict"/> — a no-op here in practice, since a
+    /// pg_server_config 42501 classifies PERMISSIONS and is caught before reaching this general handler (see
+    /// the other call at the PERMISSIONS arm below), but called anyway so this stays the one place every
+    /// stale-verdict check for a fault this handler sees is reached from, the same way the read-binary-file
+    /// one already is.</para>
     /// </summary>
     internal static string? LogTailGeneralFault(Exception ex, string collectorName, ServerRuntime runtime)
     {
         var explanation = LogTailUndecodableByteExplanation(ex, collectorName, runtime);
         DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
+        DarlingCollectorRunner.ForgetStaleFileSettingsVerdict(collectorName, ex, runtime);
         return explanation;
     }
 
@@ -10178,6 +10321,13 @@ LIMIT 1";
             /* #4051 review L1: a 42501 while the binary route is in use means that grant is gone, so the
                cached verdict must not outlive it by up to an hour. */
             DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
+
+            /* #4251 round-1 review, M1: the real landing spot for a pg_server_config 42501 — PostgresFaultOutcome
+               classifies SqlState 42501 PERMISSIONS for every collector (PostgresTargetProvider.Classify), so
+               this fault never reaches the general catch below, and a call only in LogTailGeneralFault would
+               never fire for it. Dropping the stale verdict here is what lets the next cycle re-probe instead
+               of losing the whole pg_settings snapshot until the hour runs out. */
+            DarlingCollectorRunner.ForgetStaleFileSettingsVerdict(collectorName, ex, runtime);
 
             if (status == "YIELDED")
             {

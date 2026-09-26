@@ -37,6 +37,20 @@ namespace PerformanceMonitor.Collectors;
 /// has no equivalent column; PostgreSQL hands it over for free and nothing was reading it.</item>
 /// </list>
 ///
+/// <para><b><c>pg_settings.pending_restart</c> is backend-local, and that is #4251.</b> PostgreSQL flips it
+/// true only on the connection that was open when <c>pg_reload_conf()</c> ran; a NEW connection — including
+/// the collector's own on its next cycle — reads <c>false</c> for a setting that is genuinely still pending a
+/// restart, so this column alone silently loses the fact it exists to record. <c>pg_file_settings</c> names
+/// the same fact from the FILE rather than backend state: a row whose <c>error</c> is
+/// <c>'setting could not be applied'</c> for a setting whose <c>pg_settings.context</c> is
+/// <c>postmaster</c> is pending a restart regardless of which connection asks (the same error text also
+/// marks an outright rejected value at a non-<c>postmaster</c> context — PostgreSQL <c>guc.c</c> — which is
+/// why <c>context</c> is the discriminator, not the error text alone). Reading <c>pg_file_settings</c>
+/// needs a grant a least-privilege monitoring role usually lacks, so <see cref="PgFileSettingsCapability"/>
+/// decides — once an hour, never inline — whether <see cref="BuildQuery"/> sends the query below that folds
+/// it in or the query that does not; either way this stays the ONE place <c>pending_restart</c> is computed,
+/// and every reader is unchanged.</para>
+///
 /// <para><b>Everything is stored, nothing is filtered here.</b> A <c>client</c>-source row is evidence about
 /// the collector's own session and dropping it at collection time makes that unrecoverable; the READ decides
 /// what counts as server configuration. The rule that matters is the one the read enforces: a session-scoped
@@ -173,6 +187,89 @@ CROSS JOIN LATERAL (
         substr(cfg.kv, strpos(cfg.kv, '=') + 1)     AS setting
 ) AS o";
 
+    /* #4251: byte-for-byte QueryText, except the pg_settings arm's pending_restart column also looks at
+       pg_file_settings. Only that ONE line differs - duplicated rather than templated because the two are
+       sent as two distinct query texts chosen before either runs (PgFileSettingsCapability.IsReadableAsync,
+       resolved by the host BEFORE BuildQuery decides), the same shape PgServerLogTail's text/binary routes
+       use, and for the same reason: PostgreSQL checks a relation's permission before the plan runs, so a
+       CASE or subquery that only reaches pg_file_settings on some rows still throws for a role with no grant
+       on it, and this collector must never lose the whole pg_settings snapshot to that.
+
+       The EXISTS matches a pg_file_settings row for a postmaster-context setting (s.context = 'postmaster'):
+       either by name, case-insensitively since ParseConfigFp stores the name as written and a hand-edited
+       "Shared_Buffers = ..." would otherwise miss it, with error 'setting could not be applied'; or, for the
+       row PostgreSQL records with no name when a postmaster-context setting leaves every config file (ALTER
+       SYSTEM RESET, or a deleted line), by matching that row's exact error text, since pfs.name is empty on
+       it and there is nothing to correlate by name. Neither error string is translated -
+       pstrdup("setting could not be applied") and the psprintf building the second, guc-file.l:14 and :18 -
+       so lc_messages never changes either one.
+
+       s.context = 'postmaster' does NOT separate "pending" from "rejected": pg_file_settings has no column
+       for that, so 'setting could not be applied' is set both for a postmaster-context value truly pending a
+       restart and for one PostgreSQL rejected outright (bad syntax, out of range), which a restart would only
+       fail to start on. get_pg_server_config's reading guide for pending_restart says so. The override arm
+       (pg_db_role_setting) is untouched: an override has no file line and cannot be pending a restart, per its
+       own comment above. */
+    private const string QueryTextWithFileSettings = @"
+SELECT
+    s.name                                  AS name,
+    s.setting                               AS setting,
+    s.unit                                  AS unit,
+    s.category                              AS category,
+    s.context                               AS context,
+    s.vartype                               AS vartype,
+    s.source                                AS source,
+    s.boot_val                              AS boot_val,
+    s.reset_val                             AS reset_val,
+    s.sourcefile                            AS sourcefile,
+    coalesce(s.sourceline, 0)               AS sourceline,
+    (s.pending_restart
+        OR (s.context = 'postmaster'
+            AND EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_file_settings AS pfs
+                WHERE (lower(pfs.name) = lower(s.name)
+                       AND pfs.error = 'setting could not be applied')
+                OR    pfs.error = 'parameter ""' || s.name
+                                  || '"" cannot be changed without restarting the server'
+            )))                             AS pending_restart,
+    s.short_desc                            AS short_desc,
+    NULL::text                              AS database_name,
+    NULL::text                              AS role_name
+FROM pg_catalog.pg_settings AS s
+UNION ALL
+SELECT
+    o.name                                  AS name,
+    o.setting                               AS setting,
+    NULL::text                              AS unit,
+    NULL::text                              AS category,
+    NULL::text                              AS context,
+    NULL::text                              AS vartype,
+    CASE
+        WHEN drs.setdatabase <> 0 AND drs.setrole <> 0 THEN 'database+role'
+        WHEN drs.setrole <> 0                          THEN 'role'
+        ELSE                                                'database'
+    END                                     AS source,
+    NULL::text                              AS boot_val,
+    NULL::text                              AS reset_val,
+    NULL::text                              AS sourcefile,
+    0                                       AS sourceline,
+    false                                   AS pending_restart,
+    NULL::text                              AS short_desc,
+    d.datname                               AS database_name,
+    r.rolname                               AS role_name
+FROM pg_catalog.pg_db_role_setting AS drs
+LEFT JOIN pg_catalog.pg_database AS d
+  ON d.oid = drs.setdatabase
+LEFT JOIN pg_catalog.pg_roles AS r
+  ON r.oid = drs.setrole
+CROSS JOIN LATERAL unnest(drs.setconfig) AS cfg(kv)
+CROSS JOIN LATERAL (
+    SELECT
+        split_part(cfg.kv, '=', 1)                  AS name,
+        substr(cfg.kv, strpos(cfg.kv, '=') + 1)     AS setting
+) AS o";
+
     public override string Name => "pg_server_config";
 
     public override string TargetTable => "pg_server_config";
@@ -180,7 +277,15 @@ CROSS JOIN LATERAL (
     /// <summary>Core catalog only — every PostgreSQL target, Aurora or not.</summary>
     public override bool AppliesTo(CollectorTargetInfo target) => true;
 
-    public override CollectorQuery BuildQuery(CollectorContext context) => new(QueryText);
+    /// <summary>
+    /// #4251: <see cref="CollectorContext.PgFileSettingsReadable"/> — resolved by the host through
+    /// <see cref="PgFileSettingsCapability"/> BEFORE this runs — picks which of the two byte-identical (bar
+    /// one column) query texts is sent. False, the default every host that never resolves it leaves this at,
+    /// keeps today's query: a target whose monitoring role cannot read <c>pg_file_settings</c> collects
+    /// exactly what it always has.
+    /// </summary>
+    public override CollectorQuery BuildQuery(CollectorContext context) =>
+        new(context.PgFileSettingsReadable ? QueryTextWithFileSettings : QueryText);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -217,16 +322,24 @@ CROSS JOIN LATERAL (
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var name = reader.GetString(0);
+
+            /* #4348: pg_monitor includes pg_read_all_settings, so this connection sees GUC_SUPERUSER_ONLY
+               settings too — primary_conninfo on a standby carries a replication password in plain text.
+               Every value that can hold a secret is redacted here, before a Row is ever built, in BOTH
+               arms of the UNION ALL (they share this one read loop): setting, boot_val and reset_val. The
+               query text and every other column are untouched — this is the only place a stored row is
+               shaped, so it is the only place that needs to change. */
             rows.Add(new Row(
-                Name: reader.GetString(0),
-                Setting: reader.IsDBNull(1) ? null : reader.GetString(1),
+                Name: name,
+                Setting: PgSettingRedactor.Redact(name, reader.IsDBNull(1) ? null : reader.GetString(1)),
                 Unit: reader.IsDBNull(2) ? null : reader.GetString(2),
                 Category: reader.IsDBNull(3) ? null : reader.GetString(3),
                 Context: reader.IsDBNull(4) ? null : reader.GetString(4),
                 VarType: reader.IsDBNull(5) ? null : reader.GetString(5),
                 Source: reader.IsDBNull(6) ? null : reader.GetString(6),
-                BootValue: reader.IsDBNull(7) ? null : reader.GetString(7),
-                ResetValue: reader.IsDBNull(8) ? null : reader.GetString(8),
+                BootValue: PgSettingRedactor.Redact(name, reader.IsDBNull(7) ? null : reader.GetString(7)),
+                ResetValue: PgSettingRedactor.Redact(name, reader.IsDBNull(8) ? null : reader.GetString(8)),
                 SourceFile: reader.IsDBNull(9) ? null : reader.GetString(9),
                 SourceLine: reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
                 PendingRestart: !reader.IsDBNull(11) && reader.GetBoolean(11),

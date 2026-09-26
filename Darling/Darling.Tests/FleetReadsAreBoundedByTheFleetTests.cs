@@ -116,7 +116,11 @@ public sealed class FleetReadsAreBoundedByTheFleetTests
     [Fact]
     public void EventWindowFloor_IsOneChunkBeforeTheWindow_AsNaiveUtc()
     {
-        Assert.Equal(TimeSpan.FromDays(TimescaleSupport.ChunkIntervalDays), EventWindowFloor.SkewAllowance);
+        /* Pinned to a literal 1-day TimeSpan, not to TimescaleSupport.ChunkIntervalDays: since #4211 decision 1,
+           SkewAllowance is its own clock-skew tolerance, not the raw chunk width. RawChunkIntervalPlanner can
+           narrow a table's chunk_time_interval to 12h or 6h while a monitored clock still needs a full day of
+           slack, so the two must be free to move apart without this pin dragging along. */
+        Assert.Equal(TimeSpan.FromDays(1), EventWindowFloor.SkewAllowance);
 
         var start = new DateTime(2026, 9, 22, 21, 41, 47, DateTimeKind.Utc);
         var floor = EventWindowFloor.For(start);

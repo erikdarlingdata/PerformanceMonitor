@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
@@ -120,7 +121,26 @@ public sealed partial class ViewerDataService
     /// the AVG/scale arithmetic (matching Lite's DuckDB casts).
     /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top.
     /// </summary>
-    public const string QueryStoreTopSql = """
+    public const string QueryStoreTopSql = QueryStoreTopRawPrefix + QueryStoreTopSuffix;
+
+    /// <summary>
+    /// The table twin of <see cref="QueryStoreTopSql"/> (#3953): <see cref="QueryStoreTopTablePrefix"/> reading
+    /// <c>query_store_interval_wide</c> instead of the raw dedupe, sharing <see cref="QueryStoreTopSuffix"/> so
+    /// the two reads cannot drift below <c>ranked</c>. Chosen per call by
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; never used for <see cref="QueryStoreComparisonSql"/>.
+    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
+    /// UTC, NULL for an open/preset end), $4 top, $5 database filter.
+    /// </summary>
+    public const string QueryStoreTopTableSql = QueryStoreTopTablePrefix + QueryStoreTopSuffix;
+
+    /// <summary>
+    /// The raw read's head (#3953 split it off <see cref="QueryStoreTopSql"/>'s prior single-string form,
+    /// byte-identical — the split itself changes nothing about the text a raw call sends): the interval dedupe
+    /// over the server's raw Query Store slice. <see cref="QueryStoreTopSuffix"/> is shared with
+    /// <see cref="QueryStoreTopTableSql"/>, so the two reads cannot drift above <c>ranked</c>.
+    /// $1 server_id, $2 window start, $3 window end (naive UTC), $4 top, $5 database filter.
+    /// </summary>
+    private const string QueryStoreTopRawPrefix = """
         WITH deduped AS (
             /* LOAD-BEARING (correctness, not just perf) — #1841. query_store_stats rows are CUMULATIVE
                per-Query-Store-interval snapshots, and the collector re-fetches the OPEN interval every
@@ -163,6 +183,40 @@ public sealed partial class ViewerDataService
             AND   collection_time <= $3
             AND   ($5::text[] IS NULL OR database_name = ANY($5))
         ),
+
+        """;
+
+    /// <summary>
+    /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
+    /// interval, every outcome — the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written
+    /// (<see cref="QueryStoreIntervalWide.UpsertSql"/> keeps only the running maximum under
+    /// <c>(collection_time DESC, execution_count DESC)</c> per identity) — so this reads it directly and sets
+    /// <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's own clamp,
+    /// <c>max(window start, raw's chunk floor)</c> (review D4R H3): raw chunks drop whole, so bounding the table
+    /// read there returns exactly the raw read's own answer over the snapshots raw still holds, and reaches
+    /// further back only where raw has already dropped the chunk. $3 is nullable: NULL is an open end (a WPF
+    /// preset), which reads through whatever the table currently holds; a literal end (a custom range, MCP
+    /// <c>as_of</c>) bounds it exactly as raw's own $3 does.
+    /// </summary>
+    private const string QueryStoreTopTablePrefix = """
+        WITH deduped AS (
+            SELECT
+                *,
+                1 AS rn
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   ($3::timestamp IS NULL OR collection_time <= $3)
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        ),
+
+        """;
+
+    /// <summary>Everything from <c>ranked</c> down, shared by <see cref="QueryStoreTopSql"/> and
+    /// <see cref="QueryStoreTopTableSql"/> — both prefixes above produce the same "one row per identity, every
+    /// column deduped's dedupe/the table's own upsert already kept" shape, so this aggregates either one
+    /// identically. References only $1 and $4 (the prefixes alone bind $2/$3/$5), so both share it unchanged.</summary>
+    private const string QueryStoreTopSuffix = """
         ranked AS (
             SELECT
                 database_name,
@@ -322,12 +376,50 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// The top Query Store queries for one server over [<paramref name="startUtc"/>,
-    /// <paramref name="endUtc"/>], pre-sorted by total duration descending (the grid's default sort).
+    /// The store schema version <see cref="GetQueryStoreTopQueriesAsync"/> (the grid) requires before it will
+    /// even attempt <c>query_store_interval_wide</c> (#3953 B4): must equal the version of the
+    /// <c>PgMigrations</c> migration that creates the table. The slicer never routes to this table (ruling
+    /// issuecomment-5840737421): it reads <see cref="QueryStoreSlicerSql"/> at every window, so it carries no
+    /// constant of its own here. B3a's separate <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/>
+    /// constant for the MCP top read is pinned the same way but stays its own symbol: that surface compares the
+    /// compiled <see cref="PerformanceMonitor.Darling.Storage.StorageVersion.SchemaVersion"/> instead of probing
+    /// the store live, for the reason documented on that constant.
+    /// </summary>
+    private const int QueryStoreIntervalWideMinSchemaVersion = 145;
+
+    /// <summary>
+    /// The top Query Store queries for one server over [<paramref name="startUtc"/>, <paramref name="endUtc"/>],
+    /// pre-sorted by total duration descending (the grid's default sort). #3953: reads
+    /// <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/> says its
+    /// coverage holds the window; any fault or a "no" reads <see cref="QueryStoreTopSql"/> unchanged, exactly as
+    /// before this table existed. <paramref name="literalEndUtc"/> is the gate's clause-4 input: NULL for an open
+    /// end (a WPF preset — the caller means "through now", not through this exact instant), or
+    /// <paramref name="endUtc"/> itself for a custom range or an MCP <c>as_of</c>.
+    /// <paramref name="endUtc"/> alone still binds the raw read's own $3 and the gate's minimum-window clause.
     /// </summary>
     public async Task<List<ViewerQueryStoreRow>> GetQueryStoreTopQueriesAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null,
+        DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
+        /* Review D4R H1: the window check comes FIRST, before the schema probe (a 121-column
+           EXISTS catalog query) and before TryGetQueryStoreTopQueriesFromTableAsync (a second
+           connection, a transaction, and the gate's own round trips including the unindexed table
+           floor scan). A window under GridWideMinWindow can only ever read raw (clause 5), so it must
+           reach raw with ZERO extra store round trips versus before this table existed. */
+        if (endUtc - startUtc >= QueryStoreIntervalWide.GridWideMinWindow)
+        {
+            var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+            if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
+            {
+                var tableRows = await TryGetQueryStoreTopQueriesFromTableAsync(
+                    serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, cancellationToken);
+                if (tableRows is not null)
+                {
+                    return tableRows;
+                }
+            }
+        }
+
         var rows = new List<ViewerQueryStoreRow>();
 
         await using var command = _dataSource.CreateCommand(QueryStoreTopSql);
@@ -338,66 +430,144 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new ViewerQueryStoreRow
-            {
-                DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
-                PlanId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
-                QueryHash = reader.IsDBNull(3) ? "" : reader.GetString(3),
-                QueryText = reader.IsDBNull(4) ? "" : reader.GetString(4),
-                ModuleName = reader.IsDBNull(5) ? "" : reader.GetString(5),
-                TotalExecutions = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                AvgDurationMs = reader.IsDBNull(7) ? 0 : Convert.ToDouble(reader.GetValue(7)),
-                AvgCpuTimeMs = reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8)),
-                AvgLogicalReads = reader.IsDBNull(9) ? 0 : Convert.ToDouble(reader.GetValue(9)),
-                AvgLogicalWrites = reader.IsDBNull(10) ? 0 : Convert.ToDouble(reader.GetValue(10)),
-                AvgPhysicalReads = reader.IsDBNull(11) ? 0 : Convert.ToDouble(reader.GetValue(11)),
-                AvgRowcount = reader.IsDBNull(12) ? 0 : Convert.ToDouble(reader.GetValue(12)),
-                MinDop = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
-                MaxDop = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
-                LastExecutionTime = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
-                QueryPlanHash = reader.IsDBNull(16) ? "" : reader.GetString(16),
-                IsForcedPlan = !reader.IsDBNull(17) && reader.GetBoolean(17),
-                PlanForcingType = reader.IsDBNull(18) ? "" : reader.GetString(18),
-                ExecutionTypeDesc = reader.IsDBNull(19) ? "" : reader.GetString(19),
-                FirstExecutionTime = reader.IsDBNull(20) ? null : reader.GetDateTime(20),
-                AvgClrTimeMs = reader.IsDBNull(21) ? 0 : Convert.ToDouble(reader.GetValue(21)),
-                AvgTempdbSpaceUsed = reader.IsDBNull(22) ? 0 : Convert.ToDouble(reader.GetValue(22)),
-                AvgLogBytesUsed = reader.IsDBNull(23) ? 0 : Convert.ToDouble(reader.GetValue(23)),
-                PlanType = reader.IsDBNull(24) ? "" : reader.GetString(24),
-                ForceFailureCount = reader.IsDBNull(25) ? 0 : Convert.ToInt64(reader.GetValue(25)),
-                LastForceFailureReason = reader.IsDBNull(26) ? "" : reader.GetString(26),
-                CompatibilityLevel = reader.IsDBNull(27) ? 0 : Convert.ToInt32(reader.GetValue(27)),
-                MinDurationMs = reader.IsDBNull(28) ? 0 : Convert.ToDouble(reader.GetValue(28)),
-                MaxDurationMs = reader.IsDBNull(29) ? 0 : Convert.ToDouble(reader.GetValue(29)),
-                MinCpuTimeMs = reader.IsDBNull(30) ? 0 : Convert.ToDouble(reader.GetValue(30)),
-                MaxCpuTimeMs = reader.IsDBNull(31) ? 0 : Convert.ToDouble(reader.GetValue(31)),
-                MinLogicalReads = reader.IsDBNull(32) ? 0 : Convert.ToDouble(reader.GetValue(32)),
-                MaxLogicalReads = reader.IsDBNull(33) ? 0 : Convert.ToDouble(reader.GetValue(33)),
-                MinLogicalWrites = reader.IsDBNull(34) ? 0 : Convert.ToDouble(reader.GetValue(34)),
-                MaxLogicalWrites = reader.IsDBNull(35) ? 0 : Convert.ToDouble(reader.GetValue(35)),
-                MinPhysicalReads = reader.IsDBNull(36) ? 0 : Convert.ToDouble(reader.GetValue(36)),
-                MaxPhysicalReads = reader.IsDBNull(37) ? 0 : Convert.ToDouble(reader.GetValue(37)),
-                MinClrTimeMs = reader.IsDBNull(38) ? 0 : Convert.ToDouble(reader.GetValue(38)),
-                MaxClrTimeMs = reader.IsDBNull(39) ? 0 : Convert.ToDouble(reader.GetValue(39)),
-                MinRowcount = reader.IsDBNull(40) ? 0 : Convert.ToDouble(reader.GetValue(40)),
-                MaxRowcount = reader.IsDBNull(41) ? 0 : Convert.ToDouble(reader.GetValue(41)),
-                MinLogBytesUsed = reader.IsDBNull(42) ? 0 : Convert.ToDouble(reader.GetValue(42)),
-                MaxLogBytesUsed = reader.IsDBNull(43) ? 0 : Convert.ToDouble(reader.GetValue(43)),
-                MinTempdbSpaceUsed = reader.IsDBNull(44) ? 0 : Convert.ToDouble(reader.GetValue(44)),
-                MaxTempdbSpaceUsed = reader.IsDBNull(45) ? 0 : Convert.ToDouble(reader.GetValue(45)),
-                AvgMemoryMb = reader.IsDBNull(46) ? 0 : Convert.ToDouble(reader.GetValue(46)),
-                MinMemoryMb = reader.IsDBNull(47) ? 0 : Convert.ToDouble(reader.GetValue(47)),
-                MaxMemoryMb = reader.IsDBNull(48) ? 0 : Convert.ToDouble(reader.GetValue(48)),
-                AvgNumPhysicalIoReads = reader.IsDBNull(49) ? 0 : Convert.ToDouble(reader.GetValue(49)),
-                MinNumPhysicalIoReads = reader.IsDBNull(50) ? 0 : Convert.ToDouble(reader.GetValue(50)),
-                MaxNumPhysicalIoReads = reader.IsDBNull(51) ? 0 : Convert.ToDouble(reader.GetValue(51)),
-                ReplicaRole = reader.IsDBNull(52) ? null : reader.GetString(52),
-            });
+            rows.Add(ReadQueryStoreTopRow(reader));
         }
 
         return rows;
     }
+
+    /// <summary>
+    /// #3953's gate and table read, on ONE connection in ONE read-only REPEATABLE READ transaction (M1, ruling
+    /// issuecomment-5836972848), so <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s decision and the read
+    /// it authorizes see the same snapshot. Returns null (never an empty list) when the gate says raw, so the
+    /// caller can tell "read raw instead" from "the table legitimately has nothing" — an empty list from the
+    /// table IS a valid answer and must not fall back to raw. Any fault opening the connection, starting the
+    /// transaction, running the gate, or reading the table also returns null (except cancellation, which
+    /// propagates): the gate already does this for its own statements (<see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s
+    /// catch), and the table read must fail the same way rather than surface to the caller as an error.
+    /// </summary>
+    private async Task<List<ViewerQueryStoreRow>?> TryGetQueryStoreTopQueriesFromTableAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
+                connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
+            if (!useTable)
+            {
+                return null;
+            }
+
+            var rows = new List<ViewerQueryStoreRow>();
+            await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(clampedStart, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
+            });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = top });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add(ReadQueryStoreTopRow(reader));
+            }
+
+            return rows;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Review D4R M2: a permission failure here (a viewer role that can't SELECT the new table on an
+               upgraded store) must not fall back to raw forever with no trace anywhere. */
+            System.Diagnostics.Trace.TraceWarning($"#3953 grid table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Shared by <see cref="GetQueryStoreTopQueriesAsync"/>'s raw and table paths: both
+    /// <see cref="QueryStoreTopSql"/> and <see cref="QueryStoreTopTableSql"/> project the same
+    /// <see cref="QueryStoreTopSuffix"/> column list, in the same order.</summary>
+    private static ViewerQueryStoreRow ReadQueryStoreTopRow(System.Data.Common.DbDataReader reader) => new()
+    {
+        DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
+        QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
+        PlanId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+        QueryHash = reader.IsDBNull(3) ? "" : reader.GetString(3),
+        QueryText = reader.IsDBNull(4) ? "" : reader.GetString(4),
+        ModuleName = reader.IsDBNull(5) ? "" : reader.GetString(5),
+        TotalExecutions = reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+        AvgDurationMs = reader.IsDBNull(7) ? 0 : Convert.ToDouble(reader.GetValue(7)),
+        AvgCpuTimeMs = reader.IsDBNull(8) ? 0 : Convert.ToDouble(reader.GetValue(8)),
+        AvgLogicalReads = reader.IsDBNull(9) ? 0 : Convert.ToDouble(reader.GetValue(9)),
+        AvgLogicalWrites = reader.IsDBNull(10) ? 0 : Convert.ToDouble(reader.GetValue(10)),
+        AvgPhysicalReads = reader.IsDBNull(11) ? 0 : Convert.ToDouble(reader.GetValue(11)),
+        AvgRowcount = reader.IsDBNull(12) ? 0 : Convert.ToDouble(reader.GetValue(12)),
+        MinDop = reader.IsDBNull(13) ? 0 : Convert.ToInt64(reader.GetValue(13)),
+        MaxDop = reader.IsDBNull(14) ? 0 : Convert.ToInt64(reader.GetValue(14)),
+        LastExecutionTime = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+        QueryPlanHash = reader.IsDBNull(16) ? "" : reader.GetString(16),
+        IsForcedPlan = !reader.IsDBNull(17) && reader.GetBoolean(17),
+        PlanForcingType = reader.IsDBNull(18) ? "" : reader.GetString(18),
+        ExecutionTypeDesc = reader.IsDBNull(19) ? "" : reader.GetString(19),
+        FirstExecutionTime = reader.IsDBNull(20) ? null : reader.GetDateTime(20),
+        AvgClrTimeMs = reader.IsDBNull(21) ? 0 : Convert.ToDouble(reader.GetValue(21)),
+        AvgTempdbSpaceUsed = reader.IsDBNull(22) ? 0 : Convert.ToDouble(reader.GetValue(22)),
+        AvgLogBytesUsed = reader.IsDBNull(23) ? 0 : Convert.ToDouble(reader.GetValue(23)),
+        PlanType = reader.IsDBNull(24) ? "" : reader.GetString(24),
+        ForceFailureCount = reader.IsDBNull(25) ? 0 : Convert.ToInt64(reader.GetValue(25)),
+        LastForceFailureReason = reader.IsDBNull(26) ? "" : reader.GetString(26),
+        CompatibilityLevel = reader.IsDBNull(27) ? 0 : Convert.ToInt32(reader.GetValue(27)),
+        MinDurationMs = reader.IsDBNull(28) ? 0 : Convert.ToDouble(reader.GetValue(28)),
+        MaxDurationMs = reader.IsDBNull(29) ? 0 : Convert.ToDouble(reader.GetValue(29)),
+        MinCpuTimeMs = reader.IsDBNull(30) ? 0 : Convert.ToDouble(reader.GetValue(30)),
+        MaxCpuTimeMs = reader.IsDBNull(31) ? 0 : Convert.ToDouble(reader.GetValue(31)),
+        MinLogicalReads = reader.IsDBNull(32) ? 0 : Convert.ToDouble(reader.GetValue(32)),
+        MaxLogicalReads = reader.IsDBNull(33) ? 0 : Convert.ToDouble(reader.GetValue(33)),
+        MinLogicalWrites = reader.IsDBNull(34) ? 0 : Convert.ToDouble(reader.GetValue(34)),
+        MaxLogicalWrites = reader.IsDBNull(35) ? 0 : Convert.ToDouble(reader.GetValue(35)),
+        MinPhysicalReads = reader.IsDBNull(36) ? 0 : Convert.ToDouble(reader.GetValue(36)),
+        MaxPhysicalReads = reader.IsDBNull(37) ? 0 : Convert.ToDouble(reader.GetValue(37)),
+        MinClrTimeMs = reader.IsDBNull(38) ? 0 : Convert.ToDouble(reader.GetValue(38)),
+        MaxClrTimeMs = reader.IsDBNull(39) ? 0 : Convert.ToDouble(reader.GetValue(39)),
+        MinRowcount = reader.IsDBNull(40) ? 0 : Convert.ToDouble(reader.GetValue(40)),
+        MaxRowcount = reader.IsDBNull(41) ? 0 : Convert.ToDouble(reader.GetValue(41)),
+        MinLogBytesUsed = reader.IsDBNull(42) ? 0 : Convert.ToDouble(reader.GetValue(42)),
+        MaxLogBytesUsed = reader.IsDBNull(43) ? 0 : Convert.ToDouble(reader.GetValue(43)),
+        MinTempdbSpaceUsed = reader.IsDBNull(44) ? 0 : Convert.ToDouble(reader.GetValue(44)),
+        MaxTempdbSpaceUsed = reader.IsDBNull(45) ? 0 : Convert.ToDouble(reader.GetValue(45)),
+        AvgMemoryMb = reader.IsDBNull(46) ? 0 : Convert.ToDouble(reader.GetValue(46)),
+        MinMemoryMb = reader.IsDBNull(47) ? 0 : Convert.ToDouble(reader.GetValue(47)),
+        MaxMemoryMb = reader.IsDBNull(48) ? 0 : Convert.ToDouble(reader.GetValue(48)),
+        AvgNumPhysicalIoReads = reader.IsDBNull(49) ? 0 : Convert.ToDouble(reader.GetValue(49)),
+        MinNumPhysicalIoReads = reader.IsDBNull(50) ? 0 : Convert.ToDouble(reader.GetValue(50)),
+        MaxNumPhysicalIoReads = reader.IsDBNull(51) ? 0 : Convert.ToDouble(reader.GetValue(51)),
+        ReplicaRole = reader.IsDBNull(52) ? null : reader.GetString(52),
+    };
+
+    /// <summary>
+    /// #4231: the raw floor for <c>query_store_stats</c> over [<paramref name="startUtc"/>,
+    /// <paramref name="endUtc"/>] — the shared probe (<see cref="RawWindowFloor"/>), never a second, hand-copied
+    /// floor query. The Queries tab's <c>LoadQueryStoreAsync</c> reads this
+    /// beside <see cref="GetQueryStoreTopQueriesAsync"/> so the grid header can disclose a window the raw tier
+    /// no longer fully holds, the same fact <c>get_query_store_top</c> reports over MCP (#2364). The same
+    /// window backs <see cref="GetQueryStoreSlicerDataAsync"/>'s initial (unsliced) read, so one floor read
+    /// covers both rather than a second round trip for the identical [start, end].
+    /// </summary>
+    public Task<DateTime?> GetQueryStoreWindowFloorAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        RawWindowFloor.GetAsync(_dataSource, RawWindowFloor.Table.QueryStoreStats, serverId, startUtc, endUtc,
+            ViewerCommandDeadlines.CurrentInteractiveReadSeconds, cancellationToken);
 
     /// <summary>
     /// Query-Store comparison — Lite's <c>GetQueryStoreComparisonAsync</c> ported. Uses execution-count
@@ -590,6 +760,14 @@ public sealed partial class ViewerDataService
     /// Query Store rows are already per-interval averages, so the bucket totals weight each by
     /// <c>execution_count</c> (<c>SUM(avg_metric * execution_count)</c>). Same 7-column shape as the
     /// query/procedure slicers, so it shares <see cref="ReadQueryStatsSlicerAsync"/>.
+    ///
+    /// The slicer reads this raw statement at every window (ruling issuecomment-5840737421, amending
+    /// issuecomment-5836972848 item 3): a per-interval table route (#3953) was built and measured
+    /// alongside the grid and MCP top reads, but at 6 h, 12 h and 24 h raw beat the table with
+    /// non-overlapping spreads, and at 7 d the two tied — a 24 h threshold would have made every
+    /// 24 h-to-7 d slicer read slower, not faster. The grid and MCP top read do route to the table
+    /// (<see cref="GetQueryStoreTopQueriesAsync"/>, <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader"/>);
+    /// the slicer does not, and this is its only statement.
     /// $1 server_id, $2 window start, $3 window end (naive UTC).
     /// </summary>
     public const string QueryStoreSlicerSql = """
@@ -639,8 +817,9 @@ public sealed partial class ViewerDataService
 
                The FLOOR is free: an interval is always collected after it starts, so
                interval_start_time_utc <= collection_time, and therefore COALESCE(...) >= $2 already implies
-               collection_time >= $2. The extra day is slack against clock skew between the monitored
-               server's interval clock and ours.
+               collection_time >= $2. The extra hour (#3953: was a day) is slack against clock skew between
+               the monitored server's interval clock and ours — an hour covers it, and the wider margin was
+               only ever scanning extra chunks the floor already made redundant.
 
                The CEILING is deliberately enormous rather than tight, because tight is unsafe here. A row's
                collection_time exceeds its interval start by the interval's own length -- at most 1 day,
@@ -649,7 +828,7 @@ public sealed partial class ViewerDataService
                and 29 of collector-outage allowance. A month-long outage that then back-collects an interval
                straddling an old window's edge could still omit that one bar; the data stays in the store,
                and the alternative (no ceiling) makes every historical window scan to the present. */
-            AND   collection_time >= $2 - interval '1 day'
+            AND   collection_time >= $2 - interval '1 hour'
             AND   collection_time <= $3 + interval '30 days'
             AND   ($4::text[] IS NULL OR database_name = ANY($4))
         )
@@ -676,6 +855,7 @@ public sealed partial class ViewerDataService
 
     /// <summary>Hourly Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
+        CancellationToken cancellationToken = default)
         => await ReadQueryStatsSlicerAsync(QueryStoreSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
 }

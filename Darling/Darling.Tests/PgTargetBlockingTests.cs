@@ -653,7 +653,12 @@ public sealed class PgTargetBlockingTests
         {
             await PgTargetFactCollectorTests.RegisterServerAsync(connection, ServerId, ServerName, "postgres", 18, ct);
 
-            var windowEnd = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
+            /* #4274: anchored on the hour, not on the raw minute — see AnchorEndUtc's doc comment. The
+               chain's edges start at windowStart's minute + 1 (below), so windowStart's own minute is the
+               window's only zero-blocked reading; a raw TruncateToMinutes(UtcNow) anchor let that reading
+               land in a tile large enough to drag the worst tile's mean under the pinned 2.8 floor (observed
+               2.727 in CI) on some wall clocks. See the proof matrix in PR #4274's description. */
+            var windowEnd = AnchorEndUtc();
             var windowStart = windowEnd.AddHours(-4);
             var historyStart = windowStart.AddDays(-31);
 
@@ -789,7 +794,10 @@ public sealed class PgTargetBlockingTests
             Assert.Equal(3, anomaly.Metadata["peak_blocked_sessions"]);
             /* #3653 A8 option B: avg_blocked_sessions now comes from the WORST-SCORING TILE's own mean (one target-local
                hour of the 4h chain), not the whole window's mean across all four hours — so it can differ slightly from
-               the pre-tile whole-window figure (was pinned 2.9–3.0; the worst tile's hour reads 2.8333...). */
+               the pre-tile whole-window figure. #4274: with AnchorEndUtc's hour-pinned windowStart, the one tile that
+               would hold the window's sole zero-blocked minute (windowStart's own) is always sized 1 — below
+               MinTileSamples (3) — so it never scores, and every tile that does score reads a clean 3.0. The range
+               stays (not tightened to 3.0 exactly) because it is the pre-existing, deliberately loose assertion. */
             Assert.InRange(anomaly.Metadata["avg_blocked_sessions"], 2.8, 3.0);
             Assert.Equal(0, anomaly.Metadata["baseline_low_quality"]);
             Assert.Equal(0, anomaly.Metadata["threshold_lineage"]);
@@ -1183,6 +1191,30 @@ FROM generate_series(1, $5) AS s(g)", connection);
 
     private static DateTime TruncateToMinutes(DateTime value) =>
         DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerMinute)), DateTimeKind.Unspecified);
+
+    private static DateTime TruncateToHour(DateTime value) =>
+        DateTime.SpecifyKind(new DateTime(value.Ticks - (value.Ticks % TimeSpan.TicksPerHour)), DateTimeKind.Unspecified);
+
+    /// <summary>#4274's test-only clock seam: <c>DARLING_TEST_NOW_UTC</c> (ISO-8601, e.g.
+    /// <c>2026-09-25T00:15:00Z</c>) stands in for <c>DateTime.UtcNow</c> when set, so the wall-clock proof
+    /// matrix in PR #4274 can drive <see cref="AnchorEndUtc"/> at chosen instants without waiting for real
+    /// clock minutes to land there. Unset in every normal run (CI included) — falls through to the real clock.</summary>
+    private static DateTime SimulatedUtcNow()
+    {
+        var raw = Environment.GetEnvironmentVariable("DARLING_TEST_NOW_UTC");
+        return string.IsNullOrEmpty(raw)
+            ? DateTime.UtcNow
+            : DateTime.Parse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal);
+    }
+
+    /// <summary>#4274: the window's END, pinned to the hour instead of the raw minute. Truncating to the
+    /// CURRENT hour and stepping back one minute always lands on :59 of the PRIOR hour — deterministic
+    /// regardless of what minute <see cref="SimulatedUtcNow"/> (or the real clock) happens to read, unlike
+    /// the old <c>TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1)</c>, whose minute-of-hour varied with
+    /// wall-clock time and could land <c>windowStart</c>'s own tile (the one holding the window's sole
+    /// zero-blocked minute) at a size large enough to drag the worst tile's mean under the pinned floor, on
+    /// roughly a 1-in-60 draw.</summary>
+    private static DateTime AnchorEndUtc() => TruncateToHour(SimulatedUtcNow()).AddMinutes(-1);
 
     /* ───────────────────────── planting ───────────────────────── */
 

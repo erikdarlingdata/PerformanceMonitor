@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using Xunit;
@@ -73,8 +74,13 @@ public sealed class ViewerMemorySqlTests
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(granted_memory_mb) AS double precision)", sql, StringComparison.Ordinal);
+        /* per_collection still sums per collection_time before the outer bucket AVERAGES the gauge (#4349). */
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AVG(total_granted_mb) AS total_granted_mb", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS collection_count", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY 1", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -102,8 +108,24 @@ public sealed class ViewerMemorySqlTests
         Assert.Contains(inClause, sql, StringComparison.Ordinal);
         Assert.Contains(highestParam, sql, StringComparison.Ordinal);
         Assert.Contains("FROM v_memory_clerks", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(memory_mb AS double precision)", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY clerk_type, collection_time", sql, StringComparison.Ordinal);
+        /* #4234: a gauge — AVG per bucket, not the raw per-collection value. */
+        Assert.Contains("CAST(AVG(memory_mb) AS double precision)", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY clerk_type, 2", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4234 ruling item 6 (source check): the clerk trend carries a bucket width and projects the
+    /// singleton-detection columns, mirroring <c>WaitTrendsSql</c>. Proven once by hand against the pre-#4234
+    /// text: it had no <c>date_bin</c> anywhere (a per-collection read has no bucket width), so this assert
+    /// fails there.</summary>
+    [Fact]
+    public void MemoryClerkTrendsSql_CarriesABucketWidth_AndProjectsSingletonDetectionColumns()
+    {
+        /* 1 clerk type = $4, so the width is the trailing $5. */
+        var sql = ViewerDataService.MemoryClerkTrendsSql(1);
+        Assert.Contains("date_bin(CAST($5 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+        Assert.Contains(TrendBucketSql.OriginSql, sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS collection_count", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -112,21 +134,29 @@ public sealed class ViewerMemorySqlTests
         var sql = ViewerDataService.MemoryGrantChartDataSql;
 
         Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
+        /* per_collection still groups per collection_time + pool_id (#4349); the outer bucket then AVERAGES
+           the sizing/count gauges per pool over the date_bin grid. */
         Assert.Contains("GROUP BY collection_time, pool_id", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time, pool_id", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY pool_id, 2", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY pool_id, 2", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
 
         /* pool_id is the integer group key, selected raw (GetInt32). */
         Assert.Contains("pool_id", sql, StringComparison.Ordinal);
 
         /* The three sizing MB SUMs plus the workspace-memory ceiling (target / max target — item 2) all
-           CAST to double precision. */
+           CAST to double precision inside per_collection; the outer bucket AVERAGES them (a gauge). */
         foreach (var col in new[] { "available_memory_mb", "granted_memory_mb", "used_memory_mb", "target_memory_mb", "max_target_memory_mb" })
         {
             Assert.Contains($"CAST(SUM({col}) AS double precision)", sql, StringComparison.Ordinal);
+            Assert.Contains($"AVG({col})", sql, StringComparison.Ordinal);
         }
 
         /* The four activity count SUMs CAST to bigint (integer→bigint / bigint→numeric both land on
-           GetInt64). */
+           GetInt64). grantee_count/waiter_count are gauges: SUMMED per collection, then AVERAGED per
+           bucket (rounded back to bigint). timeout_error_count_delta/forced_grant_count_delta are TRUE
+           accumulating deltas: SUMMED per collection AND summed again across the bucket's collections
+           (#4364) — averaging an event count across collections silently drops real events. */
         foreach (var col in new[]
         {
             "grantee_count", "waiter_count", "timeout_error_count_delta", "forced_grant_count_delta",
@@ -134,6 +164,14 @@ public sealed class ViewerMemorySqlTests
         {
             Assert.Contains($"CAST(SUM({col}) AS bigint)", sql, StringComparison.Ordinal);
         }
+
+        /* #4364: the outer bucket must SUM the two rated deltas (CAST to bigint), never AVG them — a
+           bucket holding two collections with deltas 3 and 4 must report 7, not AVG(3,4)=3.5 rounded
+           to a confident-but-wrong 4. */
+        Assert.Contains("CAST(SUM(rated_timeout_error_count_delta) AS bigint)", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_forced_grant_count_delta) AS bigint)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AVG(rated_timeout_error_count_delta)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AVG(rated_forced_grant_count_delta)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -422,8 +460,157 @@ public sealed class ViewerMemoryLivePostgresTests
     private const int GrantChartServerId = -930004;
     private const string GrantChartServerName = "viewer-memory-grantchart-e2e";
 
+    private const int GrantChartMergedServerId = -930009;
+    private const string GrantChartMergedServerName = "viewer-memory-grantchart-merged-e2e";
+
     private const int PressureServerId = -930005;
     private const string PressureServerName = "viewer-memory-pressure-e2e";
+
+    private const int ClerkBudgetServerId = -930006;
+    private const int ClerkSingletonServerId = -930007;
+    private const int ClerkPickerServerId = -930008;
+
+    /// <summary>#4234 ruling items 2/6: a 7-day window at the real 1-minute memory_clerks cadence used to
+    /// return every collection — now capped to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES
+    /// (clerk type). Bulk-seeded server-side (generate_series) rather than one round trip per minute.</summary>
+    [Fact]
+    public async Task MemoryClerkTrend_SevenDayWindow_ReturnsAtMostBudgetTimesSeriesRows()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live memory-clerk budget-cap test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "memory_clerks", ClerkBudgetServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var end = new DateTime(2026, 3, 10, 0, 0, 0);
+            var start = end.AddDays(-7);
+            var clerkTypes = new List<string> { "MEMORYCLERK_SQLBUFFERPOOL", "MEMORYCLERK_SQLGENERAL" };
+            var baseId = CollectionIdGenerator.Next() * 1_000_000L;
+            foreach (var clerkType in clerkTypes)
+            {
+                await BulkSeedMemoryClerkAsync(connection, TestContext.Current.CancellationToken, baseId, start, end, clerkType);
+                baseId += 20_000;
+            }
+
+            var trends = await viewer.GetMemoryClerkTrendsByTypesAsync(ClerkBudgetServerId, clerkTypes, start, end);
+
+            var totalRows = trends.Values.Sum(list => list.Count);
+            var budget = TrendBudget.Chart.AutoPoints * clerkTypes.Count;
+            Assert.True(totalRows > 0 && totalRows <= budget, $"{totalRows} rows over a {clerkTypes.Count}-series budget of {budget}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_clerks", ClerkBudgetServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling item 3/6: when the budget covers every collection in the window, the clerk trend
+    /// returns the raw points unchanged, stamped at their own raw collection time — proven off the minute
+    /// grid (:37 seconds), which the pre-#4234 date_bin-always-floors code would have lost.</summary>
+    [Fact]
+    public async Task MemoryClerkTrend_BudgetCoversEveryCollection_ReturnsRawTimestampsAndAverageUnchanged()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live memory-clerk singleton-bucket test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "memory_clerks", ClerkSingletonServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var baseTime = TruncateToSeconds(DateTime.UtcNow.AddMinutes(-30));
+            var t1 = baseTime.AddSeconds(37 - baseTime.Second);
+            var t2 = t1.AddMinutes(5);
+            var t3 = t2.AddMinutes(5);
+
+            await InsertMemoryClerkAtServerAsync(connection, ClerkSingletonServerId, t1, "MEMORYCLERK_SQLBUFFERPOOL", 500.00m);
+            await InsertMemoryClerkAtServerAsync(connection, ClerkSingletonServerId, t2, "MEMORYCLERK_SQLBUFFERPOOL", 520.00m);
+            await InsertMemoryClerkAtServerAsync(connection, ClerkSingletonServerId, t3, "MEMORYCLERK_SQLBUFFERPOOL", 540.00m);
+
+            var trends = await viewer.GetMemoryClerkTrendsByTypesAsync(
+                ClerkSingletonServerId, new List<string> { "MEMORYCLERK_SQLBUFFERPOOL" }, t1.AddMinutes(-1), t3.AddMinutes(1));
+
+            var points = trends["MEMORYCLERK_SQLBUFFERPOOL"];
+            Assert.Equal(new[] { t1, t2, t3 }, points.Select(p => p.CollectionTime).ToArray());
+            Assert.Equal(new[] { 500.00, 520.00, 540.00 }, points.Select(p => p.MemoryMb).ToArray());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_clerks", ClerkSingletonServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4234 ruling items 4/6: the clerk picker (<c>GetDistinctMemoryClerkTypesAsync</c>) is cached
+    /// per (server, window length) for <see cref="ViewerNameListCache.Ttl"/> — a second call inside 15 minutes
+    /// returns the stale list without re-running the DISTINCT (proven by mutating the store between calls and
+    /// observing the new type is invisible until the cache is bypassed), and a window whose END has moved past
+    /// the TTL misses even though the wall clock hasn't.</summary>
+    [Fact]
+    public async Task MemoryClerkPicker_SecondCallWithinTtl_ReturnsStaleList_WindowEndPastTtl_Misses()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live memory-clerk picker cache test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "memory_clerks", ClerkPickerServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = new DateTime(2026, 3, 10, 12, 0, 0);
+            var start = now.AddHours(-1);
+
+            await InsertMemoryClerkAtServerAsync(connection, ClerkPickerServerId, now.AddMinutes(-30), "MEMORYCLERK_SQLBUFFERPOOL", 500.00m);
+
+            var first = await viewer.GetDistinctMemoryClerkTypesAsync(ClerkPickerServerId, start, now, now);
+            Assert.Equal(new[] { "MEMORYCLERK_SQLBUFFERPOOL" }, first);
+
+            /* A new clerk type lands in the store, but a call 14 minutes later, same window end, still
+               answers from the cache — proof no DISTINCT ran. */
+            await InsertMemoryClerkAtServerAsync(connection, ClerkPickerServerId, now.AddMinutes(-20), "MEMORYCLERK_XTP", 999.00m);
+            var stillCached = await viewer.GetDistinctMemoryClerkTypesAsync(ClerkPickerServerId, start, now, now.AddMinutes(14));
+            Assert.Equal(new[] { "MEMORYCLERK_SQLBUFFERPOOL" }, stillCached);
+
+            /* The window END moves forward past the TTL (a live auto-refresh), even though the wall clock
+               above hadn't reached 15 minutes yet on its own — this is a MISS, and the fresh DISTINCT sees
+               the new type. */
+            var movedEnd = now.AddMinutes(20);
+            var afterWindowMoved = await viewer.GetDistinctMemoryClerkTypesAsync(ClerkPickerServerId, start.AddMinutes(20), movedEnd, now.AddMinutes(14));
+            Assert.Equal(new[] { "MEMORYCLERK_XTP", "MEMORYCLERK_SQLBUFFERPOOL" }, afterWindowMoved);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_clerks", ClerkPickerServerId, cleanupCt));
+        }
+    }
 
     [Fact]
     public async Task LatestMemoryStats_ReturnsNewestSnapshot_MbAsDouble_StateStrings_AgainstDevPostgres()
@@ -656,6 +843,68 @@ public sealed class ViewerMemoryLivePostgresTests
         }
     }
 
+    /// <summary>#4364: two DISTINCT collections that the outer date_bin bucket merges together (a wide
+    /// enough window forces the auto-bucket width past the 10-minute gap between them). The sizing MB is a
+    /// GAUGE — the bucket AVERAGES the two collections' totals. The activity-count deltas are TRUE
+    /// accumulating counters — the bucket must SUM them, or two real timeout/forced-grant events silently
+    /// vanish into a rounded average. Before #4364 this bucket reported AVG(3,4)=3.5 -> CAST to bigint = 4;
+    /// after, it reports the true 7.</summary>
+    [Fact]
+    public async Task MemoryGrantChart_MergedBucket_SumsDeltas_AveragesGauges_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live grant-chart merged-bucket test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "memory_grant_stats", GrantChartMergedServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* #4364 fix: a 7-day window auto-buckets to a WIDE grid (tens of minutes), not the fixed
+               10-minute width the old comment assumed — two collections 6 days apart do NOT land in the
+               same bucket at that width. Put both collections inside the SAME minute instead (floored to
+               the minute so a 30s offset can never spill into the next one), so date_bin's grid merges
+               them regardless of the auto-chosen width for the (now short) window this call requests. */
+            var nowFloor = DateTime.UtcNow;
+            var t1 = new DateTime(nowFloor.Year, nowFloor.Month, nowFloor.Day, nowFloor.Hour, nowFloor.Minute, 0, DateTimeKind.Utc);
+            var t2 = t1.AddSeconds(30);
+
+            await InsertMemoryGrantAsync(connection, GrantChartMergedServerId, GrantChartMergedServerName, t1, poolId: 1,
+                availMb: 10.00m, grantedMb: 10.00m, usedMb: 10.00m, grantee: 1, waiter: 0, timeoutDelta: 3, forcedDelta: 3);
+            await InsertMemoryGrantAsync(connection, GrantChartMergedServerId, GrantChartMergedServerName, t2, poolId: 1,
+                availMb: 20.00m, grantedMb: 20.00m, usedMb: 20.00m, grantee: 1, waiter: 0, timeoutDelta: 4, forcedDelta: 4);
+
+            var rows = await viewer.GetMemoryGrantChartDataAsync(GrantChartMergedServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+
+            /* Both collections merge into ONE bucket for pool 1. */
+            var merged = Assert.Single(rows);
+            Assert.Equal(1, merged.PoolId);
+
+            /* Gauges: AVERAGED across the merged bucket's two collections. */
+            Assert.Equal(15.00, merged.GrantedMemoryMb, precision: 2);
+            Assert.Equal(15.00, merged.AvailableMemoryMb, precision: 2);
+            Assert.Equal(15.00, merged.UsedMemoryMb, precision: 2);
+
+            /* True deltas: SUMMED across the merged bucket's two collections — 3 + 4 = 7, never
+               AVG(3, 4) = 3.5 rounded to a confident-but-wrong 4. */
+            Assert.Equal(7L, merged.TimeoutErrorCountDelta);
+            Assert.Equal(7L, merged.ForcedGrantCountDelta);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_grant_stats", GrantChartMergedServerId, cleanupCt));
+        }
+    }
+
     [Fact]
     public async Task MemoryPressureEvents_WindowedOnSampleTime_AgainstDevPostgres()
     {
@@ -747,6 +996,46 @@ VALUES ($1, $2, $3, $4, $5, $6)", connection);
         command.Parameters.AddWithValue(clerkType);
         command.Parameters.AddWithValue(memoryMb);
         await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>#4234 test helper: <see cref="InsertMemoryClerkAsync"/> hardcodes <see cref="ClerkServerId"/>;
+    /// the budget/singleton/picker live tests each need their own server id so they cannot race each other's
+    /// row churn under the shared "live-postgres" collection.</summary>
+    private static async Task InsertMemoryClerkAtServerAsync(
+        NpgsqlConnection connection, int serverId, DateTime collectionTimeUtc, string clerkType, decimal memoryMb)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO memory_clerks
+    (collection_id, collection_time, server_id, server_name, clerk_type, memory_mb)
+VALUES ($1, $2, $3, $4, $5, $6)", connection);
+        command.Parameters.AddWithValue(1L);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(ClerkServerName);
+        command.Parameters.AddWithValue(clerkType);
+        command.Parameters.AddWithValue(memoryMb);
+        await command.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>One row per minute from <paramref name="start"/> to <paramref name="end"/> inclusive,
+    /// generated server-side (the real memory_clerks cadence) — the #4234 budget-cap live test's seed,
+    /// avoiding a round trip per minute over a 7-day window. Mirrors
+    /// <c>ViewerTrendBucketingReviewTests.BulkSeedWaitAsync</c>.</summary>
+    private static async Task BulkSeedMemoryClerkAsync(
+        NpgsqlConnection connection, System.Threading.CancellationToken ct, long baseId, DateTime start, DateTime end, string clerkType)
+    {
+        using var command = new NpgsqlCommand(@"
+INSERT INTO memory_clerks
+    (collection_id, collection_time, server_id, server_name, clerk_type, memory_mb)
+SELECT $1 + row_number() OVER (), g, $2, $3, $4, 500.00
+FROM generate_series($5::timestamp, $6::timestamp, interval '1 minute') AS g", connection);
+        command.Parameters.AddWithValue(baseId);
+        command.Parameters.AddWithValue(ClerkBudgetServerId);
+        command.Parameters.AddWithValue(ClerkServerName);
+        command.Parameters.AddWithValue(clerkType);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(start, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(end, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task InsertMemoryGrantAsync(

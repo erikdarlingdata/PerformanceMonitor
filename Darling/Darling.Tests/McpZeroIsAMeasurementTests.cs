@@ -240,27 +240,33 @@ public sealed class McpZeroIsAMeasurementTests
             Assert.DoesNotContain("WHERE interval_seconds > 0", sql, StringComparison.Ordinal);
         }
 
-        /* Lite's four differenced trends, read from source: every `AS interval_seconds` statement — the
+        /* Lite's differenced trends, read from source: every `AS interval_seconds` statement — the
            LAG-only Query Store shape (`))) AS interval_seconds`) and the three-state delta-family shape whose
            LAG is the pre-v61 fallback arm (`END AS interval_seconds`, #3540 / #3653 A11) — rates through a
-           no-ELSE CASE and none carries the fabricated 0. The bucketed reads behind the MCP tools (#3897) are
-           held to the same rule in their own file. */
+           no-ELSE CASE and none carries the fabricated 0. A per-collection read rates each row through it
+           (`... END AS x_per_second`). A bucketed read (the MCP tools' since #3897, the Performance Trends
+           charts' since #4234) nulls an unrated collection's work and seconds through it (`... END AS rated_x`)
+           and divides the bucket's sums, so a bucket with no rated collection is NULL, never 0. */
         foreach (var file in new[] { "LocalDataService.QueryStats.cs", "LocalDataService.QueryStore.cs", "LocalDataService.TrendBuckets.cs" })
         {
             var lite = ReadRepoFile("Lite", "Services", file);
             Assert.DoesNotMatch(FabricatedFirstPoint, lite);
             var lagged = Regex.Matches(lite, @"(\)\)\)|END) AS interval_seconds").Count;
-            var rated = Regex.Matches(lite, @"CASE WHEN interval_seconds > 0 THEN [^\n]*? END AS \w+_per_second").Count;
+            var rated = Regex.Matches(lite, @"CASE WHEN interval_seconds > 0 THEN [^\n]*? END AS (\w+_per_second|rated_\w+)").Count;
             Assert.True(lagged >= 1, $"{file}: the differenced-interval idiom is gone, so this pin is looking at nothing");
             Assert.True(rated >= lagged, $"{file}: {lagged} differenced statement(s) but only {rated} no-ELSE rate column(s)");
         }
 
         /* #3653 A11: Lite's three delta-family trends read the interval the store HAS — the three-state
            MAX(sample_interval_seconds) shape, 0 → NULL, LAG only for a pre-v61 collection — and only the
-           Query Store trend (no interval column on its source) keeps the LAG-only shape. */
+           Query Store trend (no interval column on its source) keeps the LAG-only shape. Since #4234 the query
+           and procedure duration trends share one statement (DurationTrendChartSql, which takes the view), so
+           the three trends are two statements in this file, and each divides its bucket's work by its rated
+           seconds, NULL for an unrated collection. */
         var liteQueryStats = ReadRepoFile("Lite", "Services", "LocalDataService.QueryStats.cs");
-        Assert.Equal(3, Regex.Matches(liteQueryStats, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL").Count);
-        Assert.Equal(3, Regex.Matches(liteQueryStats, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)").Count);
+        Assert.Equal(2, Regex.Matches(liteQueryStats, @"CASE WHEN MAX\(sample_interval_seconds\) IS NULL").Count);
+        Assert.Equal(2, Regex.Matches(liteQueryStats, @"ELSE NULLIF\(MAX\(sample_interval_seconds\), 0\)").Count);
+        Assert.Equal(2, Regex.Matches(liteQueryStats, @"CASE WHEN interval_seconds > 0 THEN interval_seconds END AS rated_seconds").Count);
         Assert.DoesNotMatch(new Regex(@"\)\)\) AS interval_seconds"), liteQueryStats);
         /* The wrong spelling, in its SQL shape (a COALESCE whose fallback is the LAG derivation): it would fall
            back to a fabricated interval on exactly the restart row the 0 marker flags. */

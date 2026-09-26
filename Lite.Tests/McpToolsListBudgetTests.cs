@@ -126,7 +126,18 @@ public sealed class McpToolsListBudgetTests
        combined total with analysis-findings (#4266) changes on top. */
     /* #4198 (collection-health, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266);
        combined total with collection-health (#4268) changes on top. */
-    private const int TotalCeilingBytes = 91_904;
+    /* #4198 (lane TJ, get_query_store_top): +125 bytes for the new full_text opt-in parameter (84 bytes of
+       description plus its JSON schema wrapper; Darling's twin grew by a different amount, +136, per its own
+       schema shape). The head is unchanged (the new sentence lives in the tail get_tool_guide serves).
+       Default query_text preview dropped 2,000 chars -> 400; not a served description, so it does not count
+       here. */
+    /* #4198 (qs-top, merge): re-measured after merging origin/dev (dev now includes #4261+#4258+#4265+#4267+#4264+#4266+#4268+#4272);
+       combined total with qs-top (#4273) changes on top. */
+    /* #4279 (Lite half of #4231): get_query_store_top's head drops the old Darling/Lite split for one shared
+       window-floor sentence (422 -> 351, banking 71 bytes); get_top_queries_by_cpu and get_top_procedures_by_cpu
+       each gain that same sentence (474 -> 600 and 406 -> 532, +126 bytes apiece), making all three heads
+       byte-identical to Darling's. Net +181, matching Darling's twin change exactly. */
+    private const int TotalCeilingBytes = 92_222;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;

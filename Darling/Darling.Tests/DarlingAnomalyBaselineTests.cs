@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -1064,6 +1065,204 @@ public sealed class DarlingAnomalyBaselineTests
                 await command.ExecuteNonQueryAsync(cleanupCt);
             });
         }
+    }
+
+    /// <summary>
+    /// #4248: IoLatency reads the RAW file_io_stats hypertable at per-file grain over the 30-day window, so its
+    /// cache key is the UTC DAY, not the hour (PgBaselineProvider.IsDailyCacheMetric) — two calls hours apart on
+    /// the same UTC day share the one compute, and a call on the next UTC day recomputes. Proven by counting the
+    /// baseline reads Npgsql actually executes (CommandCapture), #3941's own live-pin technique.
+    /// </summary>
+    [Fact]
+    public async Task EndToEnd_IoLatencyArm_TwoCallsHoursApartOnOneDay_ShareOneCompute_NextDayRecomputes_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live IO-arm day-cache test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        const int ioServerId = TestServerId + 5; // own id — this test cleans its own rows
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using (var cleanup = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", connection))
+        {
+            await cleanup.ExecuteNonQueryAsync(ct);
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(connectionString!);
+        var bodySucceeded = false;
+        try
+        {
+            var day = DateTime.UtcNow.Date.AddDays(-8);
+            while (day.DayOfWeek != DayOfWeek.Monday) day = day.AddDays(-1);
+            var historyStart = DateTime.SpecifyKind(day.AddHours(10), DateTimeKind.Unspecified);
+
+            for (var i = 0; i < 5; i++)
+            {
+                await InsertAsync(connection,
+                    "INSERT INTO file_io_stats (collection_id, collection_time, server_id, server_name, delta_reads, delta_writes, delta_stall_read_ms) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    (long)(200 + i), historyStart.AddMinutes(5 * i), ioServerId, "IO-DAILY-CACHE",
+                    10L, 0L, (long)(10 * (i + 1)));
+            }
+
+            var provider = new PgBaselineProvider(postgres);
+            var analysisDay = historyStart.AddDays(7).Date; // the 30-day window's end (#4248: midnight, not the hour)
+
+            var (morning, firstReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddHours(1), ct));
+            Assert.Equal(1, firstReads);
+            Assert.True(morning.SampleCount > 0, "the seed produced no baseline — the comparison would prove nothing");
+
+            /* Nineteen hours later (over CacheTtl's one hour), same UTC day: the #4248 pin — no second read. */
+            var (afternoon, secondReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddHours(20), ct));
+            Assert.Equal(0, secondReads);
+            Assert.Equal(morning.SampleCount, afternoon.SampleCount);
+            Assert.Equal(morning.Median, afternoon.Median);
+
+            /* The next UTC day is a different window end (midnight moved), so a fresh compute. */
+            var (_, nextDayReads) = await CommandCapture.CountBaselineReadsAsync(
+                () => provider.GetBaselineAsync(ioServerId, MetricNames.IoLatency, analysisDay.AddDays(1).AddHours(1), ct));
+            Assert.Equal(1, nextDayReads);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                using var command = new NpgsqlCommand($"DELETE FROM file_io_stats WHERE server_id = {ioServerId};", cleanup);
+                await command.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /* ────────────────── #4298: every PgTargetBaselineProvider arm is a daily-cache arm ────────────────── */
+
+    /// <summary>
+    /// #4298: lane B2a's measurement (issuecomment-5836035579) found all 15 <c>PgTargetBaselineProvider</c> arms
+    /// (13 unkeyed, 2 keyed) reading plain hypertables at full grain over the 30-day window, up to 2.45 s and
+    /// 262 MB of temp per hourly compute (<c>pg_statement_mean_ms</c> keyed, worst) — so EVERY one, not just Cpu and
+    /// IoLatency's SQL Server twins, gets the day key. <see cref="PgBaselineProvider.RoundedKeyTime"/> is the ONE
+    /// seam both the cache key and the compute's window end read (the #3941/#4248 invariant), so proving it returns
+    /// the UTC day for an arbitrary PostgreSQL-target metric — keyed or not — proves both halves at once. Reverting
+    /// <c>PgTargetBaselineProvider.IsDailyCacheArm</c> to the inherited <c>=&gt; IsDailyCacheMetric(metricName)</c>
+    /// body fails this exactly as the old code did: <c>pg_tps</c> is neither Cpu nor IoLatency, so the old key was
+    /// hourly (proven once by hand, reverting the override, before this test was added).
+    /// </summary>
+    [Fact]
+    public void PgTargetArm_KeyIsTheUtcDay_TwoAnalysisTimesInOneDayRoundToOneEntry()
+    {
+        var provider = new PgTargetBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
+
+        var midnight = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
+        var morning = new DateTime(2026, 3, 10, 1, 0, 0, DateTimeKind.Unspecified);
+        var night = new DateTime(2026, 3, 10, 23, 59, 0, DateTimeKind.Unspecified);
+        var nextDay = new DateTime(2026, 3, 11, 0, 0, 1, DateTimeKind.Unspecified);
+
+        foreach (var metric in new[] { MetricNames.PgTps, MetricNames.PgCpu, MetricNames.PgStatementMeanMs, MetricNames.PgStatementShare })
+        {
+            Assert.Equal(midnight, provider.RoundedKeyTime(metric, morning));
+            Assert.Equal(midnight, provider.RoundedKeyTime(metric, night));
+            Assert.NotEqual(provider.RoundedKeyTime(metric, morning), provider.RoundedKeyTime(metric, nextDay));
+        }
+    }
+
+    /// <summary>
+    /// #4298: <c>pg_statement_mean_ms</c> is one of the two KEYED arms. <see cref="BaselineCache.Put"/> is what
+    /// <c>GetOrComputeKeyedBaselinesAsync</c> calls on every SUCCESSFUL member compute, keyed on (kind, serverId,
+    /// cacheKey, <c>entry.ComputedAt</c>) — so two computes inside one UTC day collide on the SAME key (one entry,
+    /// overwritten) and a compute the next UTC day is a second, distinct key. Proven directly against the shared
+    /// tier's own <c>Put</c>/<c>EntryKey</c> rather than a live compute, since the plumbing that calls <c>Put</c> is
+    /// untouched by #4298 — only which time <see cref="PgBaselineProvider.RoundedKeyTime"/> hands it changed.
+    /// </summary>
+    [Fact]
+    public void PgTargetKeyedArm_WalkedAcrossAUtcDayBoundary_HoldsAtMostTwoEntriesPerMember()
+    {
+        var shared = new BaselineCache();
+        var kind = typeof(PgTargetBaselineProvider).FullName!;
+        const int serverId = 9101;
+        var member1 = PgBaselineProvider.CacheKeyFor(serverId, MetricNames.PgStatementMeanMs, "9001");
+        var member2 = PgBaselineProvider.CacheKeyFor(serverId, MetricNames.PgStatementMeanMs, "9002");
+
+        var provider = new PgTargetBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
+        var day1 = provider.RoundedKeyTime(MetricNames.PgStatementMeanMs, new DateTime(2026, 3, 10, 2, 0, 0, DateTimeKind.Unspecified));
+        var day1Later = provider.RoundedKeyTime(MetricNames.PgStatementMeanMs, new DateTime(2026, 3, 10, 22, 0, 0, DateTimeKind.Unspecified));
+        var day2 = provider.RoundedKeyTime(MetricNames.PgStatementMeanMs, new DateTime(2026, 3, 11, 2, 0, 0, DateTimeKind.Unspecified));
+        Assert.Equal(day1, day1Later); // same UTC day, same key — the point of the fix
+        Assert.NotEqual(day1, day2);
+
+        foreach (var member in new[] { member1, member2 })
+        {
+            shared.Put(kind, serverId, member, MakeSuccess(day1, DateTime.UtcNow));
+            shared.Put(kind, serverId, member, MakeSuccess(day1Later, DateTime.UtcNow)); // same key: overwrites, not a second entry
+            shared.Put(kind, serverId, member, MakeSuccess(day2, DateTime.UtcNow));      // next UTC day: a second, distinct entry
+        }
+
+        Assert.Equal(4, shared.Count); // 2 members * at most 2 entries (today's and yesterday's, before the sweep drops the old one)
+    }
+
+    private static PgBaselineProvider.CachedBaseline MakeSuccess(DateTime computedAt, DateTime realTime) => new()
+    {
+        ComputedAt = computedAt,
+        RealTime = realTime,
+        Buckets = new Dictionary<(int HourOfDay, int DayOfWeek), BaselineBucket>(),
+        FreshUntilUtc = realTime.AddDays(1)
+    };
+
+    /// <summary>
+    /// #4291's rule, unchanged by #4298: <c>FreshUntilUtc</c> is set ONLY on a SUCCESSFUL compute (<c>buckets is not
+    /// null</c>), so a FAILED compute of a PostgreSQL-target arm — now every one of them a daily-cache arm — still
+    /// falls back to the ordinary <see cref="PgBaselineProvider.CacheTtl"/> (one hour) rather than inheriting the
+    /// day-long lifetime a SUCCESS gets. Both call sites read <c>buckets is not null &amp;&amp;
+    /// IsDailyCacheArm(metricName)</c>, never <c>IsDailyCacheArm(metricName)</c> alone — the source pin below is
+    /// what would catch a future edit that drops the guard.
+    /// </summary>
+    [Fact]
+    public void FailedCompute_OfADailyCacheArm_StillRetriesWithinTheHour_NotTheDay()
+    {
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs"));
+        Assert.Equal(2, Regex.Matches(code, Regex.Escape("is not null && IsDailyCacheArm(metricName)")).Count);
+
+        var computedAtDay = new DateTime(2026, 3, 10, 0, 0, 0, DateTimeKind.Unspecified);
+        var failedAt = new DateTime(2026, 3, 10, 3, 0, 0, DateTimeKind.Unspecified);
+        var failed = new PgBaselineProvider.CachedBaseline
+        {
+            ComputedAt = computedAtDay,
+            RealTime = failedAt,
+            Buckets = null,
+            FreshUntilUtc = null // what a failed compute of ANY arm gets, daily-cache or not
+        };
+
+        Assert.True(PgBaselineProvider.IsFresh(failed, failedAt.AddMinutes(59)));         // within CacheTtl: no retry yet
+        Assert.False(PgBaselineProvider.IsFresh(failed, failedAt.AddHours(1).AddMinutes(1))); // past CacheTtl: retries, though the UTC day has not turned over
+    }
+
+    /// <summary>
+    /// #4298 touches ONLY <see cref="PgTargetBaselineProvider"/>'s answer: the base class's own two daily-cache arms
+    /// (Cpu, IoLatency, #4248) and every other SQL Server arm's hourly key are exactly what they were —
+    /// <see cref="PgBaselineProvider.IsDailyCacheArm"/>'s base body is still <see cref="PgBaselineProvider.IsDailyCacheMetric"/>,
+    /// untouched.
+    /// </summary>
+    [Fact]
+    public void SqlServerArms_KeepTheirPre4298Keys_CpuAndIoLatencyDaily_EverythingElseHourly()
+    {
+        var provider = new PgBaselineProvider(NpgsqlDataSource.Create("Host=localhost;Database=never-opened"));
+        var t1 = new DateTime(2026, 3, 10, 1, 0, 0, DateTimeKind.Unspecified);
+        var t2 = new DateTime(2026, 3, 10, 23, 0, 0, DateTimeKind.Unspecified);
+
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.Cpu));
+        Assert.True(PgBaselineProvider.IsDailyCacheMetric(MetricNames.IoLatency));
+        Assert.False(PgBaselineProvider.IsDailyCacheMetric(MetricNames.BatchRequests));
+
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.Cpu, t1));
+        Assert.Equal(PgBaselineProvider.RoundedDay(t1), provider.RoundedKeyTime(MetricNames.IoLatency, t1));
+        Assert.Equal(PgBaselineProvider.RoundedHour(t1), provider.RoundedKeyTime(MetricNames.BatchRequests, t1));
+        Assert.NotEqual(provider.RoundedKeyTime(MetricNames.BatchRequests, t1), provider.RoundedKeyTime(MetricNames.BatchRequests, t2));
     }
 
     /// <summary>

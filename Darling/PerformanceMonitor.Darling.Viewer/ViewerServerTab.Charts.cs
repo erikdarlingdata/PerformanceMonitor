@@ -99,7 +99,7 @@ public partial class ViewerServerTab : IDisposable
     private async Task LoadCpuAsync()
     {
         var (startUtc, endUtc) = GetWindowUtc();
-        var samples = await _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc);
+        var samples = await _dataService.GetCpuUtilizationAsync(_server.ServerId, startUtc, endUtc);
         /* The read is start-only server-side; bound the end for a custom range so a window that ends in
            the past doesn't trail to the newest sample. sample_time is de-skewed to naive UTC (matching endUtc). */
         if (IsCustomRange)
@@ -120,18 +120,13 @@ public partial class ViewerServerTab : IDisposable
 
         /* Both reads run concurrently — NpgsqlDataSource pools a connection for each. */
         using var readFanOut = ViewerReadFanOut.Of(2);
-        var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc);
-        var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc);
+        var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc, endUtc);
+        var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc, endUtc);
         var trend = await trendTask;
         var fileIo = await fileIoTask;
 
-        /* Start-only reads; bound the end for a custom range (collection_time is naive UTC). */
-        if (IsCustomRange)
-        {
-            trend = trend.Where(t => t.CollectionTime <= endUtc).ToList();
-            fileIo = fileIo.Where(f => f.CollectionTime <= endUtc).ToList();
-        }
-
+        /* Both reads are bucketed (#4234/#4349) and already windowed server-side on endUtc; no client-side
+           post-filter is needed for a custom range. */
         RenderTempDbUsageChart(trend, startUtc, endUtc);
         RenderTempDbSizeChart(trend, startUtc, endUtc);
         RenderTempDbFileIoChart(fileIo, startUtc, endUtc);

@@ -31,7 +31,10 @@ namespace Darling.Tests;
 /// <para><b>The exemption is real and must stay available.</b> A class that mints its own database (through
 /// <c>ScratchPostgres</c>) or stands up its own cluster does not race the shared store, and serializing it would
 /// cost suite time for no safety at all. So this does not demand the attribute — it demands a DECISION, recorded
-/// either as the attribute or as an <c>#1776 own-store</c> comment explaining the exemption.</para>
+/// either as the attribute or as an <c>#1776 own-store</c> comment explaining the exemption. That isolation is
+/// scoped to the rows and relations the own-store class itself created: it does not extend to cluster-wide state
+/// such as WAL position, which every session on the same server — own-store scratch databases included — moves
+/// (#4354). A test that needs "nothing else touched" must assert against its own rows, not the WAL LSN.</para>
 ///
 /// <para><b>Why the match is the quoted literal and not a substring.</b> <c>DARLING_TEST_PGRUNTIME</c> and
 /// <c>DARLING_TEST_PGRUNTIME_OLD</c> are DIFFERENT variables that merely share the prefix, naming an assembled

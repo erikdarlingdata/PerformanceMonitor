@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -59,39 +60,88 @@ public partial class LocalDataService
         var startUtc = startTime.AddMinutes(-offset);
         var endUtc = endTime.AddMinutes(-offset);
 
-        /* v63 (#3653 item 13): prefer the stored UTC instant for the window; a pre-rung row (NULL twin) falls
-           back to sample_time - offset, which against UTC bounds is exactly the old sample_time-against-local
-           bounds. The PROJECTION stays sample_time: the chart plots the server's own frame. */
-        command.CommandText = @"
-SELECT
-    sample_time,
-    sqlserver_cpu_utilization,
-    other_process_cpu_utilization
-FROM v_cpu_utilization_stats
-WHERE server_id = $1
-AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) >= $2
-AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) <= $3
-ORDER BY sample_time";
+        /* #4234: bucketed to TrendBudget.Chart's point budget so the Overview lane and this same read's CPU
+           tab chart stop shipping one point per collection over a multi-day window. seriesCount is always 1 —
+           SqlServerCpu/OtherProcessCpu ride the SAME row/bucket, not separate series. */
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = CpuUtilizationTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startUtc });
         command.Parameters.Add(new DuckDBParameter { Value = endUtc });
         command.Parameters.Add(new DuckDBParameter { Value = (long)offset });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+        command.Parameters.Add(new DuckDBParameter { Value = startTime });
 
-        var items = new List<CpuUtilizationRow>();
+        var rows = new List<(DateTime BucketStart, int SqlCpu, int OtherCpu, DateTime FirstSampleTime, long SampleCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            var sampleCount = reader.GetInt64(4);
+            if (sampleCount != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetDateTime(0),
+                reader.GetInt32(1),
+                reader.GetInt32(2),
+                reader.GetDateTime(3),
+                sampleCount));
+        }
+
+        /* Every bucket in this call held exactly one physical sample: stamp each point at that sample's OWN
+           clock instead of the bucket grid line, so a window narrow enough to never merge two collections
+           renders byte-identical to the pre-#4234 per-collection read. */
+        var items = new List<CpuUtilizationRow>(rows.Count);
+        foreach (var row in rows)
+        {
             items.Add(new CpuUtilizationRow
             {
-                SampleTime = reader.GetDateTime(0),
-                SqlServerCpu = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                OtherProcessCpu = reader.IsDBNull(2) ? 0 : reader.GetInt32(2)
+                SampleTime = everyBucketSingleton ? row.FirstSampleTime : row.BucketStart,
+                SqlServerCpu = row.SqlCpu,
+                OtherProcessCpu = row.OtherCpu
             });
         }
 
         return items;
     }
+
+    /// <summary>
+    /// The bucketed CPU trend statement text (#4234), pulled out of <see cref="GetCpuUtilizationAsync"/> so its
+    /// shape is checkable without a live DuckDB. $1 server_id, $2/$3 the UTC window, $4 the offset minutes (the
+    /// pre-v63 <c>sample_time_utc</c> fallback), $5 the bucket width in minutes, $6 the server-local window
+    /// start, which clamps <c>time_bucket</c>'s grid line so the first bucket never renders earlier than the
+    /// window the caller asked for. A NULL reading counts as 0 in the average, exactly as the per-collection
+    /// read always counted it in C#; <see cref="TrendBuckets.OriginSql"/> is the same origin every bucketed
+    /// trend in this app aligns to, so a width that does not divide a day still bins consistently.
+    /// </summary>
+    internal static string CpuUtilizationTrendSql => $@"
+WITH raw AS
+(
+    SELECT
+        sample_time,
+        sqlserver_cpu_utilization,
+        other_process_cpu_utilization
+    FROM v_cpu_utilization_stats
+    WHERE server_id = $1
+    AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) >= $2
+    AND   COALESCE(sample_time_utc, sample_time - to_minutes($4)) <= $3
+)
+SELECT
+    GREATEST(time_bucket(to_minutes(CAST($5 AS INTEGER)), sample_time, {TrendBuckets.OriginSql}), $6) AS bucket_start,
+    CAST(ROUND(AVG(COALESCE(sqlserver_cpu_utilization, 0))) AS INTEGER) AS sql_server_cpu,
+    CAST(ROUND(AVG(COALESCE(other_process_cpu_utilization, 0))) AS INTEGER) AS other_process_cpu,
+    MIN(sample_time) AS first_sample_time,
+    COUNT(*) AS sample_count
+FROM raw
+GROUP BY 1
+ORDER BY 1";
 
     /// <summary>
     /// The attributed-CPU denominator's pieces (#2320): sample count, coverage bounds, and average SQL
