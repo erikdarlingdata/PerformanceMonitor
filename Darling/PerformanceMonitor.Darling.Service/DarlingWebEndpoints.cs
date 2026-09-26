@@ -451,6 +451,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
         DarlingTriageEndpoint.Map(app, postgres, analysis, logger);
+
+        /* The alert-notebook binding endpoint (#4222 slice C): the mechanical conversion of a firing into a
+           read-only notebook definition. Same reach as the triage page it sits beside - everything it
+           serves is already reachable through /api/read/*. */
+        AlertNotebookEndpoint.Map(app, postgres, analysis, logger);
     }
 
     /* ─────────────────────────── #1563 custom views: session, catalog, CRUD ─────────────────────────── */
