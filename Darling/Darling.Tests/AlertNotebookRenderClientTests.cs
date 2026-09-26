@@ -126,7 +126,16 @@ public sealed class AlertNotebookRenderClientTests
 
         // The detail_text line must go through el()'s { text: ... } prop (textContent), never innerHTML.
         Assert.Contains("el(\"pre\", { class: \"code\", text: a.detail_text })", views, StringComparison.Ordinal);
-        Assert.DoesNotContain("innerHTML", views, StringComparison.Ordinal);
+
+        // Scope the innerHTML ban to renderAlertHeaderCell's own body — the file's header comment (R4)
+        // says "never innerHTML" in prose, which the whole-file assertion this replaces was tripping on.
+        var lf = ReadRepoFileLf(ViewsPath);
+        var start = lf.IndexOf("function renderAlertHeaderCell(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "renderAlertHeaderCell not found in views.js");
+        var nextFn = lf.IndexOf("\nfunction ", start + 1, StringComparison.Ordinal);
+        Assert.True(nextFn > start, "could not find the next top-level function after renderAlertHeaderCell");
+        var body = lf.Substring(start, nextFn - start);
+        Assert.DoesNotContain("innerHTML", body, StringComparison.Ordinal);
     }
 
     /// <summary>
