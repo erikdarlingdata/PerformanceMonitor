@@ -180,31 +180,46 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// whole-value markers. Over-inclusive on purpose — the fine-grained decision is
     /// <see cref="PgSettingRedactor.Redact"/>, run per candidate row below.
     /// </summary>
-    private const string CandidateSql = @"
+    /// <summary>
+    /// The single source of ILIKE terms <see cref="CandidateSql"/> builds its <c>setting</c>/<c>boot_val</c>/
+    /// <c>reset_val</c> OR-chain from, and the same list <c>PgSettingScrubCandidateCensusTests</c> checks every
+    /// masked corpus case against, so the two can never drift out of rule-for-rule sync again (#4348). Each
+    /// entry is a plain ILIKE pattern; <c>%</c>/<c>_</c> are literal wildcards, no escaping needed here because
+    /// none of these terms contain a literal <c>%</c> or <c>_</c> character themselves (the percent-encoding
+    /// catch-all is expressed separately in <see cref="CandidateSql"/> with its own ESCAPE clause).
+    /// </summary>
+    internal static readonly string[] CandidateLikeTerms =
+    [
+        "%password%", "%passwd%", "%secret%", "%token%", "%://%@%", "%pass%", "%key%",
+        "%credential%", "%pwd%", "%-u %", "%--user%", "%-U %", "%sshpass%", "%sig=%",
+        "%signature=%", "%-u%", "%--proxy-user%",
+    ];
+
+    private static readonly string CandidateSql = BuildCandidateSql();
+
+    private static string BuildCandidateSql()
+    {
+        var termClauses = new List<string>();
+        foreach (var term in CandidateLikeTerms)
+        {
+            termClauses.Add(
+                $"setting ILIKE '{term}' OR reset_val ILIKE '{term}' OR boot_val ILIKE '{term}'");
+        }
+
+        var terms = string.Join("\n    OR ", termClauses);
+
+        return $@"
 SELECT server_id, collection_time, name, database_name, role_name, setting, boot_val, reset_val
 FROM collect.pg_server_config
 WHERE
-    setting ILIKE '%password%' OR reset_val ILIKE '%password%' OR boot_val ILIKE '%password%'
-    OR setting ILIKE '%passwd%' OR reset_val ILIKE '%passwd%' OR boot_val ILIKE '%passwd%'
-    OR setting ILIKE '%secret%' OR reset_val ILIKE '%secret%' OR boot_val ILIKE '%secret%'
-    OR setting ILIKE '%token%' OR reset_val ILIKE '%token%' OR boot_val ILIKE '%token%'
-    OR setting ILIKE '%://%@%' OR reset_val ILIKE '%://%@%' OR boot_val ILIKE '%://%@%'
-    OR setting ILIKE '%pass%' OR reset_val ILIKE '%pass%' OR boot_val ILIKE '%pass%'
-    OR setting ILIKE '%key%' OR reset_val ILIKE '%key%' OR boot_val ILIKE '%key%'
-    OR setting ILIKE '%credential%' OR reset_val ILIKE '%credential%' OR boot_val ILIKE '%credential%'
-    OR setting ILIKE '%pwd%' OR reset_val ILIKE '%pwd%' OR boot_val ILIKE '%pwd%'
-    OR setting ILIKE '%-u %' OR reset_val ILIKE '%-u %' OR boot_val ILIKE '%-u %'
-    OR setting ILIKE '%--user%' OR reset_val ILIKE '%--user%' OR boot_val ILIKE '%--user%'
-    OR setting ILIKE '%-U %' OR reset_val ILIKE '%-U %' OR boot_val ILIKE '%-U %'
-    OR setting ILIKE '%sshpass%' OR reset_val ILIKE '%sshpass%' OR boot_val ILIKE '%sshpass%'
-    OR setting ILIKE '%sig=%' OR reset_val ILIKE '%sig=%' OR boot_val ILIKE '%sig=%'
-    OR setting ILIKE '%signature=%' OR reset_val ILIKE '%signature=%' OR boot_val ILIKE '%signature=%'
+    {terms}
     OR setting LIKE '%\%%' ESCAPE '\' OR reset_val LIKE '%\%%' ESCAPE '\' OR boot_val LIKE '%\%%' ESCAPE '\'
     OR (name = 'ssl_passphrase_command' AND (setting <> '' OR boot_val <> '' OR reset_val <> ''))
     OR (name LIKE '%.%' AND (
         name ILIKE '%password%' OR name ILIKE '%passwd%' OR name ILIKE '%passphrase%'
         OR name ILIKE '%secret%' OR name ILIKE '%salt%' OR name ILIKE '%token%' OR name ILIKE '%key%'
         OR name ILIKE '%credential%' OR name ILIKE '%pwd%' OR name ILIKE '%pass%'))";
+    }
 
     private const string BatchUpdateSql = @"
 WITH batch AS (
