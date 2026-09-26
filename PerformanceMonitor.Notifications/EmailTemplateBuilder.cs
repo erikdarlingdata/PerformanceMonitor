@@ -193,7 +193,7 @@ internal static class EmailTemplateBuilder
         if (!string.IsNullOrEmpty(triageUrl))
         {
             sb.Append("<tr><td style=\"padding:4px 24px 16px 24px;\">");
-            sb.Append($"<a href=\"{WebUtility.HtmlEncode(triageUrl)}\" style=\"display:inline-block;font-family:{FontStack};font-size:13px;font-weight:600;color:#FFFFFF;background-color:{accentColor};padding:8px 16px;border-radius:4px;text-decoration:none;\">Open triage page</a>");
+            sb.Append($"<a href=\"{WebUtility.HtmlEncode(triageUrl)}\" style=\"display:inline-block;font-family:{FontStack};font-size:13px;font-weight:600;color:#FFFFFF;background-color:{accentColor};padding:8px 16px;border-radius:4px;text-decoration:none;\">{WebUtility.HtmlEncode(TriageLink.LinkLabel(triageUrl))}</a>");
             sb.Append("</td></tr>");
         }
 
@@ -442,7 +442,7 @@ internal static class EmailTemplateBuilder
            same as the pre-#4220 body. */
         if (!string.IsNullOrEmpty(triageUrl))
         {
-            sb.Append($"\r\nOpen triage page: {triageUrl}\r\n");
+            sb.Append($"\r\n{TriageLink.LinkLabel(triageUrl)}: {triageUrl}\r\n");
         }
 
         /* Footer — mirrors the HTML body's cooldown disclosure (BuildHtmlBody). The HTML and

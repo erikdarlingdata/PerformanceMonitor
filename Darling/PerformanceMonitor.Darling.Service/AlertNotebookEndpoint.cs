@@ -204,9 +204,34 @@ internal static partial class AlertNotebookEndpoint
                 postgres, serverId, fleetLevelStore, metric, anchor, now, statusHistoryRows, matchedRow, logger, context.RequestAborted);
 
             var lookbackHours = FamilyLookbackHours(metric);
-            var (cells, templateId, templateVersion) = await BuildCellsAsync(
-                metric, serverName, asOf, windowEnd, serverId, anchor, postgres, analysis, context.RequestAborted,
-                logger, notes, matchedIncident, matchedRow, status, lookbackHours);
+            var trimmedMetric = string.IsNullOrWhiteSpace(metric) ? null : metric.Trim();
+
+            JsonArray cells;
+            string templateId;
+            int templateVersion;
+
+            /* #4223: reports (the collector-cost digest, the fleet sweep rollup, the analysis singles
+               digest) declare no notebook at all, mechanical or authored -- checked BEFORE BuildCellsAsync
+               (and so before either template path it resolves to) so a report never reaches pre-fetch or a
+               template. Same 200-with-notes degrade every other empty/stale link on this endpoint takes
+               (class summary's "degrade, never error"): no cells, an honest note, and for the one report
+               with somewhere to send a reader, the note names it. */
+            if (IsDeclaredNoNotebook(trimmedMetric))
+            {
+                cells = new JsonArray();
+                templateId = "none/reports";
+                templateVersion = 0;
+                notes.Add((JsonNode)(
+                    string.Equals(trimmedMetric, TriageLink.FleetSweepRollupMetric, StringComparison.Ordinal)
+                        ? "Reports have no notebook; the Fleet Sweep Rollup opens the sweeps page."
+                        : "Reports have no notebook."));
+            }
+            else
+            {
+                (cells, templateId, templateVersion) = await BuildCellsAsync(
+                    metric, serverName, asOf, windowEnd, serverId, anchor, postgres, analysis, context.RequestAborted,
+                    logger, notes, matchedIncident, matchedRow, status, lookbackHours);
+            }
 
             var body = new JsonObject
             {
@@ -460,11 +485,35 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
         (new[] { "Deadlocks Detected" },
             new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
+        (new[] { "Failed Agent Job", "Long-Running Job", "Agent Not Running" },
+            new AuthoredTemplateEntry("authored/agent-job", AgentJobTemplateVersion, BuildAgentJobCells)),
         (new[] { "Forced Plan Failing" },
             new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
+        (new[] { "High CPU" },
+            new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCpuCells)),
         (new[] { "Long-Running Query" },
             new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
+        (new[] { "Poison Wait" },
+            new AuthoredTemplateEntry("authored/poison-wait", PoisonWaitTemplateVersion, BuildPoisonWaitCells)),
+        (new[] { "PostgreSQL Replication Slot Retention" },
+            new AuthoredTemplateEntry("authored/pg-replication-slot", PgReplicationSlotTemplateVersion, BuildPgReplicationSlotCells)),
+        (new[] { "PostgreSQL Vacuum Horizon Blocked" },
+            new AuthoredTemplateEntry("authored/pg-xmin-horizon", PgXminHorizonTemplateVersion, BuildPgXminHorizonCells)),
+        (new[] { "PostgreSQL Wraparound Risk" },
+            new AuthoredTemplateEntry("authored/pg-wraparound", PgWraparoundTemplateVersion, BuildPgWraparoundCells)),
+        (new[] { "Server Unreachable", "Server Restored" },
+            new AuthoredTemplateEntry("authored/server-connect", ServerConnectTemplateVersion, BuildServerConnectCells)),
     };
+
+    /// <summary>#4223: is <paramref name="metric"/> one of the three reports (the collector-cost digest, the
+    /// fleet sweep rollup, the analysis singles digest) that are declared to carry no notebook at all — a
+    /// scheduled document read once a day, not an incident with a window worth composing reads over? Keyed on
+    /// <see cref="AlertFamily.Reports"/> (the same census <see cref="TriageLink.Build"/> reads for the Fleet
+    /// Sweep Rollup's own carve-out), not a local name list, so the two call sites can never disagree about
+    /// which metrics are reports. <see cref="Map"/> reads this BEFORE <see cref="AuthoredTemplate"/> and
+    /// degrades honestly instead of building either template for a metric this returns true for.</summary>
+    internal static bool IsDeclaredNoNotebook(string? metric) =>
+        metric is not null && AlertFamily.Of(metric) == AlertFamily.Reports;
 
     /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
     /// conversion — every metric NOT named in <see cref="s_authoredTemplates"/> keeps the byte-identical
@@ -672,10 +721,34 @@ internal static partial class AlertNotebookEndpoint
     /// (<see cref="DarlingWebEndpoints.BuildReadDispatch"/>'s own catalog) — a chart/trend read whose budget
     /// is the bucket count, not a row cap (spec §3's own budget rule: "every read cell has an explicit limit,
     /// OR its trend goes through the chart bucket budget"). <see cref="AuthoredReadCell"/> must not force a
-    /// 'limit' onto one of these, or <c>ValidateReadPanelSpec</c>'s undeclared-param check reds it.</summary>
-    private static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
+    /// 'limit' onto one of these, or <c>ValidateReadPanelSpec</c>'s undeclared-param check reds it. Widened to
+    /// <c>internal</c> (#4223) so the shared budget theory in <c>AlertNotebookAuthoredTemplateTests</c> checks
+    /// membership in this set instead of hardcoding one read name.</summary>
+    internal static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_deadlock_trend",
+        /* #4223 Poison Wait: get_wait_trend has a bucket-count budget, not a row cap (PReqText("wait_type")
+           with no PLimit). get_memory_grants and get_resource_semaphore declare no limit param at all
+           (DarlingWebEndpoints.CatalogDescriptors). */
+        "get_wait_trend",
+        "get_memory_grants",
+        "get_resource_semaphore",
+        /* #4223: get_top_queries_by_cpu / get_top_procedures_by_cpu / get_cpu_scheduler_pressure declare no
+           'limit' param at all -- the first two cap with 'top' (carried explicitly below), the last has no
+           row cap to carry. */
+        "get_top_queries_by_cpu",
+        "get_top_procedures_by_cpu",
+        "get_cpu_scheduler_pressure",
+        /* #4223: get_collection_health and get_running_jobs declare only PServer() — no hours/limit/as_of at
+           all — so ServerOnlyReadCell never adds a limit param and this exemption applies here too, even
+           though neither is a trend read. */
+        "get_collection_health",
+        "get_running_jobs",
+        /* #4223 (dev merge): none of the three PostgreSQL primary reads declare a 'limit' param (PServer/PHours/
+           PAsOf only), so the same no-forced-limit exemption applies here even though they aren't trend reads. */
+        "get_pg_wraparound_risk",
+        "get_pg_xmin_horizon",
+        "get_pg_replication_slots",
     };
 
     /// <summary>An authored template's read cell (spec §1 binding): <c>server</c>, <c>as_of = window_end</c>

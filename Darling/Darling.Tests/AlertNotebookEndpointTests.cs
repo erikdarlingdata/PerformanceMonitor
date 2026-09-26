@@ -645,8 +645,12 @@ public sealed class AlertNotebookEndpointTests
         await using var deadStore = DeadStore();
         using var server = await BuildServer(deadStore);
 
+        /* #4223 gave "High CPU" an authored template -- this shape check now needs a metric that STAYS
+           mechanical, so it exercises the fallback path it documents rather than an authored one. "Poison
+           Wait" is excluded here because it is authored too (its own template); "tempdb Space" has no row in
+           s_authoredTemplates. */
         var ctx = await SendAuthenticated(
-            server, "/api/alert-notebook?server=probe&metric=" + Uri.EscapeDataString("High CPU"),
+            server, "/api/alert-notebook?server=probe&metric=" + Uri.EscapeDataString("tempdb Space"),
             IPAddress.Parse("192.168.1.50"));
 
         Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
@@ -676,6 +680,6 @@ public sealed class AlertNotebookEndpointTests
             Assert.True(cellParams.TryGetProperty("hours", out _), "every mechanical read cell must carry an hours param");
         }
 
-        Assert.Equal("mechanical/High CPU", root.GetProperty("template").GetProperty("id").GetString());
+        Assert.Equal("mechanical/tempdb Space", root.GetProperty("template").GetProperty("id").GetString());
     }
 }
