@@ -131,11 +131,15 @@ public static class PgSettingRedactor
         /// not to prove the pattern is fast.</summary>
         public void Warmup()
         {
+            // Catch-all, not only the timeout (#4348): ANY exception here, uncaught, would fail the static
+            // constructor and leave the type permanently unusable (every later call throws
+            // TypeInitializationException) — warmup exists to pre-pay a cost, never to gate whether the type
+            // works at all.
             try
             {
                 _default.IsMatch(WarmupSample);
             }
-            catch (RegexMatchTimeoutException)
+            catch
             {
             }
         }
@@ -314,32 +318,11 @@ public static class PgSettingRedactor
     /// observe type-initialisation order.</summary>
     internal static readonly bool WarmedUp;
 
-    static PgSettingRedactor()
-    {
-        LibpqPasswordKeyword.Warmup();
-        UriQueryPassword.Warmup();
-        AssignmentSecretName.Warmup();
-        OptionSecretSpaced.Warmup();
-        UriQueryKeyAnyEncoding.Warmup();
-        UriQuerySignature.Warmup();
-        QuotedSpacedAssignment.Warmup();
-        CurlUserColon.Warmup();
-        SshpassOption.Warmup();
-
-        try
-        {
-            UriUserInfoPassword.IsMatch(WarmupSample);
-        }
-        catch (RegexMatchTimeoutException)
-        {
-        }
-
-        WarmedUp = true;
-    }
-
     /// <summary>Every <see cref="TimeBoundPattern"/> this type warms at type initialisation (#4348) —
     /// exposed only so a test can pin that the warmup sample actually reaches each one's match step, not
-    /// only its scan.</summary>
+    /// only its scan. The static constructor below drives its warm-up from THIS list, plus
+    /// <see cref="UriUserInfoPassword"/> if it is not already in it, so a pattern added here can't be
+    /// missed from one of the two.</summary>
     internal static readonly TimeBoundPattern[] WarmedPatterns =
     {
         LibpqPasswordKeyword,
@@ -352,6 +335,41 @@ public static class PgSettingRedactor
         CurlUserColon,
         SshpassOption,
     };
+
+    static PgSettingRedactor()
+    {
+        // Catch-all around every warm-up step, not only the timeout (#4348): ANY exception escaping the
+        // static constructor fails type initialisation, and every later Redact call would then throw
+        // TypeInitializationException forever — warmup exists to pre-pay JIT cost, never to gate whether the
+        // type works at all.
+        foreach (var pattern in WarmedPatterns)
+        {
+            pattern.Warmup();
+        }
+
+        try
+        {
+            UriUserInfoPassword.IsMatch(WarmupSample);
+        }
+        catch
+        {
+        }
+
+        // Warms the evaluator lambdas too, not only the patterns' match step (#4348): the match-timeout
+        // clock spans a whole Regex.Replace call, including its MatchEvaluator, so a full Redact call here
+        // JITs those delegates before any real call has to. Safe to call from the static constructor because
+        // every field Redact reads (the patterns above, Mask, QueryKeySecretMarkers) is field-initialised,
+        // and field initialisers run before this constructor body.
+        try
+        {
+            Redact(null, WarmupSample);
+        }
+        catch
+        {
+        }
+
+        WarmedUp = true;
+    }
 
     private static bool IsQueryKeySecret(string rawKey)
     {
