@@ -2834,40 +2834,72 @@ public sealed class DarlingManagedPostgresTests
             Assert.True(File.Exists(credentialPath));
             var credentialBytes = File.ReadAllBytes(credentialPath);
 
+            /* #4215: by the time EnsureRunningAsync returns, Step A has already run post-start and
+               rewritten postgresql.conf to a single include line -- every v-block that rode the first-run
+               append now lives in darling-managed.conf instead. Every check below that used to read
+               postgresql.conf for a marker or a written-but-not-live value reads darling-managed.conf now;
+               a check that already reads the LIVE pg_settings value (below, against the running server) is
+               dropped here rather than duplicated against a file. */
             var conf = File.ReadAllText(Path.Combine(dataDirectory, "postgresql.conf"));
-            Assert.Contains("shared_preload_libraries = 'timescaledb'", conf, StringComparison.Ordinal);
-            Assert.Contains("listen_addresses = '127.0.0.1'", conf, StringComparison.Ordinal);
-            /* HypertableCount, not HypertableTables.Count: the product sizes workers from the TRUE
-               hypertable count (catalog + collection_log, the V23 non-catalog hypertable). */
-            Assert.Contains($"max_worker_processes = {3 + (TimescaleSupport.HypertableCount + 2) + 8}", conf, StringComparison.Ordinal);
+            var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+            var managedConf = File.ReadAllText(managedConfPath);
+            var migrationDiagnostics =
+                $"LastManagedConfVerification={owner.LastManagedConfVerification}; " +
+                $"Classify={ManagedConfMigrationState.Classify(dataDirectory)}; " +
+                $"files=[{string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
 
-            /* v3 memory sizing rode the SAME append path on first run, derived from THIS host's physical RAM
-               (the exact MB depend on the runner, so pin the marker + that the settings are present). */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV3, conf, StringComparison.Ordinal);
-            Assert.Contains("shared_buffers = ", conf, StringComparison.Ordinal);
-            Assert.Contains("work_mem = ", conf, StringComparison.Ordinal);
+            /* postgresql.conf itself: exactly one include line, no v-marker of any kind. */
+            Assert.True(
+                CountOccurrences(conf, ManagedConfFile.IncludeLine) == 1,
+                $"postgresql.conf should carry exactly one include line. {migrationDiagnostics}");
+            foreach (var marker in DarlingManagedPostgres.AllManagedConfMarkers)
+            {
+                Assert.True(
+                    !conf.Contains(marker, StringComparison.Ordinal),
+                    $"postgresql.conf should carry no v-marker text ({marker}). {migrationDiagnostics}");
+            }
 
-            /* v4 write throughput rode the same first-run append: connection headroom + WAL ceiling. */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV4, conf, StringComparison.Ordinal);
+            /* No live check exists in this test for shared_preload_libraries or listen_addresses, so both
+               move to darling-managed.conf's rendered text rather than being dropped. */
+            Assert.True(
+                managedConf.Contains("shared_preload_libraries = 'timescaledb,pg_stat_statements'", StringComparison.Ordinal)
+                || managedConf.Contains("shared_preload_libraries = 'timescaledb'", StringComparison.Ordinal),
+                $"darling-managed.conf should carry the timescaledb preload. {migrationDiagnostics}");
+            Assert.True(
+                managedConf.Contains("listen_addresses = '127.0.0.1'", StringComparison.Ordinal),
+                $"darling-managed.conf should carry listen_addresses. {migrationDiagnostics}");
 
-            /* v5 co-located sizing rode the same first-run append (its shared_buffers override equals the
-               v3 value on a fresh cluster, since both now derive through the same 1 GB cap). */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV5, conf, StringComparison.Ordinal);
-            Assert.Contains("max_connections = 200", conf, StringComparison.Ordinal);
-            Assert.Contains("max_wal_size = 4GB", conf, StringComparison.Ordinal);
+            /* max_worker_processes: DROPPED as a conf-text check -- reader.GetString(2) below already proves
+               this LIVE against the running server, and duplicating it against a file adds nothing. */
 
-            /* v6 log rotation rode the same first-run append, and the server ACCEPTED it (a bad line here
-               fails pg_ctl start outright) — the logging collector is live, proven by the weekday ring file
-               it creates under <data>\log the moment it starts (#1652). */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV6, conf, StringComparison.Ordinal);
+            /* v3 memory sizing rode the same first-run append, derived from THIS host's physical RAM: presence
+               moves to darling-managed.conf (the exact MB depend on the runner); the values themselves are
+               proven LIVE below (work_mem/shared_buffers NotEqual the stock defaults). */
+            Assert.True(
+                managedConf.Contains("shared_buffers = ", StringComparison.Ordinal),
+                $"darling-managed.conf should carry shared_buffers. {migrationDiagnostics}");
+            Assert.True(
+                managedConf.Contains("work_mem = ", StringComparison.Ordinal),
+                $"darling-managed.conf should carry work_mem. {migrationDiagnostics}");
+
+            /* v4 write throughput and v5 co-located sizing: no live check of these specific values exists in
+               this test, so their settings move to darling-managed.conf rather than being dropped. */
+            Assert.True(
+                managedConf.Contains("max_connections = 200", StringComparison.Ordinal),
+                $"darling-managed.conf should carry max_connections. {migrationDiagnostics}");
+            Assert.True(
+                managedConf.Contains("max_wal_size = 4GB", StringComparison.Ordinal),
+                $"darling-managed.conf should carry max_wal_size. {migrationDiagnostics}");
+
+            /* v6 log rotation: the logging collector is live, proven by the weekday ring file it creates
+               under <data>\log the moment it starts (#1652) -- unaffected by where the setting text lives. */
             var ringFiles = Directory.GetFiles(Path.Combine(dataDirectory, "log"), "postgresql-*.log");
             Assert.NotEmpty(ringFiles);
 
-            /* v7 compression memory (#1777) rode the same first-run append. Its value derives from THIS
-               host's RAM, so pin the marker and capture the conf's EFFECTIVE value (the last assignment,
-               which is the one the server honors) to compare against the live setting below. */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV7, conf, StringComparison.Ordinal);
-            var confMaintenanceWorkMem = LastSettingValue(conf, "maintenance_work_mem");
+            /* v7 compression memory (#1777): its EFFECTIVE value (the last assignment, the one the server
+               honors) now lives in darling-managed.conf, and is captured here to compare against the live
+               setting below. */
+            var confMaintenanceWorkMem = LastSettingValue(managedConf, "maintenance_work_mem");
             Assert.NotNull(confMaintenanceWorkMem);
 
             /* The derived credential really authenticates (scram, not trust) into the darling
@@ -2922,14 +2954,29 @@ public sealed class DarlingManagedPostgresTests
             Assert.Equal(credentialBytes, File.ReadAllBytes(credentialPath));
             Assert.Equal(connectionString, secondConnectionString);
 
+            var secondDiagnostics =
+                $"LastManagedConfVerification={second.LastManagedConfVerification}; " +
+                $"Classify={ManagedConfMigrationState.Classify(dataDirectory)}; " +
+                $"files=[{string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
+
+            /* The idempotent second run: this data directory is Verified after the first run, so the second
+               run's pre-start write (EnsureManagedConfReadyAsync) re-renders darling-managed.conf and finds
+               it byte-identical to what is already on disk -- no v-marker ever re-enters postgresql.conf,
+               and neither file changes. */
             var confAfterSecond = File.ReadAllText(Path.Combine(dataDirectory, "postgresql.conf"));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarker));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV2));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV3));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV4));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV5));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV6));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV7));
+            var managedConfAfterSecond = File.ReadAllText(managedConfPath);
+            Assert.True(conf == confAfterSecond, $"postgresql.conf should be byte-identical after the idempotent second run. {secondDiagnostics}");
+            Assert.True(managedConf == managedConfAfterSecond, $"darling-managed.conf should be byte-identical after the idempotent second run. {secondDiagnostics}");
+            Assert.True(
+                CountOccurrences(confAfterSecond, ManagedConfFile.IncludeLine) == 1,
+                $"postgresql.conf should still carry exactly one include line. {secondDiagnostics}");
+
+            Assert.True(
+                ManagedConfMigrationState.Classify(dataDirectory) == ManagedConfMigrationState.Kind.Verified,
+                $"The data directory should classify Verified after the first run. {migrationDiagnostics}");
+            Assert.True(
+                ManagedConfMigrationState.Classify(dataDirectory) == ManagedConfMigrationState.Kind.Verified,
+                $"The data directory should classify Verified after the idempotent second run. {secondDiagnostics}");
 
             /* Both up/down probes below must bypass Npgsql's pool: OpenAsync on a pooled string
                can hand back an idle socket with no I/O at all, which "succeeds" against a stopped
