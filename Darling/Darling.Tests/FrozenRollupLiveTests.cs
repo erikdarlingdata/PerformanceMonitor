@@ -980,6 +980,296 @@ public sealed class FrozenRollupLiveTests
         }
     }
 
+    /// <summary>
+    /// #4301, PIN A (interior hole -&gt; false): the legacy's OWN interior has a gap (hour H2 refreshed by
+    /// neither side, despite raw admitting a row there) below its last bucket (H5), and the successor holds a
+    /// bucket ABOVE the legacy's last (H6, its own ordinary advance). <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/>
+    /// must read <c>false</c>: the gap is a real hole under <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/>'s
+    /// definition (raw admits a row, neither side materialized it), so the slot must go Short, not Covered.
+    /// RED on <c>e970834ba</c>: the old row-level seam-only probe never looks INSIDE the legacy's own span (it
+    /// only checks at/after <c>l.mx</c>), so it reports Covered here.
+    /// </summary>
+    [Fact]
+    public async Task InteriorHole_BelowLegacysLastBucket_ReportsRawPurgeNotSafe()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var b = D0.AddDays(20);
+
+            /* Raw admits rows at H0, H2 (the interior hole) and H5 (legacy's last) and H6 (successor's
+               own floor above l.mx). H1, H3, H4 hold no raw rows at all, so their absence from either side
+               is never a hole. */
+            await InsertProcedureStatsAsync(connection, b, "pinA_h0", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(2), "pinA_h2", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(5), "pinA_h5", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(6), "pinA_h6", 900, 9, 3600, ct);
+
+            /* Legacy materializes H0 and H5 only -- H2 is skipped, the interior hole. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, b, b.AddHours(1), ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, b.AddHours(5), b.AddHours(6), ct);
+
+            /* Successor materializes H6 only -- its own ordinary advance above l.mx, no interior repair. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, b.AddHours(6), b.AddHours(7), ct);
+
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4301, PIN B (the trap -&gt; false): the successor holds ONE bucket BELOW the legacy's last (H3, as an
+    /// INTERIOR repair leaves it), which moves <c>s.mn</c> below <c>l.mx</c>, AND a seam hour above the
+    /// legacy's last (H6) has a raw row and no bucket anywhere. A probe bounded on <c>s.mn</c> (the old shape)
+    /// would see the seam range collapse to <c>(l.mx, s.mn)</c> = <c>(H5, H3)</c>, an EMPTY/inverted range, and
+    /// miss H6 entirely -- exactly the trap this lane's bound (the successor's first bucket ABOVE <c>l.mx</c>,
+    /// H7) exists to avoid. <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> must read <c>false</c>.
+    /// RED on <c>e970834ba</c>: the old code's seam probe is bounded on <c>COALESCE(s.mn, 'infinity')</c>,
+    /// which here is H3, before <c>l.mx + 1h</c> = H6 -- the probe range is empty, no seam row is found, and
+    /// the old code falls through to <c>LEAST(l.mn, s.mn)</c>, reporting Covered.
+    /// </summary>
+    [Fact]
+    public async Task InteriorRepairMovesSuccessorFloorBelowSeam_TrapDoesNotHideTheHole_ReportsRawPurgeNotSafe()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var b = D0.AddDays(30);
+
+            /* Raw admits rows at H0 (raw's floor), H3 (successor's interior repair), H5 (legacy's last),
+               H6 (the seam hole -- no bucket anywhere) and H7 (successor's own ordinary advance above
+               l.mx, needed so the probe's upper bound resolves to H6 and not the current hour). */
+            await InsertProcedureStatsAsync(connection, b, "pinB_h0", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(3), "pinB_h3", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(5), "pinB_h5", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(6), "pinB_h6", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(7), "pinB_h7", 900, 9, 3600, ct);
+
+            /* Legacy materializes H0 and H5 only -- l.mx ends at H5. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, b, b.AddHours(1), ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, b.AddHours(5), b.AddHours(6), ct);
+
+            /* Successor materializes H3 (an interior repair BELOW l.mx) and H7 (its own ordinary advance
+               ABOVE l.mx) -- s.mn is H3, below l.mx, the exact shape that moves the successor's floor
+               under the seam. H6 (the seam hour) is left uncovered by both sides. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, b.AddHours(3), b.AddHours(4), ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, b.AddHours(7), b.AddHours(8), ct);
+
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4301, PIN C (clean -&gt; true): the legacy covers every raw-admitted bucket up to its own last bucket
+    /// (H5), and the successor's only bucket (H6) sits immediately above it, with no gap anywhere in between.
+    /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> must read <c>true</c>. Passes on both this branch
+    /// and <c>e970834ba</c> (both find no hole here); included to show the new probe does not fire on a
+    /// gap-free stitch.
+    /// </summary>
+    [Fact]
+    public async Task NoGapAnywhere_ReportsRawPurgeSafe()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var b = D0.AddDays(40);
+
+            await InsertProcedureStatsAsync(connection, b, "pinC_h0", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(5), "pinC_h5", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(6), "pinC_h6", 900, 9, 3600, ct);
+
+            /* Legacy materializes the whole H0-H5 span, no gap. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, b, b.AddHours(6), ct);
+
+            /* Successor materializes H6, its own ordinary advance immediately above l.mx. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, b.AddHours(6), b.AddHours(7), ct);
+
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4301, PIN D (below the floor -&gt; true): the legacy holds no bucket for H0, OLDER than raw's own
+    /// filtered floor (H0 carries a first-pass, <c>sample_interval_seconds = 0</c> row that
+    /// <see cref="TimescaleSupport.IntervalHonestSourceFilter"/> excludes from admission, so it never sets
+    /// <c>fromExpr</c>). Everything from raw's real admitted floor (H2) up to the legacy's last bucket (H5) is
+    /// covered. <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> must read <c>true</c>: a gap below the
+    /// probed floor is invisible by construction, exactly as this lane's doc comment states.
+    /// </summary>
+    [Fact]
+    public async Task GapBelowRawsFilteredFloor_IsInvisibleToTheProbe_ReportsRawPurgeSafe()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var b = D0.AddDays(50);
+
+            /* H0: a first-pass restart row (interval 0), excluded from admission -- never sets fromExpr,
+               and the legacy is never refreshed for it (a pre-freeze purge could have taken this bucket
+               and it would look identical). H2: raw's real admitted floor. H5: legacy's last bucket.
+               H6: successor's own ordinary advance, bounding the probe's upper edge. */
+            await InsertProcedureStatsAsync(connection, b, "pinD_h0_restart", 0, 0, 0, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(2), "pinD_h2", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(5), "pinD_h5", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, b.AddHours(6), "pinD_h6", 900, 9, 3600, ct);
+
+            /* Legacy materializes H2-H5 only -- H0 is never touched, and never needs to be. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, b.AddHours(2), b.AddHours(6), ct);
+
+            /* Successor materializes H6, its own ordinary advance immediately above l.mx. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, b.AddHours(6), b.AddHours(7), ct);
+
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
     private static async Task InsertQueryStatsAsync(
         NpgsqlConnection connection, DateTime at, string hash, long workerUs, long executions, int intervalSeconds, CancellationToken ct)
     {
