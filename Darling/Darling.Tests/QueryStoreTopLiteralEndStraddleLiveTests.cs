@@ -29,6 +29,16 @@ namespace Darling.Tests;
 /// (<see cref="DarlingDataReader.GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,CancellationToken)"/>)
 /// — seeded through the real write path so <c>applied_through</c> is the product's own apply-time stamp, not a
 /// forced value.
+///
+/// <para><b>Isolating clause 4.</b> <see cref="SeedStraddleAsync"/>'s own coverage bookkeeping
+/// (<c>QueryStoreIntervalWide.EnsureCoverageSql</c>) raises <c>filled_since</c> to the wall clock the FIRST apply
+/// ran at — not to <see cref="WindowStart"/>'s own, much earlier, historical span — so left alone,
+/// <c>filled_since &gt; WindowStart</c> and clause 2 alone sends both reads to raw: the pin's own 192/192 would
+/// pass whether or not clause 4 does anything. This test forces <c>filled_since</c> back below
+/// <see cref="WindowStart"/> after seeding (the same move <c>QueryStoreIntervalWideGridLiveTests</c> makes for
+/// the identical reason), so every clause EXCEPT 4 passes, and adds a positive control — the same seeded store,
+/// read with an open end — that proves the table path is live for this identity before trusting that the
+/// literal-end reads' 192/zero-scans means clause 4 specifically.</para>
 /// </summary>
 /* #1776 own-store: reaches DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and
    then works entirely inside it, the same shape as QueryStoreIntervalWideGridLiveTests and
@@ -62,8 +72,20 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
         await SeedStraddleAsync(runner, ct);
 
+        /* WriteBackfillBatchAsync's own coverage bookkeeping raises filled_since to the WALL-CLOCK "now" the
+           first apply ran at (EnsureCoverageSql), not to this seed's own historical span far in 2026-09. Left
+           alone, filled_since > WindowStart and clause 2 ALONE sends both reads to raw — the assertions below
+           would pass whether or not clause 4 does anything. Force it back, the same move
+           QueryStoreIntervalWideGridLiveTests.ForceFilledSinceAsync makes for the identical reason, so every
+           clause except 4 passes and the literal-end reads below isolate clause 4 alone. */
+        await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
+
         var appliedThrough = await ScalarDateTimeAsync(connection,
             "SELECT applied_through FROM collect.query_store_interval_wide_coverage WHERE server_id = @server_id", ct);
+        var filledSince = await ScalarDateTimeAsync(connection,
+            "SELECT filled_since FROM collect.query_store_interval_wide_coverage WHERE server_id = @server_id", ct);
+        Assert.True(filledSince <= WindowStart,
+            $"the pin's premise: filled_since ({filledSince:o}) must be at or before WindowStart ({WindowStart:o}), so only clause 4 can refuse the table below");
         Assert.True(LiteralEnd < appliedThrough,
             $"the pin's premise: LiteralEnd ({LiteralEnd:o}) must sit before applied_through ({appliedThrough:o}), the real wall clock the apply above stamped");
 
@@ -79,6 +101,27 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
             return (reader.GetInt64(0), reader.GetInt64(1));
         }
+
+        /* ---- the positive control: the SAME seeded store, an open end, proves the table path is live here
+           before the literal-end assertions below are read as clause 4's own doing. ---- */
+        var (useTableOpenEnd, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connection, ServerId, WindowStart, WindowEnd, literalWindowEnd: null,
+            DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct);
+        Assert.True(useTableOpenEnd, "the positive control: an open end over this seeded, forced-covered window must route to the table");
+
+        var (useTableStraddle, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connection, ServerId, WindowStart, WindowEnd, literalWindowEnd: LiteralEnd,
+            DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct);
+        Assert.False(useTableStraddle, "clause 4 alone must refuse the table for the straddling literal end");
+
+        var beforeOpenEnd = await WideTableScanCountsAsync();
+        var appliedThroughAsOf = appliedThrough.AddMinutes(1);
+        var mcpOpenEndRows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, ServerId, WindowStart, appliedThroughAsOf, TestTop, null, ct);
+        var mcpOpenEndRow = mcpOpenEndRows.Single(r => r.DatabaseName == "qsStraddle" && r.QueryId == 7001);
+        Assert.Equal(385, mcpOpenEndRow.TotalExecutions);
+        var afterOpenEnd = await WideTableScanCountsAsync();
+        Assert.True(afterOpenEnd.SeqScan + afterOpenEnd.IdxScan > beforeOpenEnd.SeqScan + beforeOpenEnd.IdxScan,
+            "the positive control's MCP read (a literal end at/after applied_through) must actually scan the wide table");
 
         var before = await WideTableScanCountsAsync();
 
@@ -164,6 +207,18 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
             RuntimeStatsIntervalId = 7000,
         };
         await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { reFetched }, server, afterLiteralEnd, context, ct);
+    }
+
+    /// <summary>Same move as <c>QueryStoreIntervalWideGridLiveTests.ForceFilledSinceAsync</c>: backdates the
+    /// coverage row's <c>filled_since</c> past the seed's own wall-clock stamp, so clause 2 cannot be the reason
+    /// a read below picks raw.</summary>
+    private static async Task ForceFilledSinceAsync(NpgsqlConnection connection, DateTime value, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "UPDATE collect.query_store_interval_wide_coverage SET filled_since = @value WHERE server_id = @server_id", connection);
+        command.Parameters.AddWithValue("server_id", ServerId);
+        command.Parameters.AddWithValue("value", DateTime.SpecifyKind(value, DateTimeKind.Unspecified));
+        await command.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task<NpgsqlConnection> OpenMigratedAsync(ScratchPostgres scratch, CancellationToken ct)
