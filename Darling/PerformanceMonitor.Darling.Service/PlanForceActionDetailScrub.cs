@@ -125,7 +125,7 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// fine-grained decision is <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/>, run per
     /// candidate row below — this is the one and only exempted raw read of the column (#4377/#4384).
     ///
-    /// <para>Named <c>LegacyDetailCandidateSql</c>, not the bare <c>CandidateSql</c> the census census's
+    /// <para>Named <c>LegacyDetailCandidateSql</c>, not the bare <c>CandidateSql</c> the census's
     /// earlier revision guarded on: <c>PgSettingScrub</c> and <c>QueryStoreBackfill</c> each declare their
     /// own unrelated <c>CandidateSql</c> field, and a guard matching that bare name fails on the real tree
     /// before the census even runs. This name cannot collide with either.</para></summary>
