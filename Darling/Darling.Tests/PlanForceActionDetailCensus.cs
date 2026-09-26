@@ -128,6 +128,28 @@ internal static class PlanForceActionDetailCensus
     }
 
     /// <summary>
+    /// The number of JOINED literals (see <see cref="JoinedStringLiterals"/>) that name the table
+    /// <c>plan_force_actions</c> at all, with or without <c>detail</c> alongside it. This exists because
+    /// <see cref="CountDetailSites"/> only counts co-occurrence: a table name held in its own <c>const</c>,
+    /// a bare <c>SELECT *</c> against the table, or a <c>detail</c> reference that lands in a separate
+    /// interpolation hole from the table name all escape that co-occurrence count, but every one of them
+    /// still joins to a literal that names the table — which is exactly what this method pins.
+    /// </summary>
+    public static int CountTableMentions(string source)
+    {
+        var count = 0;
+        foreach (var literal in JoinedStringLiterals(source))
+        {
+            if (literal.Contains("plan_force_actions", StringComparison.OrdinalIgnoreCase))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// Whole-word occurrences of <paramref name="identifier"/> in <paramref name="source"/> once comments
     /// AND string/char literal bodies are removed. Counts identifier USES in code: a declaration's own
     /// name token counts exactly like a reference to it.

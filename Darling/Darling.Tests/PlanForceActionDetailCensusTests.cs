@@ -222,6 +222,129 @@ public sealed class PlanForceActionDetailCensusTests
     }
 
     /* ---------------------------------------------------------------------------------------------------
+     * (b2) A second, exact per-file census (#4384): every literal naming the table AT ALL, with or
+     * without "detail" alongside it. This is strictly wider than (b)'s co-occurrence count above, so it
+     * also catches a table name held in its own const, a bare SELECT * against the table, or a "detail"
+     * reference landing in a separate interpolation hole from the table name — none of which trip
+     * CountDetailSites. Keyed by repo-relative path (a bare file name is ambiguous once two files anywhere
+     * in the tree happen to share a name).
+     * --------------------------------------------------------------------------------------------------- */
+
+    /// <summary>
+    /// Today's real per-file table-mention count, computed and hard-coded (#4384). Sites, one line each:
+    ///
+    /// <para><b>Darling/PerformanceMonitor.Darling.Service/PgPlanForceActionStore.cs = 4:</b>
+    /// the INSERT (<c>JournalAsync</c>), the last-action-time subquery, and the two SELECTs
+    /// (<c>GetPendingReviewsAsync</c>, <c>GetRecentActionsAsync</c>) — the same three reads (b) counts,
+    /// plus the subquery (b) does not (no "detail" word in that literal).</para>
+    ///
+    /// <para><b>Darling/PerformanceMonitor.Darling.Service/PlanForceActionDetailScrub.cs = 2:</b>
+    /// same two sites as (b)'s <c>ScrubFileName</c> row: the candidate-row filter and the write-back.</para>
+    ///
+    /// <para><b>Darling/PerformanceMonitor.Darling.Service/DarlingRetention.cs = 2:</b>
+    /// the retention table-name literal passed to the generic purge helper, and the
+    /// <c>TimeSlicedDeleteSql("collect.plan_force_actions", "action_time")</c> call — neither mentions
+    /// "detail", so (b) never counts this file at all.</para>
+    ///
+    /// <para><b>Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs = 1:</b>
+    /// the huge migration-probe literal's V107 line, <c>table_name = 'plan_force_actions'</c> — a
+    /// boot-time schema sentinel, not a data read, and never mentions "detail" either.</para>
+    ///
+    /// <para><b>Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs = 2:</b>
+    /// V107's own <c>CREATE TABLE collect.plan_force_actions</c> DDL body (same literal (b) counts, since
+    /// it also declares a <c>detail text</c> column), plus a SEPARATE later migration literal that starts
+    /// with an unrelated <c>ALTER TABLE config.config_monitored_servers</c> but joins onward into more DDL
+    /// naming <c>plan_force_actions</c> without the word "detail" appearing near it — a joined-literal
+    /// artifact of how migrations concatenate adjacent rungs, not a second reader.</para>
+    /// </summary>
+    private static readonly Dictionary<string, int> ExpectedTableMentionCountsByPath = new()
+    {
+        ["Darling/PerformanceMonitor.Darling.Service/PgPlanForceActionStore.cs"] = 4,
+        ["Darling/PerformanceMonitor.Darling.Service/PlanForceActionDetailScrub.cs"] = 2,
+        ["Darling/PerformanceMonitor.Darling.Service/DarlingRetention.cs"] = 2,
+        ["Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.cs"] = 1,
+        ["Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs"] = 2,
+    };
+
+    [Fact]
+    public void RealTree_MatchesExactTableMentionCountsPerFile()
+    {
+        var root = RepoFile.Root;
+        var unexpected = new List<string>();
+        var actualByPath = new Dictionary<string, int>();
+
+        foreach (var file in ProductionSourceFiles())
+        {
+            var text = File.ReadAllText(file).ReplaceLineEndings("\n");
+            var count = PlanForceActionDetailCensus.CountTableMentions(text);
+            var relativePath = Path.GetRelativePath(root, file).Replace('\\', '/');
+
+            if (count == 0)
+            {
+                continue;
+            }
+
+            actualByPath[relativePath] = actualByPath.GetValueOrDefault(relativePath) + count;
+
+            if (!ExpectedTableMentionCountsByPath.ContainsKey(relativePath))
+            {
+                var sites = PlanForceActionDetailCensus.JoinedStringLiterals(text)
+                    .Where(l => l.Contains("plan_force_actions", StringComparison.OrdinalIgnoreCase))
+                    .Select(Truncate);
+                unexpected.Add($"{relativePath}: {string.Join(" | ", sites)}");
+            }
+        }
+
+        Assert.True(
+            unexpected.Count == 0,
+            "unexpected file(s) with a plan_force_actions mention not in the hard-coded map: "
+            + string.Join("; ", unexpected));
+
+        foreach (var (path, expected) in ExpectedTableMentionCountsByPath)
+        {
+            var actual = actualByPath.GetValueOrDefault(path);
+            if (actual != expected)
+            {
+                var text = File.ReadAllText(Path.Combine(root, path)).ReplaceLineEndings("\n");
+                var sites = PlanForceActionDetailCensus.JoinedStringLiterals(text)
+                    .Where(l => l.Contains("plan_force_actions", StringComparison.OrdinalIgnoreCase))
+                    .Select(Truncate);
+                Assert.Fail(
+                    $"{path}: expected {expected} mention(s), found {actual}. Literals: "
+                    + string.Join(" | ", sites));
+            }
+        }
+    }
+
+    [Fact]
+    public void CountTableMentions_ConstDeclarationOfTheTableLiteral_Counts()
+    {
+        const string source = "const string T = \"collect.plan_force_actions\";";
+        Assert.Equal(1, PlanForceActionDetailCensus.CountTableMentions(source));
+    }
+
+    [Fact]
+    public void CountTableMentions_BareSelectStarAgainstTheTable_Counts()
+    {
+        const string source = "\"SELECT * FROM collect.plan_force_actions\"";
+        Assert.Equal(1, PlanForceActionDetailCensus.CountTableMentions(source));
+    }
+
+    [Fact]
+    public void CountTableMentions_DetailInASeparateInterpolationHole_StillCounts()
+    {
+        const string source = "$\"SELECT {\"detail\"} FROM collect.plan_force_actions\"";
+        Assert.Equal(1, PlanForceActionDetailCensus.CountTableMentions(source));
+    }
+
+    [Fact]
+    public void CountTableMentions_CommentOnlyMention_DoesNotCount()
+    {
+        const string source = "// collect.plan_force_actions is the auto force-plan bot's journal";
+        Assert.Equal(0, PlanForceActionDetailCensus.CountTableMentions(source));
+    }
+
+    /* ---------------------------------------------------------------------------------------------------
      * (c) The exemption list names only the store file plus the exempted type's own file.
      * --------------------------------------------------------------------------------------------------- */
 
