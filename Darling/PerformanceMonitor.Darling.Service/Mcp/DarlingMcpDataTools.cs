@@ -2203,7 +2203,7 @@ public sealed class DarlingMcpDataTools
                 /* Same three-way split as the per-server branch, over the whole enabled fleet instead of
                    one server: never-collected (every server newly added, or the service never started)
                    outranks a filter miss, which outranks a genuinely quiet fleet-wide window. */
-                var everCollected = await DarlingDataReader.HasAnyCollectionLogFleetAsync(postgres);
+                var everCollected = await DarlingDataReader.HasAnyCollectionLogFleetAsync(postgres, cancellationToken);
 
                 if (!everCollected)
                 {

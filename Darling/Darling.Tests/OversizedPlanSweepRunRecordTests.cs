@@ -435,7 +435,7 @@ public sealed class OversizedPlanSweepRunRecordTests
         var body = CSharpSourceWalker.BraceBalanced(code, code.IndexOf('{', code.IndexOf("string? serverName)", at)));
 
         var sentinel = body.IndexOf("IsFleetSentinelName(serverName)", StringComparison.Ordinal);
-        var registry = body.IndexOf("ResolveOrErrorAsync(postgres, serverName)", StringComparison.Ordinal);
+        var registry = body.IndexOf("ResolveOrErrorAsync(postgres, serverName, cancellationToken)", StringComparison.Ordinal);
 
         Assert.True(sentinel > 0 && registry > 0, "The sentinel-aware resolve no longer has both arms.");
         Assert.True(sentinel < registry, "The registry fallback can shadow the sentinel with a partial match.");
