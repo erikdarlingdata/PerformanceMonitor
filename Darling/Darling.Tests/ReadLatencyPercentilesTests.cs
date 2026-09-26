@@ -114,7 +114,10 @@ public sealed class ReadLatencyPercentilesTests
         Assert.True(p95.UpperBoundMs > 200, $"p95 upper bound was {p95.UpperBoundMs} ms, expected > 200 ms.");
         Assert.True(p95.UpperBoundMs <= 5_000, $"p95 upper bound was {p95.UpperBoundMs} ms, expected <= 5,000 ms.");
 
-        // p99 (the last 1%) has crossed into the very-slow band: strictly above 5,000 ms.
-        Assert.True(p99.UpperBoundMs > 5_000, $"p99 upper bound was {p99.UpperBoundMs} ms, expected > 5,000 ms.");
+        // p99 (the last 1%) lands EXACTLY on the boundary between the slow and very-slow tiers: with a
+        // fixture that's exactly 90% fast / 9% slow / 1% very-slow, the 990th-of-1,000 value (ceil(0.99*1000))
+        // is the top of the slow tier itself, so the honest upper-bound answer is 5,000 ms, not a made-up
+        // value past it.
+        Assert.Equal(5_000, p99.UpperBoundMs);
     }
 }
