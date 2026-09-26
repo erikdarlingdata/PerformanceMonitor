@@ -79,6 +79,13 @@ public static class DarlingWebEndpoints
     /// would see, since a recording failure is never a request failure.</summary>
     private static ILogger? s_readLatencyLogger;
 
+    /// <summary>#4442 gap 2, test-only: one extra <c>/api/read/*</c> dispatch entry a test can register so a
+    /// real <see cref="PostgresException"/> with SqlState 57014 travels through the SAME dispatch loop
+    /// every other route uses, rather than a hand-called <c>Record</c> standing in for the wiring. <c>internal</c>
+    /// and set ONLY from <c>Darling.Tests</c> (grep proves no production caller ever assigns it); null in every
+    /// production run, so <see cref="BuildReadDispatch"/> adds nothing extra unless a test opted in.</summary>
+    internal static (string Name, ReadToolHandler Handler)? s_testOnlyExtraDispatchEntry;
+
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
     /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
@@ -3066,7 +3073,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     internal static IReadOnlyDictionary<string, ReadToolHandler> BuildReadDispatch(ILogger? logger = null, PostgresConfig? postgresConfig = null)
     {
-        return new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
+        var dispatch = new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
             /* ── analysis reads (take the DarlingAnalysisService) ── */
             ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c), c.RequestAborted),
@@ -3334,6 +3341,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
         };
+
+        /* #4442 gap 2: the test-only extra entry, added ONLY when a test set it -- never in a production
+           run, since s_testOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. */
+        if (s_testOnlyExtraDispatchEntry is { } extra)
+        {
+            dispatch[extra.Name] = extra.Handler;
+        }
+
+        return dispatch;
     }
 
     /* ─────────────────────────── response mapping ─────────────────────────── */

@@ -159,4 +159,46 @@ public sealed class ReadLatencyWebRecordingTests
                                 // own Record call never ran for it -- this fact documents that boundary
                                 // rather than asserting a Timeout sample that route can never produce.
     }
+
+    /// <summary>#4442 gap 2: the pin the classifier's own unit tests cannot give -- a real 57014
+    /// <see cref="PostgresException"/> travelling through the SAME <c>/api/read/*</c> dispatch loop every
+    /// production route uses (<see cref="DarlingWebEndpoints.s_testOnlyExtraDispatchEntry"/>, an ONE-entry
+    /// test seam that <see cref="DarlingWebEndpoints.BuildReadDispatch"/> folds in only when a test set it),
+    /// not a hand-called <c>Record</c> standing in for that wiring. Registered under the SAME name a real
+    /// tool never uses, so it is one more dispatch key, not a different code path.</summary>
+    [Fact]
+    public async Task ADispatchEntryThatThrowsA57014PostgresException_RecordsOneWebSample_WithOutcomeTimeout()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the read-latency web-recording pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        const string routeName = "__test_statement_timeout";
+        DarlingWebEndpoints.s_testOnlyExtraDispatchEntry = (routeName, (_, _, _) =>
+            throw new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014"));
+        try
+        {
+            var readLatency = new ReadLatencyAccumulator();
+            var server = await BuildServer(postgres, readLatency);
+
+            var response = await Send(server, "/api/read/" + routeName);
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+
+            var drained = readLatency.Drain();
+            var sample = Assert.Single(drained, d => d.Surface == ReadSurface.Web && d.Route == routeName);
+            Assert.Equal(ReadOutcome.Timeout, sample.Outcome);
+            Assert.Equal(1, sample.Count);
+        }
+        finally
+        {
+            /* Cleared so a later test's BuildReadDispatch call (this static persists across the whole
+               process, like s_readLatency) never sees a leftover entry from this fact. */
+            DarlingWebEndpoints.s_testOnlyExtraDispatchEntry = null;
+        }
+    }
 }
