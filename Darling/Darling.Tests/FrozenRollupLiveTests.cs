@@ -989,6 +989,152 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
+    /// PIN (#4300): an upgrade with no outage must not re-hold the raw purge while the successor is still
+    /// empty. The legacy is materialized up to a few hours ago and frozen (no ongoing refresh past that
+    /// point). Raw carries a row every hour since, right up to now. The successor has not run its first
+    /// refresh yet, so it is empty. <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> must read
+    /// <c>true</c>: the successor's own first refresh reaches every bucket newer than
+    /// <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>, so none of those recent, unmaterialized hours
+    /// are at risk from the raw purge (which only drops chunks older than 4 days). RED on dev: the fallback
+    /// probes all the way to a bare <c>now()</c>, calling every one of those recent hours an unprobed hole and
+    /// reporting <c>false</c>.
+    /// </summary>
+    [Fact]
+    public async Task Upgrade_NoOutage_EmptySuccessor_RawPurgeStaysCovered()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* now() anchor, truncated to the hour so the seeded hourly rows line up with the buckets the
+               probe walks. The legacy froze a few hours back (H-6..H-4); raw kept collecting every hour
+               since, up to and including the current hour, but the successor never ran its first refresh. */
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+
+            for (var hoursAgo = 0; hoursAgo <= 6; hoursAgo++)
+            {
+                await InsertProcedureStatsAsync(connection, h.AddHours(-hoursAgo), $"noout_proc_{hoursAgo}", 900, 9, 3600, ct);
+            }
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, h.AddHours(-6), h.AddHours(-4), ct);
+
+            /* Successor never refreshed — the field-upgrade shape this pin exercises. */
+            Assert.Equal(0L, await CountRowsAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, ct));
+
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// PIN (#4300): a real outage must still be caught, even inside the new fallback's window. The legacy's
+    /// last bucket is 3 days ago; raw carries rows in the hours between 3 days ago and 1 day ago, but neither
+    /// side ever materialized any of them — a genuine hole, not a healthy empty successor.
+    /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> must stay <c>false</c> on both dev and this
+    /// branch: the fix narrows the fallback's UPPER bound, it does not widen what counts as a hole below it.
+    /// </summary>
+    [Fact]
+    public async Task Upgrade_RealOutageInsideTheFallbackWindow_RawPurgeStaysNotSafe()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+            var legacyLast = h.AddDays(-3);
+
+            /* Legacy materialized through 3 days ago; raw has hourly rows from 3 days ago up through 1 day
+               ago, none of which either side ever refreshed — a genuine outage hole entirely inside the
+               fallback's [now - HourlyRefreshStartOffset, now] window this fix narrows the upper bound to. */
+            for (var hoursAgo = 24; hoursAgo <= 72; hoursAgo += 6)
+            {
+                await InsertProcedureStatsAsync(connection, h.AddHours(-hoursAgo), $"outage_proc_{hoursAgo}", 900, 9, 3600, ct);
+            }
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, legacyLast.AddHours(-1), legacyLast, ct);
+
+            /* Successor never refreshed either — same field-upgrade shape, but this time raw holds a real,
+               unrepaired hole between the legacy's last bucket and the successor's (nonexistent) floor. */
+            Assert.Equal(0L, await CountRowsAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, ct));
+
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
     /// #4301, PIN A (interior hole -&gt; false): the legacy's OWN interior has a gap (hour H2 refreshed by
     /// neither side, despite raw admitting a row there) below its last bucket (H5), and the successor holds a
     /// bucket ABOVE the legacy's last (H6, its own ordinary advance). <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/>

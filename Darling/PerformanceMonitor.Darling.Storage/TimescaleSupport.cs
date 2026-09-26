@@ -6205,7 +6205,9 @@ AND   j.hypertable_name = '{relation}'";
            runs from raw's own filtered floor (below it raw admits no row, so no hole can exist there — a
            gap left by an EARLIER version's purge below that floor is invisible here BY CONSTRUCTION, not
            merely undetected) up to the successor's first bucket strictly ABOVE the legacy's last bucket
-           (or, when the successor holds nothing that high, the current hour) minus one bucket width. That
+           (or, when the successor holds nothing that high, now() minus HourlyRefreshStartOffset — the successor's
+           own first refresh reaches every bucket newer than that, so a bare empty successor is not a hole)
+           minus one bucket width. That
            upper bound is deliberately NOT s.mn: an interior repair materializes successor buckets AT OR
            BELOW l.mx, which moves s.mn itself down, and a probe bounded on s.mn would then miss the seam
            entirely once even one such repair has run. Bounding instead on the successor's first bucket
@@ -6234,7 +6236,7 @@ AND   j.hypertable_name = '{relation}'";
                 + $"                WHEN {LegacySuccessorHoleExistsSql(
                         relation, sourceTimeColumn, successorFilter, legacy, c,
                         fromExpr: $"time_bucket(INTERVAL '1 hour', (SELECT min(src.{sourceTimeColumn}) FROM collect.{relation} AS src{successorFloorWhere}))",
-                        toExpr: $"COALESCE((SELECT min(sa.bucket) FROM collect.{c} AS sa WHERE sa.bucket > l.mx), time_bucket(INTERVAL '1 hour', now()::timestamp)) - INTERVAL '1 hour'",
+                        toExpr: $"COALESCE((SELECT min(sa.bucket) FROM collect.{c} AS sa WHERE sa.bucket > l.mx), time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '{HourlyRefreshStartOffset}')) - INTERVAL '1 hour'",
                         bucketWidthLiteral: "INTERVAL '1 hour'")}{Environment.NewLine}"
                 + $"                THEN NULL{Environment.NewLine}"
                 + $"                ELSE LEAST(l.mn, s.mn){Environment.NewLine}"
