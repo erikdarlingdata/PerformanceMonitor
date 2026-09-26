@@ -380,6 +380,12 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
         (new[] { "Long-Running Query" },
             new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
+        (new[] { "PostgreSQL Replication Slot Retention" },
+            new AuthoredTemplateEntry("authored/pg-replication-slot", PgReplicationSlotTemplateVersion, BuildPgReplicationSlotCells)),
+        (new[] { "PostgreSQL Vacuum Horizon Blocked" },
+            new AuthoredTemplateEntry("authored/pg-xmin-horizon", PgXminHorizonTemplateVersion, BuildPgXminHorizonCells)),
+        (new[] { "PostgreSQL Wraparound Risk" },
+            new AuthoredTemplateEntry("authored/pg-wraparound", PgWraparoundTemplateVersion, BuildPgWraparoundCells)),
         (new[] { "Server Unreachable", "Server Restored" },
             new AuthoredTemplateEntry("authored/server-connect", ServerConnectTemplateVersion, BuildServerConnectCells)),
     };
@@ -428,6 +434,11 @@ internal static partial class AlertNotebookEndpoint
            though neither is a trend read. */
         "get_collection_health",
         "get_running_jobs",
+        /* #4223 (dev merge): none of the three PostgreSQL primary reads declare a 'limit' param (PServer/PHours/
+           PAsOf only), so the same no-forced-limit exemption applies here even though they aren't trend reads. */
+        "get_pg_wraparound_risk",
+        "get_pg_xmin_horizon",
+        "get_pg_replication_slots",
     };
 
     /// <summary>An authored template's read cell (spec §1 binding): <c>server</c>, <c>as_of = window_end</c>
