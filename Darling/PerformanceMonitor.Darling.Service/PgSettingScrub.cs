@@ -172,27 +172,33 @@ ON CONFLICT (server_id, collector_name, state_key)
 DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at";
 
     /// <summary>
-    /// The coarse filter: a superset of every row <see cref="PgSettingRedactor.Redact"/> could possibly
-    /// change, cheap enough to run over a compressed hypertable (ILIKE substring tests, no regex). See the
-    /// type remarks and <c>PgSettingRedactor</c>'s own remarks for the rule this mirrors rule-for-rule:
-    /// a libpq/URI password or an assignment/option naming PASS/SECRET/TOKEN/CREDENTIAL/PWD/KEY anywhere in a
-    /// value; <c>ssl_passphrase_command</c> by name; a dotted extension setting whose name contains one of the
-    /// whole-value markers. Over-inclusive on purpose — the fine-grained decision is
-    /// <see cref="PgSettingRedactor.Redact"/>, run per candidate row below.
-    /// </summary>
-    /// <summary>
     /// The single source of ILIKE terms <see cref="CandidateSql"/> builds its <c>setting</c>/<c>boot_val</c>/
     /// <c>reset_val</c> OR-chain from, and the same list <c>PgSettingScrubCandidateCensusTests</c> checks every
-    /// masked corpus case against, so the two can never drift out of rule-for-rule sync again (#4348). Each
-    /// entry is a plain ILIKE pattern; <c>%</c>/<c>_</c> are literal wildcards, no escaping needed here because
-    /// none of these terms contain a literal <c>%</c> or <c>_</c> character themselves (the percent-encoding
-    /// catch-all is expressed separately in <see cref="CandidateSql"/> with its own ESCAPE clause).
+    /// masked corpus case's VALUE against, so the two can never drift out of rule-for-rule sync again (#4348).
+    /// Each entry is a plain ILIKE pattern; <c>%</c>/<c>_</c> are literal wildcards, no escaping needed here
+    /// because none of these terms contain a literal <c>%</c> or <c>_</c> character themselves (the
+    /// percent-encoding catch-all is expressed separately in <see cref="CandidateSql"/> with its own ESCAPE
+    /// clause). This is only half of the coarse filter — <c>CandidateSql</c> also selects on the setting's
+    /// NAME (<c>ssl_passphrase_command</c> by exact name, or a dotted extension name containing one of
+    /// <see cref="CandidateNameTerms"/>), which the census test checks separately by name.
     /// </summary>
     internal static readonly string[] CandidateLikeTerms =
     [
         "%password%", "%passwd%", "%secret%", "%token%", "%://%@%", "%pass%", "%key%",
         "%credential%", "%pwd%", "%-u %", "%--user%", "%-U %", "%sshpass%", "%sig=%",
         "%signature=%", "%-u%", "%--proxy-user%",
+    ];
+
+    /// <summary>
+    /// The whole-value name markers <see cref="CandidateSql"/> tests against a dotted extension setting's
+    /// NAME (not its value) — mirrors <see cref="PgSettingRedactor"/>'s own whole-value-mask decision for
+    /// extension settings. Kept alongside <see cref="CandidateLikeTerms"/> so the census test can check both
+    /// halves of the coarse filter against the corpus.
+    /// </summary>
+    internal static readonly string[] CandidateNameTerms =
+    [
+        "%password%", "%passwd%", "%passphrase%", "%secret%", "%salt%", "%token%", "%key%",
+        "%credential%", "%pwd%", "%pass%",
     ];
 
     private static readonly string CandidateSql = BuildCandidateSql();
@@ -208,6 +214,14 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
 
         var terms = string.Join("\n    OR ", termClauses);
 
+        var nameClauses = new List<string>();
+        foreach (var term in CandidateNameTerms)
+        {
+            nameClauses.Add($"name ILIKE '{term}'");
+        }
+
+        var nameTerms = string.Join("\n        OR ", nameClauses);
+
         return $@"
 SELECT server_id, collection_time, name, database_name, role_name, setting, boot_val, reset_val
 FROM collect.pg_server_config
@@ -216,9 +230,7 @@ WHERE
     OR setting LIKE '%\%%' ESCAPE '\' OR reset_val LIKE '%\%%' ESCAPE '\' OR boot_val LIKE '%\%%' ESCAPE '\'
     OR (name = 'ssl_passphrase_command' AND (setting <> '' OR boot_val <> '' OR reset_val <> ''))
     OR (name LIKE '%.%' AND (
-        name ILIKE '%password%' OR name ILIKE '%passwd%' OR name ILIKE '%passphrase%'
-        OR name ILIKE '%secret%' OR name ILIKE '%salt%' OR name ILIKE '%token%' OR name ILIKE '%key%'
-        OR name ILIKE '%credential%' OR name ILIKE '%pwd%' OR name ILIKE '%pass%'))";
+        {nameTerms}))";
     }
 
     private const string BatchUpdateSql = @"
