@@ -15,10 +15,10 @@ using static PerformanceMonitor.Darling.Service.ManagedConfMigration;
 namespace Darling.Tests;
 
 /// <summary>
-/// <c>ManagedConfMigration</c> (#4215 A2 "classify" lane): whether a line in an existing
-/// <c>postgresql.conf</c> is the service's own (OURS) or a hand edit, per ruling comment-5836185470's rule
-/// 4 — a line failing EITHER the design's rebuild test or review L3's form test is a hand edit. Pure logic,
-/// no wiring: the rewrite that acts on this classifier's output is a later lane.
+/// <c>ManagedConfMigration</c> (#4215): whether a line in an existing
+/// <c>postgresql.conf</c> is the service's own (OURS) or a hand edit — a line failing EITHER the design's
+/// rebuild test or its form test is a hand edit. Pure logic,
+/// no wiring: the rewrite that acts on this classifier's output is separate.
 /// </summary>
 public sealed class ManagedConfMigrationTests
 {
@@ -74,7 +74,7 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(HandEditReason.RebuildMismatch, mwm.Reason);
     }
 
-    /// <summary>Review L3: a line in a form its builder never writes is a hand edit whatever its value —
+    /// <summary>A line in a form its builder never writes is a hand edit whatever its value —
     /// <c>2GB</c> where the builder always writes <c>2047MB</c>.</summary>
     [Fact]
     public void ClassifyLines_ValueInFormBuilderNeverWrites_IsHandEdit_EvenWhenValueIsPlausible()
@@ -120,8 +120,8 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>An uncovered block version must never classify as Ours — a caller has to treat
-    /// <see cref="ConfLineClassification.Unclassified"/> as a hand edit until coverage is added. #4336 lane
-    /// rehearsal (CI on 9174da32): v8 is now in <see cref="CoveredMarkers"/> (#4336 lanes c2b/c2c covered every
+    /// <see cref="ConfLineClassification.Unclassified"/> as a hand edit until coverage is added. #4336
+    /// (CI on 9174da32): v8 is now in <see cref="CoveredMarkers"/> (#4336 covered every
     /// marker), so a real v8 marker no longer proves this — a SYNTHETIC marker string that
     /// <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> also does not carry (never built by any real
     /// version, past or future) is what actually exercises the "uncovered marker" path
@@ -145,7 +145,7 @@ public sealed class ManagedConfMigrationTests
         Assert.NotEqual(ConfLineClassification.Ours, content.Classification);
     }
 
-    /// <summary>Review M6's "older store": a store built before v14/v15 existed has no line for those keys
+    /// <summary>An "older store": a store built before v14/v15 existed has no line for those keys
     /// at all. There is nothing to misclassify — the classifier runs over whatever is actually in the file
     /// without special-casing the absence.</summary>
     [Fact]
@@ -201,7 +201,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>An untouched v8 block, at the RAM/hypertable inputs its own fingerprint records, is Ours —
-    /// the plain case (#4336 lane c1, ruling comment-5836185470 item 1).</summary>
+    /// the plain case (#4336).</summary>
     [Fact]
     public void ClassifyLines_UntouchedV8Block_AtItsOwnRecordedInputs_IsOurs()
     {
@@ -236,8 +236,7 @@ public sealed class ManagedConfMigrationTests
     /// <summary>A v8 block whose recorded fingerprint (16 GB/30 hypertables) no longer matches the HOST's
     /// current inputs (a resize to 32 GB since) is still Ours: it rebuilds exactly from its OWN recorded
     /// inputs, whatever the host is now. A resize makes the block stale — <see cref="DarlingManagedPostgres.ShouldAppendHardwareSizing"/>'s
-    /// job to notice and replace — not a hand edit for this classifier to punish (#4336 lane c1, ruling
-    /// comment-5836185470 item 1).</summary>
+    /// job to notice and replace — not a hand edit for this classifier to punish (#4336).</summary>
     [Fact]
     public void ClassifyLines_StaleV8Block_AtItsOwnRecordedInputs_IsStillOurs()
     {
@@ -310,7 +309,7 @@ public sealed class ManagedConfMigrationTests
 
     /// <summary>A v12 block whose recorded stamp no longer matches the host's CURRENT disk headroom is
     /// still Ours: the rebuild reads only the stamp's own recorded max/min-WAL outputs and major, never the
-    /// host's live free-disk figure (#4336 lane c1, ruling comment-5836185470 item 1 — same rule as v8).</summary>
+    /// host's live free-disk figure (#4336 — same rule as v8).</summary>
     [Fact]
     public void ClassifyLines_StaleV12Block_AtItsOwnRecordedInputs_IsStillOurs()
     {
@@ -349,7 +348,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>v1's <c>port</c> line rebuilds Ours when the caller supplies the store's configured port
-    /// and it matches (#4336 lane c1, ruling comment-5836185470 item 2).</summary>
+    /// and it matches (#4336).</summary>
     [Fact]
     public void ClassifyLines_V1PortLine_WithMatchingConfiguredPort_IsOurs()
     {
@@ -404,8 +403,7 @@ public sealed class ManagedConfMigrationTests
         Assert.All(wals, l => Assert.Equal(ConfLineClassification.Ours, l.Classification));
     }
 
-    /// <summary>v2's untouched block, at N = hypertableCount + 2 and M = N + 11, is Ours (#4336 lane c2b,
-    /// ruling 2026-09-26 03:19Z).</summary>
+    /// <summary>v2's untouched block, at N = hypertableCount + 2 and M = N + 11, is Ours (#4336).</summary>
     [Fact]
     public void ClassifyLines_UntouchedV2Block_IsOurs()
     {
@@ -460,7 +458,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>v3's untouched block at today's formula (<see cref="DarlingManagedPostgres.DeriveMemorySettings"/>,
-    /// generation <c>e507aa2d1</c>) is Ours (#4336 lane c2b).</summary>
+    /// generation <c>e507aa2d1</c>) is Ours (#4336).</summary>
     [Fact]
     public void ClassifyLines_UntouchedV3Block_AtCurrentGeneration_IsOurs()
     {
@@ -481,7 +479,7 @@ public sealed class ManagedConfMigrationTests
 
     /// <summary>A v3 block written under the PRE-<c>2b67bedeb</c> generation (shared_buffers capped at 8 GB) is
     /// STILL Ours — the union rule: v3 is never rewritten, so an old, unedited block legitimately carries an
-    /// older generation's values (#4336 lane c2b).</summary>
+    /// older generation's values (#4336).</summary>
     [Fact]
     public void ClassifyLines_V3Block_AtPreShrinkGeneration_SharedBuffersEightGb_IsStillOurs()
     {
@@ -498,7 +496,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>A v3 block written under the pre-#1777 <c>maintenance_work_mem</c> generation (no 1536 MB floor)
-    /// is still Ours — same union rule, for the OTHER setting the formula changed (#4336 lane c2b).</summary>
+    /// is still Ours — same union rule, for the OTHER setting the formula changed (#4336).</summary>
     [Fact]
     public void ClassifyLines_V3Block_AtPreFloorGeneration_MaintenanceWorkMem_IsStillOurs()
     {
@@ -514,7 +512,7 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(ConfLineClassification.Ours, maintenance.Classification);
     }
 
-    /// <summary>A value NO v3 generation's formula could ever produce (#4336 lane c2b's off-image example: a
+    /// <summary>A value NO v3 generation's formula could ever produce (#4336's off-image example: a
     /// suspiciously specific hand-tuned figure) is a hand edit — the negative half of the union rule.</summary>
     [Fact]
     public void ClassifyLines_V3OffImageSharedBuffers_IsHandEdit_RebuildMismatch()
@@ -534,7 +532,7 @@ public sealed class ManagedConfMigrationTests
 
     /// <summary>A unit-form variant no v3 builder ever wrote (<c>1GB</c> where every generation writes whole MB,
     /// e.g. <c>1024MB</c>) is a hand edit even though the value itself is in every generation's image — the
-    /// form test, same rule v8/v12/v13 already apply (#4336 lane c2b).</summary>
+    /// form test, same rule v8/v12/v13 already apply (#4336).</summary>
     [Fact]
     public void ClassifyLines_V3UnitFormVariant_IsHandEdit_FormMismatch()
     {
@@ -552,7 +550,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>An untouched v5 block (co-located sizing, introduced <c>2b67bedeb</c>) at today's generation is
-    /// Ours (#4336 lane c2c).</summary>
+    /// Ours (#4336).</summary>
     [Fact]
     public void ClassifyLines_UntouchedV5Block_IsOurs()
     {
@@ -568,7 +566,7 @@ public sealed class ManagedConfMigrationTests
 
     /// <summary>A v5 block cannot legitimately carry a PRE-<c>2b67bedeb</c> value (the 8 GB cap) since no
     /// generation before v5 existed could have written a v5 block at all — unlike v3's union rule, v5's image
-    /// EXCLUDES the older shape (#4336 lane c2c, ruling 2026-09-26 03:19Z).</summary>
+    /// EXCLUDES the older shape (#4336).</summary>
     [Fact]
     public void ClassifyLines_V5Block_AtPreIntroductionSharedBuffersEightGb_IsHandEdit_RebuildMismatch()
     {
@@ -582,7 +580,7 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(HandEditReason.RebuildMismatch, sharedBuffers.Reason);
     }
 
-    /// <summary>A value no v5 generation's formula could ever produce is a hand edit (#4336 lane c2c).</summary>
+    /// <summary>A value no v5 generation's formula could ever produce is a hand edit (#4336).</summary>
     [Fact]
     public void ClassifyLines_V5OffImageSharedBuffers_IsHandEdit_RebuildMismatch()
     {
@@ -597,7 +595,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>A unit-form variant no v5 builder ever wrote is a hand edit even though the value is in-image
-    /// (#4336 lane c2c, same form rule as v3).</summary>
+    /// (#4336, same form rule as v3).</summary>
     [Fact]
     public void ClassifyLines_V5UnitFormVariant_IsHandEdit_FormMismatch()
     {
@@ -612,7 +610,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>An untouched v7 block (compression memory, introduced <c>f4c86ffa3</c> #1777) at today's
-    /// generation (cap 2047 MB) is Ours (#4336 lane c2c).</summary>
+    /// generation (cap 2047 MB) is Ours (#4336).</summary>
     [Fact]
     public void ClassifyLines_UntouchedV7Block_AtCurrentGeneration_IsOurs()
     {
@@ -627,7 +625,7 @@ public sealed class ManagedConfMigrationTests
 
     /// <summary>A v7 block written under the ORIGINAL <c>f4c86ffa3</c> generation (cap 2048 MB, before #3909
     /// dropped it to 2047) is STILL Ours — both generations that ever wrote a v7 block are in-image, unlike v5
-    /// which has only ever had one generation (#4336 lane c2c).</summary>
+    /// which has only ever had one generation (#4336).</summary>
     [Fact]
     public void ClassifyLines_V7Block_AtIntroductionGeneration_Cap2048_IsStillOurs()
     {
@@ -642,7 +640,7 @@ public sealed class ManagedConfMigrationTests
 
     /// <summary>A v7 block cannot legitimately carry a PRE-#1777 value (the old <c>min(ram/20, 1GB)</c> shape,
     /// e.g. 500 MB under the 1536 MB floor) since no generation before v7 existed could have written a v7 block
-    /// — unlike v3's union, v7's image excludes the older shape (#4336 lane c2c, ruling 2026-09-26 03:19Z).</summary>
+    /// — unlike v3's union, v7's image excludes the older shape (#4336).</summary>
     [Fact]
     public void ClassifyLines_V7Block_AtPreIntroductionValue_IsHandEdit_RebuildMismatch()
     {
@@ -657,7 +655,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>A value no v7 generation's formula could ever produce (above either cap) is a hand edit
-    /// (#4336 lane c2c).</summary>
+    /// (#4336).</summary>
     [Fact]
     public void ClassifyLines_V7OffImageMaintenanceWorkMem_IsHandEdit_RebuildMismatch()
     {
@@ -672,7 +670,7 @@ public sealed class ManagedConfMigrationTests
     }
 
     /// <summary>A unit-form variant no v7 builder ever wrote is a hand edit even though the value is in-image
-    /// (#4336 lane c2c, same form rule as v3/v5).</summary>
+    /// (#4336, same form rule as v3/v5).</summary>
     [Fact]
     public void ClassifyLines_V7UnitFormVariant_IsHandEdit_FormMismatch()
     {

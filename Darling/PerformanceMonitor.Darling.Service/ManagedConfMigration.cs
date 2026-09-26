@@ -14,12 +14,12 @@ using System.Linq;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// Line-by-line classifier for an EXISTING <c>postgresql.conf</c> (#4215 A2): decides which lines the
-/// v1-v15 appenders wrote (OURS) and which an operator added by hand (HAND-EDIT), so a later rewrite lane
+/// Line-by-line classifier for an EXISTING <c>postgresql.conf</c> (#4215): decides which lines the
+/// v1-v15 appenders wrote (OURS) and which an operator added by hand (HAND-EDIT), so a later rewrite step
 /// can move hand edits below the new <c>include</c> line and drop everything else. Pure and read-only —
 /// this class never writes a file.
 ///
-/// <para><b>The rule (design §3 "What moves", rule 3; review L3; ruling comment-5836185470).</b> A line
+/// <para><b>The rule (design §3 "What moves", rule 3).</b> A line
 /// inside a marker's block counts as ours only if it survives BOTH tests: it can be rebuilt byte-for-byte
 /// from that block version's own builder (the rebuild test), and it is written in a form that builder
 /// actually produces (the form test). A line that fails either test is a hand edit — misclassifying a hand
@@ -46,12 +46,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// generation reachable from the block's own introduction commit onward — never a generation that predates
 /// the block, since a block cannot be older than its own introduction.</para>
 ///
-/// <para><b>The "older store" case (review M6).</b> A store built before v9-v15 existed has no line for
+/// <para><b>The "older store" case.</b> A store built before v9-v15 existed has no line for
 /// those keys at all, inside a block or outside one — there is nothing to misclassify, and this class does
 /// nothing special for it: the absent blocks simply produce no spans, and any line elsewhere in the file
-/// is classified exactly as it would be on a newer store. The M6 concern that migration rule 2 ("value on
-/// the last service line") gives no answer for a missing key is the REWRITE lane's problem, not this
-/// classifier's: rule 2 only fires for a key this class has already said is OURS.</para>
+/// is classified exactly as it would be on a newer store. The concern that migration rule 2 ("value on
+/// the last service line") gives no answer for a missing key belongs to the rewrite step, not this
+/// classifier: rule 2 only fires for a key this class has already said is OURS.</para>
 /// </summary>
 internal static class ManagedConfMigration
 {
@@ -75,7 +75,7 @@ internal static class ManagedConfMigration
     }
 
     /// <summary>Why a line classified as <see cref="ConfLineClassification.HandEdit"/>, for logging and for
-    /// tests that need to tell the three routes apart (ruling comment-5827624802 §3, review L3).</summary>
+    /// tests that need to tell the three routes apart.</summary>
     internal enum HandEditReason
     {
         /// <summary>Not a hand edit — only set on <see cref="ConfLineClassification.Ours"/> and
@@ -87,7 +87,7 @@ internal static class ManagedConfMigration
         RebuildMismatch,
 
         /// <summary>Inside a covered block, but written in a form that block's builder never emits — for
-        /// example a unit or quoting the builder does not use, whatever the value means (review L3).</summary>
+        /// example a unit or quoting the builder does not use, whatever the value means.</summary>
         FormMismatch,
 
         /// <summary>Not inside any managed block at all: an operator line added between, before, or after
@@ -99,7 +99,7 @@ internal static class ManagedConfMigration
     /// terminator — CRLF and LF files classify identically because every comparison here first strips a
     /// trailing <c>\r</c>, the same convention <see cref="DarlingManagedPostgres.FindHardwareSizingBlockEnd"/>
     /// already uses. <see cref="Note"/> is set only for a v2/v3 line classified <see cref="ConfLineClassification.Ours"/>
-    /// by the formula-image test (#4336 lane c2b) — the caller logs it verbatim so an operator who set the
+    /// by the formula-image test — the caller logs it verbatim so an operator who set the
     /// value by hand, matching the product's own formula by coincidence, is told how to actually override it.</summary>
     internal readonly record struct ClassifiedConfLine(
         int LineNumber,
@@ -111,8 +111,8 @@ internal static class ManagedConfMigration
         string? Note = null);
 
     /// <summary>The markers whose blocks this classifier can rule OURS on, in file-append order. Every
-    /// marker in <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> is covered as of #4336 lane
-    /// c2c (v5, v7).</summary>
+    /// marker in <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> is covered, including
+    /// v5 and v7.</summary>
     internal static readonly string[] CoveredMarkers =
     [
         DarlingManagedPostgres.ConfMarker,
@@ -135,7 +135,7 @@ internal static class ManagedConfMigration
     /// <summary>
     /// Classifies every physical line of <paramref name="conf"/>, with no configured port available — v1's
     /// <c>port = &lt;port&gt;</c> line therefore always classifies <see cref="ConfLineClassification.Unclassified"/>
-    /// (ruling comment-5836185470's item 2: "not guessable, not covered" becomes literally true only when the
+    /// ("not guessable, not covered" becomes literally true only when the
     /// caller has nothing to guess with). Kept so every pre-existing caller and pin keeps compiling.
     /// </summary>
     internal static IReadOnlyList<ClassifiedConfLine> ClassifyLines(string conf)
@@ -146,8 +146,8 @@ internal static class ManagedConfMigration
     /// the same way every time, which is what lets the rebuild test in the pins compare this output against
     /// the exact builder call that (in the field) produced the line under test.
     ///
-    /// <para><paramref name="configuredPort"/> is the store's configured port (#4336 lane c1, ruling
-    /// comment-5836185470 item 2), an input <see cref="DarlingManagedPostgres.BuildConfAppend"/> needs to
+    /// <para><paramref name="configuredPort"/> is the store's configured port (#4336), an input
+    /// <see cref="DarlingManagedPostgres.BuildConfAppend"/> needs to
     /// rebuild v1's <c>port = &lt;port&gt;</c> line — the one line in that block this class cannot re-derive
     /// from the conf text alone. Null (the default; see the overload above) leaves v1 at
     /// <see cref="ConfLineClassification.Unclassified"/>, exactly as before this parameter existed; a wrong
@@ -300,7 +300,7 @@ internal static class ManagedConfMigration
     /// v1's block (<see cref="DarlingManagedPostgres.BuildConfAppend"/>, #1681/#3175): three fixed lines
     /// (<c>shared_preload_libraries = 'timescaledb'</c>, <c>listen_addresses = '127.0.0.1'</c>,
     /// <c>default_toast_compression = lz4</c>) plus <c>port = &lt;port&gt;</c>, the one line that depends on
-    /// an input this class is not always given (#4336 lane c1, ruling comment-5836185470 item 2). With
+    /// an input this class is not always given (#4336). With
     /// <paramref name="configuredPort"/> null, the port line is <see cref="ConfLineClassification.Unclassified"/>
     /// — not guessable, not a hand edit either, since a port line always exists on every managed store and this
     /// class simply was not told what it should say. With a port, the line rebuilds exactly like any other
@@ -333,7 +333,7 @@ internal static class ManagedConfMigration
 
     /// <summary>
     /// v2's block (worker sizing, introduced <c>ce45eed74</c>; today's <see cref="DarlingManagedPostgres.DeriveWorkerSettings"/>
-    /// from <c>714af66f8</c> #2845 is the same formula) (#4336 lane c2b, ruling 2026-09-26 03:19Z): the image is over
+    /// from <c>714af66f8</c> #2845 is the same formula) (#4336): the image is over
     /// hypertable counts, not RAM. <c>timescaledb.max_background_workers = N</c> is ours only if N is an integer
     /// &gt;= 2 (<c>hypertableCount + 2</c> for a non-negative hypertable count) read from the SAME block, and
     /// <c>max_worker_processes = M</c> is ours only if M == N + 11 (<see cref="DarlingManagedPostgres.DeriveWorkerSettings"/>
@@ -378,7 +378,7 @@ internal static class ManagedConfMigration
 
     /// <summary>The value text of the one assignment for <paramref name="key"/> inside <paramref name="span"/>,
     /// read straight from the parsed assignment index rather than re-parsed here — v2's N/M rebuild rule needs
-    /// both keys from the SAME block (#4336 lane c2b).</summary>
+    /// both keys from the SAME block (#4336).</summary>
     private static bool TryFindAssignmentValue(
         (int StartLine, int EndLine, string Marker) span, Dictionary<int, (string Key, string Value)> assignments, string key, out string value)
     {
@@ -397,7 +397,7 @@ internal static class ManagedConfMigration
     }
 
     /// <summary>
-    /// v3's block (memory sizing, introduced <c>ce45eed74</c>) (#4336 lane c2b, ruling 2026-09-26 03:19Z): a v3
+    /// v3's block (memory sizing, introduced <c>ce45eed74</c>) (#4336): a v3
     /// block is never rewritten once appended (<see cref="DarlingManagedPostgres.EnsureConfAppended"/> only
     /// appends it if the marker is absent), so a store provisioned under an OLDER formula generation legitimately
     /// still carries that generation's values. The image is the UNION over every generation's exact rounding and
@@ -449,8 +449,8 @@ internal static class ManagedConfMigration
     }
 
     /// <summary>
-    /// v5's block (co-located sizing override, introduced <c>2b67bedeb</c>) (#4336 lane c2c, ruling
-    /// 2026-09-26 03:19Z): re-states ONLY <c>shared_buffers</c>, and is never rewritten once appended
+    /// v5's block (co-located sizing override, introduced <c>2b67bedeb</c>) (#4336): re-states ONLY
+    /// <c>shared_buffers</c>, and is never rewritten once appended
     /// (<see cref="DarlingManagedPostgres.EnsureConfAppended"/> only appends it if the marker is absent), so
     /// the image is every generation's <c>shared_buffers</c> formula FROM <c>2b67bedeb</c> onward — unlike
     /// v3, this EXCLUDES the pre-<c>2b67bedeb</c> <c>min(ram/4, 8GB)</c> shape, since no generation before
@@ -475,8 +475,8 @@ internal static class ManagedConfMigration
     }
 
     /// <summary>
-    /// v7's block (compression-memory override, introduced <c>f4c86ffa3</c> #1777) (#4336 lane c2c, ruling
-    /// 2026-09-26 03:19Z): re-states ONLY <c>maintenance_work_mem</c>, never rewritten once appended, so the
+    /// v7's block (compression-memory override, introduced <c>f4c86ffa3</c> #1777) (#4336): re-states ONLY
+    /// <c>maintenance_work_mem</c>, never rewritten once appended, so the
     /// image is every generation's <c>maintenance_work_mem</c> formula FROM <c>f4c86ffa3</c> onward — this
     /// EXCLUDES the pre-#1777 <c>min(ram/20, 1GB)</c> shape (no generation before v7 existed could have
     /// written a v7 block), unlike v3's union which does include it. Two generations wrote this block:
@@ -499,7 +499,7 @@ internal static class ManagedConfMigration
         return inImage ? (true, HandEditReason.None) : (false, HandEditReason.RebuildMismatch);
     }
 
-    /// <summary>The RAM domain every v3 generation's formula was defined over (#4336 lane c2b, per the brief's
+    /// <summary>The RAM domain every v3 generation's formula was defined over (#4336, per the brief's
     /// "1 GiB-1 TiB" bound), in whole MB — the enumeration bound for the exact-membership tests below.</summary>
     private const long V3MinRamMb = 1024L;
     private const long V3MaxRamMb = 1024L * 1024L;
@@ -582,9 +582,9 @@ internal static class ManagedConfMigration
     }
 
     /// <summary>
-    /// v8's block (#2845/#4207, lane c1): re-runs <see cref="DarlingManagedPostgres.BuildHardwareSizingConfAppend"/>
-    /// with the RAM and hypertable count the block's OWN fingerprint line records (ruling comment-5836185470's
-    /// item 1) — not the host's current inputs — and compares byte-for-byte. A block untouched since it was
+    /// v8's block (#2845/#4207): re-runs <see cref="DarlingManagedPostgres.BuildHardwareSizingConfAppend"/>
+    /// with the RAM and hypertable count the block's OWN fingerprint line records — not the host's
+    /// current inputs — and compares byte-for-byte. A block untouched since it was
     /// written matches at ITS OWN recorded inputs whatever the host is now (a resize since then does not make
     /// an old, unedited block a hand edit — it makes it stale, which is <see cref="DarlingManagedPostgres.ShouldAppendHardwareSizing"/>'s
     /// job to notice and replace, not this classifier's to punish). No fingerprint line in the span (an
@@ -604,7 +604,7 @@ internal static class ManagedConfMigration
     }
 
     /// <summary>
-    /// v12's block (#3802, lane c1): re-derives from the settings its OWN stamp line records — not from the
+    /// v12's block (#3802): re-derives from the settings its OWN stamp line records — not from the
     /// host's current free-disk figure — the same recorded-input rule as v8. The stamp already carries the
     /// block's derived OUTPUTS (<c>max_wal_size_mb</c>, <c>min_wal_size_mb</c>, <c>pg_major</c>), so the two
     /// setting lines rebuild directly from it without needing the raw free/total disk bytes the comment line
@@ -644,7 +644,7 @@ internal static class ManagedConfMigration
 
     /// <summary>The one line inside <paramref name="span"/> that starts with <paramref name="prefix"/> — v8's
     /// fingerprint or v12's stamp — read straight out of the block's own text rather than re-derived, which
-    /// is the whole point of the recorded-inputs rebuild rule (#4336 lane c1).</summary>
+    /// is the whole point of the recorded-inputs rebuild rule (#4336).</summary>
     private static bool TryFindFingerprintLine(
         (int StartLine, int EndLine, string Marker) span, string[] rawLines, string prefix, out string line)
     {
@@ -763,15 +763,15 @@ internal static class ManagedConfMigration
         };
 
     /// <summary>
-    /// v13's two possible keys (design §3, review L3). <c>pg_stat_statements.track_utility</c> is a fixed
+    /// v13's two possible keys (design §3). <c>pg_stat_statements.track_utility</c> is a fixed
     /// constant, exactly like v14/v15 — <see cref="ClassifyFixedLine"/> covers it. <c>shared_preload_libraries</c>
     /// is a MERGE, not a constant (<see cref="DarlingManagedPostgres.MergePreloadLibraries"/>), so there is no
-    /// single expected line to rebuild against; the test available is the form test alone (review L3's own
-    /// carve-out for exactly this shape of builder): the value must round-trip through
+    /// single expected line to rebuild against; the test available is the form test alone (a carve-out for
+    /// exactly this shape of builder): the value must round-trip through
     /// <see cref="DarlingManagedPostgres.ParsePreloadList"/> then
     /// <see cref="DarlingManagedPostgres.FormatPreloadList"/> unchanged. A hand edit in a form the builder
     /// would never emit — a literal list with no merge, different quoting, a trailing comma — fails that
-    /// round trip and is a hand edit whatever libraries it names, exactly as L3 requires.
+    /// round trip and is a hand edit whatever libraries it names.
     /// </summary>
     private static (bool IsOurs, HandEditReason Reason) ClassifyV13Line(string key, string value, string text)
     {
@@ -934,11 +934,10 @@ internal static class ManagedConfMigration
         => line.EndsWith('\r') ? line[..^1] : line;
 
     /// <summary>One key the rewrite either removed (an Ours line) or kept as an operator override, for the
-    /// change log #4336 lane mig-b writes (design rule 3, ruling comment-5827624802 §3 rule 3; classify
-    /// ruling item 4).</summary>
+    /// change log the rewrite writes (design rule 3).</summary>
     internal readonly record struct RewriteLogEntry(string Message, string? OverriddenKey);
 
-    /// <summary>The rewritten <c>postgresql.conf</c> text plus its change log (#4336 lane mig-b). Never reads
+    /// <summary>The rewritten <c>postgresql.conf</c> text plus its change log (#4336). Never reads
     /// or writes <c>postgresql.auto.conf</c> — that file is the operator's, per design section 4, and this
     /// pure function never touches disk at all.</summary>
     internal readonly record struct RewriteResult(
@@ -951,8 +950,7 @@ internal static class ManagedConfMigration
     internal const string MovedOperatorLinesComment = "# operator settings kept from the previous postgresql.conf (#4215)";
 
     /// <summary>
-    /// Rewrites an existing <c>postgresql.conf</c> (#4336 lane mig-b, corrected under rule 3 by #4336 lane
-    /// rewrite2; design §3 "What moves"):
+    /// Rewrites an existing <c>postgresql.conf</c> (#4336; design §3 "What moves"):
     /// <list type="bullet">
     /// <item>every line <see cref="ClassifyLines"/> marks <see cref="ConfLineClassification.Ours"/> is
     /// removed (rule 2 pairs with this: the product's own copy of a key goes away so the effective value
@@ -971,7 +969,7 @@ internal static class ManagedConfMigration
     /// default — stays exactly where it is, byte for byte;</item>
     /// <item>exactly one <see cref="ManagedConfFile.IncludeLine"/> is written, once, right after the
     /// surviving non-block content and before the moved operator lines (design §2 "where the line goes: the
-    /// end"; if one is already present and un-migrated — review L5, "no opt-out" — it is treated as ordinary
+    /// end"; if one is already present and un-migrated — no opt-out — it is treated as ordinary
     /// text like any other line outside a covered span, and a fresh one is still appended, so re-running
     /// this function is idempotent on a file WITH markers left; rule 6 covers the no-marker case below);</item>
     /// <item>rule 6: if <paramref name="postgresqlConf"/> has no product marker left at all (nothing any
@@ -980,7 +978,7 @@ internal static class ManagedConfMigration
     /// no-op, not just byte-identical output from re-doing the same work.</item>
     /// </list>
     /// <paramref name="managedValues"/> is the managed file's own key/value pairs (<see cref="ManagedConfFile.RenderBody"/>'s
-    /// output, parsed back) — used for the classify ruling's item 4 log line (the derived value the moved
+    /// output, parsed back) — used for the log line (the derived value the moved
     /// operator line overrides) and to decide which non-Ours lines are candidates to move; <see cref="ClassifyLines"/>
     /// alone still decides Ours vs. not.
     /// </summary>

@@ -29,7 +29,7 @@ namespace Darling.Tests;
 /// Live coverage for #4215's stored verdicts (<c>collect.managed_conf_verdicts</c>, V146) and #4251's restart
 /// check — <see cref="DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync"/> and
 /// <see cref="DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync"/>, which no test reached against a
-/// real PostgreSQL before lane A1e (PR #4336's body). Gated on DARLING_TEST_PGRUNTIME exactly like
+/// real PostgreSQL before PR #4336's body. Gated on DARLING_TEST_PGRUNTIME exactly like
 /// <see cref="ManagedConfFileLiveTests"/>, which this file sits beside.
 /// </summary>
 /* #1776 own-store: every test here stands up its own throwaway cluster from the bundled runtime, same as
@@ -76,7 +76,7 @@ public sealed class ManagedConfVerdictsLiveTests
     /// (<c>max_wal_size</c>) reads <see cref="HostSettingVerdict.RejectedValue"/>, never PendingRestart; an
     /// <c>ALTER SYSTEM</c> on an owned key (<c>work_mem</c>) reads <see cref="HostSettingVerdict.OperatorOverride"/>
     /// attributed to <c>postgresql.auto.conf</c>; and the baseline itself proves every managed sizing key and
-    /// <c>timezone</c> read <see cref="HostSettingVerdict.Matches"/> from <c>darling-managed.conf</c> (lane A1f),
+    /// <c>timezone</c> read <see cref="HostSettingVerdict.Matches"/> from <c>darling-managed.conf</c>,
     /// <c>log_timezone</c> stores no row, and the ssl trio is absent on a loopback-only store.
     /// </summary>
     [Fact]
@@ -132,11 +132,11 @@ public sealed class ManagedConfVerdictsLiveTests
             Assert.Equal(HostSettingVerdict.CommandLine, byName["port"].Verdict);
             Assert.Equal(HostSettingVerdict.CommandLine, byName["listen_addresses"].Verdict);
 
-            /* #4215 lane A1f: on a store nobody has touched, every key the service manages reads Matches,
+            /* #4215: on a store nobody has touched, every key the service manages reads Matches,
                attributed to darling-managed.conf. The include of that file is postgresql.conf's LAST line, so
-               the file wins every key it sets; before A1f's fix, AttributeManagedSetting's included-file branch
+               the file wins every key it sets; before this was fixed, AttributeManagedSetting's included-file branch
                called any winning line outside postgresql.conf an operator override, this file included, and
-               all eight sizing keys plus timezone read OperatorOverride here (lane A1e's finding). */
+               all eight sizing keys plus timezone read OperatorOverride here. */
             var sizingKeys = new[]
             {
                 "shared_buffers", "effective_cache_size", "maintenance_work_mem", "work_mem",
@@ -151,7 +151,7 @@ public sealed class ManagedConfVerdictsLiveTests
                 Assert.EndsWith(ManagedConfFile.FileName, row.SourceFile, StringComparison.OrdinalIgnoreCase);
             }
 
-            /* log_timezone (the coordinator's ruling in lane A1f): the service never sets it, so there is no
+            /* log_timezone: the service never sets it, so there is no
                managed value to compare, and initdb's own line would read OperatorOverride on every store. No
                row is stored for it at all. */
             Assert.False(byName.ContainsKey("log_timezone"), "log_timezone is never managed, so no verdict is stored for it.");
@@ -175,7 +175,7 @@ public sealed class ManagedConfVerdictsLiveTests
             Assert.Contains("restart", pendingRow.Detail, StringComparison.OrdinalIgnoreCase);
 
             /* Reload-context invalid value: never PendingRestart, always RejectedValue -- the same guc.c
-               errmsg text covers both causes (#4215 ruling H1 item 4), so context is what tells them apart. */
+               errmsg text covers both causes (#4215), so context is what tells them apart. */
             var body2 = File.ReadAllText(managedConfPath);
             var rewrittenMaxWal = Regex.Replace(body2, @"(?m)^max_wal_size = '.*'$", "max_wal_size = 'not-a-size'");
             Assert.NotEqual(body2, rewrittenMaxWal);
@@ -210,7 +210,7 @@ public sealed class ManagedConfVerdictsLiveTests
         }
     }
 
-    /// <summary>#4215 review H1 item 3: a hand edit of darling-managed.conf is stored with its changed keys as
+    /// <summary>#4215: a hand edit of darling-managed.conf is stored with its changed keys as
     /// <see cref="HostSettingVerdict.OperatorOverride"/>, detail = "hand edit of darling-managed.conf" — the
     /// most specific evidence available wins over the plain managed-block classification.</summary>
     [Fact]
@@ -268,12 +268,12 @@ public sealed class ManagedConfVerdictsLiveTests
         }
     }
 
-    /// <summary>#4215 ruling M1's scope-cut item 1 (lane A1e): the ssl trio is stored as
+    /// <summary>#4215: the ssl trio is stored as
     /// <see cref="HostSettingVerdict.CommandLine"/> only when <c>pg_settings.source</c> actually reads
     /// <c>command line</c> — an exposed store's own condition, reproduced directly here (via
     /// <see cref="DarlingManagedPostgres.BuildServerRuntimeOptions"/>'s exact runtime-override string and a
     /// throwaway cert from <see cref="StoreTlsCertificates"/>) rather than through the full network/firewall
-    /// exposure path, which this lane does not touch.</summary>
+    /// exposure path, which this test does not touch.</summary>
     [Fact]
     public async Task SslTrio_StoredAsCommandLine_WhenTheServerActuallyCarriesIt_Gated()
     {

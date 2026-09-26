@@ -26,7 +26,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// The verdict on one sizing-relevant setting (#4214): what the check verb and the once-per-start log line
 /// both report. Four states in #4214's original scope — see
 /// <see cref="DarlingStoreHostProfile.ClassifyVerdict"/> for how a managed store's file attribution collapses
-/// onto those. #4215 rulings M1 and H1 item 4 add three more, produced only by
+/// onto those. #4215 adds three more, produced only by
 /// <see cref="DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync"/>'s restart-check and
 /// command-line layer, never by <see cref="DarlingStoreHostProfile.ClassifyVerdict"/> itself.
 /// </summary>
@@ -41,7 +41,7 @@ public enum HostSettingVerdict
 
     /// <summary><c>postgresql.auto.conf</c> (an <c>ALTER SYSTEM</c>), or a line placed after every managed
     /// block in <c>postgresql.conf</c>, is what is actually in force. Also the verdict a hand edit of
-    /// <c>darling-managed.conf</c> gets for each key it changed (#4215 review H1 item 3): the file the operator
+    /// <c>darling-managed.conf</c> gets for each key it changed (#4215): the file the operator
     /// touched by hand is exactly as much an override as an <c>ALTER SYSTEM</c>.</summary>
     OperatorOverride,
 
@@ -49,14 +49,14 @@ public enum HostSettingVerdict
     /// the live value against beyond what <c>pg_settings.source</c> itself says.</summary>
     NotManaged,
 
-    /// <summary>#4215 ruling M1: <c>pg_settings.source = 'command line'</c> for this key (<c>port</c>,
+    /// <summary>#4215: <c>pg_settings.source = 'command line'</c> for this key (<c>port</c>,
     /// <c>listen_addresses</c>, always; the SSL trio, only on an exposed store — every one of them rides
     /// <c>pg_ctl</c>'s <c>-o</c> runtime override, never a conf file). Never classified as an override and
     /// never checked for a pending restart: there is no <c>sourcefile</c> to attribute it to, file or otherwise,
     /// and re-deriving would report a false override on every managed store.</summary>
     CommandLine,
 
-    /// <summary>#4215 ruling H1 item 4/#4251: <c>pg_file_settings</c> shows this key's file value as
+    /// <summary>#4215/#4251: <c>pg_file_settings</c> shows this key's file value as
     /// <c>error = 'setting could not be applied'</c>, and <c>pg_settings.context = 'postmaster'</c> for it — the
     /// file (which already passed this start's own <c>postgres -C</c> validation) holds a value that needs a
     /// restart, not a reload, to take effect. Deliberately never read from
@@ -64,7 +64,7 @@ public enum HostSettingVerdict
     /// regardless (#4251).</summary>
     PendingRestart,
 
-    /// <summary>#4215 ruling H1 item 4: the same <c>pg_file_settings</c> error text as
+    /// <summary>#4215: the same <c>pg_file_settings</c> error text as
     /// <see cref="PendingRestart"/>, but for a key whose <c>pg_settings.context</c> is NOT <c>postmaster</c> —
     /// PostgreSQL's <c>guc.c</c> gives one error string for two different causes (restart-only timing vs. an
     /// outright invalid value), and this is the "outright invalid" one: no restart will make it apply.</summary>
@@ -146,7 +146,7 @@ internal readonly record struct HostSettingProfile(
 
 /// <summary>One row of <c>collect.managed_conf_verdicts</c> (#4215 V146): a managed store's owner-computed
 /// verdict for one owned key, stored once per start and read back by every later caller —
-/// <c>--check-settings</c>, the MCP self-store reader, and (#4215's next lane) the stale-setting alert. See
+/// <c>--check-settings</c>, the MCP self-store reader, and (future work under #4215) the stale-setting alert. See
 /// <see cref="DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync"/> for how a row is built and
 /// <see cref="DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync"/> for how it is read back.</summary>
 internal readonly record struct ManagedConfVerdictRow(
@@ -586,7 +586,7 @@ WHERE NOT is_compressed";
         var winningFile = Path.GetFullPath(lastConf.File);
         if (string.Equals(winningFile, Path.GetFullPath(Path.Combine(dataDirectory, ManagedConfFile.FileName)), StringComparison.OrdinalIgnoreCase))
         {
-            /* #4215 (lane A1f): the winning line lives in darling-managed.conf, the service's OWN generated file.
+            /* #4215: the winning line lives in darling-managed.conf, the service's OWN generated file.
                postgresql.conf includes it at its end, after every versioned block, and it carries every managed
                key, so on a fresh store it wins every one of them. The whole file is managed content, with no
                blocks to find, so every line of it is managed. This check must come before the included-file
@@ -645,7 +645,7 @@ WHERE NOT is_compressed";
     }
 
     /// <summary>The string-valued twin of <see cref="ClassifyVerdict"/>, for <see cref="ValueOnlyKeys"/>
-    /// (#4215 ruling M1's scope-cut item 2): <c>timezone</c>/<c>log_timezone</c> are not numeric, so the
+    /// (#4215): <c>timezone</c>/<c>log_timezone</c> are not numeric, so the
     /// match/mismatch is plain value equality against what <see cref="AttributeManagedSetting"/> found in the
     /// file, rather than <see cref="BuildDerivedTargets"/>'s MB/count comparison. The override and unset
     /// branches are identical to <see cref="ClassifyVerdict"/>'s — neither ever looked at a value either.</summary>
@@ -766,8 +766,8 @@ WHERE NOT is_compressed";
     }
 
     /// <summary>Whether <paramref name="verdict"/> should read as <see cref="HostSettingVerdict.OperatorOverride"/>
-    /// instead (#4215, lane A1d, on A1f's note): <c>--check-settings</c>' LIVE read
-    /// (<see cref="GatherSettingProfilesAsync"/>) has no write-result to consult — review H1 item 3's ruling
+    /// instead (#4215): <c>--check-settings</c>' LIVE read
+    /// (<see cref="GatherSettingProfilesAsync"/>) has no write-result to consult — the file-attribution rule
     /// only reaches the STARTUP path, through <see cref="ComputeAndStoreManagedConfVerdictsAsync"/>'s
     /// <c>writeResult.ChangedKeys</c> — so a hand-edited <see cref="ManagedConfFile.FileName"/> was reporting
     /// every changed sizing key as <see cref="HostSettingVerdict.StaleAfterHardwareChange"/>: a hardware-drift
@@ -1093,10 +1093,10 @@ WHERE NOT is_compressed";
 
     private static readonly JsonSerializerOptions ProfileJsonOptions = new() { WriteIndented = true };
 
-    /* ================================ Stored verdicts (#4215 ruling M2, V146) ============================= */
+    /* ================================ Stored verdicts (#4215, V146) ============================= */
 
-    /// <summary>The text <c>--check-settings</c> appends after its existing table (ruling M2: "every reader
-    /// reads the stored rows... including --check-settings, which shows computed_at"). Empty-but-present
+    /// <summary>The text <c>--check-settings</c> appends after its existing table: every reader
+    /// reads the stored rows, including --check-settings, which shows computed_at. Empty-but-present
     /// rather than omitted when nothing is stored yet, so an operator sees WHY rather than a silently shorter
     /// report.</summary>
     internal static string FormatStoredVerdictsText(IReadOnlyList<ManagedConfVerdictRow> rows)
@@ -1140,13 +1140,13 @@ WHERE NOT is_compressed";
         return JsonSerializer.Serialize(payload, ProfileJsonOptions);
     }
 
-    /// <summary>#4215 ruling M1: the keys that ALWAYS ride <c>pg_ctl</c>'s <c>-o</c> runtime override on a
+    /// <summary>#4215: the keys that ALWAYS ride <c>pg_ctl</c>'s <c>-o</c> runtime override on a
     /// managed store — confirmed empirically in <c>ManagedConfFileLiveTests</c> — so <c>pg_settings.source</c>
     /// is <c>command line</c> for both, unconditionally, exposed or not. See <see cref="SslTrioKeys"/> for the
     /// sibling set that only rides it conditionally.</summary>
     internal static readonly string[] CommandLineOnlyKeys = ["port", "listen_addresses"];
 
-    /// <summary>#4215 ruling M1's scope-cut item 1 (lane A1e): <c>ssl</c>, <c>ssl_cert_file</c> and
+    /// <summary>#4215: <c>ssl</c>, <c>ssl_cert_file</c> and
     /// <c>ssl_key_file</c> — <see cref="DarlingManagedPostgres.BuildServerRuntimeOptions"/>'s <c>-o</c> trio,
     /// appended ONLY when a cert is present (an exposed store). Unlike <see cref="CommandLineOnlyKeys"/>, a row
     /// for one of these is stored only when <c>pg_settings.source</c> actually reads <c>command line</c> for it
@@ -1154,10 +1154,10 @@ WHERE NOT is_compressed";
     /// them, same as any other key nothing here touches, rather than a fixed row regardless.</summary>
     internal static readonly string[] SslTrioKeys = ["ssl", "ssl_cert_file", "ssl_key_file"];
 
-    /// <summary>#4215 ruling M1's scope-cut item 2 (lane A1e, lane A1c's finding): <c>timezone</c> (v9's
-    /// managed block, and <see cref="ManagedConfFile.FileName"/>'s own line). Lane A1c saw a NULL
-    /// <c>pg_settings.sourcefile</c> for it in <c>ManagedConfFileLiveTests</c>, alongside
-    /// <c>port</c>/<c>listen_addresses</c>; lane A1f, reading as a superuser on a fresh store, saw
+    /// <summary>#4215: <c>timezone</c> (v9's
+    /// managed block, and <see cref="ManagedConfFile.FileName"/>'s own line) reads a NULL
+    /// <c>pg_settings.sourcefile</c> in <c>ManagedConfFileLiveTests</c>, alongside
+    /// <c>port</c>/<c>listen_addresses</c>; reading as a superuser on a fresh store instead shows
     /// <c>darling-managed.conf</c> and its line. <see cref="AttributeManagedSetting"/> reads the file
     /// directly rather than <c>pg_settings.sourcefile</c>, so it is unaffected either way; only the comparison differs
     /// from the eight sizing keys' (<see cref="ClassifyValueVerdict"/> is a plain string equality, since the
@@ -1166,7 +1166,7 @@ WHERE NOT is_compressed";
     /// other surface here spell it <c>timezone</c> — <c>PgSettingsName</c> carries the exact spelling the live
     /// lookup needs; <c>FileKeyName</c> is what storage, file attribution and display all use instead.
     ///
-    /// <para><c>log_timezone</c> is deliberately NOT here (#4215, lane A1f, per the coordinator's ruling): the
+    /// <para><c>log_timezone</c> is deliberately NOT here (#4215): the
     /// service never sets it (<c>DarlingManagedPostgresTests</c> asserts the "not log_timezone" half), so
     /// there is no managed value to compare against, and initdb's own line, outside every managed block, would
     /// store <see cref="HostSettingVerdict.OperatorOverride"/> on every store, fresh ones included — an
@@ -1198,26 +1198,26 @@ FROM collect.managed_conf_verdicts
 ORDER BY setting_name";
 
     /// <summary>
-    /// #4215 ruling M2: computes every owned key's verdict on the OWNER connection and replaces
-    /// <c>collect.managed_conf_verdicts</c> (V146) with the new set — "replace the previous start's rows" is
-    /// the literal ruling, so this is a DELETE-then-INSERT in one transaction, never an UPSERT. Called once per
+    /// #4215: computes every owned key's verdict on the OWNER connection and replaces
+    /// <c>collect.managed_conf_verdicts</c> (V146) with the new set, so it never leaves a stale row from a
+    /// previous start behind; this is a DELETE-then-INSERT in one transaction, never an UPSERT. Called once per
     /// service-owned managed start from <c>DarlingWorker.LogStoreHostProfileAsync</c>, right after
     /// <see cref="GatherStartupProfileAsync"/> on the SAME connection and the SAME never-fail-startup budget —
-    /// this never throws past the caller's own cancellation, matching ruling 9's "never fail or delay startup"
-    /// for the sibling read this sits beside.
+    /// this never throws past the caller's own cancellation, matching the sibling read's own "never fail or delay startup"
+    /// rule.
     ///
     /// <para><b>The eight sizing keys</b> (<see cref="BuildDerivedTargets"/>) get the full treatment: file
     /// attribution (<see cref="AttributeManagedSetting"/>, unchanged — it never touches
     /// <c>pg_settings.sourcefile</c>, so it already handles <c>timescaledb.*</c> keys' missing sourcefile
     /// correctly), the current-vs-derived classification (<see cref="ClassifyVerdict"/>, unchanged), then the
     /// restart check below. <see cref="CommandLineOnlyKeys"/> get a fixed
-    /// <see cref="HostSettingVerdict.CommandLine"/> row (ruling M1) — never classified, never checked for a
+    /// <see cref="HostSettingVerdict.CommandLine"/> row — never classified, never checked for a
     /// pending restart, because there is no conf file to attribute either to, and
     /// <c>pg_settings.source = 'command line'</c> is checked directly rather than inferred from a NULL
-    /// <c>sourcefile</c> (lane A1c: <c>timezone</c>/<c>log_timezone</c> also read a NULL sourcefile —
+    /// <c>sourcefile</c> (<c>timezone</c>/<c>log_timezone</c> also read a NULL sourcefile —
     /// PostgreSQL's assign hook — despite being file-set, so NULL-sourcefile alone would misclassify them).</para>
     ///
-    /// <para><b>The restart check</b> (ruling H1 item 4, #4251): every <c>pg_file_settings</c> row whose
+    /// <para><b>The restart check</b> (#4251): every <c>pg_file_settings</c> row whose
     /// <c>error = 'setting could not be applied'</c>, for one of the eight sizing keys, OVERRIDES that key's
     /// verdict — <see cref="HostSettingVerdict.PendingRestart"/> when <c>pg_settings.context = 'postmaster'</c>,
     /// <see cref="HostSettingVerdict.RejectedValue"/> otherwise (PostgreSQL's <c>guc.c</c> gives one error text
@@ -1226,7 +1226,7 @@ ORDER BY setting_name";
     /// <c>pg_read_all_settings</c>. Deliberately never <c>pg_settings.pending_restart</c> — on Windows a
     /// connection opened after the reload reads <c>f</c> there regardless of the true state (#4251).</para>
     ///
-    /// <para><b>A hand edit</b> (review H1 item 3) is the LAST step and wins over both of the above: when
+    /// <para><b>A hand edit</b> is the LAST step and wins over both of the above: when
     /// <paramref name="writeResult"/> reports <c>HandEdited</c>, every key in its <c>ChangedKeys</c> is stored
     /// as <see cref="HostSettingVerdict.OperatorOverride"/> with <c>detail = "hand edit of darling-managed.conf"</c>
     /// — overriding a sizing-key row already built above, or added as a new row for a key outside the eight (a
@@ -1309,8 +1309,8 @@ ORDER BY setting_name";
 
             if (string.Equals(pgValue.Source, "command line", StringComparison.Ordinal))
             {
-                /* Defensive only -- none of the eight sizing keys is command-line by default, but ruling M1
-                   says report ANY command-line-sourced key this way, never as an override. */
+                /* Defensive only -- none of the eight sizing keys is command-line by default, but
+                   report ANY command-line-sourced key this way, never as an override. */
                 rows[name] = new ManagedConfVerdictRow(
                     name, currentDisplay, derivedDisplay, "command line", null, null,
                     HostSettingVerdict.CommandLine, null, computedAtUtc, postmasterStartTimeUtc);
@@ -1464,7 +1464,7 @@ ORDER BY setting_name";
         await transaction.CommitAsync(cancellationToken);
     }
 
-    /// <summary>Reads <c>collect.managed_conf_verdicts</c> back (#4215 ruling M2) — the only way a role without
+    /// <summary>Reads <c>collect.managed_conf_verdicts</c> back (#4215) — the only way a role without
     /// file access or <c>pg_file_settings</c> visibility (<c>viewer</c>, <c>mcp</c>, or a <c>--check-settings</c>
     /// run on a store this process did not just start) learns a managed key's file attribution and restart
     /// status. Empty on a store that has never completed a service-owned managed start under this feature.</summary>

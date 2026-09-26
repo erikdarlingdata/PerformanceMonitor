@@ -915,7 +915,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        /* 14th exempt since #4215 (lane A1d): EvaluateStoreSettingsAsync's wrapper catch — the store-settings
+        /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. */
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 14),
     };
@@ -946,7 +946,7 @@ public sealed class AlertReadFailureSurfaceTests
         "SweepStoreSelfMetricsAsync",
         "NotifyPgResolutionAsync",
         "FetchFailedJobsAsync",
-        /* #4215 (lane A1d, re-ruled): the store-settings self-alert's one real store read — the
+        /* #4215: the store-settings self-alert's one real store read — the
            rejected-verdict names behind EvaluateStoreSettingsAsync. COUNTED, not exempt: unlike
            ReadStoreSizeBytesAsync's size figure, a RejectedValue row is one of the three conditions the
            alert fires on, so a swallowed read here leaves that condition unjudgeable, not merely undescribed. */
@@ -959,7 +959,7 @@ public sealed class AlertReadFailureSurfaceTests
         "LoadMuteRulesAsync",
     };
 
-    /* 11th since #4215 (lane A1d, re-ruled): ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
+    /* 11th since #4215: ReadRejectedManagedConfSettingNamesAsync's catch — COUNTED,
        not exempt, because a RejectedValue row is judgeable evidence for the alert, not context for its text. */
     private const int WorkerCountedSites = 11;
     private const int WorkerExemptSites = 10;
@@ -974,7 +974,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// parameter required errored at exactly 13 sites in <c>AlertEngine.cs</c>, 5 in
     /// <c>DarlingSelfAlertEvaluator.cs</c>, 9 in <c>DarlingWorker.cs</c> and 0 in Lite, which is a census
     /// that cannot miss a site or invent one. <c>DarlingWorker.cs</c> carries a tenth since #3354's
-    /// mute-rule reload and an eleventh since #4215 (lane A1d, re-ruled): the store-settings self-alert's
+    /// mute-rule reload and an eleventh since #4215: the store-settings self-alert's
     /// rejected-verdict read, whose swallowed failure leaves one of the alert's three conditions
     /// unjudgeable rather than merely undescribed. And <c>DarlingSelfAlertEvaluator.cs</c> a sixth and a seventh since #3443: the
     /// collector-cost census read, whose swallowed failure decides that a tick routes nothing rather than
@@ -1002,7 +1002,7 @@ public sealed class AlertReadFailureSurfaceTests
     /// own clock and name, counted because both are the evidence a standing self-alert is judged on: a swallowed
     /// read there neither fires nor RESOLVES, so a population of them would leave a real slack file or a real
     /// fsync storm unreported for exactly as long as the store stayed unreadable, which is the quiet-is-not-clean
-    /// shape at the store's own health. And a THIRTEENTH since #4215 (lane A1d, re-ruled): the store-settings
+    /// shape at the store's own health. And a THIRTEENTH since #4215: the store-settings
     /// self-alert's rejected-verdict read, moved from exempt to counted because a RejectedValue row is one of
     /// the three conditions the alert fires on — losing it leaves that condition unjudgeable, and the original
     /// exempt classification would let one failed read write a false "Store Settings Resolved".</para>
@@ -1032,7 +1032,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
         ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the web host's in-memory WebTlsCertificateState publish) as a parameter and performs no store read at all",
-        ["Store settings self-alert failed"] = "handed its evidence as a parameter; the one store read behind it (the rejected-verdict names) is isolated in its own COUNTED catch in DarlingWorker (re-ruled #4215 A1d) rather than exempted",
+        ["Store settings self-alert failed"] = "handed its evidence as a parameter; the one store read behind it (the rejected-verdict names) is isolated in its own COUNTED catch in DarlingWorker (#4215) rather than exempted",
         ["Failed to record resolution"] = "an audit-row write",
         ["Could not record Postgres alert resolution"] = "a history write",
         ["could not read the store volume free space"] = "a local filesystem read, not a store read",
@@ -1223,7 +1223,7 @@ public sealed class AlertReadFailureSurfaceTests
            failure costs no alert, and whose whole point is to leave the store-log census and the
            collector-cost flush below it running on the connection this catch keeps open. 29th since #4012:
            the deadlock re-mask pass, which rewrites only rows still raw and resumes next hour, with every
-           deadlock read normalizing in the meantime. 30th since #4215 (lane A1d): the store-settings
+           deadlock read normalizing in the meantime. 30th since #4215: the store-settings
            self-alert's wrapper catch (its report is a parameter, like every sibling standing condition).
            ReadRejectedManagedConfSettingNamesAsync's catch is NOT here (re-ruled): a RejectedValue row is
            judgeable evidence, so it moved to the counted census above instead. */

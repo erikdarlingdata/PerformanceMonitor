@@ -2222,7 +2222,7 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending
 );";
 
     /// <summary>
-    /// V146 — <c>collect.managed_conf_verdicts</c> (#4215 ruling M2, #4251's managed-store part): the per-key
+    /// V146 — <c>collect.managed_conf_verdicts</c> (#4215, #4251's managed-store part): the per-key
     /// verdict a managed store's OWNER connection computes once at every service-owned start, replacing the
     /// previous start's rows. <c>DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync</c> is the
     /// only writer.
@@ -2234,7 +2234,7 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending
     /// file, line, verdict, detail), and cramming them into one text column would mean every reader,
     /// including a remote MCP caller, parses app-defined JSON instead of running SQL against typed columns.</para>
     ///
-    /// <para><b>Why the owner must compute and store it, not a live per-read check</b> (#4215 ruling M2). The
+    /// <para><b>Why the owner must compute and store it, not a live per-read check</b> (#4215). The
     /// <c>mcp</c> and <c>viewer</c> roles get a NULL <c>pg_settings.sourcefile</c> and cannot read
     /// <c>pg_file_settings</c> at all (superuser/<c>pg_read_all_settings</c> only) — see
     /// <c>DarlingStoreMetricsReader.JobExecutionLoggingSql</c>'s remarks for the same wall on a different GUC.
@@ -2247,7 +2247,7 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending
     /// exactly one owner connection computing exactly one verdict set; there is no <c>server_id</c> to key on
     /// (this is the store's own settings, not a monitored target's), and the write is DELETE-then-INSERT in
     /// one round trip rather than an UPSERT so a key a future version stops owning does not linger as a stale
-    /// row forever — "replace the previous start's rows" is the literal ruling.</para>
+    /// row forever: a future version that stops owning a key must not leave a stale row behind.</para>
     ///
     /// <para><b><c>collect</c>-qualified, plain table, not a hypertable</b> — like <c>collector_state</c> and
     /// <c>analysis_state</c>, not like the catalog-driven collector tables: <c>TimescaleSupport.HypertableTables</c>

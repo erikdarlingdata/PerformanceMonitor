@@ -159,7 +159,7 @@ public sealed class DarlingStoreHostProfileTests
 
     /* ---------------------------- file attribution with darling-managed.conf (#4215) ---------------------------- */
 
-    /// <summary>A fresh managed store's layout since #4215, as lane A1f recorded it from a real one: initdb's
+    /// <summary>A fresh managed store's layout since #4215, recorded from a real one: initdb's
     /// own lines, the versioned blocks, and the include of <c>darling-managed.conf</c> as the LAST line of
     /// <c>postgresql.conf</c>, with the managed file carrying the same keys again. Lines (1-based):
     /// postgresql.conf 1 shared_buffers, 2 timezone, 3 log_timezone, 5 v3 marker, 6 shared_buffers, 8 v9
@@ -193,7 +193,7 @@ public sealed class DarlingStoreHostProfileTests
     [Fact]
     public void AttributeManagedSetting_ALineInDarlingManagedConfIsManaged_NotAnOverride()
     {
-        /* #4215 lane A1f: before the fix, the included-file branch classified EVERY winning line outside
+        /* #4215: before the fix, the included-file branch classified EVERY winning line outside
            postgresql.conf as an operator override -- darling-managed.conf included -- so a store nobody had
            touched stored OperatorOverride for all eight sizing keys and timezone. */
         var dataDirectory = WriteFreshManagedStoreLayout();
@@ -291,7 +291,7 @@ public sealed class DarlingStoreHostProfileTests
         Assert.Equal(HostSettingVerdict.OperatorOverride, verdict);
     }
 
-    /* ------------------------------ ApplyHandEditOverride (#4215, lane A1d, A1f's note) ------------------------------ */
+    /* ------------------------------ ApplyHandEditOverride (#4215) ------------------------------ */
 
     [Fact]
     public void ApplyHandEditOverride_StaleAndHandEdited_BecomesOperatorOverride()

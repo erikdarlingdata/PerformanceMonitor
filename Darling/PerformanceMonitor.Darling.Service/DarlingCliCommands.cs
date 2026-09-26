@@ -498,7 +498,7 @@ public static class DarlingCliCommands
 
         output.WriteLine(json ? DarlingStoreHostProfile.FormatProfileJson(profile) : DarlingStoreHostProfile.FormatProfileText(profile));
 
-        /* #4215 ruling M2: every reader reads the stored rows, --check-settings included, which is why this
+        /* #4215: every reader reads the stored rows, --check-settings included, which is why this
            prints computed_at rather than a fresh recomputation the mcp/viewer roles could never produce
            themselves (no file access, no pg_file_settings visibility). BYO stores never populate the table. */
         if (postgres.Managed)
