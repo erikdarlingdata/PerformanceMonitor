@@ -178,8 +178,10 @@ public sealed class AlertNotebookAuthoredTemplateTests
             metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
 
         var panelCells = cells.OfType<JsonObject>().Where(cell => (string?)cell["type"] == "panel").ToArray();
-        Assert.NotEmpty(panelCells);
 
+        /* #4223: the Server Unreachable/Restored and Agent-job families carry no composed trend/timeline
+           panel at all -- get_collection_health/get_collection_log and get_running_jobs are the whole
+           forensic shape for these, so an empty panel set is a valid family shape, not a gap in this test. */
         foreach (var panel in panelCells)
         {
             var (plan, error) = ComposeSpec.TryParsePanel(panel, declaredVariables: Array.Empty<string>());
@@ -212,9 +214,10 @@ public sealed class AlertNotebookAuthoredTemplateTests
 
     /* ═══════════════════════════ budget ═══════════════════════════ */
 
-    /// <summary>Every read cell has an explicit <c>limit</c>, except <c>get_deadlock_trend</c> (a bucketed
-    /// trend read, exempted by name); no read names <c>audit_config</c>/an <c>analyze_*</c> compute read; every
-    /// composed cell's window is <![CDATA[<=]]> 24h.</summary>
+    /// <summary>Every read cell has an explicit <c>limit</c>, except the reads named in
+    /// <see cref="AlertNotebookEndpoint.s_authoredLimitlessTrendReads"/> (chart/trend reads and reads that
+    /// declare no <c>limit</c> param at all); no read names <c>audit_config</c>/an <c>analyze_*</c> compute
+    /// read; every composed cell's window is <![CDATA[<=]]> 24h.</summary>
     [Theory]
     [MemberData(nameof(AllAuthoredMetrics))]
     public void Budget_ReadCellsHaveLimitsExceptTheTrendRead_ComposedWindowsAreAtMost24h(string metric)
@@ -237,9 +240,9 @@ public sealed class AlertNotebookAuthoredTemplateTests
                     $"authored read cell names a barred read: {read}");
 
                 var parameters = Assert.IsType<JsonObject>(cell["params"]);
-                if (read == "get_deadlock_trend")
+                if (AlertNotebookEndpoint.s_authoredLimitlessTrendReads.Contains(read))
                 {
-                    Assert.False(parameters.ContainsKey("limit"), "get_deadlock_trend must not carry a limit param");
+                    Assert.False(parameters.ContainsKey("limit"), $"{read} must not carry a limit param");
                 }
                 else
                 {
@@ -282,7 +285,23 @@ public sealed class AlertNotebookAuthoredTemplateTests
             else if (type == "read")
             {
                 var parameters = Assert.IsType<JsonObject>(cell["params"]);
-                Assert.Equal(AsOf, (string)parameters["as_of"]!);
+                var read = (string)cell["read"]!;
+
+                /* get_collection_health / get_running_jobs (#4223) declare no as_of param at all (PServer()
+                   only) -- ServerOnlyReadCell correctly omits it rather than sending a param the catalog
+                   would reject as unknown. Every OTHER authored read does declare as_of and must bind it
+                   to window_end. */
+                var descriptor = DarlingWebEndpoints.CatalogDescriptors[read];
+                var declaresAsOf = descriptor.Params.Any(p => p.Name == "as_of");
+
+                if (declaresAsOf)
+                {
+                    Assert.Equal(AsOf, (string)parameters["as_of"]!);
+                }
+                else
+                {
+                    Assert.Null(parameters["as_of"]);
+                }
             }
         }
     }

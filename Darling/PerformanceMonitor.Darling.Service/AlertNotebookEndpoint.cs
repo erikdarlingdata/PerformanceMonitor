@@ -374,6 +374,10 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
         (new[] { "Deadlocks Detected" },
             new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
+        (new[] { "Failed Agent Job", "Long-Running Job", "Agent Not Running" },
+            new AuthoredTemplateEntry("authored/agent-job", AgentJobTemplateVersion, BuildAgentJobCells)),
+        (new[] { "Server Unreachable", "Server Restored" },
+            new AuthoredTemplateEntry("authored/server-connect", ServerConnectTemplateVersion, BuildServerConnectCells)),
     };
 
     /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
@@ -409,10 +413,17 @@ internal static partial class AlertNotebookEndpoint
     /// (<see cref="DarlingWebEndpoints.BuildReadDispatch"/>'s own catalog) — a chart/trend read whose budget
     /// is the bucket count, not a row cap (spec §3's own budget rule: "every read cell has an explicit limit,
     /// OR its trend goes through the chart bucket budget"). <see cref="AuthoredReadCell"/> must not force a
-    /// 'limit' onto one of these, or <c>ValidateReadPanelSpec</c>'s undeclared-param check reds it.</summary>
-    private static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
+    /// 'limit' onto one of these, or <c>ValidateReadPanelSpec</c>'s undeclared-param check reds it. Widened to
+    /// <c>internal</c> (#4223) so the shared budget theory in <c>AlertNotebookAuthoredTemplateTests</c> checks
+    /// membership in this set instead of hardcoding one read name.</summary>
+    internal static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_deadlock_trend",
+        /* #4223: get_collection_health and get_running_jobs declare only PServer() — no hours/limit/as_of at
+           all — so ServerOnlyReadCell never adds a limit param and this exemption applies here too, even
+           though neither is a trend read. */
+        "get_collection_health",
+        "get_running_jobs",
     };
 
     /// <summary>An authored template's read cell (spec §1 binding): <c>server</c>, <c>as_of = window_end</c>
