@@ -259,7 +259,7 @@ public sealed class MaterializationHoleRepairTests
     }
 
     /// <summary>
-    /// #4299 L4: a range this same pass's cap deferred inside the drop window counts as a hole for the
+    /// #4299: a range this same pass's cap deferred inside the drop window counts as a hole for the
     /// trigger's gate, even though a fresh scan alone (with no deferred rows fed in) would not have found it —
     /// the gate's whole point is that "the repair finished" is not the same claim as "nothing is left", and a
     /// deferred range is exactly the gap between those two claims. Pure inputs: this exercises

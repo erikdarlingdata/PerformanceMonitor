@@ -21,7 +21,7 @@ namespace Darling.Tests;
 /// being yes: a purge blocked behind a live reader must give up within the bound and let the NEXT hourly
 /// pass retry it, never hold the target chunk range's lock request open indefinitely.
 ///
-/// <para>Proven on the rig separately from this xUnit pin (lane 4299-1c): a second session holds
+/// <para>Proven on the rig separately from this xUnit pin (#4299): a second session holds
 /// <c>ACCESS EXCLUSIVE</c> on the oldest chunk, then <c>CALL run_job(id)</c> wrapped in
 /// <c>BEGIN; SET LOCAL lock_timeout; ...; COMMIT;</c> raised <c>55P03 lock_not_available</c> at ~5s, not at
 /// PostgreSQL's default `run_job` machinery, and the chunk count was unchanged afterward. This test holds
@@ -109,12 +109,11 @@ VALUES (-1, now() - interval '30 days', 1, 'probe-server', 'ProbeDb', '0xPROBEHA
             stopwatch.Stop();
 
             Assert.False(outcome.Ran, "a run blocked behind a conflicting lock must fail (and be retried the next pass), not succeed");
-            /* #4299 lane 4299-2e: the FIX for a real bug in this same file's original assertion. Before this
-               lane, RunRetentionPurgeJobSql sent BEGIN/SET LOCAL/CALL/COMMIT as ONE NpgsqlCommand, which
+            /* #4299: RunRetentionPurgeJobSql sent BEGIN/SET LOCAL/CALL/COMMIT as ONE NpgsqlCommand, which
                Npgsql's positional-parameter mode always rejects with 42601 "cannot insert multiple commands
-               into a prepared statement" — so this test passed on EVERY run, blocked or not, because it only
-               ever checked the bool and the elapsed time, and 42601 fails fast too. Asserting the SqlState
-               pins the REAL reason: a lock timeout, not a syntax error the CALL never reached. */
+               into a prepared statement" — so this assertion previously passed on EVERY run, blocked or not,
+               because it only checked the bool and the elapsed time, and 42601 fails fast too. Asserting the
+               SqlState pins the REAL reason: a lock timeout, not a syntax error the CALL never reached. */
             Assert.Equal("55P03", outcome.SqlState);
             Assert.True(
                 stopwatch.Elapsed < TimeSpan.FromSeconds(20),
@@ -151,10 +150,10 @@ VALUES (-1, now() - interval '30 days', 1, 'probe-server', 'ProbeDb', '0xPROBEHA
     }
 
     /// <summary>
-    /// #4299 lane 4299-2e: the success path — NEVER shown passing before this lane, since the original
-    /// one-command SQL always raised 42601 and <see cref="TimescaleSupport.RunRetentionPurgeJobAsync"/>
-    /// swallowed it into <c>false</c> every time, blocked or not. Unblocked, with a chunk older than
-    /// <c>drop_after</c>: the CALL must actually run and the chunk must actually drop.
+    /// #4299: the success path. The original one-command SQL always raised 42601 and
+    /// <see cref="TimescaleSupport.RunRetentionPurgeJobAsync"/> swallowed it into <c>false</c> every time,
+    /// blocked or not. Unblocked, with a chunk older than <c>drop_after</c>: the CALL must actually run and
+    /// the chunk must actually drop.
     /// </summary>
     [Fact]
     public async Task RunRetentionPurgeJob_Unblocked_RunsAndDropsTheOldChunk()

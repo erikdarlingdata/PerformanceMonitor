@@ -107,7 +107,7 @@ SELECT
     -1,
     now() - (n || ' hours')::interval,
     1,
-    'lane-4391-r2b',
+    'probe-gate-error',
     'ProbeDb',
     decode(md5('r2b-' || n), 'hex'),
     decode(md5('r2b-h-' || n), 'hex'),

@@ -130,7 +130,7 @@ namespace PerformanceMonitor.Darling.Storage;
 /// trigger cannot fire before the NEXT hourly tick, it can never race this start's own hole scan no matter
 /// which of the two the Startup pass launches first. Two things still bypass the service's own gate, named
 /// here rather than treated as a leak: the FIRST start after the upgrade, which still runs whichever raw job
-/// the OLD scheduled-based code had already armed, once (Low L2 — 3.8.0 parity for that one run only, before
+/// the OLD scheduled-based code had already armed, once (3.8.0 parity for that one run only, before
 /// this store has converged to the never-scheduled shape); and a DBA's own <c>alter_job</c>/<c>run_job</c>
 /// against a raw job, which always executes immediately like any other job in the catalog and is reverted by
 /// the very next hourly converge. Neither exception changes what bounds the ordinary race: a hole is
@@ -646,10 +646,10 @@ ORDER BY c.bucket";
                     }
                 }
 
-                /* #4299 L4: for a raw-sourced target the old time horizon (utcNow - MaterializationHoleScanSpanFor)
+                /* #4299: for a raw-sourced target the old time horizon (utcNow - MaterializationHoleScanSpanFor)
                    assumed raw purges on ITS OWN schedule, so nothing older than that span could still be sitting
-                   in raw unrepaired. Variant (d') stops scheduling the three raw jobs at all — raw now purges
-                   only when the service's own trigger fires — so raw can hold rows far older than that span
+                   in raw unrepaired. The service-triggered purge stops scheduling the three raw jobs at all —
+                   raw now purges only when the service's own trigger fires — so raw can hold rows far older than that span
                    while the trigger has not yet run, and the old clamp would leave a hole below it unscanned
                    indefinitely. For raw-sourced targets the lower bound is instead the RAW FLOOR actually still
                    present (min(SourceTimeColumn) in the source table itself), so the scan reaches every bucket
@@ -828,10 +828,11 @@ ORDER BY c.bucket";
     }
 
     /// <summary>
-    /// #4299 L4: is <paramref name="source"/> one of the three raw tables named in <see cref="RawTierCoverage"/>
+    /// #4299: is <paramref name="source"/> one of the three raw tables named in <see cref="RawTierCoverage"/>
     /// (the ones a service-triggered purge drops, never on a schedule of their own)? Used to pick the hole
     /// scan's lower bound: a raw-sourced target needs the RAW FLOOR itself, not the old time-based horizon (see
-    /// <see cref="RawFloorHorizonAsync"/>'s doc for why the time horizon stopped being safe under variant (d')).
+    /// <see cref="RawFloorHorizonAsync"/>'s doc for why the time horizon stopped being safe under the
+    /// service-triggered purge).
     /// </summary>
     public static bool IsRawSourced(string source)
     {
@@ -847,7 +848,7 @@ ORDER BY c.bucket";
     }
 
     /// <summary>
-    /// #4299 L4: the hole scan's lower bound for a raw-sourced target, aligned down to a bucket boundary — the
+    /// #4299: the hole scan's lower bound for a raw-sourced target, aligned down to a bucket boundary — the
     /// oldest row <paramref name="target"/>'s source table (one of <see cref="RawTierCoverage"/>'s three) still
     /// holds, or <c>utcNow - MaterializationHoleScanSpanFor(target.Source)</c> when the source is empty (nothing
     /// to scan below either bound in that case, so the fallback is harmless).
@@ -855,7 +856,7 @@ ORDER BY c.bucket";
     /// <para><b>Why the time horizon stopped being safe.</b> Before #4299, every raw table purged on its OWN
     /// scheduled retention job, so nothing older than <see cref="MaterializationHoleScanSpanFor"/>'s span could
     /// still be sitting in raw — scanning further back than that was wasted probes over rows already gone.
-    /// Variant (d') UNSCHEDULES the three raw jobs (<c>scheduled</c> stays permanently false) and moves the
+    /// The service-triggered purge UNSCHEDULES the three raw jobs (<c>scheduled</c> stays permanently false) and moves the
     /// purge onto a service-triggered <c>CALL run_job(id)</c>, gated on this very repair having found no hole in
     /// the range about to be dropped (see <see cref="HoleFreeThroughAsync"/>). Between the moment raw ages past
     /// that old span and the moment the trigger's gate is satisfied, raw legitimately holds rows older than the
@@ -877,7 +878,7 @@ ORDER BY c.bucket";
     }
 
     /// <summary>
-    /// #4299 L4: the raw purge's own trigger gate, checked as a FRESH scan of the EXACT range the purge is about
+    /// #4299: the raw purge's own trigger gate, checked as a FRESH scan of the EXACT range the purge is about
     /// to drop — never a reuse of a repair pass's stale tally, because the repair and the trigger can run in
     /// different passes and a range clean when the repair last looked can have grown a hole since (a plain
     /// refresh that regressed, a collection gap the repair pass never saw). Returns <c>true</c> only when EVERY

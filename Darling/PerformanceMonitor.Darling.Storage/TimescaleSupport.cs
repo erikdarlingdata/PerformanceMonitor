@@ -6050,7 +6050,7 @@ AND   j.hypertable_name = '{relation}'
 AND   (j.config->>'drop_after')::interval IS DISTINCT FROM $1::interval";
 
     /// <summary>
-    /// #4299 (d′): the three raw retention jobs (<see cref="RawTierCoverage"/> — <c>query_stats</c>,
+    /// #4299: the three raw retention jobs (<see cref="RawTierCoverage"/> — <c>query_stats</c>,
     /// <c>procedure_stats</c>, <c>query_store_stats</c>) are NEVER scheduled by TimescaleDB's own job
     /// runner. Every evaluation of this statement forces <c>scheduled = false</c> unconditionally (not
     /// converged, not conditional — the job simply never runs on the scheduler's own clock again) and
@@ -6078,7 +6078,7 @@ AND   j.hypertable_name = '{relation}'
 AND   (j.scheduled OR (j.config->>'darling_armed')::boolean IS DISTINCT FROM $1::boolean)";
 
     /// <summary>
-    /// #4299 (d′): the shared read for a raw job's armed verdict under the never-scheduled design — a
+    /// #4299: the shared read for a raw job's armed verdict under the never-scheduled design — a
     /// missing <c>darling_armed</c> key (a store that has not converged yet, or a job TimescaleDB just
     /// created with none of this project's keys) reads as HELD, never armed. <c>COALESCE</c> over a
     /// boolean cast is fail-closed by construction: a key that is present but not parseable as boolean
@@ -6102,7 +6102,7 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
-    /// #4299/#4391 L3b (M1): the trigger's own record of its last decision for <paramref name="relation"/> —
+    /// #4299/#4391: the trigger's own record of its last decision for <paramref name="relation"/> —
     /// the key <c>darling_last_purge</c> under the same job <c>config</c> <see cref="ConvergeRawArmedStateSql"/>
     /// already merges into, so <c>drop_after</c> and <c>darling_armed</c> survive untouched. The record is built
     /// SERVER-SIDE with <c>jsonb_build_object('at', now(), 'outcome', $1, 'sql_state', $2, 'elapsed_ms', $3)</c> —
@@ -6121,7 +6121,7 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
-    /// #4299 L3b (M1): reads <paramref name="relation"/>'s <c>darling_last_purge</c> record back as raw JSON
+    /// #4299: reads <paramref name="relation"/>'s <c>darling_last_purge</c> record back as raw JSON
     /// text (never parsed store-side — the caller owns the shape), parallel to <see cref="RawArmedStateSql"/>.
     /// <c>NULL</c> when the key has never been written (a store that has not run a Periodic pass yet, or one
     /// on a build before this record existed) — the same "absent reads as unmeasured, not innocent" posture
@@ -6136,7 +6136,7 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
-    /// #4299 L3b: writes <paramref name="relation"/>'s <see cref="SetRawLastPurgeOutcomeSql"/> record. Never
+    /// #4299: writes <paramref name="relation"/>'s <see cref="SetRawLastPurgeOutcomeSql"/> record. Never
     /// throws outward — this is a record of what already happened, and a failure to WRITE the record must
     /// not be confused with a failure of the purge decision itself; the caller logs its own outcome either
     /// way. <paramref name="outcome"/> is one of <c>not_covered</c>, <c>epoch_stale</c>, <c>hole</c>,
@@ -6166,7 +6166,7 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// #4299/#4391 L3b: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record back
+    /// #4299/#4391: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record back
     /// as a <see cref="RawLastPurgeRecord"/>, or <c>null</c> when the key has never been written or does not
     /// parse. Kept for the existing callers that only need the record; see
     /// <see cref="ReadRawLastPurgeStateAsync"/> for the tri-state read that tells "never written" apart from
@@ -6180,7 +6180,7 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// #4299/#4391 L3b: which of the three states <paramref name="relation"/>'s last-purge record is in.
+    /// #4299/#4391: which of the three states <paramref name="relation"/>'s last-purge record is in.
     /// <see cref="NeverWritten"/> means no purge-trigger pass has recorded an outcome for it yet (the key is
     /// missing or blank). <see cref="ReadFailed"/> means a value exists but could not be read — the read
     /// threw, or the value failed to parse — which is a DIFFERENT state from never having been written: an
@@ -6194,7 +6194,7 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// #4299/#4391 L3b: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record and
+    /// #4299/#4391: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record and
     /// reports which of <see cref="RawLastPurgeReadState"/> applies, alongside the record when it parsed.
     /// Tolerant of a missing job row or a read failure, same posture as <see cref="ReadJobCadenceReadingsAsync"/>
     /// — never throws outward.
@@ -6251,11 +6251,11 @@ AND   j.hypertable_name = '{relation}'";
     }
 
     /// <summary>
-    /// #4299 L2: the current PostgreSQL start time, as the value the repair epoch stamp and its comparison
+    /// #4299: the current PostgreSQL start time, as the value the repair epoch stamp and its comparison
     /// both read — epoch MICROSECONDS (<c>floor(extract(epoch from pg_postmaster_start_time()) * 1e6)::bigint</c>),
-    /// not the ISO-text alternative the ruling also allowed. A bigint compares exactly with no locale or
+    /// not the ISO-text alternative. A bigint compares exactly with no locale or
     /// timezone formatting step on either side of the round trip, and Postgres's own <c>timestamptz</c> already
-    /// carries microsecond resolution internally, so multiplying by 1e6 and flooring loses nothing the ruling's
+    /// carries microsecond resolution internally, so multiplying by 1e6 and flooring loses nothing the
     /// to-the-microsecond comparison needs. Read BEFORE the repair starts (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>)
     /// so the value stamped afterward is the postmaster start the repair actually ran under, not whatever it is
     /// by the time the repair finishes.
@@ -6264,7 +6264,7 @@ AND   j.hypertable_name = '{relation}'";
         "SELECT floor(extract(epoch FROM pg_postmaster_start_time()) * 1e6)::bigint";
 
     /// <summary>
-    /// #4299 L2: stamps <paramref name="relation"/>'s raw retention job with the repair epoch that just
+    /// #4299: stamps <paramref name="relation"/>'s raw retention job with the repair epoch that just
     /// finished — <c>$1</c> is the <see cref="PostmasterStartEpochMicrosecondsSql"/> value read BEFORE that
     /// repair started. Reached ONLY from a completion that did not throw and was not cancelled
     /// (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>): a repair cut short by shutdown or a failure
@@ -6286,7 +6286,7 @@ AND   j.hypertable_name = '{relation}'
 AND   (j.config->>'darling_repair_epoch')::bigint IS DISTINCT FROM $1::bigint";
 
     /// <summary>
-    /// #4299 L2: the trigger's epoch check — does <paramref name="relation"/>'s raw job carry a
+    /// #4299: the trigger's epoch check — does <paramref name="relation"/>'s raw job carry a
     /// <c>darling_repair_epoch</c> stamp equal, to the microsecond, to the CURRENT <c>pg_postmaster_start_time()</c>?
     /// A missing key, a missing job row, or a stamp from an earlier postmaster start all read <c>false</c>
     /// (fail-closed, the same posture <see cref="RawArmedReadExpression"/> takes for the armed key) —
@@ -6301,14 +6301,14 @@ AND   j.hypertable_name = '{relation}'
 AND   j.config->>'darling_repair_epoch' IS NOT NULL";
 
     /// <summary>
-    /// #4299 (d′): <c>lock_timeout</c> for the service's OWN <c>CALL run_job(id)</c> against a raw retention
-    /// job — the trigger that replaces the scheduler's own run under variant (d′), since the three raw jobs
+    /// #4299: <c>lock_timeout</c> for the service's OWN <c>CALL run_job(id)</c> against a raw retention
+    /// job — the trigger that replaces the scheduler's own run, since the three raw jobs
     /// are never scheduled. Bounded, not generous, ON PURPOSE: <c>run_job</c> executes
     /// <c>policy_retention</c>, whose <c>drop_chunks</c> takes <c>ACCESS EXCLUSIVE</c> on the hypertable and
     /// every chunk it touches, so an un-bounded run queued behind a live reader would hold up every LATER
     /// reader of the table for as long as <see cref="RunRetentionPurgeJobTimeoutSeconds"/> allows — same
     /// hazard <see cref="PgTableTuning.DropLockTimeoutSeconds"/> (a private constant in that file, same
-    /// number) guards for its own guarded <c>DROP INDEX</c>. Proven live on the rig (#4299 lane 4299-1c): a
+    /// number) guards for its own guarded <c>DROP INDEX</c>. Proven live on the rig (#4299): a
     /// blocked run raises <c>55P03 lock_not_available</c> at this bound, not at
     /// <see cref="RunRetentionPurgeJobTimeoutSeconds"/> — the next hourly Periodic pass retries it, so a
     /// timeout here costs one skipped pass, never a stuck one. <c>SET LOCAL</c> so it cannot outlive the
@@ -6327,17 +6327,17 @@ AND   j.config->>'darling_repair_epoch' IS NOT NULL";
     private const int RunRetentionPurgeJobTimeoutSeconds = SetupTimeoutSeconds;
 
     /// <summary>
-    /// #4299 lane 4299-2e: the SET LOCAL statement alone, run as the first statement inside the explicit
+    /// #4299: the SET LOCAL statement alone, run as the first statement inside the explicit
     /// transaction opened by <see cref="RunRetentionPurgeJobAsync"/>, which the following paragraph
     /// explains applies the SAME <see cref="RunRetentionPurgeJobLockTimeout"/> bound the rig proved (#4299
-    /// lane 4299-1c) works INSIDE <c>run_job</c>, not just around it: a blocked run raises
+    /// #4299) works INSIDE <c>run_job</c>, not just around it: a blocked run raises
     /// <c>55P03 lock_not_available</c> at this bound, aborting the transaction before <c>COMMIT</c> (same
     /// shape <see cref="PgTableTuning.GuardedDrop"/> documents for its guarded DROP), so
     /// <see cref="RunRetentionPurgeJobAsync"/> issues a best-effort <c>ROLLBACK</c> on every caught failure
     /// — proven on the rig: the connection recovers and the next statement on it succeeds. Split out from the CALL because
     /// Npgsql's default (extended-protocol, positional-parameter) command mode rejects more than one
     /// statement in a single <see cref="NpgsqlCommand"/> with <c>42601 "cannot insert multiple commands
-    /// into a prepared statement"</c> — proven on the rig (lane 4299-2e): the original one-command
+    /// into a prepared statement"</c> — proven on the rig (#4299): the original one-command
     /// <c>BEGIN; SET LOCAL ...; CALL run_job($1::integer); COMMIT;</c> shape never once executed the CALL;
     /// <see cref="RunRetentionPurgeJobAsync"/> caught the 42601 every time and returned <c>false</c>, so the
     /// service-triggered raw purge could never succeed and the existing lock-timeout pin passed on the wrong
@@ -6347,7 +6347,7 @@ AND   j.config->>'darling_repair_epoch' IS NOT NULL";
     private const string RunRetentionPurgeJobSetLocalSql = "SET LOCAL lock_timeout = '" + RunRetentionPurgeJobLockTimeout + "'";
 
     /// <summary>
-    /// #4299 lane 4299-2e: the CALL alone, as its own <see cref="NpgsqlCommand"/> — see
+    /// #4299: the CALL alone, as its own <see cref="NpgsqlCommand"/> — see
     /// <see cref="RunRetentionPurgeJobSetLocalSql"/> for why this had to split out of the original combined
     /// text. <c>$1</c> is still the job's own <c>job_id</c> (<see cref="RawArmedStateSql"/>'s caller already
     /// has it from the same catalog read).
@@ -6355,7 +6355,7 @@ AND   j.config->>'darling_repair_epoch' IS NOT NULL";
     public const string RunRetentionPurgeJobSql = "CALL run_job($1::integer)";
 
     /// <summary>
-    /// #4299 lane 4299-2e: why the CALL did not fail — <see cref="RunRetentionPurgeJobAsync"/>'s success
+    /// #4299: why the CALL did not fail — <see cref="RunRetentionPurgeJobAsync"/>'s success
     /// case — carries no reason, but the FAILURE case needs one so a pin can tell a lock timeout
     /// (<c>55P03 lock_not_available</c>, the safe, expected, retry-next-pass case this design bounds for)
     /// apart from anything else going wrong, including a regression back to the 42601 the original shape
@@ -6368,13 +6368,13 @@ AND   j.config->>'darling_repair_epoch' IS NOT NULL";
 
     /// <summary>
     /// Runs <see cref="RunRetentionPurgeJobSql"/> for <paramref name="jobId"/> — the service triggering ITS
-    /// OWN raw purge under variant (d′), from the hourly Periodic pass only. A timeout or any other failure
+    /// OWN raw purge, from the hourly Periodic pass only. A timeout or any other failure
     /// is logged at Warning and swallowed, never thrown: the caller's contract is "try once, report the
     /// outcome", and the NEXT hourly pass is the retry — there is no reason to crash a pass over one purge
     /// that can wait an hour. Returns <see cref="RetentionPurgeOutcome.Ran"/> true only when the CALL
     /// completed inside both bounds.
     ///
-    /// <para><b>#4299 lane 4299-2e: an explicit <see cref="NpgsqlTransaction"/>, not the one-command SQL
+    /// <para><b>#4299: an explicit <see cref="NpgsqlTransaction"/>, not the one-command SQL
     /// text this used to be.</b> Proven on the rig with psql, unblocked, before this change: <c>BEGIN; SET
     /// LOCAL lock_timeout = '5s'; CALL run_job(&lt;id&gt;); COMMIT;</c> succeeds and drops the target chunk —
     /// a procedure invoked through <c>CALL</c> whose own internal <c>COMMIT</c> is fine inside an ordinary
@@ -6388,7 +6388,7 @@ AND   j.config->>'darling_repair_epoch' IS NOT NULL";
     /// <see cref="RunRetentionPurgeJobSql"/> with <paramref name="jobId"/> bound, then
     /// <c>CommitAsync</c>.</para>
     ///
-    /// <para>Returns a <see cref="RetentionPurgeOutcome"/> rather than a bare bool (#4299 lane 4299-2e) so
+    /// <para>Returns a <see cref="RetentionPurgeOutcome"/> rather than a bare bool (#4299) so
     /// the caller can log WHY a run did not happen — in particular so a pin can assert the lock-timeout case
     /// really is <c>55P03 lock_not_available</c> and not any other failure, including a regression back to
     /// the 42601 the original one-command shape always raised.</para>
@@ -6597,7 +6597,7 @@ AND   j.hypertable_name = '{relation}'";
     /// an overdue job (the #4299 pre-existing hazard this whole design exists to remove) cannot race the
     /// repair. Two things bypass the service's own gate on purpose and are named here rather than treated as
     /// a leak: the FIRST start after the upgrade still runs whichever raw job the OLD scheduled-based code
-    /// already armed, once (Low L2 — 3.8.0 parity for that one run only), and a DBA's own
+    /// already armed, once (3.8.0 parity for that one run only), and a DBA's own
     /// <c>alter_job</c>/<c>run_job</c> against a raw job's <c>job_id</c> always executes immediately, exactly
     /// as it does for every other job in the catalog — this gate governs the SERVICE's own trigger, not the
     /// database's ordinary admin surface.</para>
@@ -6711,7 +6711,7 @@ AND   j.hypertable_name = '{relation}'";
     };
 
     /// <summary>
-    /// #4299 (d′): the raw relation names, straight off <see cref="RawTierCoverage"/> — the set the sweep
+    /// #4299: the raw relation names, straight off <see cref="RawTierCoverage"/> — the set the sweep
     /// checks a policy against to decide whether it is one of the three raw jobs that never run on
     /// TimescaleDB's own scheduler (<see cref="ConvergeRawArmedStateSql"/>, <see cref="RawArmedReadExpression"/>)
     /// rather than one of the fourteen others that keep today's <c>scheduled</c> semantics unchanged.
@@ -7165,10 +7165,10 @@ AND   j.hypertable_name = '{relation}'";
                     }
                 }
 
-                /* #4299 (d′): the three raw relations never use the scheduled-flag verdict — they converge
+                /* #4299: the three raw relations never use the scheduled-flag verdict — they converge
                    onto scheduled = false unconditionally, every pass, and carry the armed verdict in
                    config->>'darling_armed' instead (ConvergeRawArmedStateSql, RawArmedReadExpression). This is
-                   the hourly converge the ruling names: it reverts a DBA's alter_job(scheduled => true) within
+                   the hourly converge, which runs every pass: it reverts a DBA's alter_job(scheduled => true) within
                    the hour (and at every start), restoring the armed key to whatever this pass measures. */
                 var isRawRelation = RawRelations.Contains(relation);
 
@@ -7306,7 +7306,7 @@ AND   j.hypertable_name = '{relation}'";
                        the failure mode that kept #1877 unfixed rather than fixed badly.
 
                        For a raw relation, though, the SCHEDULED flag still converges to false on this pass
-                       (per the ruling: the hourly converge runs every pass, unconditionally) — it is the
+                       (the hourly converge runs every pass, unconditionally) — it is the
                        darling_armed key alone that an indeterminate probe must not touch, so a DBA's
                        alter_job(scheduled => true) is reverted here too, even on a pass that could not judge
                        coverage. */
@@ -11378,7 +11378,7 @@ WHERE j.proc_name = 'policy_retention'
                 var scheduled = !reader.IsDBNull(2) && reader.GetBoolean(2);
                 var darlingArmed = !reader.IsDBNull(7) && reader.GetBoolean(7);
 
-                /* #4299 L3a: a raw relation's permanent scheduled=false is not a hold — its verdict is
+                /* #4299: a raw relation's permanent scheduled=false is not a hold — its verdict is
                    darling_armed, read through the same expression RawArmedStateSql projects (see the
                    isRawRelation split in EnsureRetentionPoliciesAsync). Every other relation keeps reading
                    j.scheduled unchanged. */
@@ -11403,7 +11403,7 @@ WHERE j.proc_name = 'policy_retention'
     }
 
     /// <summary>
-    /// #4299 L3b (M1): the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/>
+    /// #4299: the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/>
     /// judges — each of the three raw relations' <see cref="RetentionHoldReading.OverHorizonRatio"/> (already
     /// present in <paramref name="holdReadings"/>, the SAME list <see cref="EvaluateRetentionHoldsAsync"/>
     /// reads this pass) paired with that relation's <see cref="ReadRawLastPurgeOutcomeAsync"/> record. Filters
@@ -12181,7 +12181,7 @@ public sealed record RetentionHoldReading(
 }
 
 /// <summary>
-/// #4299 L3b (M1): one raw relation's last recorded purge-trigger outcome, from
+/// #4299: one raw relation's last recorded purge-trigger outcome, from
 /// <see cref="TimescaleSupport.ReadRawLastPurgeOutcomeAsync"/> — the record
 /// <see cref="TimescaleSupport.RecordRawLastPurgeOutcomeAsync"/> writes at every decision point inside
 /// <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>. <see cref="Outcome"/> is one of <c>not_covered</c>,
@@ -12192,7 +12192,7 @@ public sealed record RetentionHoldReading(
 public sealed record RawLastPurgeRecord(DateTime At, string Outcome, string? SqlState, long? ElapsedMs);
 
 /// <summary>
-/// #4299 L3b (M1): one raw relation's over-horizon measure PLUS its last recorded purge-trigger outcome —
+/// #4299: one raw relation's over-horizon measure PLUS its last recorded purge-trigger outcome —
 /// the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/> judges. Built
 /// from a <see cref="RetentionHoldReading"/> for a raw relation (<see cref="TimescaleSupport.RawRelations"/>)
 /// plus that same relation's <see cref="TimescaleSupport.ReadRawLastPurgeOutcomeAsync"/> result, by

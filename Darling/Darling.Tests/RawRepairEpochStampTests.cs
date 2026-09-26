@@ -13,7 +13,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4299 L2: the repair epoch stamp and its comparison, the first half of the Periodic pass's trigger gate.
+/// #4299: the repair epoch stamp and its comparison, the first half of the Periodic pass's trigger gate.
 /// The repair records <c>pg_postmaster_start_time()</c> before it starts, and stamps that value on the three
 /// raw jobs' config as <c>darling_repair_epoch</c> only when it finishes clean. The trigger requires the
 /// stamp to equal the CURRENT postmaster start, to the microsecond.
@@ -28,8 +28,8 @@ public sealed class RawRepairEpochStampTests
 {
     private const string Relation = "query_stats";
 
-    /// <summary>The postmaster-start value is read as epoch MICROSECONDS, not the ISO-text alternative the
-    /// ruling also allowed — a bigint round-trips exactly with no locale or timezone formatting step.</summary>
+    /// <summary>The postmaster-start value is read as epoch MICROSECONDS, not as ISO text — a bigint
+    /// round-trips exactly with no locale or timezone formatting step.</summary>
     [Fact]
     public void PostmasterStartEpochMicrosecondsSql_ReadsPgPostmasterStartTimeAsMicroseconds()
     {
@@ -50,8 +50,8 @@ public sealed class RawRepairEpochStampTests
         Assert.DoesNotContain("config => jsonb_build_object('darling_repair_epoch'", sql, StringComparison.Ordinal);
     }
 
-    /// <summary>Guarded with <c>IS DISTINCT FROM</c> (ruled 2026-09-26 04:26Z) — a repeat stamp of the SAME
-    /// value must write nothing, so a second stamp cannot be told apart from the first by row-count alone.</summary>
+    /// <summary>Guarded with <c>IS DISTINCT FROM</c> — a repeat stamp of the SAME value must write nothing,
+    /// so a second stamp cannot be told apart from the first by row-count alone.</summary>
     [Fact]
     public void RawRepairEpochStampSql_GuardedWithIsDistinctFrom()
     {

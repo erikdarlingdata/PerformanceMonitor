@@ -3406,13 +3406,11 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
-    /// #4299 L3a, the M4 pin: a raw job (<see cref="TimescaleSupport.RawRelations"/>) that looks "stuck" by
-    /// the old test is NEVER re-armed — the same second gate the previous pin proves for a non-raw held
-    /// policy, exercised for one of the three raw relations specifically, because the census (#4299 L3) found
-    /// the gate already structurally skips every <c>!Scheduled</c> row regardless of WHY it is unscheduled.
-    /// GREEN on both the pre-fix and post-fix commit — the redirect this lane makes is to the WARNING text
-    /// (see the next pin), not to this gate, and the brief calls for saying so rather than claiming a RED this
-    /// pin never had.
+    /// #4299: a raw job (<see cref="TimescaleSupport.RawRelations"/>) reported as "stuck" is NEVER re-armed
+    /// — the same second gate proven for a non-raw held policy above, exercised for one of the three raw
+    /// relations specifically, because the gate already structurally skips every <c>!Scheduled</c> row
+    /// regardless of WHY it is unscheduled. GREEN on both the pre-fix and post-fix commit: the fix changes
+    /// the WARNING text (see the next pin), not this gate.
     /// </summary>
     [Fact]
     public async Task PolicyJobs_ARawJobReportedAsStuck_IsNeverRearmed_M4()
@@ -3438,12 +3436,11 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
-    /// #4299 L3a: the not-scheduled WARNING for one of the three raw relations must say it is unscheduled by
-    /// design (#4299), not the #1680/#1877 coverage-gate text a non-raw held policy gets — the census (#4299
-    /// L3, row #12) found the OLD text logs a false "detector defect" WARNING for every raw job, every hourly
-    /// pass, forever. RED before this lane's redirect (the branch on <see
-    /// cref="TimescaleSupport.RawRelations"/> did not exist, so a raw job's WARNING read exactly like the
-    /// non-raw text the pin above asserts — "#1680/#1877", not "#4299").
+    /// #4299: the not-scheduled WARNING for one of the three raw relations must say it is unscheduled by
+    /// design (#4299), not the #1680/#1877 coverage-gate text a non-raw held policy gets — the OLD text logged
+    /// a false "detector defect" WARNING for every raw job, every hourly pass, forever. RED before this fix
+    /// (the branch on <see cref="TimescaleSupport.RawRelations"/> did not exist, so a raw job's WARNING read
+    /// exactly like the non-raw text the pin above asserts — "#1680/#1877", not "#4299").
     /// </summary>
     [Fact]
     public async Task PolicyJobs_ARawJobReportedAsStuck_WarnsUnscheduledByDesign_NotACoverageHold()
@@ -5227,7 +5224,7 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Equal(4.52, new RetentionHoldReading(1, "t", false, "4 days", 19, 1_561_449, 345_600).OverHorizonRatio!.Value, 2);
     }
 
-    /* ---------------- #4299 L3b/L3d Raw Purge Over Horizon ---------------- */
+    /* ---------------- #4299 Raw Purge Over Horizon ---------------- */
 
     private static RawPurgeOverHorizonReading RawReading(
         long jobId = 2001, string hypertable = "query_stats", string dropAfter = "4 days",
@@ -5395,8 +5392,8 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
 
     /* Armed can't suppress this alert by construction: RawPurgeOverHorizonReading carries no armed flag at
        all (unlike RetentionHoldReading) — ApplyRawPurgeOverHorizonAsync fires unconditionally on the
-       recorded outcome, per M1's ruling. There is nothing to pin here; a test that tried to pass an armed
-       flag would not compile, which IS the guarantee. */
+       recorded outcome. There is nothing to pin here; a test that tried to pass an armed flag would not
+       compile, which IS the guarantee. */
 
     [Fact]
     public void RawCadenceReadings_OnlyRanWithElapsed_YieldsOneReadingAtTheTriggerInterval()

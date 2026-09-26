@@ -621,7 +621,7 @@ public sealed class DarlingWorker : BackgroundService
     internal static bool ShouldRunCollection(bool paused) => !paused;
 
     /// <summary>
-    /// #4299 L2 (two-service pin): the relaunch decision, extracted pure so a second service's own read can be
+    /// #4299 (two-service pin): the relaunch decision, extracted pure so a second service's own read can be
     /// asserted directly rather than re-driving the whole Periodic pass. Launch a materialization-hole repair
     /// only when BOTH independent guards agree: this process is not already running one
     /// (<paramref name="repairRunningInThisProcess"/>, the in-memory <c>_materializationHoleRepairRunning</c>
@@ -695,14 +695,14 @@ public sealed class DarlingWorker : BackgroundService
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
 
-    /* #4299 L2: set for the lifetime of a materialization-hole repair this process launched, cleared in a
+    /* #4299: set for the lifetime of a materialization-hole repair this process launched, cleared in a
        finally around the same call — the Periodic pass's "no repair running in this process" half of the
        relaunch gate. A per-process flag, not a store one: the epoch stamp in the store (RawRepairEpochStampSql)
        is what stops a SECOND service from repeating the work; this flag only stops THIS process's own
        Periodic tick from launching a second overlapping repair while one it started is still running. */
     private volatile bool _materializationHoleRepairRunning;
 
-    /* #4299/#4391 L2: the Periodic pass's own launch of RunMaterializationHoleRepairAsync, kept so the same
+    /* #4299/#4391: the Periodic pass's own launch of RunMaterializationHoleRepairAsync, kept so the same
        shutdown drain that awaits the start-path launch (holeRepair, above) also awaits this one — before
        this field existed the Periodic launch was fired with a bare "_ = ", neither drained on shutdown nor
        observed for a fault, so an exception it threw after the calling tick returned would go unlogged. */
@@ -3199,7 +3199,7 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
-        /* #4299/#4391 L2: the Periodic pass's own repair launch, same drain as the start-path one above —
+        /* #4299/#4391: the Periodic pass's own repair launch, same drain as the start-path one above —
            a repair the Periodic tick started is awaited here too, so shutdown does not race it and any fault
            it throws is observed rather than lost with the task. */
         if (_periodicHoleRepair is not null)
@@ -3565,7 +3565,7 @@ public sealed class DarlingWorker : BackgroundService
         {
             await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
 
-            /* #4299 L2: read BEFORE the repair runs, so the value stamped on a clean finish is the postmaster
+            /* #4299: read BEFORE the repair runs, so the value stamped on a clean finish is the postmaster
                start this repair actually ran under, not whatever it is by the time the repair returns. A
                connection-open failure here throws out to the catch below with nothing stamped, which is right —
                a repair that never ran must not make the trigger's epoch check pass. */
@@ -3587,7 +3587,7 @@ public sealed class DarlingWorker : BackgroundService
                 summary.HolesRepaired, summary.BucketsRepaired, summary.HolesForced, summary.HolesDeferred, summary.BucketsDeferred,
                 summary.HolesRemaining, summary.Failures, (long)summary.Elapsed.TotalMilliseconds);
 
-            /* #4299 L2 / #4391: the completion stamp — reached ONLY here, past both the epoch read and the
+            /* #4299/#4391: the completion stamp — reached ONLY here, past both the epoch read and the
                repair call, neither of which threw or was cancelled. Stamped on every one of the three raw jobs
                (TimescaleSupport.RawRelations), one statement per job, each guarded by its own
                IS DISTINCT FROM so a repeat stamp of the same value writes nothing. A stamp failure here is
@@ -6944,16 +6944,16 @@ LIMIT 1";
                 connection, _logger, cancellationToken);
             readClock.Restart();
 
-            /* #4299 L3c: the three raw jobs are excluded from JobCadenceReadSql (they are never
+            /* #4299: the three raw jobs are excluded from JobCadenceReadSql (they are never
                timescaledb_information.jobs.scheduled, so job_stats carries no meaningful last_run_duration
-               for them) and take their #2136 cadence from the SERVICE'S OWN trigger instead — the ruling is
-               "the #2136 cadence check takes its cadence from the trigger". The duration is the last RECORDED
+               for them) and take their #2136 cadence from the SERVICE'S OWN trigger instead — the #2136
+               cadence check takes its cadence from the trigger. The duration is the last RECORDED
                "ran" outcome's elapsed_ms (TimescaleSupport.RawLastPurgeRecord, read below via the SAME
                rawPurgeOverHorizon reading the over-horizon check judges — reused, not re-read); the interval
                is the worker's own hourly Periodic pass, s_compressionCheckInterval, because that pass is the
                ONLY caller of the raw trigger (TriggerRawPurgeCoreAsync). No record, or a last outcome other
                than "ran", yields no cadence reading — being over horizon with no successful run is the #4299
-               L3b alert's job, not cadence's; a raw job that has never run at all must not read as running at
+               alert's job, not cadence's; a raw job that has never run at all must not read as running at
                0% of its interval, and a job whose last recorded attempt failed must not be graded on a
                duration that never happened. Merged into the list #2136's evaluator already iterates rather
                than a parallel check, so the raw jobs share JobOverCadence's exact firing, cooldown and
@@ -6971,7 +6971,7 @@ LIMIT 1";
             await _selfAlerts!.EvaluateRetentionHoldsAsync(retentionHolds, cancellationToken);
             readClock.Restart();
 
-            /* #4299 L3b (M1): the raw purge over-horizon check rides the SAME connection, hourly cadence and
+            /* #4299: the raw purge over-horizon check rides the SAME connection, hourly cadence and
                retentionHolds/rawPurgeOverHorizon readings as the checks just above — reused, not re-read, so
                this tick's raw rows are the exact ones EvaluateRetentionHoldsAsync and the cadence merge just
                judged. */
@@ -7006,7 +7006,7 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// #4299 L3d: the raw-cadence merge pulled out of <see cref="EvaluateCompressionJobHealthAsync"/> as its
+    /// #4299: the raw-cadence merge pulled out of <see cref="EvaluateCompressionJobHealthAsync"/> as its
     /// own seam so it pins directly, without a connection. Behaviour is unchanged from the inline LINQ it
     /// replaces: only readings whose last recorded purge outcome is <c>"ran"</c> AND carries an elapsed-ms
     /// value become a cadence reading, at the given interval.
@@ -7155,14 +7155,14 @@ LIMIT 1";
             await TimescaleSupport.EnsureRetentionPoliciesAsync(
                 connection, _logger, TimescaleSupport.RetentionSweepPass.Periodic, budget.Token);
 
-            /* #4299 L2: the service's own raw-purge trigger — ONLY reached from this Periodic pass, never
+            /* #4299: the service's own raw-purge trigger — ONLY reached from this Periodic pass, never
                from the start path. TriggerRawPurgeAsync re-reads the sweep's own verdict (config->>'darling_armed',
                written moments ago by the call above) rather than threading it through as a parameter, so a
                future caller of EnsureRetentionPoliciesAsync cannot accidentally skip the trigger by forgetting
                to wire a return value through. */
             await TriggerRawPurgeAsync(connection, budget.Token);
 
-            /* #4299/#4391 L2: the relaunch — when the epoch does not match the CURRENT postmaster start on
+            /* #4299/#4391: the relaunch — when the epoch does not match the CURRENT postmaster start on
                ANY raw job and no repair this process launched is still running, start a new one. Checked
                against ALL THREE raw relations, not just the first: RunMaterializationHoleRepairAsync stamps
                all three under the SAME postmaster-start value in the same pass ON A CLEAN COMPLETION, but a
@@ -7227,7 +7227,7 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// #4299 L2: the Periodic pass's trigger for the three raw jobs' own purge — reached only from
+    /// #4299: the Periodic pass's trigger for the three raw jobs' own purge — reached only from
     /// <see cref="ReevaluateRetentionPoliciesAsync"/>, on the SAME connection and immediately after
     /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync(NpgsqlConnection, ILogger, TimescaleSupport.RetentionSweepPass, CancellationToken)"/>
     /// has run this pass's coverage sweep, so the drop decision below is measured fresh, not read back from a
@@ -7253,28 +7253,14 @@ LIMIT 1";
     /// All hold → <see cref="TimescaleSupport.RunRetentionPurgeJobAsync"/>. One INFORMATION line per raw
     /// job either way, naming which gate it failed (or that the run itself failed).
     ///
-    /// <para><b>Deferred ranges: passed as empty, and this is a real gap, not an oversight.</b> The ruling names
-    /// "the latest repair summary if it's reachable" as the source for <paramref name="deferredRanges"/> above
-    /// — but <see cref="TimescaleSupport.RepairMaterializationHolesAsync"/> returns its
-    /// <c>MaterializationHoleRepairSummary</c> tally only, not the per-target deferred RANGES that fed it; those
-    /// live as locals inside that method and are not surfaced to any caller today. Threading them out is a
-    /// change to that method's return shape, out of this lane's scope (L2b covers the epoch and the trigger,
-    /// not a repair-summary reshape). An empty deferred list means a range this pass's OWN repair capped out of
-    /// and deferred reads as hole-FREE here if <see cref="TimescaleSupport.ScanHolesAsync"/>'s bucket-existence
-    /// probe alone would call it clean — which the ruling's own comment on <c>HoleFreeThroughAsync</c> says is
-    /// wrong ("a range this same pass's CapMaterializationHoleRepairs capped out of and left for the next start
-    /// counts as a hole for gating purposes"). In practice this is narrow: a deferred range is capped-out
-    /// history far behind the drop range in every case measured so far (the cap is a bounded window per start,
-    /// the drop range starts at the oldest chunk still in raw), but it is not proven disjoint by construction.
-    /// Named here rather than silently accepted; a follow-up should either widen
-    /// <c>MaterializationHoleRepairSummary</c> to carry the deferred ranges or have the trigger run its own
-    /// fresh <see cref="TimescaleSupport.CapMaterializationHoleRepairs"/>-shaped probe instead of reusing empty.</para>
+    /// <para>Deferred ranges are passed empty: a deferred range is still a hole (the source has rows, the
+    /// materialization has none), so the fresh hole scan below finds it.</para>
     /// </summary>
     private Task TriggerRawPurgeAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
         => TriggerRawPurgeCoreAsync(connection, _logger, cancellationToken);
 
     /// <summary>
-    /// #4299 L2c seam: the exact body of <see cref="TriggerRawPurgeAsync"/>, extracted as an internal static
+    /// #4299: the exact body of <see cref="TriggerRawPurgeAsync"/>, extracted as an internal static
     /// method so <c>Darling.Tests</c> (already reachable via this project's <c>InternalsVisibleTo</c>) can
     /// drive it directly against a live store without standing up a whole <see cref="DarlingWorker"/>. No
     /// behaviour change: the instance method above is now a one-line forward to this, with <c>_logger</c>
@@ -7319,6 +7305,11 @@ LIMIT 1";
                     continue;
                 }
 
+                /* The scan's window is [oldest chunk range_start, now - drop_after], which contains every
+                   whole chunk drop_chunks would actually drop (a chunk drops only once its range_end <=
+                   now - drop_after). Mixing range_start (timestamptz) with now() AT TIME ZONE 'UTC' is safe
+                   here because this connection pins Timezone=UTC, so the subtraction and every later
+                   comparison against it stay in UTC with no local-offset step. */
                 long jobId;
                 DateTime dropFrom;
                 DateTime dropTo;

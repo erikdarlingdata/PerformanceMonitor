@@ -16,7 +16,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4299 L3a: live pins for the two census redirects — <see cref="TimescaleSupport.RetentionHoldReadSql"/>
+/// #4299: live pins for the two census redirects — <see cref="TimescaleSupport.RetentionHoldReadSql"/>
 /// now reads a raw relation's armed verdict off <c>config-&gt;&gt;'darling_armed'</c> instead of the
 /// permanently-false <c>j.scheduled</c>, and <see cref="TimescaleSupport.JobCadenceReadSql"/> excludes the
 /// three raw retention jobs from the #2136 cadence reading (their <c>schedule_interval</c> is a scheduler
@@ -34,7 +34,7 @@ public sealed class RetentionHoldAndCadenceRawRedirectLiveTests
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 L3a redirect pins.");
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 redirect pins.");
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
 
@@ -44,7 +44,7 @@ public sealed class RetentionHoldAndCadenceRawRedirectLiveTests
         await PgMigrations.MigrateAsync(connection, default);
 
         var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
-        Assert.SkipWhen(!enabled, "The live #4299 L3a redirect pins need TimescaleDB.");
+        Assert.SkipWhen(!enabled, "The live #4299 redirect pins need TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
 
         await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
@@ -72,7 +72,7 @@ public sealed class RetentionHoldAndCadenceRawRedirectLiveTests
     /// <summary>
     /// <see cref="TimescaleSupport.RetentionHoldReadSql"/>: a raw relation's job carries
     /// <c>darling_armed = true</c> but its permanent <c>scheduled</c> is <c>false</c> (the never-scheduled
-    /// design). RED before this lane's redirect — the row read <c>Armed = false</c> off <c>j.scheduled</c>
+    /// design). RED before this fix's redirect — the row read <c>Armed = false</c> off <c>j.scheduled</c>
     /// regardless of the real verdict, which is exactly the false-hold the census (row #7) flagged.
     /// </summary>
     [Fact]
@@ -105,7 +105,7 @@ public sealed class RetentionHoldAndCadenceRawRedirectLiveTests
 
     /// <summary>
     /// The regression case the census (row #7) named as the meaningful one: <c>darling_armed = false</c> on a
-    /// raw relation must still read <c>Armed = false</c> (unchanged from before this lane — the true/true
+    /// raw relation must still read <c>Armed = false</c> (unchanged from before this fix — the true/true
     /// fixture above is the one the redirect actually moves). Held here so a future change to the CASE/branch
     /// cannot silently invert the false case while keeping the true case green.
     /// </summary>
@@ -142,7 +142,7 @@ public sealed class RetentionHoldAndCadenceRawRedirectLiveTests
     /// cadence reading, even once it has a <c>Success</c> <c>job_stats</c> row from the service's own
     /// <c>CALL run_job(id)</c> (<see cref="TimescaleSupport.RunRetentionPurgeJobAsync"/>) — the trigger's own
     /// admin call updates <c>job_stats</c> through the same catalog path TimescaleDB's scheduler uses. RED
-    /// before this lane's WHERE exclusion — the raw job's row was present, and its <c>schedule_interval</c>
+    /// before this fix's WHERE exclusion — the raw job's row was present, and its <c>schedule_interval</c>
     /// (a scheduler artifact for a job that never runs on the scheduler's own clock) fed the #2136 alert's
     /// cadence math as if it meant something.
     /// </summary>

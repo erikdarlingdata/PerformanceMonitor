@@ -851,19 +851,19 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>#3297: the Retention Held CRITICAL tier, read live like its warning sibling.</summary>
     private readonly Func<double> _retentionHoldCriticalRatio;
 
-    /* Raw Purge Over Horizon edge state (#4299 L3b, M1). FLEET-level, MULTI-keyed by raw job_id, STANDING
+    /* Raw Purge Over Horizon edge state (#4299). FLEET-level, MULTI-keyed by raw job_id, STANDING
        like Retention Held: active flag + cooldown re-fire while a raw relation stays over-horizon with a
        last-recorded outcome that is not "ran", one "Raw Purge Over Horizon Cleared" resolution when a later
-       record says "ran" and the ratio is back under. A SEPARATE metric from Retention Held (M1's ruling) so
-       its standing state does not collide with the generic hold's — a raw relation reads BOTH conditions'
-       readings from the same RetentionHoldReading.OverHorizonRatio, but this one fires on the RECORDED
-       REASON the trigger did not run, not on the armed flag alone (darling_armed=true does not suppress
-       it — M1: "fires WHATEVER the verdict says"). */
+       record says "ran" and the ratio is back under. A SEPARATE metric from Retention Held so its standing
+       state does not collide with the generic hold's — a raw relation reads BOTH conditions' readings from
+       the same RetentionHoldReading.OverHorizonRatio, but this one fires on the RECORDED REASON the trigger
+       did not run, not on the armed flag alone (darling_armed=true does not suppress it: it fires WHATEVER
+       the recorded verdict says). */
     private readonly ConcurrentDictionary<string, bool> _activeRawPurgeOverHorizon = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastRawPurgeOverHorizonAlert = new(StringComparer.Ordinal);
 
-    /// <summary>The #4299 L3b alert metric name — deliberately distinct from <see cref="RetentionHoldMetric"/>
-    /// (M1's ruling) so the two conditions' standing state and cooldowns never collide.</summary>
+    /// <summary>The #4299 alert metric name — deliberately distinct from <see cref="RetentionHoldMetric"/>
+    /// so the two conditions' standing state and cooldowns never collide.</summary>
     internal const string RawPurgeOverHorizonMetric = "Raw Purge Over Horizon";
 
     /// <summary>The resolution title <see cref="RawPurgeOverHorizonMetric"/> clears with.</summary>
@@ -5521,7 +5521,7 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
-    /// The isolating entry point for the #4299 L3b (M1) Raw Purge Over Horizon check — rides the SAME hourly
+    /// The isolating entry point for the #4299 Raw Purge Over Horizon check — rides the SAME hourly
     /// pass that already reads <see cref="RetentionHoldReading"/>s (<see cref="EvaluateRetentionHoldsAsync"/>'s
     /// sibling). Same failure isolation.
     /// </summary>
@@ -5545,12 +5545,12 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
-    /// Applies the fleet-level Raw Purge Over Horizon condition (#4299 L3b, M1): for a raw relation whose
+    /// Applies the fleet-level Raw Purge Over Horizon condition (#4299): for a raw relation whose
     /// <see cref="RetentionHoldReading.OverHorizonRatio"/> breaches the SAME warn/critical ratio pair
     /// <see cref="ApplyRetentionHoldsAsync"/> judges non-raw policies on, this fires whenever the LAST
     /// RECORDED trigger outcome (<see cref="TimescaleSupport.RecordRawLastPurgeOutcomeAsync"/>) is not
-    /// <c>"ran"</c> — unconditionally on the recorded reason, WHATEVER <c>darling_armed</c> says (M1's
-    /// ruling: "fires whatever the verdict says"), because <c>darling_armed=true</c> only means the coverage
+    /// <c>"ran"</c> — unconditionally on the recorded reason, WHATEVER <c>darling_armed</c> says, because
+    /// <c>darling_armed=true</c> only means the coverage
     /// gate would allow a purge — it says nothing about whether the SEPARATE hourly trigger actually ran one
     /// (a hole, a stale epoch or a run failure can all block it even while armed). This is the gap the
     /// existing Retention Held alert (#2813) cannot close: that check reads only the armed flag, so a raw
@@ -5560,7 +5560,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// build shipped) reads as unmeasured and is skipped without touching standing state — the same
     /// agent-status discipline <see cref="ApplyRetentionHoldsAsync"/> follows for an unreadable span.</para>
     ///
-    /// <para>The alert text names the recorded outcome in plain words, per M1: "repair pending"
+    /// <para>The alert text names the recorded outcome in plain words: "repair pending"
     /// (<c>epoch_stale</c>), "a hole in the range" (<c>hole</c>), "not covered" (<c>not_covered</c>), or
     /// "the purge failed" with the SqlState (<c>run_failed</c>). A STANDING condition, same idiom as Retention
     /// Held: fire once on breach, re-fire only on cooldown while it persists, one clearing resolution when a
@@ -5641,8 +5641,8 @@ internal sealed class DarlingSelfAlertEvaluator
         }
     }
 
-    /// <summary>Plain-words rendering of a <see cref="RawLastPurgeRecord"/>'s outcome, per M1's ruling that
-    /// the alert names the reason: repair pending, a hole, not covered, or a failed run (with SqlState).
+    /// <summary>Plain-words rendering of a <see cref="RawLastPurgeRecord"/>'s outcome: the alert names the
+    /// reason, one of repair pending, a hole, not covered, or a failed run (with SqlState).
     /// <c>null</c> (never recorded yet) reads as "not covered" — the trigger has not recorded a run for this
     /// relation at all, which is the same unmeasured-as-not-covered posture the coverage gate itself takes.</summary>
     private static string RawPurgeOutcomeReasonText(RawLastPurgeRecord? lastPurge) => lastPurge?.Outcome switch
@@ -6069,13 +6069,13 @@ internal sealed class DarlingSelfAlertEvaluator
                job instead. */
             if (!job.Scheduled)
             {
-                /* #4299 L3a: one of the three raw retention jobs (TimescaleSupport.RawRelations) is
+                /* #4299: one of the three raw retention jobs (TimescaleSupport.RawRelations) is
                    permanently unscheduled by DESIGN, not by the #1680/#1877 coverage gate — its verdict
                    lives in config->>'darling_armed', not in j.scheduled, so reaching here for one of them
                    every hourly pass is expected, not a detector defect. */
                 if (!string.IsNullOrEmpty(job.HypertableName) && TimescaleSupport.RawRelations.Contains(job.HypertableName))
                 {
-                    _logger?.LogWarning(
+                    _logger?.LogDebug(
                         "TimescaleDB {Label} was reported as stuck while NOT scheduled — this is one of the three raw retention jobs, permanently unscheduled by design (#4299), not a #1680/#1877 coverage hold. Nothing re-armed, nothing alerted; no action needed",
                         label);
                     continue;

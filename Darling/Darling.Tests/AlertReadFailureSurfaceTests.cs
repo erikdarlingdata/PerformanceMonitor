@@ -917,7 +917,7 @@ public sealed class AlertReadFailureSurfaceTests
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
         /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
            self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
-           since #4299 L3d: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
+           since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
            self-alert's evidence (the readings) is a parameter too, with the read counted in
            DarlingWorker. */
         (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 15),
@@ -1230,7 +1230,7 @@ public sealed class AlertReadFailureSurfaceTests
            deadlock read normalizing in the meantime. 30th since #4215: the store-settings
            self-alert's wrapper catch (its report is a parameter, like every sibling standing condition).
            ReadRejectedManagedConfSettingNamesAsync's catch is NOT here: a RejectedValue row is
-           judgeable evidence, so it moved to the counted census above instead. 31st since #4299 L3d: the
+           judgeable evidence, so it moved to the counted census above instead. 31st since #4299: the
            Raw Purge Over Horizon self-alert's catch, whose evidence (the readings) is handed in as a
            parameter, with the read counted in DarlingWorker. */
         Assert.Equal(31, totalExempt);

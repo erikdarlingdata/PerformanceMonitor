@@ -162,7 +162,7 @@ WHERE j.proc_name = 'policy_retention' AND j.hypertable_schema = 'collect' AND j
             Assert.True(start.InPlace == TimescaleSupport.RetentionPolicies.Count, "the start pass must apply every policy");
 
             /* Starting from an ALREADY-CONVERGED job (the start pass's own output), not a hand-built shape:
-               this proves the ruling's "runs every pass" claim, not merely that creation converges once. */
+               this proves the converge runs every pass, not merely that creation converges once. */
             Assert.False(await ScheduledAsync(connection, Raw));
             Assert.NotNull(await ArmedKeyAsync(connection, Raw));
 
@@ -262,7 +262,7 @@ WHERE j.proc_name = 'policy_retention' AND j.hypertable_schema = 'collect' AND j
 INSERT INTO collect.query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
      delta_worker_time, delta_elapsed_time, delta_execution_count)
-VALUES (1, $1, 9138, 'lane-4299-1b2-covered', 'TestDb', decode(md5('1b2cov'), 'hex'), decode(md5('h'), 'hex'), 1, 1, 1)", connection) { CommandTimeout = PolicyReadTimeoutSeconds })
+VALUES (1, $1, 9138, 'probe-covered-raw', 'TestDb', decode(md5('1b2cov'), 'hex'), decode(md5('h'), 'hex'), 1, 1, 1)", connection) { CommandTimeout = PolicyReadTimeoutSeconds })
         {
             seed.Parameters.AddWithValue(seeded);
             await seed.ExecuteNonQueryAsync();
@@ -310,7 +310,7 @@ VALUES (1, $1, 9138, 'lane-4299-1b2-covered', 'TestDb', decode(md5('1b2cov'), 'h
                 }
 
                 using var unseed = new NpgsqlCommand(
-                    "DELETE FROM collect.query_stats WHERE server_name = 'lane-4299-1b2-covered'", cleanup) { CommandTimeout = PolicyReadTimeoutSeconds };
+                    "DELETE FROM collect.query_stats WHERE server_name = 'probe-covered-raw'", cleanup) { CommandTimeout = PolicyReadTimeoutSeconds };
                 await unseed.ExecuteNonQueryAsync(cleanupCt);
             });
         }

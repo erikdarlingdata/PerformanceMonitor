@@ -16,11 +16,11 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4299 L2: live pins for the repair epoch stamp and the trigger gate primitives DarlingWorker's Periodic
+/// #4299: live pins for the repair epoch stamp and the trigger gate primitives DarlingWorker's Periodic
 /// pass composes — <see cref="TimescaleSupport.RawRepairEpochStampSql"/>,
 /// <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/> and <see cref="TimescaleSupport.HoleFreeThroughAsync"/>
 /// against a real TimescaleDB. DarlingWorker's own trigger method is private and not exercised here directly;
-/// these pins prove the primitives it calls behave as the ruling requires, on a live server.
+/// these pins prove the primitives it calls behave as required, on a live server.
 ///
 /// <para><b>#1776 own-store</b>: deliberately NOT <c>[Collection("live-postgres")]</c>. Goes through
 /// <see cref="ScratchPostgres.CreateAsync"/> and never touches the shared database's tables.</para>
@@ -34,7 +34,7 @@ public sealed class RawRepairEpochTriggerLiveTests
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 L2 trigger pins.");
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 trigger pins.");
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
         var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -42,7 +42,7 @@ public sealed class RawRepairEpochTriggerLiveTests
         await PgMigrations.MigrateAsync(connection, default);
 
         var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
-        Assert.SkipWhen(!enabled, "The live #4299 L2 trigger pins need TimescaleDB.");
+        Assert.SkipWhen(!enabled, "The live #4299 trigger pins need TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
 
         await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
@@ -187,8 +187,8 @@ public sealed class RawRepairEpochTriggerLiveTests
     /// <summary>
     /// The trigger's hole check: a bucket the materialization holds nothing for, inside the drop range,
     /// reads as NOT hole-free — <see cref="TimescaleSupport.HoleFreeThroughAsync"/> must call it live, not
-    /// assume clean. RED before <c>HoleFreeThroughAsync</c> existed (L4, already on this branch) — this pin
-    /// proves L2's trigger composition calls it for real over a genuinely empty materialization.
+    /// assume clean. RED before <c>HoleFreeThroughAsync</c> existed (#4299, already on this branch) — this
+    /// pin proves the trigger composition calls it for real over a genuinely empty materialization.
     /// </summary>
     [Fact]
     public async Task HoleFreeThroughAsync_EmptyMaterializationInDropRange_ReadsAsNotHoleFree()

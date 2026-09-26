@@ -404,7 +404,7 @@ public sealed class RetentionHoldRatioKnobRungTests
            swept its reads into this slice too and doubled every _retentionHoldWarnRatio()/
            _retentionHoldCriticalRatio() count. The isolating entry point's own doc comment is the marker
            right after ClearRetentionHoldAsync ends, so anchor there instead. */
-        const string end = "/// The isolating entry point for the #4299 L3b (M1) Raw Purge Over Horizon check";
+        const string end = "/// The isolating entry point for the #4299 Raw Purge Over Horizon check";
         var to = source.IndexOf(end, from, StringComparison.Ordinal);
         Assert.True(to > from, "the end of ClearRetentionHoldAsync was not found, so this pin would read the rest of the file");
 

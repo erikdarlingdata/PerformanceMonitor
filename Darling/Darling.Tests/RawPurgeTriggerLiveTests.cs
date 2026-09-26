@@ -18,7 +18,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4299 L2: end-to-end live pins for <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/> — the seam that
+/// #4299: end-to-end live pins for <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/> — the seam that
 /// composes the coverage verdict, the repair epoch and <see cref="TimescaleSupport.HoleFreeThroughAsync"/>
 /// into the decision to actually drop chunks off a raw hypertable. Every pin seeds
 /// <c>collect.query_stats</c> across the drop range, refreshes (or deliberately withholds refreshing) its
@@ -37,7 +37,7 @@ public sealed class RawPurgeTriggerLiveTests
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 L2 trigger pins.");
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 trigger pins.");
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
 
@@ -52,7 +52,7 @@ public sealed class RawPurgeTriggerLiveTests
         await PgMigrations.MigrateAsync(connection, default);
 
         var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
-        Assert.SkipWhen(!enabled, "The live #4299 L2 trigger pins need TimescaleDB.");
+        Assert.SkipWhen(!enabled, "The live #4299 trigger pins need TimescaleDB.");
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, default);
 
@@ -90,7 +90,7 @@ SELECT
     -1,
     now() - (n || ' hours')::interval,
     1,
-    'lane-4299-2d',
+    'probe-trigger-pins',
     'ProbeDb',
     decode(md5('l2d-' || n), 'hex'),
     decode(md5('l2d-h-' || n), 'hex'),
@@ -173,7 +173,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             var after = await ChunkCountAsync(connection);
             Assert.True(after < before, $"a Covered, current-epoch, hole-free purge must drop chunks (before={before}, after={after}); log: {logger.Joined}");
 
-            /* #4299 L3d: the trigger records its outcome under the SAME relation name, and a successful
+            /* #4299: the trigger records its outcome under the SAME relation name, and a successful
                run must be recorded "ran" with a positive elapsed time. */
             var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
             Assert.NotNull(rec);
@@ -226,7 +226,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             var after = await ChunkCountAsync(connection);
             Assert.Equal(before, after);
 
-            /* #4299 L3d: Short — never covered, so the record is "not_covered". */
+            /* #4299: Short — never covered, so the record is "not_covered". */
             var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
             Assert.NotNull(rec);
             Assert.Equal("not_covered", rec!.Outcome);
@@ -285,7 +285,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             var after = await ChunkCountAsync(connection);
             Assert.Equal(before, after);
 
-            /* #4299 L3d: the epoch gate blocked the run, so the record is "epoch_stale". */
+            /* #4299: the epoch gate blocked the run, so the record is "epoch_stale". */
             var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
             Assert.NotNull(rec);
             Assert.Equal("epoch_stale", rec!.Outcome);
@@ -350,7 +350,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             var after = await ChunkCountAsync(connection);
             Assert.Equal(before, after);
 
-            /* #4299 L3d: the hole gate blocked the run, so the record is "hole". */
+            /* #4299: the hole gate blocked the run, so the record is "hole". */
             var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
             Assert.NotNull(rec);
             Assert.Equal("hole", rec!.Outcome);
@@ -403,7 +403,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             var after = await ChunkCountAsync(connection);
             Assert.Equal(before, after);
 
-            /* #4299 L3d: the trigger itself is never called on this path, so no record exists at all. */
+            /* #4299: the trigger itself is never called on this path, so no record exists at all. */
             var rec = await TimescaleSupport.ReadRawLastPurgeOutcomeAsync(connection, Raw, null, default);
             Assert.Null(rec);
 
@@ -420,7 +420,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
         }
     }
 
-    /// <summary>#4299 (H1): stale <c>darling_armed = true</c> from an EARLIER pass, coverage measured
+    /// <summary>#4299: stale <c>darling_armed = true</c> from an EARLIER pass, coverage measured
     /// UNKNOWN this pass (a coverage relation renamed underneath the probe, so it throws and
     /// <c>MeasureRetentionCoverageAsync</c> catches it as Unknown). The trigger must not purge on the stale
     /// standing value — it re-measures fresh via <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> and
@@ -469,7 +469,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             await using (var armedStillTrue = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql(Raw), connection) { CommandTimeout = SetupTimeoutSeconds })
             {
                 var value = await armedStillTrue.ExecuteScalarAsync();
-                Assert.True(value is bool b && b, "darling_armed is the sweep's own standing verdict and must stay stale/unchanged on Unknown, or this pin is not testing what H1 describes");
+                Assert.True(value is bool b && b, "darling_armed is the sweep's own standing verdict and must stay stale/unchanged on Unknown, or this pin is not testing a stale-armed state");
             }
 
             var before = await ChunkCountAsync(connection);
@@ -507,7 +507,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
         }
     }
 
-    /// <summary>#4299 (H1): state (a) (Covered, current epoch, no hole), but the hole check's own successor
+    /// <summary>#4299: state (a) (Covered, current epoch, no hole), but the hole check's own successor
     /// cannot be resolved this pass — <see cref="TimescaleSupport.ResolveMaterializationAsync"/> returns null
     /// because the successor CAGG's view was renamed away, standing in for a successor mid-rebuild. An
     /// unresolvable successor must NOT read as hole-free: the trigger blocks the purge and records

@@ -74,7 +74,7 @@ SELECT
     -1,
     now() - (n || ' hours')::interval,
     1,
-    'lane-4391-r3a',
+    'probe-converge-purge',
     'ProbeDb',
     decode(md5('r3a-' || n), 'hex'),
     decode(md5('r3a-h-' || n), 'hex'),
