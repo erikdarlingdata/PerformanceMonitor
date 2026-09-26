@@ -395,7 +395,7 @@ internal static partial class AlertNotebookEndpoint
     };
 
     /// <summary>#4223: is <paramref name="metric"/> one of the three reports (the collector-cost digest, the
-    /// fleet sweep rollup, the analysis singles digest) that were RULED to carry no notebook at all — a
+    /// fleet sweep rollup, the analysis singles digest) that are declared to carry no notebook at all — a
     /// scheduled document read once a day, not an incident with a window worth composing reads over? Keyed on
     /// <see cref="AlertFamily.Reports"/> (the same census <see cref="TriageLink.Build"/> reads for the Fleet
     /// Sweep Rollup's own carve-out), not a local name list, so the two call sites can never disagree about
