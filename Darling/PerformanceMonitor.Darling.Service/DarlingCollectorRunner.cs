@@ -1460,6 +1460,140 @@ public sealed class DarlingCollectorRunner
         }
     }
 
+    /// <summary>
+    /// #4197 part b: the watermark cache hit/miss/seed block, extracted out of <see cref="RunCoreAsync"/>
+    /// so a live-Postgres-only test can exercise the cache-hit/miss/seed/read-count behaviour without a
+    /// live SQL Server target (RunCoreAsync collects from one before it ever reaches this point). Pure
+    /// move — the SQL strings and the eligibility/seed/read logic are byte-identical to what RunCoreAsync
+    /// inlined before this refactor.
+    /// </summary>
+    internal async Task<(DateTime? Watermark, bool WatermarkFromUtcColumn, long? NumericWatermark, long ServerWatermarkMs, bool WatermarkCacheEligible)> ResolveServerWatermarkAsync<TRow>(
+        ServerRuntime server,
+        ICollectorDefinition<TRow> definition,
+        bool serverWatermarkDiscarded,
+        DateTime? serverReadFloor,
+        CancellationToken cancellationToken)
+    {
+        var watermarkCacheEligible = definition.WatermarkColumn is not null
+            && !serverWatermarkDiscarded
+            && definition.WatermarkValueAccessor is not null;
+        var cachedWatermark = watermarkCacheEligible
+            ? _watermarkCache.TryGet(server.ServerId, definition.Name)
+            : null;
+
+        var serverWatermarkWatch = Stopwatch.StartNew();
+        long serverWatermarkMs;
+        DateTime? watermark;
+        var watermarkFromUtcColumn = false;
+        if (cachedWatermark is { } hit)
+        {
+            /* Cache hit: use the cached value and issue NO store read for either watermark. */
+            watermark = hit.Value;
+            watermarkFromUtcColumn = hit.FromUtcColumn;
+            serverWatermarkMs = 0;
+        }
+        else
+        {
+            try
+            {
+                if (definition.WatermarkColumn is null || serverWatermarkDiscarded)
+                {
+                    watermark = null;
+                }
+                else if (definition.UtcWatermarkColumn is null)
+                {
+                    watermark = await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
+                }
+                else
+                {
+                    /* #3778: a definition with a UTC twin beside its watermark column (cpu_utilization's
+                       sample_time_utc beside the server-LOCAL sample_time) gets the pair read in one round trip
+                       and the FRAME of what came back, so its dedup compares like with like: the twin where the
+                       store has one, the local stamp until the first post-upgrade run has stored one. Its own
+                       method rather than a parameter on the read above, so every other definition's watermark
+                       SQL is the byte-identical string it was (TimeHonestyRungTests pins both strings). */
+                    (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(
+                        server.ServerId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn,
+                        cancellationToken, serverReadFloor);
+                }
+            }
+            finally
+            {
+                serverWatermarkMs = serverWatermarkWatch.ElapsedMilliseconds;
+            }
+        }
+
+        /* Numeric (bigint) watermark = the newest already-collected value of the definition's monotonic
+           identity column (job_history's instance_id), read from Postgres — the bigint twin of the timestamp
+           watermark above. Null for every collector that declares no numeric watermark (the common case),
+           so no extra query runs for them. Skipped on a cache hit for the same reason the timestamp read
+           above is. */
+        long? numericWatermark;
+        if (cachedWatermark is { } numericHit)
+        {
+            numericWatermark = numericHit.NumericValue;
+        }
+        else
+        {
+            numericWatermark = definition.NumericWatermarkColumn is null
+                ? null
+                : await GetLastCollectedInstanceIdAsync(server.ServerId, definition.TargetTable, definition.NumericWatermarkColumn, cancellationToken);
+
+            /* Seed the cache from this miss so every call after this one for this (server, collector)
+               skips both store reads. Only when the definition is eligible (a live accessor and not on
+               a fan-out path) — an ineligible definition's watermark is never written to the cache, so a
+               later collector-name reuse under a different accessor policy can't read a stale entry. */
+            if (watermarkCacheEligible)
+            {
+                _watermarkCache.Seed(server.ServerId, definition.Name, watermark, watermarkFromUtcColumn, numericWatermark);
+            }
+        }
+
+        return (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible);
+    }
+
+    /// <summary>
+    /// #4197 part b: the post-write cache-advance block, extracted out of the plain (non-fan-out) write
+    /// path in <see cref="RunCoreAsync"/> for the same live-test reason as <see cref="ResolveServerWatermarkAsync"/>
+    /// above. Pure move.
+    /// </summary>
+    internal void AdvanceServerWatermark<TRow>(
+        ServerRuntime server,
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        bool watermarkFromUtcColumn)
+    {
+        if (definition.WatermarkValueAccessor is not { } accessor)
+        {
+            return;
+        }
+
+        DateTime? batchMax = null;
+        foreach (var row in rows)
+        {
+            var value = accessor(row);
+            if (value is { } v && (batchMax is null || v > batchMax.Value))
+            {
+                batchMax = v;
+            }
+        }
+
+        long? batchMaxNumeric = null;
+        if (definition.NumericWatermarkValueAccessor is { } numericAccessor)
+        {
+            foreach (var row in rows)
+            {
+                var value = numericAccessor(row);
+                if (value is { } v && (batchMaxNumeric is null || v > batchMaxNumeric.Value))
+                {
+                    batchMaxNumeric = v;
+                }
+            }
+        }
+
+        _watermarkCache.Advance(server.ServerId, definition.Name, batchMax, watermarkFromUtcColumn, batchMaxNumeric);
+    }
+
     private async Task<CollectorRunResult> RunCoreAsync<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,
@@ -1541,88 +1675,12 @@ public sealed class DarlingCollectorRunner
            holding a number against rather than believing. finally, not a trailing assignment (#2816): a
            throwing read must still report how long it ran. Zero when the definition declares no watermark
            column, or when #2797's gate skipped the read, which is honest either way — no read happened. */
-        /* #4197 part b: a definition opts into the server-scoped in-memory cache by declaring a per-row
-           watermark accessor (WatermarkValueAccessor). A null accessor (the common case, and always true
-           for pg_cpu_utilization — a second writer, Targets/RdsCpuIngestor.cs, can move its watermark
-           without this runner's knowledge) means the store is read fresh every cycle, exactly as before
-           this cache existed. serverWatermarkDiscarded also disqualifies a cache lookup: those two paths
-           (#2797) overwrite context.Watermark with a per-database value before any query is built, so a
-           cached SERVER-scoped value would never be the one actually used and must not be seeded from,
-           read from, or advanced by them. */
-        var watermarkCacheEligible = definition.WatermarkColumn is not null
-            && !serverWatermarkDiscarded
-            && definition.WatermarkValueAccessor is not null;
-        var cachedWatermark = watermarkCacheEligible
-            ? _watermarkCache.TryGet(server.ServerId, definition.Name)
-            : null;
-
-        var serverWatermarkWatch = Stopwatch.StartNew();
-        long serverWatermarkMs;
-        DateTime? watermark;
-        var watermarkFromUtcColumn = false;
-        if (cachedWatermark is { } hit)
-        {
-            /* Cache hit: use the cached value and issue NO store read for either watermark. */
-            watermark = hit.Value;
-            watermarkFromUtcColumn = hit.FromUtcColumn;
-            serverWatermarkMs = 0;
-        }
-        else
-        {
-            try
-            {
-                if (definition.WatermarkColumn is null || serverWatermarkDiscarded)
-                {
-                    watermark = null;
-                }
-                else if (definition.UtcWatermarkColumn is null)
-                {
-                    watermark = await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);
-                }
-                else
-                {
-                    /* #3778: a definition with a UTC twin beside its watermark column (cpu_utilization's
-                       sample_time_utc beside the server-LOCAL sample_time) gets the pair read in one round trip
-                       and the FRAME of what came back, so its dedup compares like with like: the twin where the
-                       store has one, the local stamp until the first post-upgrade run has stored one. Its own
-                       method rather than a parameter on the read above, so every other definition's watermark
-                       SQL is the byte-identical string it was (TimeHonestyRungTests pins both strings). */
-                    (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(
-                        server.ServerId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn,
-                        cancellationToken, serverReadFloor);
-                }
-            }
-            finally
-            {
-                serverWatermarkMs = serverWatermarkWatch.ElapsedMilliseconds;
-            }
-        }
-
-        /* Numeric (bigint) watermark = the newest already-collected value of the definition's monotonic
-           identity column (job_history's instance_id), read from Postgres — the bigint twin of the timestamp
-           watermark above. Null for every collector that declares no numeric watermark (the common case),
-           so no extra query runs for them. Skipped on a cache hit for the same reason the timestamp read
-           above is. */
-        long? numericWatermark;
-        if (cachedWatermark is { } numericHit)
-        {
-            numericWatermark = numericHit.NumericValue;
-        }
-        else
-        {
-            numericWatermark = definition.NumericWatermarkColumn is null
-                ? null
-                : await GetLastCollectedInstanceIdAsync(server.ServerId, definition.TargetTable, definition.NumericWatermarkColumn, cancellationToken);
-
-            /* Seed the cache from this miss so every call after this one for this (server, collector)
-               skips both store reads. Only when the definition is eligible (a live accessor and not on
-               a fan-out path) — an ineligible definition's watermark is never written to the cache, so a
-               later collector-name reuse under a different accessor policy can't read a stale entry. */
-            if (watermarkCacheEligible)
-            {
-                _watermarkCache.Seed(server.ServerId, definition.Name, watermark, watermarkFromUtcColumn, numericWatermark);
-            }
-        }
+        /* #4197 part b: the cache hit/miss/seed block, extracted verbatim into its own method (step 1 of
+           the measure lane's brief) so a live-Postgres-only test can call it directly — RunCoreAsync itself
+           needs a live SQL Server target to reach this point, which the live-PG rig this lane runs on
+           cannot provide. Behaviour and SQL strings are unchanged; this is a pure move. */
+        var (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible) =
+            await ResolveServerWatermarkAsync(server, definition, serverWatermarkDiscarded, serverReadFloor, cancellationToken);
 
         /* Only when the watermark came back null: tell a TRUE first run from a store merely emptied by
            retention, so default_trace_events uses a bounded window instead of re-scanning all .trc history
@@ -3088,32 +3146,9 @@ public sealed class DarlingCollectorRunner
                    matching the definition's own "no row-derived watermark from an empty batch" rule
                    (#1962) instead of inventing one. Only eligible definitions (a live WatermarkValueAccessor,
                    not a fan-out path) advance — see watermarkCacheEligible above. */
-                if (watermarkCacheEligible && rowsWritten > 0 && definition.WatermarkValueAccessor is { } accessor)
+                if (watermarkCacheEligible && rowsWritten > 0)
                 {
-                    DateTime? batchMax = null;
-                    foreach (var row in rows)
-                    {
-                        var value = accessor(row);
-                        if (value is { } v && (batchMax is null || v > batchMax.Value))
-                        {
-                            batchMax = v;
-                        }
-                    }
-
-                    long? batchMaxNumeric = null;
-                    if (definition.NumericWatermarkValueAccessor is { } numericAccessor)
-                    {
-                        foreach (var row in rows)
-                        {
-                            var value = numericAccessor(row);
-                            if (value is { } v && (batchMaxNumeric is null || v > batchMaxNumeric.Value))
-                            {
-                                batchMaxNumeric = v;
-                            }
-                        }
-                    }
-
-                    _watermarkCache.Advance(server.ServerId, definition.Name, batchMax, watermarkFromUtcColumn, batchMaxNumeric);
+                    AdvanceServerWatermark(server, definition, rows, watermarkFromUtcColumn);
                 }
             }
         }
