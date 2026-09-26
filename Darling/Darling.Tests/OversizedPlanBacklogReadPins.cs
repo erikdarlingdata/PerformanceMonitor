@@ -103,7 +103,10 @@ public sealed class OversizedPlanBacklogReadPins
            arrives as a parameter someone adds for symmetry with the neighbouring self-monitoring reads. */
         Assert.Equal(
             new[] { "postgres", "server_name", "include_rows", "limit" },
-            ToolMethod.GetParameters().Select(p => p.Name).ToArray());
+            ToolMethod.GetParameters()
+                .Where(p => p.ParameterType != typeof(CancellationToken))
+                .Select(p => p.Name)
+                .ToArray());
 
         foreach (var sql in AllReadSql)
         {

@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -175,7 +176,8 @@ LIMIT $2";
         [Description("Only statements run by this role: owner, admin, viewer or mcp. Omit for every role.")] string? role = null,
         [Description("Rank by total_time (default: where the store's time went), mean_time (slowest per call), max_time (worst single call), calls, rows, or shared_blks_read (disk reads).")] string order_by = "total_time",
         [Description("How many statements. Default 20, max 1000.")] int top = DefaultTop,
-        [Description("Return each statement's full normalized text instead of a 240-character preview. Default false.")] bool full_text = false)
+        [Description("Return each statement's full normalized text instead of a 240-character preview. Default false.")] bool full_text = false,
+        CancellationToken cancellationToken = default)
     {
         var invalidTop = McpHelpers.ValidateTop(top, "top");
         if (invalidTop != null)
@@ -207,8 +209,8 @@ LIMIT $2";
             await using (var command = postgres.CreateCommand(StateSql))
             {
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                await using var reader = await command.ExecuteReaderAsync();
-                await reader.ReadAsync();
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
                 state = new StatsState(
                     ReaderExists: reader.GetBoolean(0),
                     MayRead: reader.GetBoolean(1),
@@ -228,8 +230,8 @@ LIMIT $2";
             await using (var info = postgres.CreateCommand(InfoSql))
             {
                 info.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                await using var reader = await info.ExecuteReaderAsync();
-                if (await reader.ReadAsync())
+                await using var reader = await info.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
                 {
                     statsSince = reader.IsDBNull(0) ? null : reader.GetDateTime(0).ToUniversalTime();
                     evictionPasses = reader.IsDBNull(1) ? null : reader.GetInt64(1);
@@ -241,8 +243,8 @@ LIMIT $2";
             await using (var command = postgres.CreateCommand(ByRoleSql))
             {
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
-                await using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                 {
                     byRole.Add((
                         reader.GetString(0),
@@ -260,8 +262,8 @@ LIMIT $2";
                 command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
                 command.Parameters.Add(new NpgsqlParameter { Value = (object?)roleKey ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
                 command.Parameters.AddWithValue(top + 1);
-                await using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
                 {
                     var text = ShownText(reader.IsDBNull(10) ? "" : reader.GetString(10));
                     fetched.Add(new StatementRow(
@@ -324,7 +326,7 @@ LIMIT $2";
                 note = BuildNote(state, utilityTracked, hiddenText, evictionPasses),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_store_query_stats", ex);
         }

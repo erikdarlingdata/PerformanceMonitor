@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -91,7 +92,8 @@ public sealed class DarlingMcpFleetTools
         [Description("Hours of blocking/deadlock history the per-server cards and fleet totals window over. Default 1.")] int hours_back = 1,
         [Description("\"summary\" (default): rollup, band counts, worst_servers, no cards array. \"cards\": adds every server's full card, this tool's shape before #4198. See tool guide.")] string detail = "summary",
         [Description("Cards-only: keep only cards already in worst_servers (the needs-attention list). No effect under detail=\"summary\". Default false.")] bool worst_only = false,
-        [Description("Cards-only filter: keep only cards at this FleetHealthBand — \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null)
+        [Description("Cards-only filter: keep only cards at this FleetHealthBand — \"healthy\", \"warning\", \"critical\", or \"offline\" (case-insensitive). Ignored under detail=\"summary\". Omit for every band.")] string? band = null,
+        CancellationToken cancellationToken = default)
     {
         var validation = McpHelpers.ValidateHoursBack(hours_back);
         if (validation != null) return validation;
@@ -116,7 +118,7 @@ public sealed class DarlingMcpFleetTools
         try
         {
             var now = DateTime.UtcNow;
-            var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-hours_back), now, now);
+            var result = await DarlingFleetReader.GetFleetOverviewAsync(postgres, now.AddHours(-hours_back), now, now, cancellationToken: cancellationToken);
 
             if (result.TotalServers == 0)
             {
@@ -171,7 +173,7 @@ public sealed class DarlingMcpFleetTools
                 + "detail=\"cards\" for the full per-server detail.";
             return node.ToJsonString(DarlingFleetReader.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_fleet_overview", ex);
         }
