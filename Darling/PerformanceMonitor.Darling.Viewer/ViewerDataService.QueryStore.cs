@@ -856,6 +856,6 @@ public sealed partial class ViewerDataService
     /// <summary>Hourly Query Store slicer buckets over [<paramref name="startUtc"/>, <paramref name="endUtc"/>].</summary>
     public async Task<List<TimeSliceBucket>> GetQueryStoreSlicerDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
-        DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default)
         => await ReadQueryStatsSlicerAsync(QueryStoreSlicerSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
 }

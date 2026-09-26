@@ -13,10 +13,10 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Unit coverage for #3953's grid/MCP/slicer gate (ruling issuecomment-5836972848; review D4R items H3, M1):
+/// Unit coverage for #3953's grid/MCP top gate (ruling issuecomment-5836972848; review D4R items H3, M1):
 /// <see cref="QueryStoreIntervalWide.UseTable"/>, each clause alone flipping the answer to raw. Mirrors
 /// <c>PlanRegressionIntervalTableEquivalenceTests</c>' own <c>UseTable</c> theory for V143's gate. The live
-/// equality, clamp and end-to-end gate tests belong beside the grid/MCP/slicer reads that call this decision.
+/// equality, clamp and end-to-end gate tests belong beside the grid/MCP top reads that call this decision.
 /// </summary>
 public sealed class QueryStoreIntervalWideGateTests
 {

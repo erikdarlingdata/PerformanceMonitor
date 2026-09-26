@@ -396,10 +396,10 @@ SELECT
     b.null_first_execution_rows
 FROM batch_rows AS b;";
 
-    /* ---- the read-source decision (grid/MCP/slicer reads, #3953, ruling issuecomment-5836972848) ------------ */
+    /* ---- the read-source decision (grid/MCP top reads, #3953, ruling issuecomment-5836972848) ------------ */
     /* This is a SEPARATE decision from QueryStoreIntervalLatest.ReadsTableAsync (V143's, which PLAN_REGRESSION
        alone uses): the two tables have independent coverage claims, and the reads gated here (the Queries grid,
-       its MCP twin, its slicer) have an upper bound and a per-read minimum window that PLAN_REGRESSION's
+       its MCP twin) have an upper bound and a per-read minimum window that PLAN_REGRESSION's
        always-open, always-14-day read does not. V143's shape is still the model for clauses 1-3; read it once,
        by offset, before touching this. */
 
@@ -468,8 +468,8 @@ WHERE t.server_id = $1;";
     /// <summary>
     /// The Queries grid's own minimum window (#3953 clause 5, ruling issuecomment-5836972848 item 5): below this
     /// the table's fixed per-decision round trips (two more queries plus a transaction) cost more than the read
-    /// they would save, so the gate reads raw regardless of coverage. One constant per read — the MCP and slicer
-    /// reads (a later lane) set their own, and may not share this value. Stays 12 hours (lane B4t, rig-d4, 15-day
+    /// they would save, so the gate reads raw regardless of coverage. One constant per read — the MCP read (a
+    /// later lane) sets its own, and may not share this value. Stays 12 hours (lane B4t, rig-d4, 15-day
     /// seed at a field store's rate, end-to-end through the viewer's grid read): median of 5 at the ruled
     /// 12-hour cell, table 1488.1 ms (spread 1118.9-1563.3) against raw 1725.6 ms (spread 1239.4-2512.5) — the
     /// table is at least as fast as raw there, so the ruling keeps this threshold.
@@ -486,7 +486,7 @@ WHERE t.server_id = $1;";
     public static readonly TimeSpan IntervalSpanMargin = TimeSpan.FromDays(1);
 
     /// <summary>
-    /// The rule: read <c>query_store_interval_wide</c> for a grid/MCP/slicer read if and only if all five of
+    /// The rule: read <c>query_store_interval_wide</c> for a grid/MCP top read if and only if all five of
     /// these hold, otherwise run today's raw statement unchanged (ruling issuecomment-5836972848; review D4R
     /// items H3, M1). A sixth clause — the viewer's store must report schema version 145 or later — is the
     /// caller's: it needs the viewer's own connection probe, which this pure function does not have.

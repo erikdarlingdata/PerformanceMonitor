@@ -69,8 +69,8 @@ public sealed class QueryStoreIntervalWideRungTests
         Assert.Contains("NULLS NOT DISTINCT;", sql, StringComparison.Ordinal);
         Assert.Contains("first_execution_time timestamp NOT NULL,", sql, StringComparison.Ordinal);
 
-        /* No secondary index on the full table (F1, measured: a window index took HOT updates to 0%) beyond
-           B4's own near-empty partial index for the slicer's legacy-row probe. */
+        /* No secondary index on the full table at all (F1, measured: a window index took HOT updates to 0%).
+           The slicer's legacy-row probe and its near-empty partial index were removed (review-4341-r1 M1). */
         Assert.DoesNotContain("btree", sql, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(1, CountOf(sql, "CREATE UNIQUE INDEX"));
 
