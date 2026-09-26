@@ -498,6 +498,18 @@ public static class DarlingCliCommands
 
         output.WriteLine(json ? DarlingStoreHostProfile.FormatProfileJson(profile) : DarlingStoreHostProfile.FormatProfileText(profile));
 
+        /* #4215: every reader reads the stored rows, --check-settings included, which is why this
+           prints computed_at rather than a fresh recomputation the mcp/viewer roles could never produce
+           themselves (no file access, no pg_file_settings visibility). BYO stores never populate the table. */
+        if (postgres.Managed)
+        {
+            var stored = await DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(connection, cancellationToken);
+            output.WriteLine();
+            output.WriteLine(json
+                ? DarlingStoreHostProfile.FormatStoredVerdictsJson(stored)
+                : DarlingStoreHostProfile.FormatStoredVerdictsText(stored));
+        }
+
         return profile.Settings.Any(s => s.Verdict == HostSettingVerdict.StaleAfterHardwareChange)
             ? CheckSettingsExitCode.StaleSettings
             : CheckSettingsExitCode.Ok;
