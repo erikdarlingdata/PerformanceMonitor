@@ -14,8 +14,7 @@ namespace Darling.Tests;
 /// <see cref="PgSettingRedactorTests.RedactionCases"/> whose expected output differs from its input (a case
 /// the redactor actually masks) must have at least one term in the term list that would have selected it as
 /// a candidate row. If a future rule joins the redactor corpus without a matching term, this fails — it is
-/// the guard the coordinator review asked for so the coarse filter and the fine-grained redactor can never
-/// drift out of rule-for-rule sync again.
+/// so the coarse filter and the fine-grained redactor cannot drift out of rule-for-rule sync (#4348).
 /// </summary>
 public sealed class PgSettingScrubCandidateCensusTests
 {

@@ -74,7 +74,7 @@ public sealed class PgSettingRedactorTests
         yield return new object[] { "primary_conninfo",
         "postgresql://alice@host/db?sslmode=require&password=hunter2",
         "postgresql://alice@host/db?sslmode=require&password=********" };
-        // M2 (review round 1): an empty user name in the URI's user info still carries a password to libpq.
+        // An empty user name in the URI's user info still carries a password to libpq.
         yield return new object[] { "primary_conninfo",
         "postgresql://:hunter2@primary:5432/db",
         "postgresql://:********@primary:5432/db" };
@@ -91,14 +91,14 @@ public sealed class PgSettingRedactorTests
         yield return new object[] { "restore_command",
         @"pg_dump --password=""hunter 2"" --host=foo",
         "pg_dump --password=******** --host=foo" };
-        // M3 (review round 1): a space-separated option, no '=' at all.
+        // A space-separated option with no '='.
         yield return new object[] { "archive_command",
         "mycmd --password hunter2 %p",
         "mycmd --password ******** %p" };
         yield return new object[] { "archive_command",
         "aws s3 cp s3://b/%f %p --secret-access-key hunter2secret",
         "aws s3 cp s3://b/%f %p --secret-access-key ********" };
-        // M1 (review round 2): the spaced-option path had fallen behind the assignment path's name list.
+        // The spaced-option path uses the same name list as the assignment path.
         yield return new object[] { "archive_command",
         "gpg --passphrase S1 --decrypt %p",
         "gpg --passphrase ******** --decrypt %p" };
@@ -114,14 +114,14 @@ public sealed class PgSettingRedactorTests
         yield return new object[] { "archive_command",
         "mycmd --no-password -h x %p",
         "mycmd --no-password -h x %p" };
-        // M4 (review round 1): a quoted value glued to a trailing ';' rather than whitespace.
+        // A quoted value glued to a trailing ';' rather than whitespace.
         yield return new object[] { "archive_command",
         "export PGPASSWORD='hunter 2'; psql",
         "export PGPASSWORD=******** psql" };
         yield return new object[] { "primary_conninfo",
         "password='x'host=y",
         "password=********" };
-        // M5 (ruling amendment): backup-tool secret variable names the assignment list did not cover.
+        // Backup-tool secret variable names covered by the assignment list.
         yield return new object[] { "archive_command",
         "WALG_LIBSODIUM_KEY=hunter2 wal-g wal-push %p",
         "WALG_LIBSODIUM_KEY=******** wal-g wal-push %p" };
@@ -154,12 +154,12 @@ public sealed class PgSettingRedactorTests
         // negative: myext.keep_alive does not contain any marker (password/passwd/passphrase/secret/salt/token/key/
         // credential/pwd) as a substring of "keep_alive", so its value is left alone.
         yield return new object[] { "myext.keep_alive", "30s", "30s" };
-        // L1 (review round 1): "credential" and "pwd" join the whole-value markers, and a marker in ANY
+        // "credential" and "pwd" are whole-value markers, and a marker in ANY
         // dot-separated segment counts, not only the last one.
         yield return new object[] { "myext.api_credentials", "AKIAABCDEFG", "********" };
         yield return new object[] { "app.db_pwd", "hunter2", "********" };
         yield return new object[] { "vault.secret.value", "hunter2", "********" };
-        // L2 (review round 1): edge forms, probe-confirmed.
+        // Edge forms, probe-confirmed.
         yield return new object[] { "primary_conninfo",
         "postgresql://u:pa S8@h/db",
         "postgresql://u:********@h/db" };
@@ -179,7 +179,7 @@ public sealed class PgSettingRedactorTests
         // must not change at all.
         yield return new object[] { "password_encryption", "scram-sha-256", "scram-sha-256" };
         // PASS is a deliberately unbounded substring (unlike the bounded KEY segment test), so a libpq
-        // passfile keyword now over-masks rather than leaking — the ruling's own tradeoff, never a leak.
+        // passfile keyword is masked too (over-masking is the safe direction, #4348).
         yield return new object[] { "unix_socket_directories", "passfile=/x/.pgpass", "passfile=********" };
         yield return new object[] { "primary_conninfo", "host=a user=b", "host=a user=b" };
         yield return new object[] { "primary_conninfo", "", "" };
