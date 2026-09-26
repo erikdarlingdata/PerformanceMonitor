@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -56,9 +57,10 @@ public sealed class DarlingMcpObjectStatsTools
     [McpServerTool(Name = "get_table_index_sizes"), Description("Gets the 100 largest tables with per-table size, growth (7d/30d/daily rate), and row counts from the latest daily snapshot. Indexes are rolled up per table. Use to find storage hot-spots and fast-growing tables for capacity planning. Growth is measured only over history the store actually holds: the history block says how many days of snapshots exist and whether the 7-day and 30-day baselines are reachable; growth_7d_mb / growth_30d_mb / growth_pct_30d are null (with the reason in growth_note) when their baseline does not exist, never re-labelled from a nearer one, and growth_over_available_history_* always spans exactly growth_window_days. A table absent from a baseline snapshot (created since) reports null growth for that window, not 0. tables_returned and truncated bound the page.")]
     public static async Task<string> GetTableIndexSizes(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
@@ -66,9 +68,9 @@ public sealed class DarlingMcpObjectStatsTools
             var now = DateTime.UtcNow;
             /* Over-fetch by one so truncation is observed, not inferred from a full page (#3541 A3's rule). */
             var rows = await DarlingObjectStatsReader.GetObjectSizeGrowthAsync(
-                postgres, resolved.ServerId, now.AddDays(-7), now.AddDays(-30), TableSizesTop + 1);
+                postgres, resolved.ServerId, now.AddDays(-7), now.AddDays(-30), TableSizesTop + 1, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No object size data available. Index/object stats are collected daily.");
 
             var truncated = rows.Count > TableSizesTop;
@@ -124,7 +126,7 @@ public sealed class DarlingMcpObjectStatsTools
                 tables = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_table_index_sizes", ex);
         }
@@ -163,9 +165,10 @@ public sealed class DarlingMcpObjectStatsTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Limit to one database. Strongly recommended: without it, unused-first ordering can fill the whole result from one database.")] string? database_name = null,
-        [Description("Maximum rows to return. Default 75.")] int limit = IndexUsageTop)
+        [Description("Maximum rows to return. Default 75.")] int limit = IndexUsageTop,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateTop(limit);
@@ -175,7 +178,7 @@ public sealed class DarlingMcpObjectStatsTools
         {
             var database = string.IsNullOrWhiteSpace(database_name) ? null : database_name;
 
-            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, limit, database);
+            var rows = await DarlingObjectStatsReader.GetIndexUsageAsync(postgres, resolved.ServerId, limit, database, cancellationToken);
             if (rows.Count == 0)
             {
                 /* #2636: a database filter that matches nothing is a DIFFERENT answer from a server that
@@ -184,7 +187,7 @@ public sealed class DarlingMcpObjectStatsTools
                    — and only then does the filter get blamed for its own empty result. */
                 if (database is not null)
                 {
-                    var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId);
+                    var anyOnServer = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, cancellationToken: cancellationToken);
 
                     if (anyOnServer > 0)
                     {
@@ -198,13 +201,13 @@ public sealed class DarlingMcpObjectStatsTools
                     }
                 }
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No index usage data available. Index/object stats are collected daily.");
             }
 
             /* Counted BEFORE the cap, by a second query. A count taken over the returned rows is a count of
                the page, which is the whole defect this answers. */
-            var matching = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, database);
+            var matching = await DarlingObjectStatsReader.GetIndexUsageMatchCountAsync(postgres, resolved.ServerId, database, cancellationToken);
             var truncated = matching > rows.Count;
 
             var result = rows.Select(r => new
@@ -242,7 +245,7 @@ public sealed class DarlingMcpObjectStatsTools
                 indexes = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_index_usage", ex);
         }
@@ -252,9 +255,10 @@ public sealed class DarlingMcpObjectStatsTools
     public static async Task<string> GetObjectLocking(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop)
+        [Description("Maximum rows to return. Default 75.")] int limit = ObjectLockingTop,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateTop(limit);
@@ -265,11 +269,11 @@ public sealed class DarlingMcpObjectStatsTools
             /* #4198: limit + 1 as the fetch, the extra row as the OBSERVED truncation signal (#3653's
                dialect) -- McpHelpers.BoundPage trims the page back to `limit`, so objects_returned below is
                always a count of the page and never of the over-fetch. */
-            var fetched = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, limit + 1);
+            var fetched = await DarlingObjectStatsReader.GetIndexLockingAsync(postgres, resolved.ServerId, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "index_object_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No locking/contention data recorded. Index/object stats are collected daily.");
 
             var result = rows.Select(r => new
@@ -315,7 +319,7 @@ public sealed class DarlingMcpObjectStatsTools
                 objects = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_object_locking", ex);
         }
@@ -324,16 +328,17 @@ public sealed class DarlingMcpObjectStatsTools
     [McpServerTool(Name = "get_database_sizes"), Description("Gets database file sizes, space usage, and volume free space. Shows each database file with total size, used space, auto-growth settings, and the underlying volume's capacity. Use for capacity planning and identifying space pressure. LATEST IS A TIME: this reads the newest size snapshot, not a window, and captured_at is the instant it was collected - a volume's free space here is what it was AT that stamp, and a file that grew since is not reflected until the next collection.")]
     public static async Task<string> GetDatabaseSizes(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var rows = await DarlingObjectStatsReader.GetLatestDatabaseSizesAsync(postgres, resolved.ServerId);
+            var rows = await DarlingObjectStatsReader.GetLatestDatabaseSizesAsync(postgres, resolved.ServerId, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "database_size_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No database size data available. The size collector may not have run yet.");
 
             return JsonSerializer.Serialize(new
@@ -365,7 +370,7 @@ public sealed class DarlingMcpObjectStatsTools
                     })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_database_sizes", ex);
         }
