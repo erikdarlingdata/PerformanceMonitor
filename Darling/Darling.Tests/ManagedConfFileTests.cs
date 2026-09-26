@@ -174,6 +174,73 @@ public sealed class ManagedConfFileTests
         Assert.Contains(diffs, d => d.Key == "shared_buffers");
     }
 
+    /// <summary>
+    /// Carries #4342's heal ("Heal the v8 sizing block on stores resized before #4225 (#4207)") into
+    /// <c>darling-managed.conf</c>: unlike the v1-v15 postgresql.conf blocks #4342 heals, <see
+    /// cref="ManagedConfFile.RenderBody"/> never reads or reuses an existing v8 block's text — every start
+    /// re-derives <c>work_mem</c> straight from <see cref="DarlingManagedPostgres.DeriveMemorySettings"/> and
+    /// the CURRENT inputs, with nothing on disk to go stale in the first place. So a store whose LAST
+    /// postgresql.conf write happened before #4225 (or even before #4207, when work_mem was not re-derived at
+    /// all) still gets today's formula the moment darling-managed.conf starts rendering it, with no separate
+    /// heal step needed: the current value is the only value this method is capable of writing.
+    /// </summary>
+    [Fact]
+    public void RenderBody_AuthoritativeRam_WorkMemIsAlwaysTheCurrentDerivation_NeverAStaleV8Value()
+    {
+        // 15.6 GiB: v8's quantization (round-to-nearest-GiB, #2845) rounds this UP to 16 GiB, which
+        // DeriveMemorySettings turns into work_mem=32MB. The un-quantized raw byte count derives 31MB
+        // instead — a real divergence the 16-64MB clamp does not mask, so this pins that the render takes
+        // the CURRENT (quantized) derivation rather than a stale (pre-quantization/pre-#4225) one.
+        const long ramBytes = 16_749_363_609L; // ~15.6 GiB
+        var body = ManagedConfFile.RenderBody(SampleInputs(ramAuthoritative: true) with { RamBytes = ramBytes });
+        var (_, values) = ReduceToLastOccurrenceForTest(body);
+
+        var quantized = DarlingManagedPostgres.QuantizeRam(ramBytes);
+        var expected = DarlingManagedPostgres.DeriveMemorySettings(quantized);
+        var stale = DarlingManagedPostgres.DeriveMemorySettings(ramBytes); // un-quantized: the stale story
+
+        Assert.True(values.TryGetValue("work_mem", out var workMem));
+        Assert.NotEqual(stale.WorkMemMb, expected.WorkMemMb); // sanity: this RAM figure actually diverges
+        Assert.Equal($"{expected.WorkMemMb}MB", workMem);
+        Assert.NotEqual($"{stale.WorkMemMb}MB", workMem);
+    }
+
+    /// <summary>
+    /// The other half of #4342's heal: a non-authoritative RAM reading must not carry a stale hardware-sizing
+    /// value forward. Because <see cref="ManagedConfFile.RenderBody"/> renders fresh every time rather than
+    /// healing a persisted block, "not carrying it forward" here means the v8 block is skipped outright (as
+    /// #4342's own <c>ShouldAppendHardwareSizing</c> requires an authoritative reading before acting at all)
+    /// and <c>work_mem</c> falls back to v3's always-available derivation — never a value minted from a
+    /// reading this render could not trust.
+    /// </summary>
+    [Fact]
+    public void RenderBody_NonAuthoritativeRam_WorkMemFallsBackToV3_NotAStaleHardwareValue()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs(ramAuthoritative: false));
+        var (_, values) = ReduceToLastOccurrenceForTest(body);
+
+        var v3Expected = DarlingManagedPostgres.DeriveMemorySettings(17_179_869_184L); // SampleInputs' RamBytes
+        Assert.True(values.TryGetValue("work_mem", out var workMem));
+        Assert.Equal($"{v3Expected.WorkMemMb}MB", workMem);
+    }
+
+    private static (System.Collections.Generic.List<string> Order, System.Collections.Generic.Dictionary<string, string> Values) ReduceToLastOccurrenceForTest(string body)
+    {
+        var diffs = ManagedConfFile.DiffBodyKeys(string.Empty, body);
+        var order = new System.Collections.Generic.List<string>();
+        var values = new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var diff in diffs)
+        {
+            if (diff.RenderedValue is not null)
+            {
+                order.Add(diff.Key);
+                values[diff.Key] = diff.RenderedValue;
+            }
+        }
+
+        return (order, values);
+    }
+
     [Fact]
     public void HasManagedInclude_NoIncludeLine_ReturnsFalse()
     {
