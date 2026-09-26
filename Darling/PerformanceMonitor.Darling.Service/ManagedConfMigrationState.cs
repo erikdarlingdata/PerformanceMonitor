@@ -46,7 +46,7 @@ internal static class ManagedConfMigrationState
     /// Classifies <paramref name="dataDir"/>'s <c>postgresql.conf</c>: a
     /// v-marker present, or the managed include missing, is <see cref="Kind.Legacy"/> — checked FIRST and
     /// unconditionally, because a re-appended v-marker on an otherwise-migrated conf must never be read as
-    /// migrated. Only once that is ruled out does the pending file, then the stamp, decide the rest.
+    /// migrated. Only once that is excluded does the pending file, then the stamp, decide the rest.
     /// </summary>
     internal static Kind Classify(string dataDir)
     {

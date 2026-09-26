@@ -1261,6 +1261,40 @@ public sealed class DarlingSelfAlertTests
         Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
     }
 
+    /// <summary>Fixes commit 9ae7410c: a Step B Failed verification's reason names that the running server
+    /// keeps the new values until its next restart; a Step A Failed reason does not carry that note (Step A
+    /// never leaves a mismatched write running -- the restore already happened before the server started on
+    /// it).</summary>
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_StepB_ReasonNamesRunningServerKeepsNewValues()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.B);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("the running server keeps the new values until its next restart", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_StepA_ReasonDoesNotNameRunningServer()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.DoesNotContain("the running server keeps the new values until its next restart", fired.DetailText);
+    }
+
     [Fact]
     public async Task StoreSettings_AllFourConditions_CurrentValueIsFour()
     {

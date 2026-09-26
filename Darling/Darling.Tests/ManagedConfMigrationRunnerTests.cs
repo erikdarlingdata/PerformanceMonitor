@@ -322,6 +322,68 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
     }
 
+    /// <summary>Pin (fixes commit 9ae7410c): a hand-edited comment line that embeds a product marker
+    /// SUBSTRING mid-line (not at line start, so it never classifies as the marker's own Ours line) is a
+    /// HandEdit the rewrite keeps verbatim -- the marker text survives into the rewritten postgresql.conf.
+    /// RunStepA catches that and reports Failed with a Detail before EITHER new file
+    /// (darling-managed.conf, the rewritten postgresql.conf) is written, and deletes the pending file it had
+    /// already persisted. NOTE: WritePending and BackupOriginal both run earlier in RunStepA's order (before
+    /// this check), so a backup file DOES exist afterward -- carrying the ORIGINAL bytes, since nothing wrote
+    /// over postgresql.conf itself. That backup is reported back on the outcome, not deleted; only the pending
+    /// file is cleaned up here.</summary>
+    [Fact]
+    public async Task RunStepA_MarkerSurvivesRewrite_AbortsBeforeAnyWrite_Failed()
+    {
+        const string original =
+            "# base conf\n" +
+            "do not delete: # Managed by PerformanceMonitor Darling (v11 job execution logging) -- do not remove this block\n";
+        WriteConf(original);
+        var inputs = SampleInputs();
+        var derived = DerivedValues(inputs);
+
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(
+                Array.ConvertAll(new List<string>(derived.Keys).ToArray(), name => Applied(name, derived[name])));
+
+        var logger = new CapturingTestLogger();
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, logger, CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.False(string.IsNullOrEmpty(outcome.Detail));
+        Assert.Equal(original, File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf")));
+        Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfFile.FileName)));
+        Assert.NotNull(outcome.BackupPath);
+        Assert.Equal(original, File.ReadAllText(outcome.BackupPath!));
+        Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
+    }
+
+    /// <summary>Pin (fixes commit 9ae7410c): a corrupt pending file with a backup present -- restores the
+    /// conf byte-equal to the backup, deletes the pending file, and reports Failed with a non-empty Detail
+    /// (not Unknown, so the store-settings alert actually fires).</summary>
+    [Fact]
+    public async Task ResumePending_CorruptPendingFile_WithBackup_RestoresAndReportsFailed()
+    {
+        const string originalConf = "# base conf\nwork_mem = '16MB'\n";
+        WriteConf(originalConf);
+        var backupPath = ManagedConfMigrationSteps.BackupOriginal(
+            _dataDir, Path.Combine(_dataDir, "postgresql.conf"), UtcNow);
+
+        // Simulate the migration having already written new content, then a pending file too corrupt to parse.
+        WriteConf("# migrated\nwork_mem = '9999MB'\n");
+        File.WriteAllText(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName), "N\ngarbage\tfields\n");
+
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot =
+            _ => throw new InvalidOperationException("must not be called: the pending file is unreadable before any snapshot");
+
+        var outcome = await ManagedConfMigrationRunner.ResumePending(_dataDir, snapshot, backupPath, CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.False(string.IsNullOrEmpty(outcome.Detail));
+        Assert.Equal(originalConf, File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf")));
+        Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
+    }
+
     private void WriteManaged(string text) => File.WriteAllText(Path.Combine(_dataDir, ManagedConfFile.FileName), text);
 
     /// <summary>Pin (#4336): every rendered key matches its <c>pg_file_settings</c> row — the stamp
@@ -391,6 +453,36 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
     }
 
+    /// <summary>Pin (fixes commit 9ae7410c): a row whose sourcefile is <c>old-darling-managed.conf</c> --
+    /// which ENDS WITH the managed file's name but is not it -- is not attributed to the managed file, so it
+    /// cannot verify the rendered key. A row named exactly <c>DARLING-MANAGED.CONF</c> (case-insensitive) IS
+    /// attributed and verifies.</summary>
+    [Fact]
+    public void VerifyStepB_StrayFileEndingWithTheName_IsNotAttributed_ExactCasedNameIs()
+    {
+        var rendered = "work_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var strayRows = new List<FileSettingRow>
+        {
+            Applied("work_mem", "16MB", file: "C:/x/old-darling-managed.conf"),
+        };
+        var strayOutcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, strayRows, rendered, previousText: null);
+
+        // The rendered key was never matched by an attributed row, so it counts as a mismatch, not a match.
+        Assert.Equal(ManagedConfVerificationStatus.Failed, strayOutcome.Status);
+        Assert.Contains("work_mem", strayOutcome.MismatchedKeys);
+
+        WriteManaged(rendered); // VerifyStepB's Failed branch restored/deleted the managed file; rewrite it for the second call.
+        var exactRows = new List<FileSettingRow>
+        {
+            Applied("work_mem", "16MB", file: "C:/x/DARLING-MANAGED.CONF"),
+        };
+        var exactOutcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, exactRows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, exactOutcome.Status);
+    }
+
     /// <summary>Pin (#4336): a fresh error row from <c>darling-managed.conf</c> on a rendered key fails
     /// verification even when a differently-sourced row for the same name is applied.</summary>
     [Fact]
@@ -429,5 +521,45 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
             "max_connections: (unset) -> 200 (RAM 16384 MB, authoritative True; platform Windows; PG 18; CPUs 8; hypertables 42)";
 
         Assert.Equal(expected, log);
+    }
+
+    /// <summary>Pin (fixes commit 9ae7410c): a dropped product key — v12's <c>min_wal_size</c>, present in
+    /// the before conf as a v12 block but not owned by THIS render (<c>DataVolumeAuthoritative: false</c>) —
+    /// is carried into <c>darling-managed.conf</c> from the before snapshot, so the after-snapshot still
+    /// reports it and the run Verifies rather than reporting a spurious mismatch on every start.</summary>
+    [Fact]
+    public async Task RunStepA_DroppedProductKey_CarriedIntoManagedConf_Verifies()
+    {
+        var v12Block = DarlingManagedPostgres.BuildWalSizingConfAppend(
+            freeDiskBytesOnDataVolume: 64L * 1024 * 1024 * 1024,
+            totalDiskBytesOnDataVolume: 256L * 1024 * 1024 * 1024,
+            postgresMajor: 13);
+        WriteConf("# base conf\n" + v12Block);
+
+        // DataVolumeAuthoritative: false -- this render never derives min_wal_size/max_wal_size itself.
+        var inputs = SampleInputs() with { DataVolumeAuthoritative = false };
+        var derived = DerivedValues(inputs);
+        Assert.DoesNotContain("min_wal_size", derived.Keys);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            beforeRows.Add(Applied(kvp.Key, kvp.Value));
+        }
+
+        // The before snapshot also reports min_wal_size as applied from the v12 block's own value (8192MB / 4 = 2048MB).
+        beforeRows.Add(Applied("min_wal_size", "2048MB"));
+
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(beforeRows);
+
+        var logger = new CapturingTestLogger();
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, logger, CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+
+        var managedText = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
+        Assert.Contains("min_wal_size = '2048MB'", managedText, StringComparison.Ordinal);
     }
 }

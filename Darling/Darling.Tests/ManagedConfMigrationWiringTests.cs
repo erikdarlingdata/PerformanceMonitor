@@ -143,4 +143,37 @@ public sealed class ManagedConfMigrationWiringTests
         var parsed = new NpgsqlConnectionStringBuilder(result);
         Assert.False(parsed.Pooling, "the migration snapshot connection string must parse with Pooling=false.");
     }
+
+    /// <summary>Fixes commit 9ae7410c: the <c>PendingVerify</c>-with-no-backup branch inside
+    /// <c>MigrateManagedConfAsync</c> (Windows-only, not pure -- unreachable from a plain unit test without a
+    /// real bootstrap) returns <c>ManagedConfVerificationStatus.Failed</c>, not <c>Unknown</c>.</summary>
+    [Fact]
+    public void MigrateManagedConfAsync_PendingVerifyWithNoBackup_ReturnsFailed()
+    {
+        var source = ReadManagedSource();
+        var migrateMethod = At(source, "private async Task<ManagedConfMigrationOutcome?> MigrateManagedConfAsync(", 0);
+        var pendingCase = At(source, "case ManagedConfMigrationState.Kind.PendingVerify:", migrateMethod);
+        var noBackupCheck = At(source, "if (backupPath.Length == 0)", pendingCase);
+        var failedReturn = At(source, "ManagedConfVerificationStatus.Failed, Array.Empty<string>(), null, ManagedConfMigrationStep.A,", noBackupCheck);
+
+        Assert.True(pendingCase < noBackupCheck && noBackupCheck < failedReturn,
+            "the PendingVerify case's no-backup branch must return ManagedConfVerificationStatus.Failed.");
+    }
+
+    /// <summary>Fixes commit 9ae7410c: the post-start SaveLastGoodManagedConf call guards on
+    /// <c>confState != ManagedConfMigrationState.Kind.Verified</c> (in addition to the pre-existing
+    /// File.Exists guard) -- a Verified start's fresh render has not been checked by Step B yet, so saving it
+    /// here would let a render Step B goes on to reject become the fallback a future rejected render restores
+    /// to. The save for a Verified start happens only once Step B verifies, in the separate branch inside
+    /// MigrateManagedConfAsync (checked by MigrateManagedConfAsync_HasVerifiedCase_CallingVerifyStepB above).</summary>
+    [Fact]
+    public void SaveLastGoodManagedConf_PostStartCall_IsGuardedOnNonVerifiedConfState()
+    {
+        var source = ReadManagedSource();
+        var call = At(source, "SaveLastGoodManagedConf(_dataDirectory);", 0);
+
+        var ifIndex = source.LastIndexOf("if (confState != ManagedConfMigrationState.Kind.Verified", call, StringComparison.Ordinal);
+        Assert.True(ifIndex >= 0 && ifIndex < call,
+            "the post-start SaveLastGoodManagedConf call must sit inside 'if (confState != ManagedConfMigrationState.Kind.Verified && ...)'.");
+    }
 }

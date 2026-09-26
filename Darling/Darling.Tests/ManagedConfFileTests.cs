@@ -250,6 +250,27 @@ public sealed class ManagedConfFileTests
         Assert.Equal(trickyValue, roundTripped["work_mem"]);
     }
 
+    /// <summary>#4215 fixes commit: an <c>extraKeys</c> entry is appended AFTER every owned key, from the
+    /// same snapshot-value map, and the result still reads as this render's own write (not a hand edit).</summary>
+    [Fact]
+    public void RenderWithValues_ExtraKey_AppendedAfterOwnedKeys_ResultIsNotHandEdited()
+    {
+        var inputs = SampleInputs(dataVolumeAuthoritative: false); // v12 skipped: min_wal_size is not owned this render
+        var derivedBody = ManagedConfFile.RenderBody(inputs);
+        var (order, values) = ExtractValues(derivedBody);
+        Assert.DoesNotContain("min_wal_size", order);
+
+        values["min_wal_size"] = "512MB"; // the BEFORE snapshot's value for a key this render does not own
+        var rendered = ManagedConfFile.RenderWithValues(inputs, values, extraKeys: new List<string> { "min_wal_size" });
+        var parsed = ManagedConfFile.ParseExisting(rendered);
+        var body = parsed.Body;
+        var (renderedOrder, renderedValues) = ExtractValues(body);
+
+        Assert.Equal("min_wal_size", renderedOrder[^1]); // after every owned key
+        Assert.Equal("512MB", renderedValues["min_wal_size"]);
+        Assert.False(ManagedConfFile.IsHandEdited(rendered));
+    }
+
     private static (List<string> Order, Dictionary<string, string> Values) ExtractValues(string body)
     {
         var order = new List<string>();

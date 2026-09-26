@@ -40,7 +40,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// would require guessing or threading a new parameter through every caller, which the design does not ask
 /// for. v2, v3, v5, v7, v8 and v12 are RAM- or disk-derived; v8 and v12 carry a fingerprint/stamp that
 /// records their derivation inputs, while v2/v3/v5/v7 are classified by exact formula-image membership over
-/// every generation that ever wrote that block (#4336 lanes c2b/c2c) rather than a fingerprint, since none
+/// every generation that ever wrote that block (#4215) rather than a fingerprint, since none
 /// of them stamp their inputs into the block text. Their marker and content lines classify as
 /// <see cref="ConfLineClassification.Ours"/> only when in-image, in-form, and (for v5/v7) introduced by a
 /// generation reachable from the block's own introduction commit onward — never a generation that predates

@@ -255,6 +255,36 @@ public sealed class ManagedConfMigrationStepsTests : IDisposable
         Assert.Equal("old managed body\n", File.ReadAllText(managedPath));
     }
 
+    /// <summary>Pin (fixes commit 9ae7410c): a pending file with a WRONG FIELD COUNT (5 instead of 6) does
+    /// not throw -- it returns false with both out parameters empty/null, the same as a missing file.</summary>
+    [Fact]
+    public void TryReadPending_WrongFieldCount_ReturnsFalse_DoesNotThrow()
+    {
+        var pendingPath = Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName);
+        File.WriteAllText(pendingPath, "N\nVpostgresql.conf\tV1\tVwork_mem\tV16MB\t1\n"); // 5 fields, not 6
+
+        var found = ManagedConfMigrationSteps.TryReadPending(_dataDir, out var readBack, out var priorText);
+
+        Assert.False(found);
+        Assert.Empty(readBack);
+        Assert.Null(priorText);
+    }
+
+    /// <summary>Pin (fixes commit 9ae7410c): a pending file whose source-line field is not an integer does
+    /// not throw -- it returns false with both out parameters empty/null.</summary>
+    [Fact]
+    public void TryReadPending_NonIntegerLineNumber_ReturnsFalse_DoesNotThrow()
+    {
+        var pendingPath = Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName);
+        File.WriteAllText(pendingPath, "N\nVpostgresql.conf\tVnot-a-number\tVwork_mem\tV16MB\t1\tN\n");
+
+        var found = ManagedConfMigrationSteps.TryReadPending(_dataDir, out var readBack, out var priorText);
+
+        Assert.False(found);
+        Assert.Empty(readBack);
+        Assert.Null(priorText);
+    }
+
     [Fact]
     public void RestoreOriginal_NoPriorManagedText_LeavesTheManagedFileAbsent()
     {
