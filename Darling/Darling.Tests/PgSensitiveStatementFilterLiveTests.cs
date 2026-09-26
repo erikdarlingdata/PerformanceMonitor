@@ -69,8 +69,16 @@ public sealed class PgSensitiveStatementFilterLiveTests
             ("/* c */ CREATE SUBSCRIPTION sub CONNECTION 'host=h password=secret-x' PUBLICATION p", true),
             ("create subscription sub connection 'host=h password=secret-x' publication p", true),
 
+            // role/user/group/subscription/server DDL is withheld whole, whatever it sets
+            ("ALTER ROLE app SET work_mem = '64MB'", true),
+
+            ("CREATE USER MAPPING FOR u SERVER s OPTIONS (user 'u', secret_access_key 'secret-x')", true),
+            ("ALTER SERVER s OPTIONS (ADD token 'secret-x')", true),
+            ("CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (api_key 'secret-x')", true),
+
             ("SELECT * FROM t WHERE password_changed_at > $1", false),
-            ("ALTER ROLE app SET work_mem = '64MB'", false),
+            ("SET work_mem = '64MB'", false),
+            ("SELECT rolname FROM pg_roles", false),
             ("SELECT 1", false),
             ("CREATE TABLE passwords (id int)", false),
         };

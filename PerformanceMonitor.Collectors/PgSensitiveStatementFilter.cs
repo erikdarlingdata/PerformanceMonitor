@@ -51,7 +51,8 @@ public static class PgSensitiveStatementFilter
     /// (<c>password = $1</c>) is not a hit: it carries no value.</para>
     /// </summary>
     public const string SensitiveStatementPattern =
-        "[[:<:]]password[[:>:]]" + TokenGap + "*(=|to)?" + TokenGap + "*(e?'|u&'|[$][^0-9])"
+        "[[:<:]](create|alter)" + TokenGap + "+(role|user|group|subscription|server)[[:>:]]"
+        + "|[[:<:]]password[[:>:]]" + TokenGap + "*(=|to)?" + TokenGap + "*(e?'|u&'|[$][^0-9])"
         + "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]"
         + "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@";
 

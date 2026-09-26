@@ -35,7 +35,7 @@ public sealed class PgSensitiveStatementFilterTests
     public void ThePatternHasExactlyOneDefinitionInTheRepo()
     {
         var repoRoot = FindRepoRoot();
-        var needle = "[[:<:]]password[[:>:]]";
+        var needle = "[[:<:]](create|alter)";
         var hits = 0;
         string? onlyFile = null;
 
