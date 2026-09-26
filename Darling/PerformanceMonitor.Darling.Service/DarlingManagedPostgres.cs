@@ -692,6 +692,13 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal bool LastStartUsedLastGoodManagedConf { get; private set; }
 
+    /// <summary>The #4215/#4336 migration's outcome for THIS start (lane 5c) — null when
+    /// <see cref="MigrateManagedConfAsync"/> never ran this start (the adopted-listener branch; a Verified
+    /// conf runs Step B instead, #4336 lane 6). Carried out of the bootstrap the same way
+    /// <see cref="LastManagedConfWriteResult"/> already is.</summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfMigrationOutcome? LastManagedConfVerification { get; private set; }
+
     /// <summary>null/empty dataDirectory means %ProgramData%\PerformanceMonitorDarling\pg (created with inherited ACLs).</summary>
     public static string ResolveDataDirectory(PostgresConfig config)
     {
@@ -2629,8 +2636,14 @@ public sealed class DarlingManagedPostgres
                reverts and leaves the store exactly as it was. */
             /* #3909: before ANYTHING can start this cluster on PostgreSQL 17 binaries (the upgrade's old-cluster
                start just below, a reverted upgrade's restart, or a plain start of a store still on 17), make
-               sure its conf is one 17 will open. */
-            HealLegacyMaintenanceWorkMem(_dataDirectory);
+               sure its conf is one 17 will open. Legacy conf only (#4336 lane 5c): once #4215 has migrated,
+               maintenance_work_mem's value lives in darling-managed.conf, which this heal never touches — a
+               migrated store's cap is the render's own job, not this append. */
+            if (ManagedConfMigrationState.Classify(_dataDirectory) == ManagedConfMigrationState.Kind.Legacy)
+            {
+                HealLegacyMaintenanceWorkMem(_dataDirectory);
+            }
+
             await EnsureDataDirectoryMajorAsync(binDirectory, networkPlan, cancellationToken);
         }
 
@@ -2664,7 +2677,16 @@ public sealed class DarlingManagedPostgres
             }
         }
 
-        EnsureConfAppended(_dataDirectory);
+        /* #4336 lane 5c, plan decision (c): the classifier reads the conf's own state ONCE, before the
+           legacy appenders can run. Only a Legacy conf (a v-marker present, or the include missing) may
+           append — a PendingVerify/Verified/MigratedUnstamped conf already carries the migrated file, and
+           EnsureConfAppended appends at the END of postgresql.conf, which would override both the managed
+           file's values AND any operator line this migration moved below the include. */
+        var confState = ManagedConfMigrationState.Classify(_dataDirectory);
+        if (confState == ManagedConfMigrationState.Kind.Legacy)
+        {
+            EnsureConfAppended(_dataDirectory);
+        }
 
         var password = ReadStoredPassword();
 
@@ -2733,8 +2755,15 @@ public sealed class DarlingManagedPostgres
         {
             /* #4215: the one service-owned settings file, rendered and validated right before the start it
                takes effect on — never for the adopted-listener branch above, which does not start anything
-               this file could take effect on until the next service-owned start anyway. */
-            await EnsureManagedConfReadyAsync(binDirectory, _dataDirectory, cancellationToken);
+               this file could take effect on until the next service-owned start anyway. #4336 lane 5c: skipped
+               on Legacy (no managed file exists yet — the old blocks are still what's in force) and on
+               PendingVerify (a crash left the migrated files exactly where the last attempt wrote them; A1
+               must not re-derive before the stamp exists, or ResumePending's before/after comparison below
+               would be comparing against a snapshot the render itself just changed). */
+            if (confState == ManagedConfMigrationState.Kind.Verified || confState == ManagedConfMigrationState.Kind.MigratedUnstamped)
+            {
+                await EnsureManagedConfReadyAsync(binDirectory, _dataDirectory, cancellationToken);
+            }
 
             try
             {
@@ -2764,7 +2793,14 @@ public sealed class DarlingManagedPostgres
 
             _startedByThisProcess = true;
 
-            SaveLastGoodManagedConf(_dataDirectory);
+            /* #4336 lane 5c: guarded — Legacy and PendingVerify never ran EnsureManagedConfReadyAsync above, so
+               darling-managed.conf may not exist yet on this start. Copying a missing file would throw and take
+               the whole start down over what SaveLastGoodManagedConf's own doc comment already treats as a
+               no-op-worthy failure. */
+            if (File.Exists(Path.Combine(_dataDirectory, ManagedConfFile.FileName)))
+            {
+                SaveLastGoodManagedConf(_dataDirectory);
+            }
         }
 
         /* Covers all three ways this point is reached with nothing left pending: already running (no start
@@ -2819,7 +2855,170 @@ public sealed class DarlingManagedPostgres
            a network reconcile failure logs + degrades, it does not abort the bootstrap. */
         await ReconcileNetworkAsync(binDirectory, networkPlan.Value, connectionString, cancellationToken);
 
+        /* #4336 lane 5c: only when THIS process started the server — an adopted listener's conf takes effect
+           on the next service-owned start, same rule EnsureManagedConfReadyAsync above already follows, and
+           the migration's own re-snapshot needs a server that is actually up on the files this start wrote. */
+        if (_startedByThisProcess)
+        {
+            LastManagedConfVerification = await MigrateManagedConfAsync(confState, connectionString, cancellationToken);
+        }
+
         return connectionString;
+    }
+
+    /// <summary>
+    /// Runs Step A, resumes a pending Step A, or re-verifies a hand-edited migrated conf — whichever
+    /// <paramref name="confState"/> calls for (#4336 lane 5c, plan decision (c)). <see
+    /// cref="ManagedConfMigrationState.Kind.Verified"/> does nothing here; Step B is #4336 lane 6. Everything
+    /// is caught: a migration failure logs and reports, it never throws — the store this start already
+    /// brought up must not go down over a verification step (plan (a)).
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private async Task<ManagedConfMigrationOutcome?> MigrateManagedConfAsync(
+        ManagedConfMigrationState.Kind confState, string connectionString, CancellationToken cancellationToken)
+    {
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = async ct =>
+        {
+            await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
+            await connection.OpenAsync(ct);
+            await using var command = new NpgsqlCommand(ManagedConfFileSettings.SnapshotSql, connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var rows = new List<FileSettingRow>();
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(new FileSettingRow(
+                    SourceFile: reader.IsDBNull(0) ? null : reader.GetString(0),
+                    SourceLine: reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                    Name: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    Setting: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Applied: !reader.IsDBNull(4) && reader.GetBoolean(4),
+                    Error: reader.IsDBNull(5) ? null : reader.GetString(5)));
+            }
+
+            return rows;
+        };
+
+        try
+        {
+            ManagedConfMigrationOutcome outcome;
+            switch (confState)
+            {
+                case ManagedConfMigrationState.Kind.Legacy:
+                {
+                    var postgresMajor = DarlingStoreUpgrade.TryReadDataDirectoryMajor(_dataDirectory) ?? 0;
+                    var inputs = GatherManagedConfRenderInputs(_dataDirectory, postgresMajor);
+                    var derived = new Dictionary<string, string>(StringComparer.Ordinal);
+                    foreach (var (_, name, value) in ParseConfText(ManagedConfFile.RenderBody(inputs)))
+                    {
+                        derived[name] = value;
+                    }
+
+                    outcome = await ManagedConfMigrationRunner.RunStepA(
+                        _dataDirectory, snapshot, derived, inputs, _config.Port, DateTime.UtcNow, _logger, cancellationToken);
+                    break;
+                }
+
+                case ManagedConfMigrationState.Kind.PendingVerify:
+                {
+                    var backupPath = Directory.GetFiles(_dataDirectory, "postgresql.conf.pre-4215.*.bak");
+                    if (backupPath.Length == 0)
+                    {
+                        _logger.LogWarning(
+                            "{DataDirectory} has a pending #4215 migration but no backup file — cannot resume; reporting Unknown.",
+                            _dataDirectory);
+                        return new ManagedConfMigrationOutcome(
+                            ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+                    }
+
+                    Array.Sort(backupPath, StringComparer.Ordinal);
+                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[0], cancellationToken);
+                    break;
+                }
+
+                case ManagedConfMigrationState.Kind.MigratedUnstamped:
+                {
+                    /* A hand edit of darling-managed.conf, or a crash inside Step B (#4336 lane 6's problem to
+                       distinguish further — here, both look the same: migrated, no pending file, stale stamp).
+                       Re-verify against what is on disk NOW: no new error row may come from darling-managed.conf
+                       relative to the file's own current bytes — the file itself is the ground truth once no
+                       pending snapshot survives to compare against. */
+                    var rows = await snapshot(cancellationToken);
+                    var managedConfPath = Path.Combine(_dataDirectory, ManagedConfFile.FileName);
+                    var newErrorFromManagedFile = false;
+                    var mismatchedKeys = new List<string>();
+                    foreach (var row in rows)
+                    {
+                        if (row.Error is not null && row.SourceFile is not null
+                            && row.SourceFile.EndsWith(ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            newErrorFromManagedFile = true;
+                            if (row.Name is not null)
+                            {
+                                mismatchedKeys.Add(row.Name);
+                            }
+                        }
+                    }
+
+                    if (newErrorFromManagedFile)
+                    {
+                        outcome = new ManagedConfMigrationOutcome(
+                            ManagedConfVerificationStatus.Failed, mismatchedKeys, null, ManagedConfMigrationStep.A);
+                        break;
+                    }
+
+                    var managedConfText = File.Exists(managedConfPath) ? File.ReadAllText(managedConfPath) : string.Empty;
+                    ManagedConfMigrationSteps.WriteVerifiedStamp(_dataDirectory, managedConfText);
+                    _logger.LogWarning(
+                        "{Path} was changed outside the service; operator settings belong below the include in postgresql.conf, or in ALTER SYSTEM; the service re-renders this file.",
+                        managedConfPath);
+                    outcome = new ManagedConfMigrationOutcome(
+                        ManagedConfVerificationStatus.Verified, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+                    break;
+                }
+
+                default:
+                    return null;
+            }
+
+            LogMigrationOutcome(outcome);
+
+            if (outcome.Status == ManagedConfVerificationStatus.Verified)
+            {
+                if (File.Exists(Path.Combine(_dataDirectory, ManagedConfFile.FileName)))
+                {
+                    SaveLastGoodManagedConf(_dataDirectory);
+                }
+            }
+
+            return outcome;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "The #4215 conf migration failed for {DataDirectory}; the store keeps running on its current conf.", _dataDirectory);
+            return new ManagedConfMigrationOutcome(
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+        }
+    }
+
+    /// <summary>Logs a <see cref="MigrateManagedConfAsync"/> outcome once (#4336 lane 5c): Information for a
+    /// clean Verified, Warning for Failed or Unknown — naming the backup path and the mismatched keys so an
+    /// operator has somewhere to look.</summary>
+    [SupportedOSPlatform("windows")]
+    private void LogMigrationOutcome(ManagedConfMigrationOutcome outcome)
+    {
+        if (outcome.Status == ManagedConfVerificationStatus.Verified)
+        {
+            _logger.LogInformation(
+                "#4215 conf migration verified for {DataDirectory} (step {Step}).", _dataDirectory, outcome.Step);
+            return;
+        }
+
+        _logger.LogWarning(
+            "#4215 conf migration {Status} for {DataDirectory} (step {Step}); backup {BackupPath}; mismatched keys: {MismatchedKeys}.",
+            outcome.Status, _dataDirectory, outcome.Step, outcome.BackupPath ?? "(none)", string.Join(", ", outcome.MismatchedKeys));
     }
 
     /// <summary>
