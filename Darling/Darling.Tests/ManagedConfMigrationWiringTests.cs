@@ -94,4 +94,17 @@ public sealed class ManagedConfMigrationWiringTests
 
         Assert.True(classify < gate, "confState must be classified before the Legacy append gate reads it.");
     }
+
+    /// <summary>#4336 lane 6: <c>MigrateManagedConfAsync</c> has a <c>Kind.Verified</c> case that calls
+    /// <c>VerifyStepB</c>.</summary>
+    [Fact]
+    public void MigrateManagedConfAsync_HasVerifiedCase_CallingVerifyStepB()
+    {
+        var source = ReadManagedSource();
+        var migrateMethod = At(source, "private async Task<ManagedConfMigrationOutcome?> MigrateManagedConfAsync(", 0);
+        var verifiedCase = At(source, "case ManagedConfMigrationState.Kind.Verified:", migrateMethod);
+        var verifyCall = At(source, "ManagedConfMigrationRunner.VerifyStepB(", verifiedCase);
+
+        Assert.True(verifiedCase < verifyCall, "the Kind.Verified case must call VerifyStepB.");
+    }
 }

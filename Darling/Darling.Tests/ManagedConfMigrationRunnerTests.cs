@@ -316,4 +316,113 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
     }
+
+    private void WriteManaged(string text) => File.WriteAllText(Path.Combine(_dataDir, ManagedConfFile.FileName), text);
+
+    /// <summary>Pin (#4336 lane 6): every rendered key matches its <c>pg_file_settings</c> row — the stamp
+    /// is written and <see cref="ManagedConfMigrationSteps.IsVerified"/> is true.</summary>
+    [Fact]
+    public void VerifyStepB_AllKeysMatch_StampsVerified()
+    {
+        var rendered = "work_mem = '16MB'\nmax_connections = '200'\n";
+        WriteManaged(rendered);
+
+        var rows = new List<FileSettingRow>
+        {
+            Applied("work_mem", "16MB", file: Path.Combine(_dataDir, ManagedConfFile.FileName)),
+            Applied("max_connections", "200", file: Path.Combine(_dataDir, ManagedConfFile.FileName)),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Equal(ManagedConfMigrationStep.B, outcome.Step);
+        Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
+    }
+
+    /// <summary>Pin (#4336 lane 6): a mismatched key restores the previous file bytes exactly, and the OLD
+    /// stamp (written against <c>previousText</c> beforehand) is still verified against them.</summary>
+    [Fact]
+    public void VerifyStepB_Mismatch_RestoresPreviousTextAndOldStampStillVerifies()
+    {
+        var previousText = "work_mem = '8MB'\n";
+        WriteManaged(previousText);
+        ManagedConfMigrationSteps.WriteVerifiedStamp(_dataDir, previousText);
+
+        var rendered = "work_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var rows = new List<FileSettingRow>
+        {
+            Applied("work_mem", "8MB", file: Path.Combine(_dataDir, ManagedConfFile.FileName)),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.Equal(ManagedConfMigrationStep.B, outcome.Step);
+        Assert.Contains("work_mem", outcome.MismatchedKeys);
+        Assert.Equal(previousText, File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName)));
+        Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
+    }
+
+    /// <summary>Pin (#4336 lane 6): a key whose row has <c>Applied: false</c> because an operator line
+    /// overrides it lower down still passes, as long as its setting and value agree and it carries no error.</summary>
+    [Fact]
+    public void VerifyStepB_OverriddenKey_StillPasses()
+    {
+        var rendered = "work_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "work_mem", Setting: "16MB", Applied: false, Error: null),
+            Applied("work_mem", "32MB", file: "postgresql.conf", line: 99),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+    }
+
+    /// <summary>Pin (#4336 lane 6): a fresh error row from <c>darling-managed.conf</c> on a rendered key fails
+    /// verification even when a differently-sourced row for the same name is applied.</summary>
+    [Fact]
+    public void VerifyStepB_NewErrorFromManagedFile_Fails()
+    {
+        var rendered = "work_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "work_mem", Setting: "16MB", Applied: false, Error: "invalid value"),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.Contains("work_mem", outcome.MismatchedKeys);
+    }
+
+    /// <summary>Pin (#4336 lane 6): the exact change-log line for two changed keys.</summary>
+    [Fact]
+    public void FormatStepBChangeLog_TwoKeys_ExactLine()
+    {
+        var inputs = SampleInputs(port: 5432);
+        var changes = new List<(string Key, string? Old, string New)>
+        {
+            ("work_mem", "8MB", "16MB"),
+            ("max_connections", null, "200"),
+        };
+
+        var log = ManagedConfMigrationRunner.FormatStepBChangeLog(changes, inputs);
+
+        var expected =
+            "work_mem: 8MB -> 16MB (RAM 16384 MB, authoritative True; platform Windows; PG 18; CPUs 8; hypertables 42)\n" +
+            "max_connections: (unset) -> 200 (RAM 16384 MB, authoritative True; platform Windows; PG 18; CPUs 8; hypertables 42)";
+
+        Assert.Equal(expected, log);
+    }
 }
