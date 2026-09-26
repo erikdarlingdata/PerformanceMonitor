@@ -505,6 +505,37 @@ OUTER APPLY
            ALL EIGHT delta'd counters take the same rule. Crediting only some would make one row's metrics
            disagree about how much work it did, which is worse than under-reporting all of them. */
         var age = row.CompileAgeSeconds;
+
+        /* #4428: a per-family CalculateDeltaWithSeriesAge call only ever sees its OWN counter, so a row
+           whose statistics restart under this same key can be read as a reset in one family (the one that
+           happened to shrink) and a giant real increment in another (a sibling that had already re-grown
+           past its own pre-restart value) — the same row telling two different stories about whether it
+           restarted. In the field: executions 1 -> 16 against a CPU counter that fell from 57,695,259 to
+           703,943 read as "executions +15" instead of "16 executions since the restart". DecideRow peeks
+           every family's cached value under deltaKey WITHOUT updating anything, so the decision is made
+           once, ROW-COHERENTLY, before any of the eight per-family calls below mutate a baseline: if any
+           family would reset, every counter's fate is the same — the #2235 series-age test's call on
+           whether the restart falls inside the gap since we last looked, exactly as a single reset already
+           decides for itself. A row with no reset is unaffected: DecideRow reports AnyReset = false and
+           every per-family call below runs its ordinary path. */
+        var rowReset = context.Deltas.DecideRow(
+            context.ServerId,
+            new (string Family, long Current)[]
+            {
+                ("query_stats_exec", row.ExecutionCount),
+                ("query_stats_worker", row.TotalWorkerTime),
+                ("query_stats_elapsed", row.TotalElapsedTime),
+                ("query_stats_reads", row.TotalLogicalReads),
+                ("query_stats_writes", row.TotalLogicalWrites),
+                ("query_stats_phys_reads", row.TotalPhysicalReads),
+                ("query_stats_rows", row.TotalRows),
+                ("query_stats_spills", row.TotalSpills),
+            },
+            deltaKey,
+            age,
+            context.CollectionTime,
+            CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
         var deltaExecCount = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, age, out var execIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         /* Capture the collection interval alongside the CPU delta so the display can derive
            worker_time_per_second (peak CPU-ms per wall-clock second) over the window. */
@@ -515,6 +546,46 @@ OUTER APPLY
         var deltaPhysicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaRows = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaSpills = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        /* #4428: apply the row-coherent decision AFTER every per-family call above has run — each call
+           already updated its own baseline to the current value/time (the store-forward the Add/Update
+           branches always perform), so the row is ready for an ordinary delta on the NEXT pass regardless
+           of which branch this row takes now. When the row restarted, override every counter together:
+           credited-in-gap makes each counter's delta its own CURRENT value over the real interval (the
+           restart's whole accrual, symmetric with #2235's single-family rescue); otherwise every counter
+           becomes unknowable, (0, 0), rather than the mixed reset-plus-inflated-increment the per-family
+           calls above would otherwise have written. */
+        if (rowReset.AnyReset)
+        {
+            if (rowReset.CreditedInGap)
+            {
+                deltaExecCount = row.ExecutionCount;
+                deltaWorkerTime = row.TotalWorkerTime;
+                deltaElapsedTime = row.TotalElapsedTime;
+                deltaLogicalReads = row.TotalLogicalReads;
+                deltaLogicalWrites = row.TotalLogicalWrites;
+                deltaPhysicalReads = row.TotalPhysicalReads;
+                deltaRows = row.TotalRows;
+                deltaSpills = row.TotalSpills;
+                execIntervalSeconds = rowReset.IntervalSeconds;
+                workerIntervalSeconds = rowReset.IntervalSeconds;
+                elapsedIntervalSeconds = rowReset.IntervalSeconds;
+            }
+            else
+            {
+                deltaExecCount = 0;
+                deltaWorkerTime = 0;
+                deltaElapsedTime = 0;
+                deltaLogicalReads = 0;
+                deltaLogicalWrites = 0;
+                deltaPhysicalReads = 0;
+                deltaRows = 0;
+                deltaSpills = 0;
+                execIntervalSeconds = 0;
+                workerIntervalSeconds = 0;
+                elapsedIntervalSeconds = 0;
+            }
+        }
 
         /* #4394: the worker (CPU) counter's own interval can land at 0 — a first sighting, a plan
            reset, or a gap past the policy — while the exec-count or elapsed-time counters (same row,

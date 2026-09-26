@@ -286,6 +286,74 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         _discontinuities.GetOrAdd(serverId, _ => new ConcurrentQueue<string>()).Enqueue(discontinuity);
     }
 
+    /// <inheritdoc />
+    ///
+    /// <para>#4428: peeks every family's cached (Value, Timestamp) for <paramref name="key"/> WITHOUT
+    /// updating anything — no baseline write, no pass-window roll — so it costs nothing beyond the calls a
+    /// caller was already going to make. A family with no cached entry yet cannot have restarted (its own
+    /// per-family call takes the ordinary first-sighting path), so it is skipped rather than counted as a
+    /// reset.</para>
+    public RowResetDecision DecideRow(int serverId, IReadOnlyList<(string Family, long Current)> counters, string key,
+        int? seriesAgeSeconds, DateTime? collectionTime, int maxGapSeconds)
+    {
+        if (counters is null || counters.Count == 0)
+        {
+            return default;
+        }
+
+        if (!_cache.TryGetValue(serverId, out var serverCache))
+        {
+            return default;
+        }
+
+        var anyReset = false;
+
+        foreach (var (family, current) in counters)
+        {
+            if (!serverCache.TryGetValue(family, out var collectorCache)
+                || !collectorCache.TryGetValue(key, out var previous))
+            {
+                /* No cached baseline for this family under this key yet — a genuine first sighting, which
+                   is not a restart and takes its own per-family path (including the #2235 rescue). */
+                continue;
+            }
+
+            if (current < previous.Value)
+            {
+                anyReset = true;
+                break;
+            }
+        }
+
+        if (!anyReset)
+        {
+            return default;
+        }
+
+        /* Same #2235 test a per-family reset already uses to place a restart inside the gap: read the
+           PREVIOUS pass without rolling it forward (PreviousPass only rolls when collectionTime is a NEW
+           pass for this (server, collector), and this call passes the family name of the first counter
+           purely as the collector key that pass window is stored under — every family sharing this row
+           already shares one pass window because they are called in the same WritePayload for the same
+           collectorName-per-family scheme, so any one of them reads the same previous pass). */
+        if (seriesAgeSeconds.HasValue && seriesAgeSeconds.Value >= 0 && collectionTime.HasValue)
+        {
+            var previousPass = PreviousPass(serverId, counters[0].Family, collectionTime);
+
+            if (previousPass.HasValue)
+            {
+                var gap = (collectionTime.Value - previousPass.Value).TotalSeconds;
+
+                if (gap > 0 && (maxGapSeconds <= 0 || gap <= maxGapSeconds) && seriesAgeSeconds.Value <= gap)
+                {
+                    return new RowResetDecision(AnyReset: true, CreditedInGap: true, IntervalSeconds: (int)gap);
+                }
+            }
+        }
+
+        return new RowResetDecision(AnyReset: true, CreditedInGap: false, IntervalSeconds: 0);
+    }
+
     /// <summary>
     /// Calculates the delta between the current value and the previous cached value.
     /// First-ever sighting (no baseline): returns 0 and stores the value as the new baseline.
