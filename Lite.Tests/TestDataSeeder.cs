@@ -25,11 +25,34 @@ public class TestDataSeeder : IDisposable
     public const string TestServerName = "TestServer-ErikAI";
 
     /// <summary>
-    /// Test scenarios use a 4-hour window ending "now" so the data
-    /// falls within any reasonable time range query.
+    /// Test scenarios use a 4-hour window ending near "now" so the data
+    /// falls within any reasonable time range query. Anchored to 04:00 UTC of
+    /// today rather than the raw instant: BaselineProvider's daily-cache arms
+    /// (Cpu, IoLatency — #4248) key their 30-day query window on
+    /// RoundedDay(TestPeriodStart), midnight UTC of TestPeriodStart's date. A
+    /// raw DateTime.UtcNow made that rounding point drift away from
+    /// TestPeriodStart by up to ~24h depending on the run's time-of-day —
+    /// worst (almost the entire 24h seeded baseline excluded) whenever the
+    /// suite ran shortly before 04:00 UTC, which is what started failing the
+    /// CPU-spike scenario tests intermittently. Fixing the anchor so
+    /// TestPeriodStart lands exactly on a UTC midnight keeps that rounding
+    /// point equal to TestPeriodStart every run, at any time of day.
     /// Captured once so all references use identical boundaries.
     /// </summary>
-    private static readonly DateTime _periodEnd = DateTime.UtcNow;
+    private static readonly DateTime _periodEnd = AnchorPeriodEndToUtcMidnight(DateTime.UtcNow);
+
+    /// <summary>
+    /// The most recent midnight-UTC-plus-4h instant that is not in the future, so
+    /// TestPeriodStart (<see cref="TestPeriodStart"/>, 4h before this) lands exactly
+    /// on a UTC midnight at any time of day the suite runs — see the remarks on
+    /// <see cref="_periodEnd"/> for why that alignment matters.
+    /// </summary>
+    private static DateTime AnchorPeriodEndToUtcMidnight(DateTime nowUtc)
+    {
+        var midnight = nowUtc.Date;
+        if (nowUtc.Hour < 4) midnight = midnight.AddDays(-1);
+        return midnight.AddHours(4);
+    }
     public static DateTime TestPeriodEnd => _periodEnd;
     public static DateTime TestPeriodStart => _periodEnd.AddHours(-4);
     public static double TestPeriodDurationMs => (TestPeriodEnd - TestPeriodStart).TotalMilliseconds;

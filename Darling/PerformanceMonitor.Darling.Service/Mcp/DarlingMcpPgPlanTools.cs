@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -54,9 +55,10 @@ public sealed class DarlingMcpPgPlanTools
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum plan shapes to return. Default 10. See the tool's reading guide.")] int limit = 10,
         [Description("Only return plans for this queryid, as a string. Optional. See the tool's reading guide.")] string? query_id = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -95,20 +97,20 @@ public sealed class DarlingMcpPgPlanTools
                over a read already capped at `limit` and publish nothing about the cut, so a page of ten shapes
                read as "this server's plans" whether the window held ten or ten thousand. */
             var rows = await DarlingPgPlanCaptureReader.GetPgPlanCaptureAsync(
-                postgres, resolved.ServerId, start, now, limit + 1, wantedQueryId);
+                postgres, resolved.ServerId, start, now, limit + 1, wantedQueryId, cancellationToken);
 
             if (rows.Count == 0)
             {
                 return await NoPlansStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, wantedQueryId, hours_back);
+                    postgres, resolved.ServerId, resolved.ServerName, wantedQueryId, hours_back, cancellationToken);
             }
 
             return BuildPlansJson(resolved.ServerName, hours_back, rows, limit);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                postgres, resolved.ServerId, resolved.ServerName, "pg_plan_capture");
+                postgres, resolved.ServerId, resolved.ServerName, "pg_plan_capture", cancellationToken);
             if (gated != null)
             {
                 return gated;
@@ -124,9 +126,10 @@ public sealed class DarlingMcpPgPlanTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to search for each facet's most recent reading. Default 24 - this collector runs hourly, so a window under an hour can legitimately find nothing.")] int hours_back = 24,
         [Description("Maximum facet rows to return. Default 25 - the collector emits one row per facet, so the default is well clear of the whole set. See the tool's reading guide.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -146,19 +149,19 @@ public sealed class DarlingMcpPgPlanTools
                `limit = 6` - the whole set - used to be told the result was truncated and have its
                unsatisfied_facets WITHHELD, for a page that was complete. */
             var rows = await DarlingPgPlanCaptureReadinessReader.GetPgPlanCaptureReadinessAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
 
             if (rows.Count == 0)
             {
-                return await NoReadinessStatusAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back);
+                return await NoReadinessStatusAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, cancellationToken);
             }
 
             return BuildReadinessJson(resolved.ServerName, hours_back, rows, limit);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                postgres, resolved.ServerId, resolved.ServerName, "pg_plan_capture_readiness");
+                postgres, resolved.ServerId, resolved.ServerName, "pg_plan_capture_readiness", cancellationToken);
             if (gated != null)
             {
                 return gated;
@@ -177,17 +180,18 @@ public sealed class DarlingMcpPgPlanTools
     /// that order.</para>
     /// </summary>
     private static async Task<string> NoReadinessStatusAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack)
+        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack,
+        CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_plan_capture_readiness");
+            postgres, serverId, serverName, "pg_plan_capture_readiness", cancellationToken);
         if (gated != null)
         {
             return gated;
         }
 
         var precondition = await DarlingRuntimePrecondition.StatusAsync(
-            postgres, serverId, serverName, "pg_plan_capture_readiness");
+            postgres, serverId, serverName, "pg_plan_capture_readiness", cancellationToken);
         if (precondition != null)
         {
             return precondition;
@@ -274,17 +278,18 @@ public sealed class DarlingMcpPgPlanTools
     /// the threshold" become a true statement rather than a guess.</para>
     /// </summary>
     private static async Task<string> NoPlansStatusAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, long? wantedQueryId, int hoursBack)
+        NpgsqlDataSource postgres, int serverId, string serverName, long? wantedQueryId, int hoursBack,
+        CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_plan_capture");
+            postgres, serverId, serverName, "pg_plan_capture", cancellationToken);
         if (gated != null)
         {
             return gated;
         }
 
         var precondition = await DarlingRuntimePrecondition.StatusAsync(
-            postgres, serverId, serverName, "pg_plan_capture");
+            postgres, serverId, serverName, "pg_plan_capture", cancellationToken);
         if (precondition != null)
         {
             return precondition;
@@ -292,7 +297,7 @@ public sealed class DarlingMcpPgPlanTools
 
         /* The readiness collector (#2564) already measured every precondition and stored the remedy beside
            it, so this names the specific missing step instead of listing everything that could be wrong. */
-        var unmet = await UnsatisfiedFacetsAsync(postgres, serverId);
+        var unmet = await UnsatisfiedFacetsAsync(postgres, serverId, cancellationToken);
 
         if (unmet.Count > 0)
         {
@@ -342,7 +347,8 @@ public sealed class DarlingMcpPgPlanTools
     /// The unsatisfied readiness facets, newest reading per facet. Read directly rather than through the
     /// readiness tool so this stays a fact lookup rather than one MCP tool narrating another's prose.
     /// </summary>
-    private static async Task<List<string>> UnsatisfiedFacetsAsync(NpgsqlDataSource postgres, int serverId)
+    private static async Task<List<string>> UnsatisfiedFacetsAsync(NpgsqlDataSource postgres, int serverId,
+        CancellationToken cancellationToken = default)
     {
         var unmet = new List<string>();
 
@@ -364,9 +370,9 @@ public sealed class DarlingMcpPgPlanTools
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
             command.Parameters.AddWithValue(serverId);
 
-            await using var reader = await command.ExecuteReaderAsync();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
-            while (await reader.ReadAsync())
+            while (await reader.ReadAsync(cancellationToken))
             {
                 var facet = reader.IsDBNull(0) ? "(unnamed)" : reader.GetString(0);
                 var observed = reader.IsDBNull(1) ? "(not reported)" : reader.GetString(1);

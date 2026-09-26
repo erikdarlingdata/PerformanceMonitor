@@ -291,6 +291,76 @@ public sealed partial class ViewerDataService
     public static readonly string QueryStoreDurationTrendRollupSql =
         QueryStoreTrendRouting.BuildRollupTrendSql(withDatabaseFilter: true);
 
+    /// <summary>
+    /// The table-routed twin of <see cref="QueryStoreDurationTrendSql"/> (#4310 site 3): reads
+    /// <c>query_store_interval_wide</c> directly instead of the raw arms' interval dedupe — the table already
+    /// holds the latest snapshot per interval, every outcome (<see cref="QueryStoreIntervalWide.UpsertSql"/>'s
+    /// running-maximum guard) — so this drops arm 1's identity subquery/ROW_NUMBER entirely and reads arm 2
+    /// (the legacy rows with no <c>interval_start_time_utc</c>) off the SAME base table, exactly as
+    /// <see cref="ViewerDataService.QueryStoreTopTablePrefix"/> does for the grid's top read.
+    /// <para><b>Arm 2's own dedup is NOT a no-op here, unlike arm 1's raw text.</b> A legacy row's identity
+    /// (<see cref="QueryStoreIntervalWide.IdentityColumns"/>) carries no <c>collection_time</c>, so a legacy
+    /// interval re-fetched across several cycles — the collector's ordinary behaviour for an open interval
+    /// before tier 2 assigned intervals their own identity, or any interval whose catalog join missed — keeps
+    /// only its LATEST snapshot in the table, the same running-maximum guard arm 1 relies on; this arm places
+    /// every snapshot at its OWN collection_time and needs every one of them, not the running maximum. This is
+    /// why <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s clause 6 refuses the table outright when the
+    /// window holds any legacy row, rather than trusting this arm to read them un-deduped the way raw's own
+    /// arm 2 does.</para>
+    /// $1 server_id, $2 the gate's own clamp (<see cref="QueryStoreIntervalWide.ClampedStart"/>), $3/$4 window
+    /// end (naive UTC; $3 binds arm 1's placement filter, $4 binds arm 2's collection-time filter — both are
+    /// the caller's unclamped <c>endUtc</c>), $5 database filter.
+    /// </summary>
+    public const string QueryStoreDurationTrendTableSql = """
+        WITH placed AS
+        (
+            SELECT
+                interval_start_time_utc AS point_time,
+                execution_count,
+                avg_duration_us
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   interval_start_time_utc >= $2
+            AND   interval_start_time_utc <= $3
+            AND   interval_start_time_utc IS NOT NULL
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+
+            UNION ALL
+
+            /* Arm 2 — legacy rows (no interval_start_time_utc). The table's upsert keeps only the LATEST
+               snapshot per identity, and a legacy identity carries no collection_time, so this arm can only
+               be trusted when the gate's clause 6 has already confirmed the window holds no such row — see
+               ReadsTableAsync and QueryStoreDurationTrendTableSql's own remarks. Byte-identical to
+               QueryStoreDurationTrendSql's own arm 2 apart from the source table. */
+            SELECT
+                collection_time AS point_time,
+                execution_count,
+                avg_duration_us
+            FROM query_store_interval_wide
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $4
+            AND   interval_start_time_utc IS NULL
+            AND   ($5::text[] IS NULL OR database_name = ANY($5))
+        ),
+        raw AS
+        (
+            SELECT
+                point_time,
+                SUM(execution_count * avg_duration_us / 1000.0) AS total_duration_ms,
+                SUM(execution_count) AS total_executions,
+                extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time)))) AS interval_seconds
+            FROM placed
+            GROUP BY point_time
+        )
+        SELECT
+            point_time AS collection_time,
+            CASE WHEN interval_seconds > 0 THEN total_duration_ms / interval_seconds END AS duration_ms_per_second,
+            CASE WHEN interval_seconds > 0 THEN CAST(total_executions AS DOUBLE PRECISION) / interval_seconds END AS executions_per_second
+        FROM raw
+        ORDER BY point_time
+        """;
+
     /// <summary>Execution-count trend: executions/sec per BUCKET from query_stats (#4234) — the executions
     /// column of <see cref="QueryDurationTrendSql"/>'s bucketing pattern on its own, so it reads the interval
     /// the same way (#3653 A11): the collection's stored <c>sample_interval_seconds</c>, 0 → NULL (unrated,
@@ -416,6 +486,21 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// #4310 site 3's own minimum window (ruling issuecomment-5836972848 item 5's pattern, restated per-site as
+    /// <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader.QueryStoreTopMinWindow"/> already
+    /// does): below this window the table's own gate round trips (a second connection, a transaction, the
+    /// coverage/floor probes) cost more than they save, so the read stays raw regardless of coverage. Does NOT
+    /// share <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> (the grid's 12h) — this site's query shape
+    /// measured differently. 48 hours (NULL-free 15-day seed at a field store's
+    /// rate, end-to-end through <see cref="GetQueryStoreDurationTrendAsync"/>, gate-routed, 1 cold + 5 warm):
+    /// at 24h the table lost (279 ms raw vs. 370 ms table); at 48h the table won (median of 5,
+    /// raw 423.0 ms vs. table 361.4 ms); at 72h the table also won (raw 515.0 ms vs. table 380.5 ms). Raw vs.
+    /// table point equality was exact at 48h (46 of 46 points) on the NULL-free seed. 48h is the lower of the
+    /// two measured wins, so it is the threshold — the exact crossover between 24h and 48h was not bisected.
+    /// </summary>
+    public static readonly TimeSpan QueryStoreDurationTrendMinWindow = TimeSpan.FromHours(48);
+
+    /// <summary>
     /// Query Store duration trend over the window — routed through the corrected rollup where the store has
     /// one (#2736; see <see cref="QueryStoreDurationTrendRollupSql"/>). The raw-only read is kept unchanged
     /// as the fallback for stores without a materialized rollup, where it is affordable.
@@ -426,19 +511,108 @@ public sealed partial class ViewerDataService
     /// the days it had under an axis that said seven — the sibling charts' #3666 defect, on the one chart that
     /// PR left out because its routing is a watermark and not the tier ladder. The MCP tool has disclosed
     /// this floor as <c>routing.unserved_before</c> since #2736; the chart now reads the same rule.</para>
+    /// <para>#4310 site 3: below <see cref="QueryStoreDurationTrendMinWindow"/> the read stays exactly
+    /// as it was (the rollup route above, or raw). At or above it, and only when the store's schema is V145 or
+    /// later, <see cref="QueryStoreIntervalWide.ReadsTableAsync"/> gets ONE chance to route the RAW arm (never
+    /// the rollup route, which stays untouched — this is #2736's own fallback path, the pattern site 3 mirrors
+    /// off the grid's top read) through <see cref="QueryStoreDurationTrendTableSql"/> instead; any fault or a
+    /// "no" leaves <paramref name="startUtc"/>/<paramref name="endUtc"/> on the raw read unchanged, exactly as
+    /// before this table existed. <paramref name="literalEndUtc"/> is the gate's clause-4 input, mirroring the
+    /// grid's own parameter: null for an open end (the WPF preset means "through now"), or a concrete instant
+    /// for a custom range. The window check comes first, before the schema probe or the gate's own round
+    /// trips, so a short window costs no extra store round trips.</para>
     /// </summary>
     public async Task<QueryStoreTrendSeries> GetQueryStoreDurationTrendAsync(
-        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null, CancellationToken cancellationToken = default)
+        int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
+        DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
         var route = await QueryStoreTrendRouting.ResolveAsync(_dataSource, cancellationToken);
-        var points = route.UseRollup
-            ? await ReadQueryStoreRollupTrendAsync(route, serverId, startUtc, endUtc, databaseNames, cancellationToken)
-            : await ReadDurationTrendAsync(QueryStoreDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+        List<QueryTrendPoint> points;
+        if (route.UseRollup)
+        {
+            points = await ReadQueryStoreRollupTrendAsync(route, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+        }
+        else
+        {
+            List<QueryTrendPoint>? fromTable = null;
+            if (endUtc - startUtc >= QueryStoreDurationTrendMinWindow)
+            {
+                var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+                if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
+                {
+                    fromTable = await TryReadQueryStoreDurationTrendFromTableAsync(
+                        serverId, startUtc, endUtc, literalEndUtc, databaseNames, cancellationToken);
+                }
+            }
+
+            points = fromTable ?? await ReadDurationTrendAsync(QueryStoreDurationTrendSql, serverId, startUtc, endUtc, databaseNames, cancellationToken);
+        }
 
         /* Coverage the MCP tool's way: effective_start from the first served point (the shared rule, so the
            chart and the payload name the same instant), the unserved head from the route's measured floor. */
         var (effectiveStart, _) = DurationTrendRouting.DescribeCoverage(points.Count > 0 ? points[0].CollectionTime : null, startUtc);
         return new QueryStoreTrendSeries(points, route, effectiveStart, QueryStoreTrendRouting.UnservedBefore(route, startUtc));
+    }
+
+    /// <summary>
+    /// #4310 site 3's gate and table read, on ONE connection in ONE read-only REPEATABLE READ transaction —
+    /// the SAME arrangement <see cref="TryGetQueryStoreTopQueriesFromTableAsync"/> uses for the grid, so the
+    /// gate's decision and the read it authorizes see one snapshot. Returns null (never an empty list) when the
+    /// gate says raw, so the caller can tell "read raw instead" from "the table legitimately has nothing"; any
+    /// fault opening the connection, starting the transaction, running the gate, or reading the table also
+    /// returns null (except cancellation, which propagates).
+    /// </summary>
+    private async Task<List<QueryTrendPoint>?> TryReadQueryStoreDurationTrendFromTableAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            await using (var readOnly = new Npgsql.NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
+                connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreDurationTrendMinWindow,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
+            if (!useTable)
+            {
+                return null;
+            }
+
+            var items = new List<QueryTrendPoint>();
+            await using var command = new Npgsql.NpgsqlCommand(QueryStoreDurationTrendTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(clampedStart, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified) });
+            command.Parameters.Add(DatabaseFilterParameter(databaseNames));
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                items.Add(new QueryTrendPoint
+                {
+                    CollectionTime = reader.GetDateTime(0),
+                    Value = Convert.ToDouble(reader.GetValue(1)),
+                    ExecutionCount = reader.IsDBNull(2) ? 0 : (long)Convert.ToDouble(reader.GetValue(2)),
+                });
+            }
+
+            return items;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#4310 Query Store duration trend table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>The rollup-routed read (#2736): <see cref="QueryStoreDurationTrendRollupSql"/> with the route's
