@@ -235,7 +235,13 @@ public sealed class SharedBaselineCacheLiveTests
     {
         await using var store = await SeededStore.CreateAsync();
         if (store is null) return;
-        var (h, ct) = (store.Hour, TestContext.Current.CancellationToken);
+
+        /* Anchor to midnight of store.Hour's own UTC day, not store.Hour itself: store.Hour is End's hour minus 6,
+           which wraps to hour 23 of the PREVIOUS day whenever CI's wall clock is 00:00-05:59 UTC — the exact window
+           this test started failing in. h.AddHours(1) below must stay inside the SAME RoundedDay key as h for the
+           "next hour is a cache hit" assertion to hold no matter what hour CI runs at. */
+        var h = PgBaselineProvider.RoundedDay(store.Hour);
+        var ct = TestContext.Current.CancellationToken;
         var shared = new BaselineCache();
         var provider = new PgTargetBaselineProvider(store.Postgres, null, shared);
 
