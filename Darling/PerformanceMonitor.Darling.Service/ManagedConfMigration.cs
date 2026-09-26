@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -1109,6 +1110,67 @@ internal static class ManagedConfMigration
 
         var newText = string.Join('\n', newLines) + "\n";
         return new RewriteResult(newText, log, excluded);
+    }
+
+    /// <summary>
+    /// #4358: every RAW line of <paramref name="postgresqlConf"/> strictly after its
+    /// <see cref="ManagedConfFile.IncludeLine"/> (found the way PostgreSQL itself would recognise it, via
+    /// <see cref="ManagedConfFile.HasManagedInclude"/>/<see cref="DarlingManagedPostgres.ParseConfText"/> —
+    /// never a raw string match, so a differently-quoted but equivalent include is still found), in original
+    /// order, unmodified. This is the region <see cref="Rewrite"/> itself writes below the include on a
+    /// same-major migration (rule 3, "keep operator lines winning") — an ALREADY-migrated old cluster's
+    /// below-include region is, by construction, every line an operator override was winning at the moment
+    /// it was written, so this does no re-classification of its own: verbatim carry, no re-derivation of
+    /// which key is "currently effective" the way <see cref="Rewrite"/> must for a same-major legacy conf.
+    ///
+    /// <para>No working include (<see cref="ManagedConfFile.HasManagedInclude"/> false — a Legacy conf,
+    /// never migrated) returns an empty list: there is no "below the include" region to carry, and #4358 is
+    /// explicitly about the migrated shape.</para>
+    ///
+    /// <para>Pure and read-only, like every other member of this class — never touches disk, never decides
+    /// whether a returned line is one the destination cluster will accept (that is the upgrade path's own
+    /// per-line probe, matching <c>DarlingStoreUpgrade.CarryAutoConfAsync</c>'s treatment of
+    /// postgresql.auto.conf settings).</para>
+    /// </summary>
+    internal static IReadOnlyList<string> ExtractOperatorLinesBelowInclude(string postgresqlConf)
+    {
+        if (!ManagedConfFile.HasManagedInclude(postgresqlConf))
+        {
+            return Array.Empty<string>();
+        }
+
+        var normalized = postgresqlConf.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var hadTrailingNewline = normalized.EndsWith('\n');
+        var rawLines = normalized.Split('\n');
+        if (hadTrailingNewline && rawLines.Length > 0 && rawLines[^1].Length == 0)
+        {
+            rawLines = rawLines[..^1];
+        }
+
+        var includeLineNumber = -1;
+        foreach (var (line, name, value) in DarlingManagedPostgres.ParseConfText(normalized))
+        {
+            if (name.Equals("include", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.GetFileName(value), ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
+            {
+                includeLineNumber = line;
+                break;
+            }
+        }
+
+        if (includeLineNumber < 0)
+        {
+            /* HasManagedInclude said yes but this loop's own scan disagreed — cannot happen since both read
+               the SAME ParseConfText output the same way, but there is no line to return below if it did. */
+            return Array.Empty<string>();
+        }
+
+        if (includeLineNumber >= rawLines.Length)
+        {
+            return Array.Empty<string>();
+        }
+
+        return rawLines[includeLineNumber..];
     }
 
     /// <summary>Whether <paramref name="rawLine"/> is the line currently in force for SOME key in
