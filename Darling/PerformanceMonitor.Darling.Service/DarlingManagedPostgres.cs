@@ -3945,52 +3945,69 @@ public sealed class DarlingManagedPostgres
     /// </summary>
     private async Task EnsureDatabaseAsync(string connectionString, CancellationToken cancellationToken)
     {
-        /* The whole unit retries, not just the connect. A backend that loses the post-start race dies
+        await using var connection = await OpenProbedMaintenanceConnectionAsync(connectionString, cancellationToken);
+        if (connection is null)
+        {
+            return;
+        }
+
+        _logger.LogInformation("Creating the '{Database}' database", DatabaseName);
+
+        /* Once, on the connection whose backend just answered the probe, and outside the retry (#4352).
+           The retry is for the post-start race, and that race kills a backend on its FIRST query, which is
+           the probe; this backend has already survived it. A CREATE DATABASE timeout means the template
+           copy is slow, and retrying cannot help: the timeout cancels the statement, the server rolls the
+           partial copy back, and a new attempt copies template1 from the start under the same deadline, so
+           a copy slower than the deadline never finishes. Un-retried, it takes the bootstrap group's
+           deadline; if that fires too, the bootstrap throws and the worker's startup triage retries the
+           whole start.
+           Identifier from the class constant, never from input — same interpolation reasoning
+           as TimescaleSupport/DarlingRetention. CREATE DATABASE cannot run in a transaction;
+           plain ExecuteNonQuery is the correct shape. */
+        using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapSeconds };
+        await create.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Opens the maintenance database and asks whether the store's database exists. Returns null when it
+    /// does, and otherwise the open connection, whose backend has answered its first query.
+    /// </summary>
+    private async Task<NpgsqlConnection?> OpenProbedMaintenanceConnectionAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        /* The connect and the first query retry as one unit. A backend that loses the post-start race dies
            AFTER authenticating, so the Open succeeds and the first QUERY is what fails — retrying only the
            Open would never have helped. Each attempt gets a fresh connection because the old one's
            connector is dead. */
+        var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
         for (var attempt = 1; ; attempt++)
         {
+            var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
             try
             {
-                await EnsureDatabaseOnceAsync(connectionString, cancellationToken);
-                return;
+                await connection.OpenAsync(cancellationToken);
+                using var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds };
+                if (await exists.ExecuteScalarAsync(cancellationToken) is not null)
+                {
+                    await connection.DisposeAsync();
+                    return null;
+                }
+
+                return connection;
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException && attempt < FirstConnectionAttempts && IsTransientConnectionFault(ex))
             {
-                throw;
-            }
-            catch (Exception ex) when (attempt < FirstConnectionAttempts && IsTransientConnectionFault(ex))
-            {
+                await connection.DisposeAsync();
                 _logger.LogWarning(
                     "The store dropped the first connection after start ({Message}) — attempt {Attempt} of {Total}. A backend that loses the shared-memory reservation race just after start does this; retrying.",
                     ex.Message, attempt, FirstConnectionAttempts);
                 await Task.Delay(s_firstConnectionRetryDelay, cancellationToken);
             }
-        }
-    }
-
-    private async Task EnsureDatabaseOnceAsync(string connectionString, CancellationToken cancellationToken)
-    {
-        var builder = new NpgsqlConnectionStringBuilder(connectionString) { Database = "postgres" };
-        await using var connection = new NpgsqlConnection(DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
-        await connection.OpenAsync(cancellationToken);
-
-        using (var exists = new NpgsqlCommand($"SELECT 1 FROM pg_database WHERE datname = '{DatabaseName}'", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds })
-        {
-            if (await exists.ExecuteScalarAsync(cancellationToken) is not null)
+            catch
             {
-                return;
+                await connection.DisposeAsync();
+                throw;
             }
         }
-
-        _logger.LogInformation("Creating the '{Database}' database", DatabaseName);
-
-        /* Identifier from the class constant, never from input — same interpolation reasoning
-           as TimescaleSupport/DarlingRetention. CREATE DATABASE cannot run in a transaction;
-           plain ExecuteNonQuery is the correct shape. */
-        using var create = new NpgsqlCommand($"CREATE DATABASE {DatabaseName}", connection) { CommandTimeout = ServiceCommandDeadlines.BootstrapConnectProbeSeconds };
-        await create.ExecuteNonQueryAsync(cancellationToken);
     }
 
     /// <summary>

@@ -168,7 +168,7 @@ internal static class StartupFailureTriage
     /// operator counts in.</para>
     ///
     /// <para><b>Bounded rather than a supervisor loop, deliberately.</b> The repo holds both shapes.
-    /// <c>DarlingManagedPostgres.EnsureDatabaseAsync</c> is bounded — 6 attempts, 2 s apart, classified,
+    /// <c>DarlingManagedPostgres.OpenProbedMaintenanceConnectionAsync</c> is bounded — 6 attempts, 2 s apart, classified,
     /// then it gives up — and it is the structural match: straight-line startup code around a store
     /// interaction that must succeed before the caller can continue. <c>DarlingMcpHostService</c> and
     /// <c>DarlingWebHostService</c> retry a failed config load forever on a 30 s

@@ -29,7 +29,7 @@ namespace Darling.Tests;
 /// <para><b>Three constants, because the failure modes differ rather than the magnitudes.</b>
 /// <see cref="ServiceCommandDeadlines.BootstrapSeconds"/> covers the un-retried bootstrap sites
 /// (<see cref="ExpectedBootstrapSites"/> of them); <see cref="ServiceCommandDeadlines.BootstrapConnectProbeSeconds"/>
-/// the two inside the bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
+/// the one inside the bootstrap's six-attempt first-connection retry, where the deadline MULTIPLIES; and
 /// <see cref="ServiceCommandDeadlines.SerialLoopSeconds"/> the ten on the collection loop's serial
 /// thread, where ten sequential commands have to fit inside one watchdog window.</para>
 ///
@@ -113,7 +113,9 @@ public sealed class StartupCommandTimeoutTests
     /// </summary>
     private static readonly (string File, string Member, int Bootstrap, int ConnectProbe, int SerialLoop, int Other)[] s_startupMembers =
     {
-        ("DarlingManagedPostgres.cs", "EnsureDatabaseOnceAsync", 0, 2, 0, 0),
+        /* #4352: the probe retries with the connect; CREATE DATABASE runs once, after it, un-retried. */
+        ("DarlingManagedPostgres.cs", "OpenProbedMaintenanceConnectionAsync", 0, 1, 0, 0),
+        ("DarlingManagedPostgres.cs", "EnsureDatabaseAsync", 1, 0, 0, 0),
         ("DarlingManagedPostgres.cs", "VerifyPgHbaAsync", 3, 0, 0, 0),
         ("DarlingManagedPostgres.cs", "GuardAdoptedListenAsync", 1, 0, 0, 0),
         ("DarlingStoreUpgrade.cs", "ReadClusterIdentityAsync", 1, 0, 0, 0),
@@ -179,9 +181,9 @@ public sealed class StartupCommandTimeoutTests
     };
 
     /// <summary>The group's own totals, so a member that stops creating commands fails loudly.</summary>
-    private const int ExpectedBootstrapSites = 33;
+    private const int ExpectedBootstrapSites = 34;
 
-    private const int ExpectedConnectProbeSites = 2;
+    private const int ExpectedConnectProbeSites = 1;
 
     internal const int ExpectedSerialLoopSites = 10;
 
@@ -437,9 +439,32 @@ public sealed class StartupCommandTimeoutTests
             seconds < MigrationRungBudgetSeconds(),
             $"bootstrap deadline {seconds}s reaches the {MigrationRungBudgetSeconds()}s that "
             + "PgMigrations gives ONE migration rung. That budget bounds data-MOVING DDL on a cold busy "
-            + "store; these sites are catalog reads, single-row config seeds, one count(*) and one "
-            + "idempotent grant batch, so taking the rung's number would be borrowing rather than "
-            + "deriving");
+            + "store; these sites are catalog reads, single-row config seeds, one count(*), one "
+            + "idempotent grant batch and one CREATE DATABASE of the few-megabyte template1, so taking "
+            + "the rung's number would be borrowing rather than deriving");
+    }
+
+    /// <summary>
+    /// #4352: <c>CREATE DATABASE</c> runs once, outside the connect-and-probe retry. A timeout on it means
+    /// the template copy is slow, and a retry cannot help: the timeout cancels the statement, the server
+    /// rolls the partial copy back, and the next attempt starts the copy over under the same deadline, so a
+    /// copy slower than the deadline never finishes. Pinned at the source because the failing case needs a
+    /// Windows store whose disk is slow on demand.
+    /// </summary>
+    [Fact]
+    public void TheCreateDatabase_RunsOnce_OutsideTheFirstConnectionRetry()
+    {
+        var path = SourcePath("DarlingManagedPostgres.cs");
+        var text = File.ReadAllText(path);
+        var create = CSharpSourceWalker.StripCommentsAndStrings(MemberBody(text, "EnsureDatabaseAsync", path));
+        var probe = CSharpSourceWalker.StripCommentsAndStrings(MemberBody(text, "OpenProbedMaintenanceConnectionAsync", path));
+        var loop = new Regex(@"\b(?:for|foreach|while)\s*\(|\bdo\s*\{", RegexOptions.CultureInvariant);
+
+        Assert.False(loop.IsMatch(create), "EnsureDatabaseAsync loops: CREATE DATABASE must run once, not inside a retry");
+        Assert.DoesNotContain("IsTransientConnectionFault", create, StringComparison.Ordinal);
+        Assert.True(loop.IsMatch(probe), "OpenProbedMaintenanceConnectionAsync no longer loops, so the post-start race has no retry");
+        Assert.Contains("IsTransientConnectionFault", probe, StringComparison.Ordinal);
+        Assert.Contains("OpenProbedMaintenanceConnectionAsync(", create, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -460,8 +485,7 @@ public sealed class StartupCommandTimeoutTests
         Assert.True(
             seconds >= 5,
             $"connect-probe deadline {seconds}s leaves too little over the measured worst case — a 12-14 ms "
-            + "pg_database probe and a 19-68 ms CREATE DATABASE, on a Windows box where antivirus scans "
-            + "every file the template copy creates");
+            + "pg_database probe, on a Windows box whose store is at its least warm just after start");
 
         Assert.True(
             seconds < ServiceCommandDeadlines.BootstrapSeconds,

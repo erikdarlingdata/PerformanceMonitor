@@ -1300,6 +1300,64 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// #4251: sets <see cref="CollectorContext.PgFileSettingsReadable"/> for <c>pg_server_config</c> from
+    /// <see cref="PgFileSettingsCapability"/> (its own hourly cache), and leaves every other collector
+    /// untouched — pg_file_settings only matters to this one read. Its own method, the
+    /// <see cref="ResolvePgReadBinaryFileGrantAsync"/> shape, so the gate is testable without a live target.
+    /// Logs ONCE per target at Information when the view turns out to be unreadable
+    /// (<see cref="PgFileSettingsCapability.ShouldLogUnreadable"/>) rather than on every cycle the fallback
+    /// query runs — the collector itself keeps collecting <c>pg_settings</c> either way, so this is
+    /// informational, never a fault.
+    ///
+    /// <para><b>#4251 round-1 review, H1(a).</b> Both <see cref="CollectorContext.PgFileSettingsReadable"/>
+    /// and the log line are gated on the SAME probe's Windows fact, not merely on the grant. By PostgreSQL's
+    /// process model the stale <c>pending_restart</c> this capability exists to fix only happens on Windows:
+    /// on Unix the postmaster itself applies the reload and every backend it forks inherits the flag, so
+    /// <c>pg_settings</c> alone is already correct there, granting these two objects fixes nothing, and the
+    /// collector keeps today's plain query and stays silent — asking an operator to widen the role for no
+    /// gain would be the wrong trade on every non-Windows target, which is most of them (Linux, RDS, Aurora,
+    /// Azure, Cloud SQL).</para>
+    /// </summary>
+    internal static async ValueTask ResolvePgFileSettingsReadableAsync(
+        CollectorContext context,
+        string collectorName,
+        DbConnection targetConnection,
+        ServerRuntime server,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        if (server.Target.Engine != CollectorTargetEngine.PostgreSql || collectorName != "pg_server_config")
+        {
+            return;
+        }
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+        var readable = await PgFileSettingsCapability.IsReadableAsync(targetConnection, targetKey, cancellationToken);
+        PgFileSettingsCapability.TryGetCachedVerdict(targetKey, out _, out var isWindowsTarget);
+
+        /* Windows-gated (H1(a) above): on a non-Windows target this stays false even when the grants ARE
+           present, so PgServerConfigCollector.BuildQuery always keeps the plain query there — the enhanced
+           one buys nothing when pending_restart is already correct without it. */
+        context.PgFileSettingsReadable = readable && isWindowsTarget;
+
+        if (isWindowsTarget && !readable && PgFileSettingsCapability.ShouldLogUnreadable(targetKey))
+        {
+            logger?.LogInformation(
+                "[{Server}] pg_file_settings is not readable by the monitoring role (#4251), so pending_restart "
+                + "is computed from pg_settings alone, which can read false on this Windows target for a "
+                + "setting that changed and reloaded but is still pending a restart: a connection opened after "
+                + "pg_reload_conf() reads pending_restart = false, and this collector opens a new connection "
+                + "every cycle. Two grants fix it: GRANT SELECT ON pg_file_settings and GRANT EXECUTE ON "
+                + "FUNCTION pg_show_all_file_settings() to the monitoring role. Both are superuser-only by "
+                + "default for a reason: they show every line of every configuration file, including lines "
+                + "that are not the running value (a superseded or misspelled primary_conninfo with its "
+                + "password, for example) and each file's path — grant them only if that exposure is "
+                + "acceptable for this role.",
+                server.Config.DisplayName);
+        }
+    }
+
+    /// <summary>
     /// The one place <see cref="PgReadBinaryFileCapability"/>'s cache key comes from (#4051 round-2 review). The
     /// helper that fills the cache, the one that reads it for the advisory note, and the one that drops a stale
     /// verdict all take the <see cref="ServerRuntime"/> and key through here. None of them can drift to a
@@ -1339,6 +1397,30 @@ public sealed class DarlingCollectorRunner
             || (pg.SqlState == "42501" && PgReadBinaryFileCapability.TryGetCachedVerdict(targetKey, out var granted) && granted))
         {
             PgReadBinaryFileCapability.Invalidate(targetKey);
+        }
+    }
+
+    /// <summary>
+    /// #4251 round-1 review, M1: drops a stale "readable" pg_file_settings verdict when pg_server_config's
+    /// file-settings query is refused (42501: the grant was revoked, or the login changed, since the check),
+    /// so the next cycle re-probes and falls back to the pg_settings-only query instead of failing until the
+    /// hour runs out — without this, every pg_server_config cycle lost the WHOLE pg_settings snapshot for up
+    /// to <see cref="PgFileSettingsCapability.CacheTtl"/>, the one outcome <see cref="PgServerConfigCollector"/>
+    /// must never have.
+    /// </summary>
+    internal static void ForgetStaleFileSettingsVerdict(string collectorName, Exception ex, ServerRuntime server)
+    {
+        if (ex is not PostgresException { SqlState: "42501" }
+            || collectorName != "pg_server_config"
+            || CollectorFaultCopyPhase.IsProvenStoreWrite(ex))
+        {
+            return;
+        }
+
+        var targetKey = ReadBinaryFileCacheKey(server);
+        if (PgFileSettingsCapability.TryGetCachedVerdict(targetKey, out var readable, out _) && readable)
+        {
+            PgFileSettingsCapability.Invalidate(targetKey);
         }
     }
 
@@ -2697,6 +2779,11 @@ public sealed class DarlingCollectorRunner
                    CollectorTargetInfo that live for the connection's whole life. */
                 await ResolvePgReadBinaryFileGrantAsync(
                     context, definition.Name, targetConnection, server, cancellationToken);
+                /* #4251: same shape, same connection, right beside the grant check above — pg_server_config
+                   is the other server-scoped PostgreSQL collector that must decide which of two query texts
+                   to send before BuildQuery runs. */
+                await ResolvePgFileSettingsReadableAsync(
+                    context, definition.Name, targetConnection, server, _logger, cancellationToken);
 
                 var sqlSlice = Stopwatch.StartNew();
                 var plan = definition.BuildQuery(context);
