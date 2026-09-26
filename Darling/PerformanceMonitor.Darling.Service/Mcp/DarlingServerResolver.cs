@@ -144,7 +144,8 @@ ORDER BY server_name";
     public static async Task<((int ServerId, string ServerName) resolved, string? error)>
         ResolveOrErrorWithFleetSentinelAsync(
             NpgsqlDataSource postgres,
-            string? serverName)
+            string? serverName,
+            CancellationToken cancellationToken = default)
     {
         /* BEFORE the registry read, and the order is the correctness rather than a saved round trip. The
            fallback below matches partially, so a registry row whose name merely CONTAINED the sentinel's
@@ -155,7 +156,7 @@ ORDER BY server_name";
             return ((DarlingObservability.FleetServerId, DarlingObservability.FleetServerName), null);
         }
 
-        var (resolved, error) = await ResolveOrErrorAsync(postgres, serverName).ConfigureAwait(false);
+        var (resolved, error) = await ResolveOrErrorAsync(postgres, serverName, cancellationToken).ConfigureAwait(false);
         if (error is null)
         {
             return (resolved, null);

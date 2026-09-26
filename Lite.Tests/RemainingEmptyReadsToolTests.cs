@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Notifications;
@@ -234,7 +235,7 @@ public sealed class RemainingEmptyReadsToolTests : IClassFixture<SharedDuckDbFix
     {
         private readonly List<MuteRule> _rules = new();
 
-        public Task<IReadOnlyList<MuteRule>> LoadAllAsync() => Task.FromResult<IReadOnlyList<MuteRule>>(_rules.ToList());
+        public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<MuteRule>>(_rules.ToList());
         public Task InsertAsync(MuteRule rule) { _rules.Add(rule); return Task.CompletedTask; }
         public Task UpdateAsync(MuteRule rule) => Task.CompletedTask;
         public Task SetEnabledAsync(string ruleId, bool enabled) => Task.CompletedTask;

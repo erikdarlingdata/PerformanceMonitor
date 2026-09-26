@@ -1974,4 +1974,22 @@ ORDER BY object_kind, object_name, metric_time DESC";
             .OrderBy(p => p.Day)
             .ToList();
     }
+
+    /// <summary>
+    /// #4251's managed-store part: the store's own settings, from <c>collect.managed_conf_verdicts</c> (V146,
+    /// #4215) rather than a live <c>pg_settings.pending_restart</c> read — the same connection this
+    /// reader already uses (<c>mcp</c> role in managed mode) cannot see <c>pg_file_settings</c> or a
+    /// <c>sourcefile</c> at all, and <c>pending_restart</c> itself reads <c>f</c> from any connection opened
+    /// after the reload on Windows (#4251), which an MCP host's pooled connection always is. The PG-TARGET
+    /// collectors (<c>PgServerConfigCollector</c>, <c>get_pg_server_config</c>) are a different surface —
+    /// monitored servers, not the store itself — and are untouched here.
+    /// </summary>
+    public static async Task<IReadOnlyList<PerformanceMonitor.Darling.Service.ManagedConfVerdictRow>> GetManagedConfVerdictsAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(postgres);
+
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+        return await PerformanceMonitor.Darling.Service.DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync(connection, cancellationToken);
+    }
 }

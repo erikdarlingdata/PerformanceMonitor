@@ -135,64 +135,37 @@ public static class DarlingWebEndpoints
 internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSet<string>(StringComparer.Ordinal)
     {
         "compare_analysis",
+        "get_ag_health",
         "get_analysis_facts",
         "get_analysis_findings",
-        "get_session_stats",
-        "get_waiting_tasks",
-        "get_alert_history",
-        "get_alert_settings",
-        "get_mute_rules",
-        "get_notification_routes",
-        "get_sweep_reports",
-        "get_collection_health",
-        "get_collection_log",
-        "get_current_waits_trend",
-        "get_blocking_stats",
-        "get_cpu_utilization",
-        "get_file_io_stats",
-        "get_memory_clerks",
-        "get_memory_stats",
-        "get_perfmon_stats",
-        "get_query_store_top",
-        "get_tempdb_trend",
-        "get_pg_logging_audit",
-        "get_pg_cpu_utilization",
-        "get_pg_index_bloat",
-        "get_pg_column_stats",
-        "get_pg_log_events",
-        "get_pg_blocking",
-        "get_wait_stats",
-        "get_wait_trend",
-        "get_wait_types",
-        "list_servers",
-        "get_file_io_trend",
-        "get_memory_trend",
-        "get_perfmon_trend",
-        "get_server_summary",
-        "get_daily_summary",
-        "get_daily_summary_range",
-        "get_fleet_overview",
-        "get_ag_health",
-        "get_store_metrics",
-        "get_store_log",
-        "get_store_query_stats",
-        "get_store_host",
         "get_collector_cost",
         "get_collector_stall_probes",
-        "get_oversized_plan_backlog",
-        "get_latch_stats",
-        "get_spinlock_stats",
-        "get_memory_grants",
-        "get_memory_pressure_events",
-        "get_resource_semaphore",
-
-        "get_pvs_stats",
-
         "get_cpu_scheduler_pressure",
-        "get_plan_cache_bloat",
-        "get_running_jobs",
-        "get_plan_xml",
         "get_default_trace_events",
+        "get_file_io_trend",
+        "get_fleet_overview",
+        "get_latch_stats",
+        "get_memory_trend",
+        "get_oversized_plan_backlog",
+        "get_perfmon_trend",
+        "get_pg_blocking",
+        "get_pg_column_stats",
+        "get_pg_cpu_utilization",
+        "get_pg_index_bloat",
+        "get_pg_log_events",
+        "get_pg_logging_audit",
+        "get_plan_cache_bloat",
+        "get_plan_xml",
+        "get_pvs_stats",
+        "get_running_jobs",
+        "get_session_stats",
+        "get_spinlock_stats",
+        "get_store_host",
+        "get_store_log",
+        "get_store_metrics",
+        "get_store_query_stats",
+        "get_sweep_reports",
+        "get_waiting_tasks",
     };
 
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>
@@ -3004,10 +2977,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c)),
 
             /* ── alerts / mute rules ── */
-            ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false)),
-            ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg),
-            ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true)),
-            ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg),
+            ["get_alert_history"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertHistory(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), include_dismissed: QueryBool(c, "include_dismissed", false), cancellationToken: c.RequestAborted),
+            ["get_alert_settings"] = (c, pg, an) => DarlingMcpAlertTools.GetAlertSettings(pg, c.RequestAborted),
+            ["get_mute_rules"] = (c, pg, an) => DarlingMcpAlertTools.GetMuteRules(pg, QueryBool(c, "enabled_only", true), c.RequestAborted),
+            ["get_notification_routes"] = (c, pg, an) => DarlingMcpAlertTools.GetNotificationRoutes(pg, c.RequestAborted),
 
             /* ── fleet sweep reports (#3466 lane 4) ── the tool mirror beside the dedicated /api/sweeps
                routes, the /api/fleet + /api/read/get_fleet_overview coexistence: the page reads its own
@@ -3063,7 +3036,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #4198: full_detail=true keeps the web viewer's payload exactly what it was before the default
                cut — every field on every collector row, never the compact shape a boring-healthy row gets
                by default. */
-            ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true),
+            ["get_collection_health"] = (c, pg, an) => DarlingMcpDataTools.GetCollectionHealth(pg, Server(c), full_detail: true, cancellationToken: c.RequestAborted),
             /* #4198: full_text: true, because error_message carried no preview cap before this PR — the
                web viewer keeps that behavior (an operator reading the Collection Log grid gets the whole
                error, the same way get_deadlock_detail's row passes TrendBudget.Chart-style overrides to
@@ -3071,19 +3044,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                unaffected by the new lower MCP default. */
 
             ["get_collection_log"] = (c, pg, an) => OptionalDouble(c, "min_duration_ms", out var minDurationMs)
-                ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs, full_text: true)
+                ? DarlingMcpDataTools.GetCollectionLog(pg, Server(c), Hours(c, 24), Rows(c, "limit", 200), AsOf(c), Str(c, "collector_name"), minDurationMs, full_text: true, cancellationToken: c.RequestAborted)
                 : UnparseableParam("min_duration_ms"),
-            ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c)),
-            ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_current_waits_trend"] = (c, pg, an) => DarlingMcpDataTools.GetCurrentWaitsTrend(pg, Server(c), Hours(c, 4), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_blocking_stats"] = (c, pg, an) => DarlingMcpDataTools.GetBlockingStats(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #3960: the core trends a page charts take the CHART budget and bind bucket_minutes, as the trends
                below do (#3897). */
             ["get_cpu_utilization"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                ? DarlingMcpDataTools.GetCpuUtilization(pg, Server(c), Hours(c, 4), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
-            ["get_file_io_stats"] = (c, pg, an) => DarlingMcpDataTools.GetFileIoStats(pg, Server(c)),
-            ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c)),
-            ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c)),
-            ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name")),
+            ["get_file_io_stats"] = (c, pg, an) => DarlingMcpDataTools.GetFileIoStats(pg, Server(c), c.RequestAborted),
+            ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c), c.RequestAborted),
+            ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c), c.RequestAborted),
+            ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name"), c.RequestAborted),
             ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4198: full_text defaults false on the MCP signature (a 240-character preview keeps a busy
                production store's default call under the shared response budget), but the web viewer has
@@ -3095,11 +3068,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                all, so the viewer keeps that exact number through the previewLength overload -- QueryBool
                still lets an operator ask for the whole statement via ?full_text=true, but the default (no
                query override) reproduces the page exactly as it always rendered. */
-            ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000),
+            ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000, cancellationToken: c.RequestAborted),
             ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -3149,14 +3122,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_pg_index_usage"] = (c, pg, an) => DarlingMcpPgIndexUsageTools.GetPgIndexUsage(pg, Server(c), Hours(c, 168), Rows(c, "limit", 25), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_table_bloat"] = (c, pg, an) => DarlingMcpPgTableBloatTools.GetPgTableBloat(pg, Server(c), Hours(c, 168), Rows(c, "limit", 25), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_session_states"] = (c, pg, an) => DarlingMcpPgSessionStatesTools.GetPgSessionStates(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c), cancellationToken: c.RequestAborted),
-            ["get_wait_stats"] = (c, pg, an) => DarlingMcpDataTools.GetWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
+            ["get_wait_stats"] = (c, pg, an) => DarlingMcpDataTools.GetWaitStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_wait_trend"] = (c, pg, an) => RequireText(c, "wait_type", out var waitType)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                    ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                    ? DarlingMcpDataTools.GetWaitTrend(pg, waitType, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("wait_type"),
-            ["get_wait_types"] = (c, pg, an) => DarlingMcpDataTools.GetWaitTypes(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
-            ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServers(pg),
+            ["get_wait_types"] = (c, pg, an) => DarlingMcpDataTools.GetWaitTypes(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["list_servers"] = (c, pg, an) => DarlingMcpDataTools.ListServers(pg, c.RequestAborted),
 
             /* ── trends ── */
             /* #3897: the trends a page charts pass the CHART budget — a browser draws far more points than a model
@@ -3187,9 +3160,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 : MissingParam("query_hash"),
 
             /* ── health / overview ── */
-            ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c)),
-            ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date")),
-            ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c)),
+            ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), c.RequestAborted),
+            ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), c.RequestAborted),
+            ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), c.RequestAborted),
             ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band")),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c)),
             ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit)),
@@ -3209,9 +3182,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_spinlock_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetSpinlockStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c)),
 
             /* ── memory grants ── */
-            ["get_memory_grants"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), as_of: AsOf(c)),
-            ["get_memory_pressure_events"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
-            ["get_resource_semaphore"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetResourceSemaphore(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_memory_grants"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryGrants(pg, Server(c), Hours(c, 1), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_memory_pressure_events"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetMemoryPressureEvents(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_resource_semaphore"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetResourceSemaphore(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── object / index stats ── */
             ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c), cancellationToken: c.RequestAborted),

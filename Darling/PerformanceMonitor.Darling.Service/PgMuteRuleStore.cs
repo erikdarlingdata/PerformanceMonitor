@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
@@ -39,11 +40,11 @@ public sealed class PgMuteRuleStore : IMuteRuleStore
     /// "no mute rules are configured for this store". This store carries no logger of its own for the same
     /// reason Lite's does not — the caller that swallows the fault is the one that knows what it cost.
     /// </summary>
-    public async Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+    public async Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
         var rules = new List<MuteRule>();
 
-        await using var connection = await _postgres.OpenConnectionAsync();
+        await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
         using var command = new NpgsqlCommand(@"
 SELECT id, enabled, created_at_utc, expires_at_utc, reason,
        server_name, metric_name, database_pattern,
@@ -51,8 +52,8 @@ SELECT id, enabled, created_at_utc, expires_at_utc, reason,
 FROM config_mute_rules
 ORDER BY created_at_utc DESC", connection) { CommandTimeout = DarlingAlertReadAdapter.AlertPassCommandTimeoutSeconds };
 
-        using var reader = await command.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             rules.Add(new MuteRule
             {

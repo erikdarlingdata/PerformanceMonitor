@@ -60,8 +60,9 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4.")] int hours_back = 4,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.CpuMaxPoints));
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetCpuUtilization(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.CpuMaxPoints), cancellationToken);
 
     /// <summary>
     /// get_cpu_utilization under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the web
@@ -70,9 +71,10 @@ public sealed class DarlingMcpDataTools
     /// DB source's 15-second cadence was 40,000 rows for 10,000 points.
     /// </summary>
     internal static async Task<string> GetCpuUtilization(
-        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -83,9 +85,9 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var points = await DarlingDataReader.GetCpuBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes);
+            var points = await DarlingDataReader.GetCpuBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
             if (points.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_utilization")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "cpu_utilization", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No CPU utilization data available.");
 
             /* #3653 A15/A16: the source-cadence sentence both SKUs publish is TrendPayloads.CpuCadenceNote, the one
@@ -93,7 +95,7 @@ public sealed class DarlingMcpDataTools
                sys.dm_db_resource_stats one every 15 seconds; samples_in_bucket is the measured count). */
             return TrendPayloads.CpuUtilization(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_cpu_utilization", ex);
         }
@@ -105,9 +107,10 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum wait types to return, heaviest first. Default 20. This is what bounds the page — read truncated to know whether the window observed more.")] int limit = 20,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -120,9 +123,9 @@ public sealed class DarlingMcpDataTools
             var now = windowEnd;
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 50 sat under a limit the tool accepts up to 1,000. */
-            var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
+            var rows = await DarlingDataReader.GetWaitStatsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No wait stats data available for the specified time range.");
 
             var truncated = rows.Count > limit;
@@ -154,7 +157,7 @@ public sealed class DarlingMcpDataTools
                 waits = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_wait_stats", ex);
         }
@@ -165,9 +168,10 @@ public sealed class DarlingMcpDataTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -177,7 +181,7 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var types = await DarlingDataReader.GetDistinctWaitTypesAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
             if (types.Count == 0)
             {
@@ -187,13 +191,13 @@ public sealed class DarlingMcpDataTools
                     wants somebody to look at collection, and widening will never fill it. Probed only here,
                     against the SAME source the read walks.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
                 }
 
-                return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId)
+                return await DarlingDataReader.HasAnyWaitStatAsync(postgres, resolved.ServerId, cancellationToken)
                     ? McpHelpers.Status(
                         "empty",
                         $"No wait types recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected wait stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
@@ -209,7 +213,7 @@ public sealed class DarlingMcpDataTools
                 wait_types = types
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_wait_types", ex);
         }
@@ -222,15 +226,17 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetWaitTrend(postgres, wait_type, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.WaitMaxPoints));
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetWaitTrend(postgres, wait_type, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.WaitMaxPoints), cancellationToken);
 
     /// <summary>get_wait_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the
     /// web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
     internal static async Task<string> GetWaitTrend(
-        NpgsqlDataSource postgres, string wait_type, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
+        NpgsqlDataSource postgres, string wait_type, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -243,14 +249,14 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var points = await DarlingDataReader.GetWaitBucketsAsync(postgres, resolved.ServerId, wait_type, start, now, bucketMinutes);
+            var points = await DarlingDataReader.GetWaitBucketsAsync(postgres, resolved.ServerId, wait_type, start, now, bucketMinutes, cancellationToken);
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-values probe, not after it. Both are on
                    the miss path, so either order keeps the property that matters — but a permanently gated
                    engine takes this branch on every call, forever, and the probe below could never tell it
                    anything. Asking first makes that case one query instead of two. */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "wait_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -258,7 +264,7 @@ public sealed class DarlingMcpDataTools
 
                 /* Distinguish "unknown wait type here" from "nothing collected at all", handing back the
                    ones that do have data — Lite's get_wait_trend miss vocabulary. */
-                var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.ServerId, start, now);
+                var collected = await DarlingDataReader.GetDistinctWaitTypesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
                 if (collected.Count == 0)
                     return McpHelpers.Status(
                         "unavailable",
@@ -275,13 +281,13 @@ public sealed class DarlingMcpDataTools
                step a restart or failover most directly manufactures; the markers ride the payload's trailing
                key exactly as on the DarlingMcpTrendTools family (see that class's remarks), over the same
                window as the points. */
-            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now);
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
             return TrendPayloads.WaitTrend(
                 resolved.ServerName, wait_type, hours_back, points, bucketMinutes, bucket_minutes is not null,
                 budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_wait_trend", ex);
         }
@@ -290,16 +296,17 @@ public sealed class DarlingMcpDataTools
     [McpServerTool(Name = "get_memory_stats"), Description("Gets the latest memory statistics snapshot: physical memory, buffer pool size, plan cache size, memory utilization %, and SQL Server memory model. Use this for a quick memory health check; use get_memory_clerks to see detailed breakdown by component. LATEST IS A TIME: this reads one snapshot, not a window, and captured_at is the instant that snapshot was collected - read it before treating any figure as current, because the newest row a store holds can be minutes or days old.")]
     public static async Task<string> GetMemoryStats(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var stats = await DarlingDataReader.GetLatestMemoryStatsAsync(postgres, resolved.ServerId);
+            var stats = await DarlingDataReader.GetLatestMemoryStatsAsync(postgres, resolved.ServerId, cancellationToken);
             if (stats == null)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No memory stats available.");
 
             var utilization = stats.TotalPhysicalMemoryMb > 0
@@ -322,7 +329,7 @@ public sealed class DarlingMcpDataTools
                 plan_cache_mb = stats.PlanCacheMb
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_memory_stats", ex);
         }
@@ -331,14 +338,15 @@ public sealed class DarlingMcpDataTools
     [McpServerTool(Name = "get_memory_clerks"), Description("Gets the top memory consumers by memory clerk type — shows which SQL Server components are using the most memory. LATEST IS A TIME: this reads the newest clerk snapshot, not a window, and captured_at is the instant it was collected.")]
     public static async Task<string> GetMemoryClerks(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var snapshot = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.ServerId);
+            var snapshot = await DarlingDataReader.GetLatestMemoryClerksAsync(postgres, resolved.ServerId, cancellationToken);
 
             if (snapshot.IsEmpty)
                 /*
@@ -349,7 +357,7 @@ public sealed class DarlingMcpDataTools
                     the caller does need is to be told that an empty clerk list is NEVER a quiet period,
                     because on a live SQL Server it cannot be: the DMV always has clerks.
                 */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_clerks")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_clerks", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No memory-clerk snapshot is available for {resolved.ServerName}. This read returns the LATEST snapshot rather than a window, so an empty result is never a quiet period — a live SQL Server always has memory clerks. It means nothing the memory_clerks collector stored is still retained, either because it has not run for this server or because its rows have aged out. Check get_collection_health and get_collection_log for the memory_clerks collector.");
@@ -367,7 +375,7 @@ public sealed class DarlingMcpDataTools
                 clerks = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_memory_clerks", ex);
         }
@@ -376,16 +384,17 @@ public sealed class DarlingMcpDataTools
     [McpServerTool(Name = "get_file_io_stats"), Description("Gets the latest per-database-file I/O stats: read/write counts, bytes, stall times, calculated latency. LATEST IS A TIME: the newest snapshot, not a window; captured_at is when it was collected, and the deltas cover the sample_interval_seconds ending there. sample_interval_seconds 0 means no delta was knowable for that file (first sighting, counter reset, a gap) and that row's latencies are null, not 0. <<GUIDE>> Gets the latest file I/O statistics per database file: read/write counts, bytes, stall times, and calculated latency. High read latency (>20ms) or write latency (>10ms for data, >2ms for log) often indicates storage bottlenecks. Each row carries sample_interval_seconds, the measured seconds its deltas accrued over; a 0 means no delta was knowable for that file at this collection (first sighting, counter reset, or a gap past the delta policy — typically a restart) and its latencies are null rather than 0. LATEST IS A TIME: this reads the newest file-I/O snapshot, not a window, and captured_at is the instant it was collected; the deltas cover the sample_interval_seconds ending there.")]
     public static async Task<string> GetFileIoStats(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var snapshot = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId);
+            var snapshot = await DarlingDataReader.GetLatestFileIoStatsAsync(postgres, resolved.ServerId, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No file I/O stats available.");
 
             var result = snapshot.Rows.Select(r => new
@@ -418,7 +427,7 @@ public sealed class DarlingMcpDataTools
                 files = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_file_io_stats", ex);
         }
@@ -430,15 +439,17 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetTempDbTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.TempDbMaxPoints));
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetTempDbTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.TempDbMaxPoints), cancellationToken);
 
     /// <summary>get_tempdb_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the
     /// web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
     internal static async Task<string> GetTempDbTrend(
-        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -449,14 +460,14 @@ public sealed class DarlingMcpDataTools
 
         try
         {
-            var points = await DarlingDataReader.GetTempDbBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes);
+            var points = await DarlingDataReader.GetTempDbBucketsAsync(postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, bucketMinutes, cancellationToken);
             if (points.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "tempdb_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No TempDB data available.");
 
             return TrendPayloads.TempDbTrend(resolved.ServerName, hours_back, points, bucketMinutes, bucket_minutes is not null, budget.AutoPoints);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_tempdb_trend", ex);
         }
@@ -467,16 +478,17 @@ public sealed class DarlingMcpDataTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Filter to a specific counter name, e.g. 'Batch Requests/sec'.")] string? counter_name = null,
-        [Description("Filter to a specific instance name, e.g. a database name.")] string? instance_name = null)
+        [Description("Filter to a specific instance name, e.g. a database name.")] string? instance_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var snapshot = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.ServerId);
+            var snapshot = await DarlingDataReader.GetLatestPerfmonStatsAsync(postgres, resolved.ServerId, cancellationToken);
             if (snapshot.IsEmpty)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No perfmon stats available.");
 
             IEnumerable<DarlingDataReader.PerfmonRow> filtered = snapshot.Rows;
@@ -505,7 +517,7 @@ public sealed class DarlingMcpDataTools
                 counters = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_perfmon_stats", ex);
         }
@@ -816,8 +828,9 @@ public sealed class DarlingMcpDataTools
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description("Filter by Query Store execution outcome: Regular, Aborted, or Exception.")] string? execution_type = null,
         [Description("Exact schema-qualified module name, as get_top_procedures_by_cpu returns it in full_name (e.g. dbo.usp_ProcessOrder). Case-sensitive; applied before ranking. Ad-hoc statements are Adhoc.")] string? module_name = null,
-        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false) =>
-        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength);
+        [Description("Return each row's full query_text instead of a 400-character preview. Default false.")] bool full_text = false,
+        CancellationToken cancellationToken = default) =>
+        GetQueryStoreTop(postgres, server_name, hours_back, top, database_name, as_of, execution_type, module_name, full_text, QueryTextPreviewLength, cancellationToken);
 
     /// <summary>
     /// get_query_store_top under an explicit <paramref name="previewLength"/> (#4198): the MCP tool passes
@@ -827,9 +840,9 @@ public sealed class DarlingMcpDataTools
     /// </summary>
     internal static async Task<string> GetQueryStoreTop(
         NpgsqlDataSource postgres, string? server_name, int hours_back, int top, string? database_name, string? as_of,
-        string? execution_type, string? module_name, bool full_text, int previewLength)
+        string? execution_type, string? module_name, bool full_text, int previewLength, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -850,7 +863,7 @@ public sealed class DarlingMcpDataTools
         {
             var now = windowEnd;
             var requestedStart = now.AddHours(-hours_back);
-            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, execution_type, module_name);
+            var rows = await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, top, database_name, execution_type, module_name, cancellationToken);
 
             /* #2364: what the window ACTUALLY holds. The rows above are the top N by COST, so their timestamps
                say nothing about how far back the read reached -- the most expensive query in a month may have
@@ -858,7 +871,7 @@ public sealed class DarlingMcpDataTools
                and this tool has no rollup to fall back to (the corrected CAGGs carry no query_id or plan_id,
                and plan identity is the whole point of this tool). So the honest move is to report the window
                that was served rather than echo the one that was asked for. */
-            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now);
+            var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
             var effectiveStart = floor ?? requestedStart;
             /* #4231: the shared helper's own boundary, not a bare 90-minute literal restated here. */
             var truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
@@ -872,7 +885,7 @@ public sealed class DarlingMcpDataTools
                    module_name (#4057) is the same case and takes the same test: a module that did not run in the
                    window is a measured zero whenever the read without the filters has rows. */
                 if ((execution_type != null || module_name != null)
-                    && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, database_name)).Count > 0)
+                    && (await DarlingDataReader.GetQueryStoreTopAsync(postgres, resolved.ServerId, requestedStart, now, 1, database_name, cancellationToken)).Count > 0)
                     return module_name is null
                         ? McpHelpers.QueryStoreExecutionTypeEmpty(execution_type!, hours_back, database_name)
                         /* The module miss hands back the window it read: "did not run" is a claim about that window,
@@ -884,16 +897,16 @@ public sealed class DarlingMcpDataTools
                             window_truncated = truncated
                         });
 
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     /* #2546: the sentence below GUESSES ("may not be enabled"), and it has to, because the
                        read had no way to find out. The store has known all along -- query_store_health
                        records actual_state per database every hour for exactly this purpose. Asking it turns
                        a hedge into a fact plus the ALTER DATABASE that fixes it, and it answers for the
                        database this read was scoped to rather than for the server's most flattering one. */
-                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, database_name)
+                    ?? await DarlingRuntimePrecondition.QueryStoreStatusAsync(postgres, resolved.ServerId, resolved.ServerName, database_name, cancellationToken)
                     /* And the collector's own last run, for the case Query Store is on and the collector is
                        the thing that cannot read it. */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store")
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         $"No Query Store rows for this server in the {hours_back}-hour window searched. Query Store " +
@@ -952,7 +965,7 @@ public sealed class DarlingMcpDataTools
                 queries = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
@@ -962,16 +975,17 @@ public sealed class DarlingMcpDataTools
 
     [McpServerTool(Name = "list_servers"), Description("Lists monitored servers with collection freshness status and last collection time. Darling has no live connection to monitored servers: status is derived from how recently each was collected (Online = fresh, Warning = stale, Offline = no recent collection). Lite's status IS a live connection check, independent of whether anything is being collected. <<GUIDE>> Use this first to see available servers before calling other tools. Lists all monitored servers — SQL Server and PostgreSQL — with their collection freshness status and last collection time. Each row says which engine it describes: engine_kind is the raw registry token (sqlserver, postgres, aurora-postgres; null when no connect has stamped the row — the same vocabulary get_fleet_overview uses) and engine_version is the engine-aware version label (\"SQL Server 2022\", \"PostgreSQL 18\"; empty when no version has been collected). sql_version is a DEPRECATED legacy alias carrying the same value as engine_version, kept so existing consumers keep working — read engine_version instead, and never infer the engine from that key's name: a PostgreSQL row's sql_version reads \"PostgreSQL 18\". The service has no live connection to the monitored servers, so status is derived from how recently each server was collected (Online = fresh, Warning = stale, Offline = no recent collection). The peer_fleets block names the SIBLING Darling stores that monitor the rest of a split fleet, with what each one covers — this server can only NAME them (no cross-store reads), and peer_note says what an empty peer_fleets does and does not prove.")]
     public static async Task<string> ListServers(
-        NpgsqlDataSource postgres)
+        NpgsqlDataSource postgres,
+        CancellationToken cancellationToken = default)
     {
         try
         {
             List<DarlingDataReader.ServerListRow> servers;
             try
             {
-                servers = await DarlingDataReader.GetServerListAsync(postgres);
+                servers = await DarlingDataReader.GetServerListAsync(postgres, cancellationToken);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 /* #3653 (errors one shape): through the shared sentence helper like every other SQL Server-family
                    tool on this SKU, rather than an interpolated sentence of this tool's own. The operation names
@@ -990,7 +1004,7 @@ public sealed class DarlingMcpDataTools
 
             return RenderServerList(servers, DateTime.UtcNow, DarlingPeerDirectory.Current);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("list_servers", ex);
         }
@@ -1061,9 +1075,10 @@ public sealed class DarlingMcpDataTools
     public static async Task<string> GetCollectionHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Return every field for every collector. Default compacts a HEALTHY collector with nothing to report; failing, stale, stopped, erroring, denied or regressed collectors always keep every field.")] bool full_detail = false)
+        [Description("Return every field for every collector. Default compacts a HEALTHY collector with nothing to report; failing, stale, stopped, erroring, denied or regressed collectors always keep every field.")] bool full_detail = false,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
@@ -1086,7 +1101,7 @@ public sealed class DarlingMcpDataTools
                that one. */
             var nowUtc = DateTime.UtcNow;
             var (rows, collectionHealthAgeSeconds) = await DarlingDataReader.GetCollectionHealthMemoizedAsync(
-                postgres, resolved.ServerId, nowUtc.AddDays(-7), nowUtc);
+                postgres, resolved.ServerId, nowUtc.AddDays(-7), nowUtc, cancellationToken);
             if (rows.Count == 0)
                 return McpHelpers.Status("unavailable", "No collection health data available.");
 
@@ -1505,7 +1520,7 @@ public sealed class DarlingMcpDataTools
                 collection_health_age_seconds = collectionHealthAgeSeconds
             }, resolved.ServerId, McpHelpers.JsonOptions), McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_collection_health", ex);
         }
@@ -1788,7 +1803,8 @@ public sealed class DarlingMcpDataTools
             ceiling) and is previewed at default the same shape get_store_query_stats already uses for
             full_text.
         */
-        [Description("Return each run's error_message in full instead of a preview. Default false.")] bool full_text = false)
+        [Description("Return each run's error_message in full instead of a preview. Default false.")] bool full_text = false,
+        CancellationToken cancellationToken = default)
     {
         /* #4199: server_name OMITTED, blank, or "*" means the WHOLE FLEET rather than "auto-select the
            lone server" or "which server did you mean" -- the read whose subject is the log itself is also
@@ -1803,7 +1819,7 @@ public sealed class DarlingMcpDataTools
         {
             return await GetCollectionLogFleetAsync(
                 postgres, hours_back, limit ?? McpResponseBudget.CollectionLogFleetDefaultLimit,
-                as_of, collector_name, min_duration_ms, status);
+                as_of, collector_name, min_duration_ms, status, cancellationToken);
         }
 
         /* limit is nullable so the fleet branch above and this per-server branch can default it
@@ -1817,7 +1833,7 @@ public sealed class DarlingMcpDataTools
         /* The SENTINEL-AWARE resolve, and this read is the only one that takes it (#3399): its subject is
            the log itself, so the fleet-maintenance run-records have to be nameable here or they answer
            nothing. Every other tool keeps the registry-only resolve, where "(fleet)" is correctly a miss. */
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorWithFleetSentinelAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorWithFleetSentinelAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* The shared row-cap contract every sibling read uses: rejects out of range rather than
@@ -1869,7 +1885,7 @@ public sealed class DarlingMcpDataTools
                would make it mean "more rows were in the window", which is a different sentence under the
                same field name. */
             var rows = await DarlingDataReader.GetCollectionLogAsync(
-                postgres, resolved.ServerId, start, end, effectiveLimit + 1, collector_name, min_duration_ms, status);
+                postgres, resolved.ServerId, start, end, effectiveLimit + 1, collector_name, min_duration_ms, status, cancellationToken);
             var truncated = rows.Count > effectiveLimit;
             if (truncated) rows = rows.Take(effectiveLimit).ToList();
 
@@ -1904,7 +1920,7 @@ public sealed class DarlingMcpDataTools
                     narrow the answer given to a server that HAS collected. It costs one LIMIT 1 probe on a
                     path that already returned no rows.
                 */
-                var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId);
+                var everCollected = await DarlingDataReader.HasAnyCollectionLogAsync(postgres, resolved.ServerId, cancellationToken);
 
                 /* The sentinel gets its OWN three sentences, ahead of the server-shaped ones, because all
                    three of those are false about a maintenance pass — and one is false in the reassuring
@@ -2128,7 +2144,7 @@ public sealed class DarlingMcpDataTools
                 runs = result,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_collection_log", ex);
         }
@@ -2150,7 +2166,8 @@ public sealed class DarlingMcpDataTools
         string? as_of,
         string? collector_name,
         double? min_duration_ms,
-        string? status)
+        string? status,
+        CancellationToken cancellationToken = default)
     {
         var invalidLimit = McpHelpers.ValidateTop(limit);
         if (invalidLimit != null) return invalidLimit;
@@ -2173,7 +2190,7 @@ public sealed class DarlingMcpDataTools
             /* Over-fetch by one, exactly like the per-server read, so truncated is OBSERVED across the
                merged fleet page rather than inferred. */
             var rows = await DarlingDataReader.GetCollectionLogFleetAsync(
-                postgres, start, end, limit + 1, collector_name, min_duration_ms, status);
+                postgres, start, end, limit + 1, collector_name, min_duration_ms, status, cancellationToken);
             var truncated = rows.Count > limit;
             if (truncated) rows = rows.Take(limit).ToList();
 
@@ -2186,7 +2203,7 @@ public sealed class DarlingMcpDataTools
                 /* Same three-way split as the per-server branch, over the whole enabled fleet instead of
                    one server: never-collected (every server newly added, or the service never started)
                    outranks a filter miss, which outranks a genuinely quiet fleet-wide window. */
-                var everCollected = await DarlingDataReader.HasAnyCollectionLogFleetAsync(postgres);
+                var everCollected = await DarlingDataReader.HasAnyCollectionLogFleetAsync(postgres, cancellationToken);
 
                 if (!everCollected)
                 {
@@ -2275,7 +2292,7 @@ public sealed class DarlingMcpDataTools
                 runs = result,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_collection_log", ex);
         }
@@ -2287,9 +2304,10 @@ public sealed class DarlingMcpDataTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 4. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 4,
         [Description("Limit the blocked-session series to one database. Omit for all databases.")] string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
@@ -2306,9 +2324,9 @@ public sealed class DarlingMcpDataTools
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
 
-            var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end);
+            var waits = await DarlingDataReader.GetWaitingTaskTrendAsync(postgres, resolved.ServerId, start, end, cancellationToken);
             var blocked = await DarlingDataReader.GetBlockedSessionTrendAsync(
-                postgres, resolved.ServerId, start, end, database_name);
+                postgres, resolved.ServerId, start, end, database_name, cancellationToken);
 
             if (waits.Count == 0 && blocked.Count == 0)
             {
@@ -2317,13 +2335,13 @@ public sealed class DarlingMcpDataTools
                     "nothing was waiting" reads as an all-clear, while the truth may be that the
                     waiting_tasks collector never ran. A caller told all-clear stops looking.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
                 }
 
-                var everCollected = await DarlingDataReader.HasAnyWaitingTaskSampleAsync(postgres, resolved.ServerId);
+                var everCollected = await DarlingDataReader.HasAnyWaitingTaskSampleAsync(postgres, resolved.ServerId, cancellationToken);
                 return everCollected
                     ? McpHelpers.Status(
                         "empty",
@@ -2357,7 +2375,7 @@ public sealed class DarlingMcpDataTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_current_waits_trend", ex);
         }
@@ -2368,9 +2386,10 @@ public sealed class DarlingMcpDataTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24. No upper bound (this read exists to look further back than the 168-hour reads allow); a negative or zero value is refused rather than read as its absolute value.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         /* ValidateUncappedWindow, deliberately NOT ValidateWindow. These three reads have never capped
@@ -2387,11 +2406,11 @@ public sealed class DarlingMcpDataTools
             var end = windowEnd;
             var start = end.AddHours(-hours_back);
 
-            var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end);
+            var blocking = await DarlingDataReader.GetBlockingDurationStatsAsync(postgres, resolved.ServerId, start, end, cancellationToken);
 
             /* Parsed and bucketed by the shared aggregator rather than re-derived here: a second copy of
                "what counts as a victim" is how two surfaces end up disagreeing about one deadlock. */
-            var graphs = await DarlingDataReader.GetDeadlockGraphsAsync(postgres, resolved.ServerId, start, end);
+            var graphs = await DarlingDataReader.GetDeadlockGraphsAsync(postgres, resolved.ServerId, start, end, cancellationToken);
             var deadlocks = DeadlockSeverityAggregator.Aggregate(graphs);
 
             if (blocking.Count == 0 && deadlocks.Count == 0)
@@ -2407,15 +2426,15 @@ public sealed class DarlingMcpDataTools
                     checked because either can be off alone, and the deadlock collector is separate from
                     both -- the verdict covers its series too.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "blocked_process_report", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
                 }
 
                 var everRan =
-                    await DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId)
-                    || await DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId);
+                    await DarlingBlockingTrendReader.HasAnyBlockingCollectorRunAsync(postgres, resolved.ServerId, cancellationToken)
+                    || await DarlingBlockingTrendReader.HasAnyDeadlockCollectorRunAsync(postgres, resolved.ServerId, cancellationToken);
                 return everRan
                     ? McpHelpers.Status(
                         "empty",
@@ -2452,7 +2471,7 @@ public sealed class DarlingMcpDataTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_blocking_stats", ex);
         }

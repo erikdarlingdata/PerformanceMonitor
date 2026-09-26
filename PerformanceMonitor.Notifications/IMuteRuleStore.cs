@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace PerformanceMonitor.Notifications;
@@ -33,7 +34,7 @@ public interface IMuteRuleStore
 {
     /// <summary>Loads every persisted rule. Lite: SELECT … ORDER BY created_at_utc DESC. Dash: the already-loaded set.
     /// An empty list means the store holds no rules; a failed read throws rather than rendering as one.</summary>
-    Task<IReadOnlyList<MuteRule>> LoadAllAsync();
+    Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default);
 
     /// <summary>Persists a new rule. Lite: INSERT one row. Dash: add + rewrite file.</summary>
     Task InsertAsync(MuteRule rule);
