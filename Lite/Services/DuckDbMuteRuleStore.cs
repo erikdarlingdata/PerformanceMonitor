@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Notifications;
@@ -47,7 +48,7 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
         _dbInitializer = dbInitializer;
     }
 
-    public async Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+    public async Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
         var rules = new List<MuteRule>();
 

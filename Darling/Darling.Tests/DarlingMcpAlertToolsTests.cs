@@ -1324,7 +1324,7 @@ internal sealed class FakeMuteRuleStore : IMuteRuleStore
 
     internal void Remove(string id) => _rows.RemoveAll(r => r.Id == id);
 
-    public Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+    public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
         LoadAllCalls++;
         return Task.FromResult<IReadOnlyList<MuteRule>>(
