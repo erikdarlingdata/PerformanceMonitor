@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -240,72 +241,186 @@ public sealed class AlertNotebookEndpointTests
         Assert.NotEqual(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
     }
 
-    /* ═══════════════════════════ pure: dedup beats nearest-in-time ═══════════════════════════ */
+    /* ═══════════════════════════ pure: MatchAlert (#4366 review F3/F4) ═══════════════════════════ */
 
-    /// <summary>The endpoint's own dedup-first rule, reproduced at the level the handler actually runs it
-    /// (a list of same-metric rows, scanned for an incident whose <c>DedupKey</c> matches, before falling
-    /// back to nearest-in-time) — the handler itself is a single inline lambda with no extracted method to
-    /// call directly, so this pins the SAME comparison shape the source uses
-    /// (<c>Math.Abs((row.AlertTime - anchor).Ticks)</c> ascending) against a fixture proving the nearer row
-    /// loses when a farther row carries the matching dedup key.</summary>
+    private static DarlingAlertReader.AlertHistoryReadRow Row(
+        DateTime alertTime, string metric, string? contextJson = null, int serverId = 1, string serverName = "SRV1") =>
+        new(alertTime, serverId, serverName, metric, 90.0, 80.0, true, "webhook", null, false, null, false, contextJson);
+
+    private static string ContextWithDedup(string dedupKey) =>
+        AlertContextSerializer.Serialize(new AlertContext { Incidents = new List<AlertIncident> { new(dedupKey, new[] { "obj" }) } });
+
+    /// <summary>F3 fix, real rows: a same-key re-fire inside the tail used to win by being newest
+    /// (rows arrive DESC), which hid it from the status arms' own re-fire check. The NEAREST dedup match to
+    /// <c>anchor</c> must win instead — this fixture's farther row carries the matching key while the nearer
+    /// row's key is unrelated, exactly F3's own input.</summary>
     [Fact]
-    public void DedupMatch_BeatsNearerRow_WhenTheNearerRowHasADifferentKey()
+    public void MatchAlert_DedupPicksNearestMatch_NotNewestMatch()
     {
         var anchor = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
-        var near = anchor - TimeSpan.FromSeconds(5);
-        var far = anchor - TimeSpan.FromSeconds(35);
+        var refireInTail = anchor + TimeSpan.FromMinutes(12); // inside the +15m tail, newest of the two
+        var firing = anchor - TimeSpan.FromSeconds(1);        // nearest to anchor, but listed second (DESC order)
 
-        var rows = new List<(DateTime AlertTime, string DedupKey)>
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow>
         {
-            (near, "key-near-unrelated"),
-            (far, "key-far-matches"),
+            Row(refireInTail, "High CPU", ContextWithDedup("unrelated-key")),
+            Row(firing, "High CPU", ContextWithDedup("the-link-key")),
         };
 
-        var dedup = "key-far-matches";
+        var (matched, incident) = AlertNotebookEndpoint.MatchAlert(rows, "High CPU", "the-link-key", anchor);
 
-        // Reproduce the handler's exact rule: scan every same-metric row's dedup key for a match FIRST;
-        // only fall back to nearest-in-time (Math.Abs ticks ascending) when no row's incident matches.
-        (DateTime AlertTime, string DedupKey)? matched = null;
-        foreach (var row in rows)
-        {
-            if (string.Equals(row.DedupKey, dedup, StringComparison.Ordinal))
-            {
-                matched = row;
-                break;
-            }
-        }
-
-        matched ??= rows.OrderBy(r => Math.Abs((r.AlertTime - anchor).Ticks)).First();
-
-        Assert.Equal(far, matched.Value.AlertTime);
+        Assert.NotNull(matched);
+        Assert.Equal(firing, matched!.AlertTime);
+        Assert.Equal("the-link-key", incident!.DedupKey);
     }
 
+    /// <summary>F3's own re-fire scenario end to end: the SAME dedup key on two rows (the firing, and a
+    /// same-key re-fire in the tail) must match the NEARER one, not the newest.</summary>
     [Fact]
-    public void NoDedupKey_FallsBackToNearestRow()
+    public void MatchAlert_ReFireInTail_IsNotChosenOverTheNearerFiring()
+    {
+        var anchor = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        var refire = anchor + TimeSpan.FromMinutes(12);
+        var firing = anchor - TimeSpan.FromMinutes(1);
+
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow>
+        {
+            Row(refire, "High CPU", ContextWithDedup("key-1")),
+            Row(firing, "High CPU", ContextWithDedup("key-1")),
+        };
+
+        var (matched, _) = AlertNotebookEndpoint.MatchAlert(rows, "High CPU", "key-1", anchor);
+
+        Assert.Equal(firing, matched!.AlertTime);
+    }
+
+    /// <summary>Dedup beats a nearer NON-matching row: a row closer to <c>anchor</c> but with no dedup match
+    /// must not shadow a farther row that does carry the link's key.</summary>
+    [Fact]
+    public void MatchAlert_DedupBeatsANearerNonMatchingRow()
     {
         var anchor = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
         var near = anchor - TimeSpan.FromSeconds(5);
         var far = anchor - TimeSpan.FromSeconds(35);
 
-        var rows = new List<(DateTime AlertTime, string DedupKey)> { (far, "irrelevant-1"), (near, "irrelevant-2") };
-
-        string? dedup = null;
-        (DateTime AlertTime, string DedupKey)? matched = null;
-        if (!string.IsNullOrWhiteSpace(dedup))
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow>
         {
-            foreach (var row in rows)
-            {
-                if (string.Equals(row.DedupKey, dedup, StringComparison.Ordinal))
-                {
-                    matched = row;
-                    break;
-                }
-            }
+            Row(near, "High CPU", ContextWithDedup("key-near-unrelated")),
+            Row(far, "High CPU", ContextWithDedup("key-far-matches")),
+        };
+
+        var (matched, _) = AlertNotebookEndpoint.MatchAlert(rows, "High CPU", "key-far-matches", anchor);
+
+        Assert.Equal(far, matched!.AlertTime);
+    }
+
+    /// <summary>No dedup key at all falls back to nearest-in-time.</summary>
+    [Fact]
+    public void MatchAlert_NoDedupKey_FallsBackToNearestRow()
+    {
+        var anchor = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
+        var near = anchor - TimeSpan.FromSeconds(5);
+        var far = anchor - TimeSpan.FromSeconds(35);
+
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow> { Row(far, "High CPU"), Row(near, "High CPU") };
+
+        var (matched, _) = AlertNotebookEndpoint.MatchAlert(rows, "High CPU", null, anchor);
+
+        Assert.Equal(near, matched!.AlertTime);
+    }
+
+    /* ═══════════════════════════ pure: StatusFromHistory (#4366 review F1/F2/F4) ═══════════════════════════ */
+
+    /// <summary>F1: a resolution 40 minutes after <c>at</c> (past the old +15m read's edge) is now visible and
+    /// reads "Resolved at" -- the review's own input. The caller is responsible for widening the rows passed
+    /// in; this pin proves the ARM sees a late row once it is given one.</summary>
+    [Fact]
+    public void StatusFromHistory_ResolutionFortyMinutesLater_ReadsResolved()
+    {
+        var anchor = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var resolvedAt = anchor + TimeSpan.FromMinutes(40);
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow> { Row(resolvedAt, "CPU Resolved", serverId: 7) };
+
+        var status = AlertNotebookEndpoint.StatusFromHistory(rows, "High CPU", anchor, matchedRow: null, serverId: 7, fleetLevelStore: false);
+
+        Assert.Equal("Resolved at " + resolvedAt.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture), status);
+    }
+
+    /// <summary>F2: another server's resolution must not answer for a server the caller could not resolve --
+    /// the caller passes <c>serverId: null</c> here (the unresolved case) and gets Unknown, never a status
+    /// built from rows belonging to a different host.</summary>
+    [Fact]
+    public void StatusFromHistory_UnresolvedServer_NeverReadsAnotherServersResolution()
+    {
+        var anchor = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var otherServerResolved = Row(anchor + TimeSpan.FromMinutes(5), "CPU Resolved", serverId: 99, serverName: "OTHER-HOST");
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow> { otherServerResolved };
+
+        var status = AlertNotebookEndpoint.StatusFromHistory(rows, "High CPU", anchor, matchedRow: null, serverId: null, fleetLevelStore: false);
+
+        Assert.StartsWith("Unknown (not collected since ", status, StringComparison.Ordinal);
+    }
+
+    /// <summary>F2's other half: when a server id IS known, rows scoped to a DIFFERENT server id must not
+    /// leak into either arm even though both rows are in the same list.</summary>
+    [Fact]
+    public void StatusFromHistory_KnownServer_IgnoresAnotherServersRows()
+    {
+        var anchor = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow>
+        {
+            Row(anchor + TimeSpan.FromMinutes(5), "CPU Resolved", serverId: 99, serverName: "OTHER-HOST"),
+        };
+
+        var status = AlertNotebookEndpoint.StatusFromHistory(rows, "High CPU", anchor, matchedRow: null, serverId: 7, fleetLevelStore: false);
+
+        Assert.Null(status); // neither arm 1 nor 2 fires -- caller falls through to collector freshness
+    }
+
+    /// <summary>A later same-metric firing (arm 2), excluding the matched row itself.</summary>
+    [Fact]
+    public void StatusFromHistory_LaterSameMetricFiring_ReadsFiredAgain()
+    {
+        var anchor = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var matched = Row(anchor, "High CPU", serverId: 7);
+        var refired = anchor + TimeSpan.FromMinutes(20);
+        var rows = new List<DarlingAlertReader.AlertHistoryReadRow> { matched, Row(refired, "High CPU", serverId: 7) };
+
+        var status = AlertNotebookEndpoint.StatusFromHistory(rows, "High CPU", anchor, matched, serverId: 7, fleetLevelStore: false);
+
+        Assert.Equal("Fired again at " + refired.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture), status);
+    }
+
+    /// <summary>The four arms are distinct strings and none of them ever say "ongoing" -- reproduced against
+    /// the real seam's outputs rather than hand-typed literals.</summary>
+    [Fact]
+    public void StatusFromHistory_FourArms_AreDistinctStrings_AndNoneSayOngoing()
+    {
+        var anchor = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var matched = Row(anchor, "High CPU", serverId: 7);
+
+        var resolved = AlertNotebookEndpoint.StatusFromHistory(
+            new List<DarlingAlertReader.AlertHistoryReadRow> { matched, Row(anchor + TimeSpan.FromMinutes(1), "CPU Resolved", serverId: 7) },
+            "High CPU", anchor, matched, 7, false);
+        var refired = AlertNotebookEndpoint.StatusFromHistory(
+            new List<DarlingAlertReader.AlertHistoryReadRow> { matched, Row(anchor + TimeSpan.FromMinutes(1), "High CPU", serverId: 7) },
+            "High CPU", anchor, matched, 7, false);
+        var fallthrough = AlertNotebookEndpoint.StatusFromHistory(
+            new List<DarlingAlertReader.AlertHistoryReadRow> { matched }, "High CPU", anchor, matched, 7, false);
+        var unknownUnresolved = AlertNotebookEndpoint.StatusFromHistory(
+            new List<DarlingAlertReader.AlertHistoryReadRow>(), "High CPU", anchor, null, null, false);
+
+        Assert.StartsWith("Resolved at ", resolved, StringComparison.Ordinal);
+        Assert.StartsWith("Fired again at ", refired, StringComparison.Ordinal);
+        Assert.Null(fallthrough); // arms 1/2 don't fire; caller's own "No resolution recorded"/"Unknown" arms take over
+        Assert.StartsWith("Unknown (not collected since ", unknownUnresolved, StringComparison.Ordinal);
+
+        var arms = new[] { resolved!, refired!, unknownUnresolved! };
+        Assert.Equal(3, arms.Distinct(StringComparer.Ordinal).Count());
+        foreach (var arm in arms)
+        {
+            Assert.DoesNotContain("ongoing", arm, StringComparison.OrdinalIgnoreCase);
         }
-
-        matched ??= rows.OrderBy(r => Math.Abs((r.AlertTime - anchor).Ticks)).First();
-
-        Assert.Equal(near, matched.Value.AlertTime);
     }
 
     /* ═══════════════════════════ pure: window math and the future-`at` clamp ═══════════════════════════ */
