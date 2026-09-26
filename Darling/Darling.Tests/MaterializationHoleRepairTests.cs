@@ -344,68 +344,22 @@ public sealed class MaterializationHoleRepairTests
     /// <summary>
     /// #4301 (H2): a legacy-interior gap — a hole BELOW the legacy's last bucket, inside its own frozen span,
     /// from an outage that predates this store ever taking the freeze — gets a THIRD window, distinct from
-    /// both the seam window and the ordinary window, emitted FIRST (oldest of the three). RED on the pre-#4301
-    /// signature: <c>MaterializationHoleScanWindows</c> had no parameter through which a legacy-interior span
-    /// could ever reach this method at all, so it returned at most the seam window and the ordinary window —
-    /// never anything anchored below <c>l.mx</c> — exactly the H2 regression this pins.
+    /// both the seam window and the ordinary window, emitted FIRST (oldest of the three). Superseded by the
+    /// #4301 ruling ("fill the successor CONTIGUOUSLY DOWNWARD"): the walk no longer takes a separate
+    /// legacy-interior window at all — the seam window's own lower bound moved to raw's filtered floor, so a
+    /// hole below the legacy's last bucket is repaired by the SAME newest-first descent as everything else
+    /// below the successor's floor. <c>MaterializationHoleScanWindows</c> dropped the
+    /// <c>legacyInteriorFrom</c>/<c>legacyInteriorTo</c> parameters this test exercised; removed with them.
     /// </summary>
-    [Fact]
-    public void ScanWindows_LegacyInterior_GivesAThirdWindow_EmittedFirst()
-    {
-        var width = TimescaleSupport.HourlyBucket;
-        var floor = Hour.AddHours(200);
-        var horizon = Hour.AddHours(190);
-        var seamFloor = Hour.AddHours(195);
-        var ceiling = Hour.AddHours(250);
-        var legacyInteriorFrom = Hour.AddHours(20);
-        var legacyInteriorTo = Hour.AddHours(180);
-
-        var windows = TimescaleSupport.MaterializationHoleScanWindows(
-            floor, ceiling, horizon, seamFloor, width, legacyInteriorFrom, legacyInteriorTo);
-
-        Assert.Equal(3, windows.Count);
-        Assert.Equal((legacyInteriorFrom, legacyInteriorTo), windows[0]);
-        Assert.Equal((seamFloor, floor.AddHours(-1)), windows[1]);
-        Assert.Equal((floor, ceiling), windows[2]);
-
-        /* The legacy-interior window is unclamped by the horizon — same reasoning as the seam window: the
-           outage that opened it left the source with no rows there, not purged, so it can sit however far
-           below the horizon it needs to. */
-        Assert.True(windows[0].From < horizon);
-    }
 
     /// <summary>
-    /// #4301: no legacy-interior span (both bounds null, the ordinary case once a store has run a while, or
-    /// any relation without a frozen legacy) yields exactly the same two windows #4186 already produced —
-    /// the new parameter is purely additive and does not disturb the seam/ordinary shape when it is absent.
-    /// An inverted or empty span (from after to) is also omitted, the same rule the seam window already uses.
+    /// #4301 (H2, filter parity): <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/> (the gate's
+    /// <c>EXISTS</c> wrapper) is the shared hole definition <see cref="TimescaleSupport.RetentionArmSafetySql"/>
+    /// uses. This pins its shape: a well-formed <c>EXISTS(...)</c> wrapping the <c>generate_series(...)</c>
+    /// buckets clause, fenced with <c>OFFSET 0</c> for the #3933 reason its own doc states.
     /// </summary>
     [Fact]
-    public void ScanWindows_NoLegacyInterior_LeavesTheExistingTwoWindowsUnchanged()
-    {
-        var width = TimescaleSupport.HourlyBucket;
-        var floor = Hour.AddHours(10);
-        var horizon = Hour.AddHours(2);
-        var seamFloor = Hour.AddHours(4);
-        var ceiling = Hour.AddHours(50);
-
-        var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor, width);
-        Assert.Equal(new[] { (seamFloor, floor.AddHours(-1)), (floor, ceiling) }, windows);
-
-        var invertedInteriorWindows = TimescaleSupport.MaterializationHoleScanWindows(
-            floor, ceiling, horizon, seamFloor, width, legacyInteriorFrom: Hour.AddHours(5), legacyInteriorTo: Hour.AddHours(1));
-        Assert.Equal(windows, invertedInteriorWindows);
-    }
-
-    /// <summary>
-    /// #4301 (H2, filter parity companion): <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/> (the
-    /// gate's <c>EXISTS</c> wrapper) and <see cref="TimescaleSupport.LegacySuccessorHoleScanSql"/> (the walk's
-    /// bucket LIST) must share the IDENTICAL body text — one private builder, two wrappers — so the gate and
-    /// the walk can never drift into disagreeing about what a hole is. Asserts the shared
-    /// <c>generate_series(...) ... OFFSET 0</c> buckets clause appears verbatim inside both generated strings.
-    /// </summary>
-    [Fact]
-    public void LegacySuccessorHoleExistsSql_AndLegacySuccessorHoleScanSql_ShareTheIdenticalBody()
+    public void LegacySuccessorHoleExistsSql_WrapsTheBucketsClauseInExists()
     {
         const string relation = "query_stats";
         const string sourceTimeColumn = "collection_time";
@@ -418,25 +372,11 @@ public sealed class MaterializationHoleRepairTests
 
         var existsSql = TimescaleSupport.LegacySuccessorHoleExistsSql(
             relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral);
-        var scanSql = TimescaleSupport.LegacySuccessorHoleScanSql(
-            relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral);
 
         Assert.StartsWith("EXISTS (", existsSql, StringComparison.Ordinal);
-        Assert.StartsWith("SELECT hb.bucket", scanSql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY hb.bucket", scanSql, StringComparison.Ordinal);
-
-        /* Strip each wrapper down to the shared buckets clause and compare verbatim — the whole point of the
-           refactor is that this body is ONE piece of text, not two that happen to agree today. Located by
-           IndexOf rather than a hardcoded literal length, so the file's own line-ending convention (CRLF)
-           does not throw the split off by one. */
-        var existsBody = existsSql.Substring("EXISTS (".Length, existsSql.Length - "EXISTS (".Length - 1);
-        var scanFromIndex = scanSql.IndexOf("FROM (", StringComparison.Ordinal) + "FROM (".Length;
-        var scanCloseIndex = scanSql.LastIndexOf(") AS hb(bucket)", StringComparison.Ordinal);
-        var scanBody = scanSql.Substring(scanFromIndex, scanCloseIndex - scanFromIndex);
-
-        Assert.Equal(existsBody, scanBody);
-        Assert.Contains("generate_series(", existsBody, StringComparison.Ordinal);
-        Assert.Contains("OFFSET 0", existsBody, StringComparison.Ordinal);
+        Assert.EndsWith(")", existsSql, StringComparison.Ordinal);
+        Assert.Contains("generate_series(", existsSql, StringComparison.Ordinal);
+        Assert.Contains("OFFSET 0", existsSql, StringComparison.Ordinal);
     }
 
     /// <summary>
