@@ -237,9 +237,9 @@ public sealed class AlertNotebookAuthoredTemplateTests
                     $"authored read cell names a barred read: {read}");
 
                 var parameters = Assert.IsType<JsonObject>(cell["params"]);
-                if (read == "get_deadlock_trend")
+                if (AlertNotebookEndpoint.s_authoredLimitlessTrendReads.Contains(read))
                 {
-                    Assert.False(parameters.ContainsKey("limit"), "get_deadlock_trend must not carry a limit param");
+                    Assert.False(parameters.ContainsKey("limit"), $"{read} must not carry a limit param");
                 }
                 else
                 {
