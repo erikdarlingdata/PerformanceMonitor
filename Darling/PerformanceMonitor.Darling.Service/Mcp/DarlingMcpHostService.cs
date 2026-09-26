@@ -102,12 +102,19 @@ public sealed class DarlingMcpHostService : BackgroundService
        outside the service's DI (a test) keeps a private one. */
     private readonly BaselineCache _baselineCache;
 
-    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null)
+    /* #4442 scope 2: the process-wide read-latency accumulator, the SAME singleton Program.cs hands the web
+       host and the worker's flush (DI, one AddSingleton<ReadLatencyAccumulator> registration) -- optional so a
+       test-constructed host (which passes none) keeps a private, throwaway accumulator rather than a
+       null-reference, exactly like BaselineCache above. */
+    private readonly ReadLatencyAccumulator _readLatency;
+
+    public DarlingMcpHostService(ILogger<DarlingMcpHostService> logger, McpRuntimeState state, MonitoredServerRegistryState registryState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null)
     {
         _logger = logger;
         _state = state;
         _registryState = registryState;
         _baselineCache = baselineCache ?? new BaselineCache();
+        _readLatency = readLatency ?? new ReadLatencyAccumulator();
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort)
@@ -558,7 +565,7 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* Register MCP server with the analysis tool class. */
-            ConfigureMcpServices(builder.Services, declaredPeers);
+            ConfigureMcpServices(builder.Services, declaredPeers, _readLatency, _logger);
 
             _app = builder.Build();
 
@@ -628,8 +635,16 @@ public sealed class DarlingMcpHostService : BackgroundService
     /// Every line below is identical to before the extraction; only the receiver (<c>builder.Services</c>
     /// there vs. the parameter here) changes.
     /// </summary>
-    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers)
+    internal static void ConfigureMcpServices(IServiceCollection services, DarlingPeerDirectory.Snapshot declaredPeers, ReadLatencyAccumulator? readLatency = null, ILogger? readLatencyLogger = null)
     {
+        /* #4442 scope 2: the per-tool latency filter needs the SAME accumulator singleton the web host and
+           worker flush use (Program.cs registers ONE ReadLatencyAccumulator for the whole process) -- an
+           optional parameter, defaulted to a private instance, so every existing test-constructed call site
+           (which passes none) keeps building and running with its own throwaway accumulator instead of a
+           null-reference. Production's one real call site (TryStartServerAsync) resolves the DI singleton and
+           passes it here explicitly. */
+        var toolLatency = new McpToolLatencyFilter(readLatency ?? new ReadLatencyAccumulator(), readLatencyLogger);
+
         services
             .AddMcpServer(options =>
             {
@@ -948,7 +963,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                at McpToolGuide.Marker in WithGeminiCompatibleTools) and the cross-tool topics. Lite twin:
                McpToolGuideTools. */
             .WithGeminiCompatibleTools<DarlingMcpToolGuideTools>()
-            /* Two call-tool filters, each registered ONCE and each covering every tool with no
+            /* Three call-tool filters, each registered ONCE and each covering every tool with no
                per-tool change — the seam that exists precisely so a decision about all ~147 reads
                is made in one place.
 
@@ -961,6 +976,17 @@ public sealed class DarlingMcpHostService : BackgroundService
                are language models, a silently dropped key is a confidently wrong answer. Shared with
                Lite from PerformanceMonitor.Common so both SKUs refuse identically.
 
+               The read-latency filter (#4442 scope 2) times every call and records it into the shared
+               ReadLatencyAccumulator under ReadSurface.Mcp — the same seam the guard above uses (a call-tool
+               filter, registered once, covering every tool without a per-tool change), chosen because the SDK
+               offers exactly this hook (McpServerOptions.AddCallToolFilter) and Darling registers no fallback
+               CallToolHandler, so a filter here sees every dispatched call on BOTH / and /core — a /core
+               request that never reaches dispatch (a name outside the narrowed ToolCollection) never reaches
+               this filter either, which is correct: nothing ran to time. run_custom_view_panel is skipped
+               inside the filter (see McpToolLatencyFilter's own doc): it already records one Compose sample
+               through RunComposedPanelAsync, so recording it again here would double-count every MCP
+               custom-view run.
+
                Optional GCF (Graph Compact Format) output runs LAST: when DARLING_OUTPUT_FORMAT=gcf
                it re-encodes each tool's JSON result as a GCF generic wire. Opt-in, lossless, and
                never larger than the JSON (see GcfCallToolFilter / GcfOutput). #4198 ruled out a
@@ -970,6 +996,7 @@ public sealed class DarlingMcpHostService : BackgroundService
                see McpResponseBudget.DefaultBytes, which stays as the one shared size target. */
             .WithRequestFilters(filters => filters
                 .AddCallToolFilter(McpUnknownArgumentGuard.Instance)
+                .AddCallToolFilter(toolLatency.AsFilter())
                 .AddCallToolFilter(GcfCallToolFilter.Instance));
     }
 
