@@ -7,11 +7,13 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
@@ -19,6 +21,63 @@ using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
 namespace Darling.Tests;
+
+/// <summary>
+/// Counts Npgsql's own "Executing command: {CommandText}" debug log lines whose text mentions a given
+/// table (#4197 CI fix). CI's PostgreSQL service does not preload <c>pg_stat_statements</c>
+/// (<c>shared_preload_libraries</c> is a server-restart setting the service container never sets), so
+/// <c>CREATE EXTENSION pg_stat_statements</c> there throws 55000. Counting through Npgsql's own logging
+/// seam proves the SAME fact — how many statement executions touched the table — without depending on
+/// an extension the CI cluster cannot load. Npgsql logs each command execution once, at Debug, under the
+/// standard <c>Npgsql.Command.Execution</c> category name, regardless of whether the statement changed
+/// data or not, so a substring match on the logged command text is exactly the per-statement count
+/// <c>CallsForTableAsync</c>'s pg_stat_statements-backed SUM(calls) used to give.
+/// </summary>
+private sealed class CommandCountingLoggerProvider : ILoggerProvider
+{
+    private readonly ConcurrentBag<string> _messages = new();
+
+    public int CountContaining(string table) =>
+        _messages.Count(m => m.Contains(table, StringComparison.OrdinalIgnoreCase));
+
+    public void Reset() => _messages.Clear();
+
+    public ILogger CreateLogger(string categoryName) => new CommandCountingLogger(_messages);
+
+    public void Dispose() { }
+
+    private sealed class CommandCountingLogger(ConcurrentBag<string> messages) : ILogger
+    {
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Debug;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (!IsEnabled(logLevel))
+            {
+                return;
+            }
+
+            var message = formatter(state, exception);
+            if (message.StartsWith("Executing command:", StringComparison.Ordinal))
+            {
+                messages.Add(message);
+            }
+        }
+    }
+}
+
+private sealed class CommandCountingLoggerFactory : ILoggerFactory
+{
+    public readonly CommandCountingLoggerProvider Provider = new();
+
+    public void AddProvider(ILoggerProvider provider) { }
+
+    public ILogger CreateLogger(string categoryName) => Provider.CreateLogger(categoryName);
+
+    public void Dispose() => Provider.Dispose();
+}
 
 /// <summary>
 /// #4197 part b — RUNNER-LEVEL live pins for <see cref="ServerWatermarkCache"/>, against a real
@@ -97,20 +156,13 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
         return connection;
     }
 
-    private static async Task ResetPgStatStatementsAsync(NpgsqlConnection connection, CancellationToken ct)
-    {
-        await using var reset = new NpgsqlCommand("SELECT pg_stat_statements_reset()", connection);
-        await reset.ExecuteScalarAsync(ct);
-    }
-
-    /// <summary>Sum of `calls` for statements whose query text mentions the given table name.</summary>
-    private static async Task<long> CallsForTableAsync(NpgsqlConnection connection, string table, CancellationToken ct)
-    {
-        await using var command = new NpgsqlCommand(
-            "SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE query ILIKE '%' || @table || '%' AND query ILIKE '%max(%'", connection);
-        command.Parameters.AddWithValue("table", table);
-        return (long)(await command.ExecuteScalarAsync(ct))!;
-    }
+    /// <summary>
+    /// Count of Npgsql "Executing command" log lines whose text mentions the given table, since the last
+    /// <see cref="CommandCountingLoggerProvider.Reset"/> — the counting-logger twin of the old
+    /// pg_stat_statements SUM(calls) read (see the class remarks above).
+    /// </summary>
+    private static long CallsForTable(CommandCountingLoggerProvider provider, string table) =>
+        provider.CountContaining(table);
 
     /// <summary>
     /// #4197's headline correctness pin: after real writes through the product's own
@@ -275,11 +327,11 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
 
     /// <summary>
     /// Zero store round trips after seed: after the first (seeding) call, N-1 further calls for the SAME
-    /// (server, collector) issue no MAX() query against job_history at all — the `pg_stat_statements`
-    /// call count for the watermark statements stays at 1 through the whole run.
+    /// (server, collector) issue no MAX() query against job_history at all — the counting logger's tally
+    /// of "Executing command" log lines mentioning job_history stays at 0 through the reset loop below.
     ///
     /// <para>RED on dev: dev has no cache, so this SAME loop drives 20 store reads, and the delta assertion
-    /// (== 1) fails there (dev: 20).</para>
+    /// (== 0 further reads) fails there (dev: 20).</para>
     /// </summary>
     [Fact]
     public async Task ZeroReadsAfterSeed_TwentyCallsForTheSameServerAndCollector_IssueExactlyOneStatementCall()
@@ -290,12 +342,11 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
-        await using (var ext = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", connection))
-        {
-            await ext.ExecuteNonQueryAsync(ct);
-        }
 
-        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var loggerFactory = new CommandCountingLoggerFactory();
+        await using var postgres = new NpgsqlDataSourceBuilder(scratch.ConnectionString)
+            .UseLoggerFactory(loggerFactory)
+            .Build();
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         var server = MakeServer(-419702, "wm-zeroreads");
         var definition = JobHistoryCollector.Instance;
@@ -319,14 +370,14 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             await WriteBatchAsync(runner, connection, definition, seedBatch, server, seedContext.CollectionTime, seedContext, ct);
             Advance(runner, server, definition, seedBatch, fromUtc: false);
 
-            await ResetPgStatStatementsAsync(connection, ct);
+            loggerFactory.Provider.Reset();
 
             for (var i = 0; i < 20; i++)
             {
                 await ResolveAsync(runner, server, definition, ct);
             }
 
-            var calls = await CallsForTableAsync(connection, "job_history", ct);
+            var calls = CallsForTable(loggerFactory.Provider, "job_history");
             Assert.Equal(0, calls);
 
             bodySucceeded = true;
@@ -358,12 +409,11 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
-        await using (var ext = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", connection))
-        {
-            await ext.ExecuteNonQueryAsync(ct);
-        }
 
-        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var loggerFactory = new CommandCountingLoggerFactory();
+        await using var postgres = new NpgsqlDataSourceBuilder(scratch.ConnectionString)
+            .UseLoggerFactory(loggerFactory)
+            .Build();
         var firstRunner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         var server = MakeServer(-419703, "wm-restart");
         var definition = JobHistoryCollector.Instance;
@@ -388,11 +438,14 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             /* Warm the first runner's cache, then reset the statement counter so this test measures only
                the RESTARTED runner's behaviour. */
             await ResolveAsync(firstRunner, server, definition, ct);
-            await ResetPgStatStatementsAsync(connection, ct);
+            loggerFactory.Provider.Reset();
 
-            /* A fresh runner instance, over a fresh data source — the restart. Its cache is cold, so its
-               first call must seed (one read), and every call after must be a hit (zero more reads). */
-            await using var restartedPostgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+            /* A fresh runner instance, over a fresh data source that shares the SAME counting logger
+               factory — the restart. Its cache is cold, so its first call must seed (one read), and every
+               call after must be a hit (zero more reads). */
+            await using var restartedPostgres = new NpgsqlDataSourceBuilder(scratch.ConnectionString)
+                .UseLoggerFactory(loggerFactory)
+                .Build();
             var restartedRunner = new DarlingCollectorRunner(restartedPostgres, new CollectorDeltaCalculator());
 
             await ResolveAsync(restartedRunner, server, definition, ct);
@@ -402,7 +455,7 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             /* job_history declares BOTH a timestamp watermark (run_datetime) and a numeric twin
                (instance_id) — a cold-cache seed reads each once, so the first (seeding) call issues TWO
                MAX statements against job_history, not one; every call after is a hit and reads neither. */
-            var calls = await CallsForTableAsync(connection, "job_history", ct);
+            var calls = CallsForTable(loggerFactory.Provider, "job_history");
             Assert.Equal(2, calls);
 
             bodySucceeded = true;
@@ -445,12 +498,11 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
-        await using (var ext = new NpgsqlCommand("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", connection))
-        {
-            await ext.ExecuteNonQueryAsync(ct);
-        }
 
-        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var loggerFactory = new CommandCountingLoggerFactory();
+        await using var postgres = new NpgsqlDataSourceBuilder(scratch.ConnectionString)
+            .UseLoggerFactory(loggerFactory)
+            .Build();
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
         var server = MakeServer(-419704, "wm-fault");
         var definition = JobHistoryCollector.Instance;
@@ -477,12 +529,12 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             Advance(runner, server, definition, seedBatch, fromUtc: false);
 
             await ResolveAsync(runner, server, definition, ct);
-            await ResetPgStatStatementsAsync(connection, ct);
+            loggerFactory.Provider.Reset();
 
             /* A hit issues no read (already covered by the zero-reads pin, re-asserted here as the
                pre-fault baseline). */
             await ResolveAsync(runner, server, definition, ct);
-            Assert.Equal(0, await CallsForTableAsync(connection, "job_history", ct));
+            Assert.Equal(0, CallsForTable(loggerFactory.Provider, "job_history"));
 
             /* Simulate the fault path: the runner's public RunAsync invalidates on ANY exception from
                RunCoreAsync (see the try/catch this branch added). That invalidation is exactly this call. */
@@ -491,15 +543,15 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             /* The next resolve must now read the store again — job_history declares both a timestamp
                AND a numeric watermark, so a reseed after invalidation issues TWO MAX statements, same as
                any other cold-cache seed for this collector (see the restart pin's remark). */
-            await ResetPgStatStatementsAsync(connection, ct);
+            loggerFactory.Provider.Reset();
             await ResolveAsync(runner, server, definition, ct);
-            Assert.Equal(2, await CallsForTableAsync(connection, "job_history", ct));
+            Assert.Equal(2, CallsForTable(loggerFactory.Provider, "job_history"));
 
             /* And the call after THAT is a hit again — the reseed is a one-time cost, not a re-entry into
                always-read mode. */
-            await ResetPgStatStatementsAsync(connection, ct);
+            loggerFactory.Provider.Reset();
             await ResolveAsync(runner, server, definition, ct);
-            Assert.Equal(0, await CallsForTableAsync(connection, "job_history", ct));
+            Assert.Equal(0, CallsForTable(loggerFactory.Provider, "job_history"));
 
             bodySucceeded = true;
         }
