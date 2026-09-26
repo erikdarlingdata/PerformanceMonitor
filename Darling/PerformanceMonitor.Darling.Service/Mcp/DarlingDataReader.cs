@@ -1183,6 +1183,12 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    /// <summary>The FROM-clause placeholder <see cref="TopQueriesHourlySql"/> carries — replaced with
+    /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
+    /// <c>query_stats_interval_hourly</c> or <c>query_stats_hourly</c> in its place; see
+    /// <see cref="GetTopQueriesByCpuHourlyAsync"/>.</summary>
+    public const string TopQueriesHourlyFromPlaceholder = "$FROM$";
+
     /// <summary>
     /// #4231 stage 3: the hourly-tier twin of <see cref="TopQueriesSql"/>, over <c>query_stats_hourly</c> /
     /// <c>query_stats_interval_hourly</c> — routed here ONLY through <see cref="RollupCoverage.StitchedRelationSql"/>
@@ -1202,12 +1208,6 @@ internal static class DarlingDataReader
     /// filter (NULL = all). <c>min_dop</c> filtering (#3541 A13) is Raw-tier only for this lane — the rollup
     /// carries no per-group DOP column — so this const takes no $6.
     /// </summary>
-    /// <summary>The FROM-clause placeholder <see cref="TopQueriesHourlySql"/> carries — replaced with
-    /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
-    /// <c>query_stats_interval_hourly</c> or <c>query_stats_hourly</c> in its place; see
-    /// <see cref="GetTopQueriesByCpuHourlyAsync"/>.</summary>
-    public const string TopQueriesHourlyFromPlaceholder = "$FROM$";
-
     public const string TopQueriesHourlySql = """
         WITH ranked AS (
             SELECT
