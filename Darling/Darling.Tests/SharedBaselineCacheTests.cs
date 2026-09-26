@@ -135,7 +135,7 @@ public sealed class SharedBaselineCacheTests
         Assert.Contains("builder.Services.AddSingleton<BaselineCache>();", program, StringComparison.Ordinal);
 
         var worker = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
-        Assert.Contains("BaselineCache baselineCache)", worker, StringComparison.Ordinal);
+        Assert.Matches(@"BaselineCache baselineCache\s*[,)]", worker);
         Assert.Contains("new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache)", worker, StringComparison.Ordinal);
 
         var mcp = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");

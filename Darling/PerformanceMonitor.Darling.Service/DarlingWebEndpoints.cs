@@ -79,7 +79,7 @@ public static class DarlingWebEndpoints
     /// would see, since a recording failure is never a request failure.</summary>
     private static ILogger? s_readLatencyLogger;
 
-    /// <summary>#4442 gap 2, test-only: one extra <c>/api/read/*</c> dispatch entry a test can register so a
+    /// <summary>#4442, test-only: one extra <c>/api/read/*</c> dispatch entry a test can register so a
     /// real <see cref="PostgresException"/> with SqlState 57014 travels through the SAME dispatch loop
     /// every other route uses, rather than a hand-called <c>Record</c> standing in for the wiring. <c>internal</c>
     /// and set ONLY from <c>Darling.Tests</c> (grep proves no production caller ever assigns it); null in every
@@ -3342,7 +3342,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
         };
 
-        /* #4442 gap 2: the test-only extra entry, added ONLY when a test set it -- never in a production
+        /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production
            run, since s_testOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. */
         if (s_testOnlyExtraDispatchEntry is { } extra)
         {

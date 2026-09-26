@@ -160,7 +160,7 @@ public sealed class ReadLatencyWebRecordingTests
                                 // rather than asserting a Timeout sample that route can never produce.
     }
 
-    /// <summary>#4442 gap 2: the pin the classifier's own unit tests cannot give -- a real 57014
+    /// <summary>#4442: the pin the classifier's own unit tests cannot give -- a real 57014
     /// <see cref="PostgresException"/> travelling through the SAME <c>/api/read/*</c> dispatch loop every
     /// production route uses (<see cref="DarlingWebEndpoints.s_testOnlyExtraDispatchEntry"/>, an ONE-entry
     /// test seam that <see cref="DarlingWebEndpoints.BuildReadDispatch"/> folds in only when a test set it),
