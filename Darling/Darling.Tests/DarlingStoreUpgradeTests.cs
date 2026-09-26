@@ -1643,6 +1643,99 @@ public sealed class DarlingStoreUpgradeTests
         return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
 
+    /// <summary>
+    /// Reads the LIVE server's own start time, on a <c>Pooling=false</c> connection so this probe itself
+    /// cannot be handed a stale pooled socket. Used to catch a restart between the upgrade bootstrap
+    /// returning and a later pooled read: two calls with the same server identity return the same instant,
+    /// and a moved instant means the server the caller thinks it still has is gone.
+    /// </summary>
+    private static async Task<DateTime> ReadPostmasterStartTimeAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        var unpooled = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
+        await using var connection = new NpgsqlConnection(unpooled);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = new NpgsqlCommand("SELECT pg_postmaster_start_time()", connection) { CommandTimeout = 60 };
+        return DateTime.SpecifyKind((DateTime)(await command.ExecuteScalarAsync(cancellationToken))!, DateTimeKind.Utc);
+    }
+
+    /// <summary>
+    /// Builds the failure message for ANY exception raised after <c>EnsureRunningAsync</c> returned: whether
+    /// the upgraded server restarted under us since the bootstrap finished (compared against the
+    /// <c>Pooling=false</c> reading taken right after it returned), plus the upgraded cluster's OWN server
+    /// log tail — not the shared rig's log, which is all a bare stack trace leaves behind. FATAL/PANIC and
+    /// termination lines are surfaced first, ahead of the raw tail, because those are the lines that turn
+    /// "a pooled read failed" into "the server crashed and restarted".
+    /// </summary>
+    private static async Task<string> DescribePostBootstrapFailureAsync(
+        Exception failure,
+        string dataDirectory,
+        string connectionString,
+        DateTime startTimeAfterBootstrap,
+        CancellationToken cancellationToken)
+    {
+        var restartNote = "(could not re-read pg_postmaster_start_time() to check for a restart)";
+        try
+        {
+            var startTimeNow = await ReadPostmasterStartTimeAsync(connectionString, cancellationToken);
+            restartNote = startTimeNow == startTimeAfterBootstrap
+                ? $"the server did not restart (pg_postmaster_start_time() stayed {startTimeAfterBootstrap:O})"
+                : $"the upgraded server restarted between the bootstrap and this read " +
+                  $"(start time {startTimeAfterBootstrap:O} → {startTimeNow:O})";
+        }
+        catch (Exception probeEx)
+        {
+            restartNote = $"(could not re-read pg_postmaster_start_time() to check for a restart: {probeEx.Message})";
+        }
+
+        var serverLogTail = ReadUpgradedServerLogTail(dataDirectory);
+        var highlighted = string.Join('\n', serverLogTail
+            .Split('\n')
+            .Where(line =>
+                line.Contains("FATAL", StringComparison.Ordinal) ||
+                line.Contains("PANIC", StringComparison.Ordinal) ||
+                line.Contains("terminated by exception", StringComparison.Ordinal) ||
+                line.Contains("was terminated", StringComparison.Ordinal) ||
+                line.Contains("database system is shut down", StringComparison.Ordinal)));
+
+        var highlightBlock = string.IsNullOrEmpty(highlighted)
+            ? "(no FATAL/PANIC/terminated lines in the server log)"
+            : highlighted;
+
+        return $"{failure.Message}\n\n--- restart check ---\n{restartNote}" +
+               $"\n\n--- upgraded server log, matching lines first ---\n{highlightBlock}" +
+               $"\n\n--- upgraded server log tail ---\n{serverLogTail}";
+    }
+
+    /// <summary>
+    /// The upgraded cluster's OWN server log — the newest of its <c>pg.log</c> (beside its data directory)
+    /// and its logging-collector ring files (its data directory's <c>log\</c>), the same choice
+    /// <see cref="DarlingManagedPostgres.PickNewestServerLog"/> makes for the live orchestration. Read by
+    /// line offset, last 200 lines only — this file can be large after a whole bootstrap plus pg_upgrade run.
+    /// </summary>
+    private static string ReadUpgradedServerLogTail(string dataDirectory)
+    {
+        var serverLogPath = Path.Combine(
+            Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataDirectory)))!,
+            DarlingManagedPostgres.ServerLogFileName);
+
+        var newest = DarlingManagedPostgres.PickNewestServerLog(serverLogPath, dataDirectory);
+        if (newest is null)
+        {
+            return "(no server log written for the upgraded cluster)";
+        }
+
+        try
+        {
+            var lines = File.ReadAllLines(newest);
+            var take = Math.Min(200, lines.Length);
+            return $"({newest})\n" + string.Join('\n', lines[^take..]);
+        }
+        catch (IOException ex)
+        {
+            return $"(could not read the upgraded cluster's server log {newest}: {ex.Message})";
+        }
+    }
+
     [Fact]
     public void BuildStoreUpgradeReport_CarriesAPostCommitWarningThroughOnSuccess()
     {
@@ -2741,6 +2834,15 @@ public sealed class DarlingStoreUpgradeTests
                     $"The store upgrade bootstrap threw: {ex.Message}\n\n--- orchestration log ---\n{log}", ex);
             }
 
+            /* DIAGNOSTIC for a nightly failure where a pooled read taken right after EnsureRunningAsync
+               returned failed with "forcibly closed": that pooled connector was opened by product code
+               INSIDE the bootstrap, so if the upgraded server restarted (a crash-restart, or a stop/start
+               this test hasn't found) between the bootstrap returning and the first pooled read below, the
+               pool handed back a socket to a server whose lifetime already ended. Recorded on a
+               Pooling=false connection — the same shape ReadClusterIdentityAsync already uses — so this
+               probe itself can't be the thing that dies. */
+            var startTimeAfterBootstrap = await ReadPostmasterStartTimeAsync(connectionString, timeout.Token);
+
             try
             {
                 /* ---- 4. The store is on the NEW major and its data survived intact. ---- */
@@ -2801,6 +2903,16 @@ public sealed class DarlingStoreUpgradeTests
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
+            }
+            catch (Exception ex)
+            {
+                /* ANY failure after the bootstrap returned — a dead pooled connector's exception, a data
+                   mismatch assertion, anything — gets the same diagnosis: did the upgraded server restart
+                   under us, and if so (or regardless) what does its own log say right now. */
+                throw new InvalidOperationException(
+                    await DescribePostBootstrapFailureAsync(
+                        ex, dataDirectory, connectionString, startTimeAfterBootstrap, timeout.Token),
+                    ex);
             }
             finally
             {
