@@ -194,53 +194,62 @@ public sealed class WaitStatsClearDetectionTests
     }
 
     /// <summary>
-    /// The mutation: raising the majority bar from 50% to 101% (impossible to reach) makes
-    /// <see cref="FieldShape_AllLowerAndTotalLower_EveryRowCreditsCurrentValueOverRealInterval"/>'s own
-    /// direct <see cref="WaitStatsCollector.DetectClear"/> call go RED — proving the test's true assertion
-    /// depends on the 50% bar rather than always passing.
+    /// #4428: pins the collector's read step, not just the delta math. Seeds a real
+    /// <see cref="CollectorDeltaCalculator"/> with one ordinary pass's baselines, then drives the field-shape
+    /// clear through <see cref="WaitStatsCollector.ObserveWaitStatsClear"/> — the exact call
+    /// <see cref="WaitStatsCollector.ReadAsync"/> makes — with NO manual <c>RebaseFamiliesToZero</c> call in
+    /// the test. If <c>ReadAsync</c> stopped calling the detector, this is the test that would notice: every
+    /// row's delta would come back (0, 0) instead of its current value, because the pre-clear baselines
+    /// would never be rebased.
     /// </summary>
     [Fact]
-    public void Mutation_RequireOverHundredPercentLower_FieldShapeNoLongerDetectsAClear()
+    public void FieldShape_ThroughObserveWaitStatsClear_EveryRowCreditsCurrentValue()
     {
         const int typeCount = 900;
         var baselines = BuildBaselines(typeCount, baselineEach: 1_000_000);
-        var rows = BuildRows(typeCount, 1_000_000, i => 500);
+        var currentRows = BuildRows(typeCount, baselineEach: 1_000_000, i => 500);
 
-        var baselinedCount = 0;
-        var lowerCount = 0;
-        var currentTotal = 0L;
-        var baselineTotal = 0L;
+        var deltas = new CollectorDeltaCalculator();
 
-        foreach (var b in baselines.Values)
+        /* One ordinary pass, seeding the real cache exactly as WritePayload would have left it. */
+        foreach (var (waitType, baseline) in baselines)
         {
-            baselineTotal += b;
+            deltas.CalculateDeltaWithInterval(ServerId, "wait_stats_time", waitType, baseline, out _, collectionTime: T0);
+            deltas.CalculateDeltaWithInterval(ServerId, "wait_stats_tasks", waitType, 10, out _, collectionTime: T0);
+            deltas.CalculateDeltaWithInterval(ServerId, "wait_stats_signal", waitType, 1, out _, collectionTime: T0);
         }
 
-        foreach (var row in rows)
+        var context = new CollectorContext
         {
-            currentTotal += row.WaitTimeMs;
+            ServerId = ServerId,
+            ServerName = "target-a",
+            CollectionTime = T1,
+            Deltas = deltas,
+        };
 
-            if (!baselines.TryGetValue(row.WaitType, out var baseline) || baseline <= 0)
-            {
-                continue;
-            }
+        /* The collector's own read-step call — no manual RebaseFamiliesToZero here. */
+        Assert.True(WaitStatsCollector.ObserveWaitStatsClear(currentRows, context));
 
-            baselinedCount++;
+        var deltaTimes = new List<long>();
+        var intervals = new List<int>();
 
-            if (row.WaitTimeMs < baseline)
-            {
-                lowerCount++;
-            }
+        foreach (var row in currentRows)
+        {
+            var writer = new RecordingCollectorRowWriter();
+
+            WaitStatsCollector.Instance.WritePayload(row, writer, context);
+
+            var columns = WaitStatsCollector.Instance.PayloadColumns
+                .Select((c, idx) => (c.Name, idx))
+                .ToDictionary(p => p.Name, p => p.idx);
+
+            deltaTimes.Add((long)writer.Values[columns["delta_wait_time_ms"]]!);
+            intervals.Add((int)writer.Values[columns["sample_interval_seconds"]]!);
         }
 
-        /* Same shape as DetectClear, but with the bar raised to 101% (mutated), which no count can ever
-           reach — recording the mutated line here rather than editing the shipped rule. */
-        var majorityLowerAt101Percent = lowerCount * 100 >= baselinedCount * 101;
-        var wouldBeAClear = majorityLowerAt101Percent && currentTotal < baselineTotal;
-
-        Assert.False(wouldBeAClear);
-        /* The real, shipped rule still calls this a clear — pinning that the mutation is what flipped it. */
-        Assert.True(WaitStatsCollector.DetectClear(rows, baselines));
+        Assert.All(deltaTimes, d => Assert.Equal(500L, d));
+        Assert.All(intervals, iv => Assert.True(iv > 0, "clear-rebased row must report a real, non-zero interval"));
+        Assert.DoesNotContain(0, intervals);
     }
 
     private sealed class RecordingCollectorRowWriter : ICollectorRowWriter

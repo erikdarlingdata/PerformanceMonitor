@@ -190,6 +190,29 @@ FROM sys.dm_os_sys_info AS dosi;";
         return majorityLower && currentTotal < baselineTotal;
     }
 
+    /// <summary>
+    /// #4428: peeks this pass's <see cref="ClearDetectionFamily"/> baselines, decides via <see
+    /// cref="DetectClear"/>, and — on a clear — rebases <see cref="RebasedFamilies"/> to zero and records
+    /// the event. Called from <see cref="ReadAsync"/> BEFORE any row's delta is calculated, for the reason
+    /// documented there: once <see cref="WritePayload"/> starts subtracting per row, a verdict formed after
+    /// even one row has written would compare a mix of pre-clear and already-rebased baselines. Returns
+    /// whether a clear was detected and rebased, so a caller (or a test) can assert on it directly.
+    /// </summary>
+    internal static bool ObserveWaitStatsClear(IReadOnlyList<Row> rows, CollectorContext context)
+    {
+        var baselines = context.Deltas.PeekBaselines(context.ServerId, ClearDetectionFamily);
+
+        if (!DetectClear(rows, baselines))
+        {
+            return false;
+        }
+
+        context.Deltas.RebaseFamiliesToZero(context.ServerId, RebasedFamilies);
+        context.Deltas.NoteWaitStatsClear(context.ServerId, context.ServerName, context.CollectionTime);
+
+        return true;
+    }
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
@@ -211,20 +234,7 @@ FROM sys.dm_os_sys_info AS dosi;";
                 SignalWaitTimeMs: reader.GetInt64(3)));
         }
 
-        /* #4428: decide the whole pass BEFORE any subtraction — the same "decide before any subtraction"
-           point #3653 A5 already uses for the identity epoch below, and for the identical reason: once
-           WritePayload starts calling CalculateDeltaWithInterval per row, every family's baseline for the
-           row it has already visited is overwritten, so a clear verdict formed AFTER even one row has
-           written would be comparing this pass's rows against a mix of pre-clear and already-rebased
-           baselines. Peeking (not consuming) the wait_time_ms family's cache costs nothing here that
-           WritePayload was not already going to spend making its own per-key delta calls. */
-        var baselines = context.Deltas.PeekBaselines(context.ServerId, ClearDetectionFamily);
-
-        if (DetectClear(rows, baselines))
-        {
-            context.Deltas.RebaseFamiliesToZero(context.ServerId, RebasedFamilies);
-            context.Deltas.NoteWaitStatsClear(context.ServerId, context.ServerName, context.CollectionTime);
-        }
+        ObserveWaitStatsClear(rows, context);
 
         /* #3653 A5: the batch's SECOND result set — the instance identity. Observed HERE, after the rows are
            read and before this method returns, because this collector's subtractions all happen in
