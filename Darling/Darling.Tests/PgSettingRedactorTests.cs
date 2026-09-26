@@ -170,6 +170,14 @@ public sealed class PgSettingRedactorTests
         yield return new object[] { "restore_command",
         "curl -u admin:S22",
         "curl -u admin:********" };
+        // A quoted value with an embedded space is masked WHOLE, not just up to the space.
+        yield return new object[] { "restore_command",
+        "curl -u u:\"a b\"",
+        "curl -u u:********" };
+        // A backslash-escaped double quote inside the quoted value does not end it early.
+        yield return new object[] { "restore_command",
+        "curl --user \"u:it\\\"s\"",
+        "curl --user u:********" };
         yield return new object[] { "primary_conninfo",
         "password='S5 unterminated",
         "password=********" };
@@ -197,10 +205,26 @@ public sealed class PgSettingRedactorTests
         yield return new object[] { "custom.json_blob",
         "{\"password\" = \"hunter2\", \"host\" = \"foo\"}",
         "{\"password\" = \"********\", \"host\" = \"foo\"}" };
-        // A double-quoted, key-unquoted "password" = "x" mixed shape: name bare, value quoted.
+        // An unquoted name with a double-quoted value and spaces around '=' is LibpqPasswordKeyword's
+        // shape (no quote sits before the bare name "password", so QuotedSpacedAssignment never engages
+        // here), and that rule tightens the spacing around '=' the same way the unquoted-value case at the
+        // top of this list does ("host=a password = hunter2 user=b" -> "...password=******** ...") --
+        // consistent tightening, not a special case for a quoted value.
         yield return new object[] { "custom.json_blob",
         "password = \"hunter2\"",
-        "password = ********" };
+        "password=********" };
+        // A whole assignment sharing ONE quote pair -- the name has no separate closing quote of its own, so
+        // the value's only closing quote is the outer one coming back around.
+        yield return new object[] { "custom.json_blob",
+        "\"password = hunter2\"",
+        "\"password = ********\"" };
+        yield return new object[] { "custom.json_blob",
+        "'pwd = abc'",
+        "'pwd = ********'" };
+        // Untouched neighbour: a quoted assignment whose name carries no secret marker is left alone.
+        yield return new object[] { "custom.json_blob",
+        "\"host = foo\"",
+        "\"host = foo\"" };
         // curl -u user:x and --user user:x mask the part after the colon, not the user name.
         yield return new object[] { "archive_command",
         "curl -u admin:hunter2 https://x",
@@ -246,6 +270,22 @@ public sealed class PgSettingRedactorTests
         yield return new object[] { "archive_command",
         "sshpass -p \"hunter 2\" ssh user@host",
         "sshpass -p ******** ssh user@host" };
+        // An earlier option before -p is allowed.
+        yield return new object[] { "archive_command",
+        "sshpass -v -p hunter2 ssh user@host",
+        "sshpass -v -p ******** ssh user@host" };
+        yield return new object[] { "archive_command",
+        "sshpass -e -p hunter2 ssh user@host",
+        "sshpass -e -p ******** ssh user@host" };
+        // -p is case-sensitive: sshpass's own -P takes the SSH prompt text, not a password, so it stays
+        // unmasked while the real -p value after it is masked.
+        yield return new object[] { "archive_command",
+        "sshpass -P prompt -p s3 ssh user@host",
+        "sshpass -P prompt -p ******** ssh user@host" };
+        // Untouched neighbour: sshpass with no -p at all (a file-based password) never matches.
+        yield return new object[] { "archive_command",
+        "sshpass -f /etc/sshpass.txt ssh user@host",
+        "sshpass -f /etc/sshpass.txt ssh user@host" };
         // A quoted URI query password value with an embedded space is masked whole — the pre-existing
         // UriQueryPassword rule (fixed alongside the new ones, same quote-aware value alternation).
         yield return new object[] { "primary_conninfo",

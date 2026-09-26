@@ -164,30 +164,45 @@ public static class PgSettingRedactor
     /// may ALSO be quote-wrapped — <c>{"password" = "hunter2"}</c> — because <c>(?<nameq>["']?)</c> makes the
     /// name's own closing quote optional on both sides independently of the value's quoting, so a
     /// key-quoted/value-quoted JSON shape and a bare <c>"password = x"</c> shape both match with the same
-    /// pattern. Only the value half, up to its closing quote, is masked; the quotes and the name are kept as
-    /// they were. The value's quote character does not have to match the name's.</summary>
+    /// pattern. The value is either separately quoted (<c>"password" = "hunter2"</c>, <c>valq</c> matches),
+    /// or left bare and closed only by the NAME's own opening quote coming back around
+    /// (<c>"password = hunter2"</c>, <c>'pwd = abc'</c> — the whole assignment sits inside one quote pair, so
+    /// the value's end is <c>\k&lt;q&gt;</c>, not a quote of its own). Only the value half is masked; the
+    /// quotes and the name are kept as they were. The value's own quote character does not have to match the
+    /// name's.</summary>
     private static readonly Regex QuotedSpacedAssignment = new(
-        @"(?<q>[""'])(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)(?<nameq>[""']?)\s*=\s*(?<valq>[""'])(?<val>[^""']*)\k<valq>",
+        @"(?<q>[""'])(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)(?<nameq>[""']?)\s*=\s*(?:(?<valq>[""'])(?<val>[^""']*)\k<valq>|(?<val>[^""']*)\k<q>)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary><c>curl -u user:secret</c> / <c>curl --user user:secret</c>, including the tightly-bound
     /// <c>-uuser:secret</c>/<c>--user=user:secret</c> forms and <c>--proxy-user</c>/<c>-U</c> (Basic Auth over
     /// a proxy, curl's own name for that pair — note <c>-U</c> is upper-case ONLY: curl treats <c>-u</c> and
     /// <c>-U</c> as two different flags, so this pattern does not fold them together case-insensitively). The
-    /// user name is kept, only the part after the colon is masked; a quoted value with an embedded space
-    /// (<c>curl -u "u:a b"</c>) is masked whole via the same quote-aware value alternation the other rules
-    /// use. A bare <c>-u user</c> with no colon (no password at all) does not match.</summary>
+    /// user name is kept, only the part after the colon is masked. The double-quoted branch's value runs to
+    /// the CLOSING double quote rather than stopping at the first embedded space, and a backslash-escaped
+    /// double quote inside that run (<c>--user "u:it\"s"</c>) does not end it early, so the value is masked
+    /// whole and a second pass over the masked output is a no-op. The unquoted branch's value likewise
+    /// consumes a run of quoted segments glued to bare characters (<c>u:"a b"</c>), not just the first
+    /// non-space run, so nothing after an embedded-space quoted chunk leaks. A bare <c>-u user</c> with no
+    /// colon (no password at all) does not match.</summary>
     private static readonly Regex CurlUserColon = new(
-        @"(?<=^|\s)(?:(?<flag>-u|--user|-U|--proxy-user)[\s=]*""(?<user>[^:""]+):(?<val>[^""]*)""|(?<flag>-u|--user|-U|--proxy-user)[\s=]*'(?<user>[^:']+):(?<val>[^']*)'|(?<flag>-u|--user|-U|--proxy-user)[\s=]*(?<user>[^:\s]+):(?<val>\S+))",
+        @"(?<=^|\s)(?:(?<flag>-u|--user|-U|--proxy-user)[\s=]*""(?<user>[^:""]+):(?<val>(?:\\.|[^""\\])*)""|(?<flag>-u|--user|-U|--proxy-user)[\s=]*'(?<user>[^:']+):(?<val>[^']*)'|(?<flag>-u|--user|-U|--proxy-user)[\s=]*(?<user>[^:\s]+):(?<val>(?:""[^""]*""|'[^']*'|\S)+))",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary><c>sshpass -p secret</c>. <c>-p</c> is too short and generic to add to
     /// <see cref="OptionSecretSpaced"/>'s name list (it would swallow unrelated single-letter flags on other
     /// commands), so this is scoped to the literal <c>sshpass</c> command name (optionally path-prefixed,
     /// such as <c>/usr/bin/sshpass</c>), and covers both <c>-p secret</c> and the tightly-bound <c>-psecret</c>.
-    /// A quoted value with an embedded space is masked whole via the quote-aware value alternation.</summary>
+    /// Earlier options are allowed before <c>-p</c> (<c>sshpass -v -p x</c>, <c>sshpass -e -p x</c>) via a
+    /// non-greedy run of whitespace-delimited tokens, so a plain <c>sshpass -f file</c> (no <c>-p</c> at all)
+    /// still does not match. <c>-p</c> itself is matched case-SENSITIVELY (<c>(?-i:-p)</c>, even though the
+    /// rest of the pattern is case-insensitive for the command name), because sshpass's own <c>-P</c> takes
+    /// the SSH prompt text to wait for, not a password, and folding the two together would mask that prompt
+    /// text instead of the real <c>-p</c> value that follows it (<c>sshpass -P prompt -p s3</c> masks
+    /// <c>s3</c>, not <c>prompt</c>). A quoted value with an embedded space is masked whole via the
+    /// quote-aware value alternation.</summary>
     private static readonly Regex SshpassOption = new(
-        @"(?<cmd>(?:^|(?<=/|\s))sshpass)\s+-p\s*(?:""(?<val>[^""]*)""|'(?<val>[^']*)'|(?<val>\S+))",
+        @"(?<cmd>(?:^|(?<=/|\s))sshpass)(?:\s+\S+)*?\s+(?-i:-p)\s*(?:""(?<val>[^""]*)""|'(?<val>[^']*)'|(?<val>\S+))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>Markers a decoded URI query KEY is tested against for <see cref="UriQueryKeyAnyEncoding"/> —
@@ -249,7 +264,19 @@ public static class PgSettingRedactor
             ? m.Groups["key"].Value + "=" + Mask
             : m.Value);
         redacted = UriQuerySignature.Replace(redacted, static m => m.Groups["key"].Value + "=" + Mask);
-        redacted = QuotedSpacedAssignment.Replace(redacted, static m => m.Groups["q"].Value + m.Groups["name"].Value + m.Groups["nameq"].Value + " = " + m.Groups["valq"].Value + Mask + m.Groups["valq"].Value);
+        redacted = QuotedSpacedAssignment.Replace(redacted, static m =>
+        {
+            var head = m.Groups["q"].Value + m.Groups["name"].Value + m.Groups["nameq"].Value + " = ";
+
+            // The value is either separately quoted ("password" = "hunter2", valq matched — the value
+            // carries its own opening and closing quote pair, kept around the mask), or it is bare and the
+            // whole "name = value" assignment shares ONE quote pair, so the value's only closing quote is
+            // the outer q coming back around via \k<q> ("password = hunter2" — only a trailing quote, no
+            // separate opening one, goes after the mask).
+            return m.Groups["valq"].Success
+                ? head + m.Groups["valq"].Value + Mask + m.Groups["valq"].Value
+                : head + Mask + m.Groups["q"].Value;
+        });
         redacted = AssignmentSecretName.Replace(redacted, static m => m.Groups["name"].Value + "=" + Mask);
         redacted = OptionSecretSpaced.Replace(redacted, static m => m.Groups["opt"].Value + " " + Mask);
         redacted = CurlUserColon.Replace(redacted, static m => m.Groups["flag"].Value + " " + m.Groups["user"].Value + ":" + Mask);
