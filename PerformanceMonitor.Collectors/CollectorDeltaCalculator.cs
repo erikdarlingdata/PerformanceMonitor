@@ -187,6 +187,17 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         return updated.Previous;
     }
 
+    /// <inheritdoc />
+    ///
+    /// <para>#4428: the same window-rolling machinery <see cref="PreviousPass(int, string, DateTime?)"/>
+    /// (private, above) already keeps for a collector-clock caller, exposed under the interface's own
+    /// name for a caller that tracks a DIFFERENT clock. <paramref name="group"/> shares the private
+    /// method's dictionary rather than a second one, on the contract stated on the interface member: a
+    /// caller's group name never collides with any <c>collectorName</c> an ordinary delta call passes, so
+    /// one dictionary safely serves both without either clock's window disturbing the other's.</para>
+    public DateTime? PreviousPass(int serverId, string group, DateTime observedTime)
+        => PreviousPass(serverId, group, (DateTime?)observedTime);
+
     /// <summary>
     /// The discontinuity accounts (#3653 A5) a definition handed to <see cref="ClearServer"/> or
     /// <see cref="ClearGroups"/> and no host has logged yet: serverId -> the lines, in the order they were
