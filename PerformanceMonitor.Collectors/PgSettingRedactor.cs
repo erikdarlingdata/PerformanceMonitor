@@ -114,6 +114,25 @@ public static class PgSettingRedactor
             (MatchTimeoutForTest is TimeSpan overrideTimeout
                 ? new Regex(_pattern, _options, overrideTimeout)
                 : _default).Replace(input, evaluator);
+
+        /// <summary>Runs the DEFAULT (production-timeout) instance once on a short, benign string, outside
+        /// any timed accounting the caller does (#4348): a <see cref="RegexOptions.Compiled"/> pattern's IL
+        /// is JITted on its first invocation, and on a busy CI runner that JIT cost alone can exceed the
+        /// 100&#160;ms <see cref="MatchTimeout"/>, turning the first real call on a short, well-formed value
+        /// into a spurious whole-value mask. Warming here, at type initialisation, pays that cost once,
+        /// before the type is usable at all, so the first real <see cref="Redact"/> call never has to. A
+        /// timeout during warmup (the JIT itself, on an especially slow runner, taking longer than the
+        /// timeout) is swallowed — warmup exists to pre-pay JIT cost, not to prove the pattern is fast.</summary>
+        public void Warmup()
+        {
+            try
+            {
+                _default.IsMatch("x");
+            }
+            catch (RegexMatchTimeoutException)
+            {
+            }
+        }
     }
 
     /// <summary>Names whose value is masked in full when the setting is extension-scoped (#4348), or when a
@@ -276,6 +295,36 @@ public static class PgSettingRedactor
         "passphrase",
         "pwd",
     };
+
+    /// <summary>Set once, before any real <see cref="Redact"/> call can return (#4348): the static
+    /// constructor below warms every <see cref="Compiled"/> pattern's first-use JIT cost before it counts
+    /// against anyone's <see cref="MatchTimeout"/>. Exposed only so a test can pin that warmup ran ahead of
+    /// the first real call, without the test having to spin up a fresh <c>AssemblyLoadContext</c> just to
+    /// observe type-initialisation order.</summary>
+    internal static readonly bool WarmedUp;
+
+    static PgSettingRedactor()
+    {
+        LibpqPasswordKeyword.Warmup();
+        UriQueryPassword.Warmup();
+        AssignmentSecretName.Warmup();
+        OptionSecretSpaced.Warmup();
+        UriQueryKeyAnyEncoding.Warmup();
+        UriQuerySignature.Warmup();
+        QuotedSpacedAssignment.Warmup();
+        CurlUserColon.Warmup();
+        SshpassOption.Warmup();
+
+        try
+        {
+            UriUserInfoPassword.IsMatch("x");
+        }
+        catch (RegexMatchTimeoutException)
+        {
+        }
+
+        WarmedUp = true;
+    }
 
     private static bool IsQueryKeySecret(string rawKey)
     {

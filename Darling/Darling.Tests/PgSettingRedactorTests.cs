@@ -518,4 +518,22 @@ public sealed class PgSettingRedactorTests
             PgSettingRedactor.MatchTimeoutForTest = null;
         }
     }
+
+    /// <summary>
+    /// #4348: every <c>Compiled</c> pattern is warmed at type initialisation, before any real
+    /// <see cref="PgSettingRedactor.Redact"/> call can return, so the first real call never pays a
+    /// first-use JIT cost against the 100ms match timeout. This pins that the warmup ran (rather than
+    /// re-deriving that fact from timing, which would be flaky by construction on a busy runner) and that a
+    /// short, well-formed value is masked in PART, not masked whole, the way a spurious timeout would
+    /// produce.
+    /// </summary>
+    [Fact]
+    public void Warmup_RanBeforeFirstRealCall_AndShortValueIsNotMaskedWhole()
+    {
+        Assert.True(PgSettingRedactor.WarmedUp);
+
+        var result = PgSettingRedactor.Redact("archive_command", "PGPASSWORD=hunter2 psql -c 'select 1'");
+
+        Assert.Equal("PGPASSWORD=******** psql -c 'select 1'", result);
+    }
 }
