@@ -2094,65 +2094,94 @@ public sealed class DarlingManagedPostgresTests
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
 
-            /* A real store, provisioned the normal way: exactly one CURRENT v8 block, with work_mem. */
+            /* A real store, provisioned the normal way. Step A migrates the v8 block out of
+               postgresql.conf into darling-managed.conf during this same call (#4215), so the v8 shape this
+               test needs to rewind is only available in the pre-migration BACKUP, not the live file. */
             await owner.EnsureRunningAsync(timeout.Token);
             await owner.StopIfStartedByThisProcessAsync();
 
-            var fresh = await File.ReadAllTextAsync(confPath, timeout.Token);
-            var spans = DarlingManagedPostgres.FindHardwareSizingBlockSpans(fresh);
-            Assert.Single(spans);
-            var (v8Start, v8End) = spans[0];
-            var freshBlock = fresh[v8Start..v8End];
-            var derivedWorkMem = LastSettingValue(fresh, "work_mem");
+            string? derivedWorkMem = null;
+            await RewindDataDirectoryToLegacyConfAsync(
+                dataDirectory,
+                preFixConf =>
+                {
+                    var spans = DarlingManagedPostgres.FindHardwareSizingBlockSpans(preFixConf);
+                    Assert.Single(spans);
+                    var (v8Start, v8End) = spans[0];
+                    var freshBlock = preFixConf[v8Start..v8End];
+                    derivedWorkMem = LastSettingValue(preFixConf, "work_mem");
+                    Assert.NotNull(derivedWorkMem);
+                    Assert.Contains("work_mem = " + derivedWorkMem, freshBlock, StringComparison.Ordinal);
+
+                    /* Reproduce the field shape: the same block, minus work_mem, three times over - the
+                       append-not-replace leftovers (#4225 fixed the bug; this store's blocks predate the fix)
+                       with a fingerprint that is ALREADY current, since it came straight from this run's own
+                       real (pre-migration) conf. */
+                    var legacyBlock = string.Join(
+                        '\n',
+                        freshBlock.Split('\n').Where(line => !line.StartsWith("work_mem = ", StringComparison.Ordinal)));
+                    /* Checked on the single copy, before tripling and splicing: the v3 block elsewhere in this
+                       real conf can legitimately carry the SAME derived value on a host whose RAM clamps both
+                       formulas to the same ceiling (64MB), so asserting against the whole file would be a
+                       false failure on such a host rather than a check of what THIS splice removed. */
+                    Assert.DoesNotContain("\nwork_mem = ", legacyBlock, StringComparison.Ordinal);
+
+                    /* A blank line between each copy - the separator every Build*ConfAppend leads with, and
+                       so the shape every REAL append-not-replace duplicate carried. preFixConf[..v8Start]
+                       already supplies the separator before the first copy, and preFixConf[v8End..] already
+                       supplies one after the last, so only the two seams IN BETWEEN need one inserted; without
+                       it FindHardwareSizingBlockSpans reads all three copies as a single span (nothing blank
+                       to stop it at), and the fixture would not be the three-block shape #4207 describes. */
+                    var legacyConf = preFixConf[..v8Start] + legacyBlock + '\n' + legacyBlock + '\n' + legacyBlock + preFixConf[v8End..];
+                    Assert.Equal(3, DarlingManagedPostgres.FindHardwareSizingBlockSpans(legacyConf).Count);
+                    return legacyConf;
+                },
+                timeout.Token);
             Assert.NotNull(derivedWorkMem);
-            Assert.Contains("work_mem = " + derivedWorkMem, freshBlock, StringComparison.Ordinal);
 
-            /* Reproduce the field shape: the same block, minus work_mem, three times over - the
-               append-not-replace leftovers (#4225 fixed the bug; this store's blocks predate the fix) with a
-               fingerprint that is ALREADY current, since it came straight from this run's own real start. */
-            var legacyBlock = string.Join(
-                '\n',
-                freshBlock.Split('\n').Where(line => !line.StartsWith("work_mem = ", StringComparison.Ordinal)));
-            /* Checked on the single copy, before tripling and splicing: the v3 block elsewhere in this real
-               conf can legitimately carry the SAME derived value on a host whose RAM clamps both formulas to
-               the same ceiling (64MB), so asserting against the whole file would be a false failure on such
-               a host rather than a check of what THIS splice removed. */
-            Assert.DoesNotContain("\nwork_mem = ", legacyBlock, StringComparison.Ordinal);
-
-            /* A blank line between each copy - the separator every Build*ConfAppend leads with, and so the
-               shape every REAL append-not-replace duplicate carried. fresh[..v8Start] already supplies the
-               separator before the first copy, and fresh[v8End..] already supplies one after the last, so
-               only the two seams IN BETWEEN need one inserted; without it FindHardwareSizingBlockSpans reads
-               all three copies as a single span (nothing blank to stop it at), and the fixture would not be
-               the three-block shape #4207 describes. */
-            var legacyConf = fresh[..v8Start] + legacyBlock + '\n' + legacyBlock + '\n' + legacyBlock + fresh[v8End..];
-            await File.WriteAllTextAsync(confPath, legacyConf, timeout.Token);
-
-            Assert.Equal(3, DarlingManagedPostgres.FindHardwareSizingBlockSpans(legacyConf).Count);
-
-            /* The service-owned start: EnsureConfAppended heals BEFORE pg_ctl start, so the derived value
-               is live on this very start rather than one restart later. */
+            /* The service-owned start: on a Legacy conf, EnsureConfAppended heals BEFORE pg_ctl start (so the
+               derived value is live on this very start), and Step A then migrates the healed value into
+               darling-managed.conf post-start -- postgresql.conf itself never carries the v8 marker again. */
             var healedOwner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             var healedConnectionString = await healedOwner.EnsureRunningAsync(timeout.Token);
             try
             {
-                var healedConf = await File.ReadAllTextAsync(confPath, timeout.Token);
-                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarkerV8));
-                Assert.Equal(derivedWorkMem, LastSettingValue(healedConf, "work_mem"));
+                var healedPostgresqlConf = await File.ReadAllTextAsync(confPath, timeout.Token);
+                var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+                var healedManagedConf = File.Exists(managedConfPath)
+                    ? await File.ReadAllTextAsync(managedConfPath, timeout.Token)
+                    : string.Empty;
+                var diagnostics =
+                    $"LastManagedConfVerification={healedOwner.LastManagedConfVerification}; " +
+                    $"Classify={ManagedConfMigrationState.Classify(dataDirectory)}; " +
+                    $"files=[{string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
+
+                Assert.True(
+                    !healedPostgresqlConf.Contains(DarlingManagedPostgres.ConfMarkerV8, StringComparison.Ordinal),
+                    $"postgresql.conf should carry no v8 marker after Step A migrates it out. {diagnostics}");
+                Assert.True(
+                    healedManagedConf.Contains("work_mem = " + derivedWorkMem, StringComparison.Ordinal),
+                    $"darling-managed.conf should carry the healed work_mem value. {diagnostics}");
 
                 var (live, expected) = await ReadSettingAndLiteralBytesAsync(
                     healedConnectionString, "work_mem", derivedWorkMem!, timeout.Token);
-                Assert.Equal(expected, live);
+                Assert.True(expected == live, $"work_mem was not live at the healed value. {diagnostics}");
+
+                Assert.True(
+                    ManagedConfMigrationState.Classify(dataDirectory) == ManagedConfMigrationState.Kind.Verified,
+                    $"The data directory should classify Verified after the heal start. {diagnostics}");
             }
             finally
             {
                 await healedOwner.StopIfStartedByThisProcessAsync();
             }
 
-            /* A third start must not append a second v8 block - already current, nothing left to heal. */
-            Assert.Equal(
-                1,
-                CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV8));
+            /* A third start must not re-append a v8 block into postgresql.conf -- already migrated, nothing
+               left to heal there. */
+            Assert.DoesNotContain(
+                DarlingManagedPostgres.ConfMarkerV8,
+                await File.ReadAllTextAsync(confPath, timeout.Token),
+                StringComparison.Ordinal);
         }
         finally
         {
@@ -3286,6 +3315,58 @@ public sealed class DarlingManagedPostgresTests
             {
                 Thread.Sleep(500);
             }
+        }
+    }
+
+    /// <summary>
+    /// Rewinds <paramref name="dataDirectory"/> to a Legacy shape a next start will re-classify as such
+    /// (#4215/#4336): after one real provisioning start and stop, Step A has already migrated the v-blocks
+    /// out of <c>postgresql.conf</c> and into <c>darling-managed.conf</c>, so the LEGACY conf a pre-fix store
+    /// would have carried is not on disk any more as text to slice — it must be rebuilt. The first start's own
+    /// backup (<c>postgresql.conf.pre-4215.*.bak</c>) is exactly that Legacy conf, since it is the snapshot Step
+    /// A took immediately before rewriting the file; <paramref name="transform"/> applies the test's own rewind
+    /// (stripping/duplicating/truncating a block) to that text. Every migration artifact this start produced —
+    /// the managed file itself, its verified stamp, any pending file, the last-good copy, and the backup — is
+    /// then deleted, so <see cref="ManagedConfMigrationState.Classify"/> reads <see
+    /// cref="ManagedConfMigrationState.Kind.Legacy"/> again on the very next call, exactly as a real pre-fix
+    /// store would.
+    /// </summary>
+    private static async Task RewindDataDirectoryToLegacyConfAsync(
+        string dataDirectory, Func<string, string> transform, CancellationToken cancellationToken)
+    {
+        var backups = Directory.GetFiles(dataDirectory, "postgresql.conf.pre-4215.*.bak");
+        Assert.True(
+            backups.Length > 0,
+            $"No postgresql.conf.pre-4215.*.bak found in {dataDirectory} after the first provisioning start; " +
+            "Step A should have written one. Files present: " +
+            string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName)));
+        Array.Sort(backups, StringComparer.Ordinal);
+        var preFixConf = await File.ReadAllTextAsync(backups[0], cancellationToken);
+
+        var legacyConf = transform(preFixConf);
+
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        await File.WriteAllTextAsync(confPath, legacyConf, cancellationToken);
+
+        TryDelete(Path.Combine(dataDirectory, ManagedConfFile.FileName));
+        TryDelete(Path.Combine(dataDirectory, ManagedConfMigrationSteps.StampFileName));
+        TryDelete(Path.Combine(dataDirectory, ManagedConfMigrationSteps.PendingFileName));
+        TryDelete(Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName));
+        foreach (var backup in backups)
+        {
+            TryDelete(backup);
+        }
+
+        Assert.Equal(
+            ManagedConfMigrationState.Kind.Legacy,
+            ManagedConfMigrationState.Classify(dataDirectory));
+    }
+
+    private static void TryDelete(string path)
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
         }
     }
 
