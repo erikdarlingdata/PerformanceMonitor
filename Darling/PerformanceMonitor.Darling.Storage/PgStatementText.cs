@@ -8,6 +8,7 @@
 
 using System;
 using System.Globalization;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Storage;
 
@@ -39,6 +40,22 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class PgStatementText
 {
+    /// <summary>
+    /// The shared filter (#4348): a statement <see cref="PgSensitiveStatementFilter.SensitiveStatementPattern"/>
+    /// names is withheld before it ever reaches the upsert, replaced with
+    /// <see cref="PgSensitiveStatementFilter.PlaceholderText"/> in the fetch itself
+    /// (<see cref="AuroraFetchSql"/>/<see cref="VanillaFetchSql"/>). <c>queryid</c> and every stats row this
+    /// text is keyed to are unaffected; only the text column changes. Single quotes in the pattern (it matches
+    /// a quote character in the target's SQL) are doubled for SQL literal syntax, same rule as
+    /// <c>StoreStatementStats.QuoteLiteral</c> applies for its own copy.
+    /// </summary>
+    private static string SqlLiteral(string value) => "'" + value.Replace("'", "''", System.StringComparison.Ordinal) + "'";
+
+    private static readonly string SensitiveTextCase =
+        "CASE WHEN query_text ~* " + SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) +
+        " THEN " + SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) +
+        " ELSE query_text END AS query_text";
+
     /// <summary>The table. Not a hypertable: one row per statement per server, near-static once a workload is
     /// warm, so it is dimension-shaped and pruned on <see cref="LastSeenColumn"/> rather than by drop_chunks.</summary>
     public const string TableName = "collect.pg_statement_text";
@@ -79,7 +96,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
     /// filtered rather than grouped — a nested statement shares its parent's text and would only duplicate the
     /// row it upserts into.</para>
     /// </summary>
-    public const string FetchSql = AuroraFetchSql;
+    public static string FetchSql => AuroraFetchSql;
 
     /// <summary>
     /// Aurora's extended function. Kept as its own constant now that there are two sources (#2651).
@@ -90,10 +107,10 @@ CREATE INDEX IF NOT EXISTS idx_pg_statement_text_last_seen ON collect.pg_stateme
     /// <c>pg_stat_statements</c> does, on <c>(queryid, userid, dbid, toplevel)</c>, so it duplicates for
     /// identically the same reason and the upsert abandoned every batch on every Aurora server.</para>
     /// </summary>
-    public const string AuroraFetchSql = @"
+    public static readonly string AuroraFetchSql = @"
 SELECT
     queryid,
-    query_text
+    " + SensitiveTextCase + @"
 FROM
 (
     /* DISTINCT ON, and it is not tidiness - see VanillaFetchSql for the full reasoning. One queryid comes
@@ -132,10 +149,10 @@ LIMIT $1";
     /// <para>Strictly simpler than the Aurora arm: the two columns this needs are the two both sources
     /// have, so there is no NULL-filling and no ordinal to keep in step.</para>
     /// </summary>
-    public const string VanillaFetchSql = @"
+    public static readonly string VanillaFetchSql = @"
 SELECT
     queryid,
-    query_text
+    " + SensitiveTextCase + @"
 FROM
 (
     /* DISTINCT ON, and it is not tidiness. pg_stat_statements keys on
