@@ -286,6 +286,50 @@ WHERE EXISTS (
 ORDER BY c.bucket";
     }
 
+    /// <summary>
+    /// ONE hole definition for a frozen-legacy/successor pair (#4301), shared TEXT-IDENTICAL by
+    /// <see cref="TimescaleSupport.RetentionArmSafetySql"/> (the gate) and — the next lane — the repair walk's
+    /// interior/seam branch: a bucket in <c>[<paramref name="fromExpr"/>, <paramref name="toExpr"/>]</c> is a
+    /// hole when raw admits at least one row in <c>[bucket, bucket + width)</c> AND neither the legacy nor the
+    /// successor has materialized that bucket. The gate and the walk must never disagree about what a hole is —
+    /// a bucket the gate calls Short that the walk never repairs holds the raw purge forever with no
+    /// self-release. <paramref name="fromExpr"/>/<paramref name="toExpr"/> are SQL expressions (a literal, a
+    /// parameter placeholder, a correlated subquery) so each caller supplies its own bounds in its own idiom.
+    /// OFFSET 0 fenced for the same #3933 reason <see cref="MaterializationHoleScanSql"/> is: written bare, the
+    /// planner pulls the per-bucket EXISTS probes up into joins that scan the whole relation instead of
+    /// probing one bucket's worth. A bucket below raw's own current floor can hold no admitted row, so it can
+    /// never be a hole under this definition and never holds the purge — a gap left below the floor by an
+    /// earlier version's purge is invisible here by construction, not merely undetected (see this member's own
+    /// callers for what that means for the gate).
+    /// </summary>
+    public static string LegacySuccessorHoleExistsSql(
+        string relation, string sourceTimeColumn, string sourceFilter, string legacy, string successor,
+        string fromExpr, string toExpr, string bucketWidthLiteral)
+    {
+        ArgumentNullException.ThrowIfNull(relation);
+        ArgumentNullException.ThrowIfNull(sourceTimeColumn);
+        ArgumentNullException.ThrowIfNull(sourceFilter);
+        ArgumentNullException.ThrowIfNull(legacy);
+        ArgumentNullException.ThrowIfNull(successor);
+        ArgumentNullException.ThrowIfNull(fromExpr);
+        ArgumentNullException.ThrowIfNull(toExpr);
+        ArgumentNullException.ThrowIfNull(bucketWidthLiteral);
+
+        var filterClause = sourceFilter.Length == 0 ? string.Empty : $"\n        AND   {sourceFilter}";
+
+        return $@"EXISTS (
+    SELECT 1
+    FROM generate_series({fromExpr}, {toExpr}, {bucketWidthLiteral}) AS hb(bucket)
+    WHERE NOT EXISTS (SELECT 1 FROM collect.{legacy} AS hl WHERE hl.bucket = hb.bucket OFFSET 0)
+    AND   NOT EXISTS (SELECT 1 FROM collect.{successor} AS hs WHERE hs.bucket = hb.bucket OFFSET 0)
+    AND   EXISTS (
+              SELECT 1 FROM collect.{relation} AS hr
+              WHERE hr.{sourceTimeColumn} >= hb.bucket
+              AND   hr.{sourceTimeColumn} < hb.bucket + {bucketWidthLiteral}{filterClause}
+              OFFSET 0)
+    OFFSET 0)";
+    }
+
     /// <summary>The materialized span of one aggregate — its oldest and newest bucket — read off the
     /// materialization hypertable, both index-endpoint lookups. NULLs for an aggregate that has never
     /// materialized, which is the backfill's case and not this pass's.</summary>
