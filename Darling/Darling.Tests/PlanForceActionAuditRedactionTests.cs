@@ -443,14 +443,22 @@ public sealed class PlanForceActionAuditRedactionTests
     /// mentions <c>plan_force_actions</c> counts as a read; the INSERT column list in
     /// <c>JournalAsync</c> (and its <c>RETURNING action_id</c>) does not.
     ///
-    /// <para>A method may be exempted by adding its fully qualified name to
-    /// <see cref="RawDetailReaderExemptions"/> — capped at one entry, reserved for a future one-time
-    /// audit-detail scrub (#4346), and itself asserted below to return no detail text.</para>
+    /// <para>A field may be exempted by adding its fully qualified name (<c>Namespace.Type.FieldName</c>)
+    /// to <see cref="RawDetailReaderExemptions"/>. All entries must share the SAME owning type — at most
+    /// ONE exempted owner, reserved for a future one-time audit-detail scrub (#4346) — and each entry is
+    /// itself asserted below (a) to actually be reachable from the census scan, and (b) to be referenced
+    /// nowhere outside its own type (<see cref="AssertExemptedFieldsOnlyReferencedInsideTheirOwner"/>).</para>
     /// </summary>
     [Fact]
     public void NoOtherProductionCode_ReadsTheDetailColumnDirectly()
     {
-        Assert.True(RawDetailReaderExemptions.Length <= 1, "at most one raw-detail-reader exemption is allowed.");
+        var exemptedOwners = RawDetailReaderExemptions
+            .Select(e => e[..e.LastIndexOf('.')])
+            .Distinct()
+            .ToArray();
+        Assert.True(exemptedOwners.Length <= 1, "at most one raw-detail-reader exempted TYPE is allowed, even if it owns multiple SQL fields.");
+
+        AssertExemptedFieldsOnlyReferencedInsideTheirOwner();
 
         var violations = new System.Collections.Generic.List<string>();
         foreach (var file in ProductionSourceFiles())
@@ -496,20 +504,114 @@ public sealed class PlanForceActionAuditRedactionTests
             "}\n" +
             "}";
         Assert.Empty(RawDetailReadersIn(StripComments(insertOnlyMention)));
+
+        /* Positive control (a) — #4384's own false-green: a NEW const string field declared right before
+           RunAsync, inside the scrub's own type. Before this fix, the field-held SQL with no enclosing
+           method was attributed to "the next method declared in the same type" — RunAsync itself — so an
+           evil field just riding next to the real one would inherit RunAsync's exemption for free. Now the
+           field is attributed to ITS OWN name, which is not in RawDetailReaderExemptions, so it still
+           violates even though it sits one line above the exempted method. */
+        const string evilFieldBesideTheRealExemption =
+            "namespace PerformanceMonitor.Darling.Service {\n" +
+            "public static class PlanForceActionDetailScrub {\n" +
+            "    private const string CandidateSql = @\"SELECT action_id, detail FROM collect.plan_force_actions WHERE detail LIKE '%x%'\";\n" +
+            "    private const string EvilSql = @\"SELECT detail FROM collect.plan_force_actions\";\n" +
+            "    public static async Task<Summary> RunAsync() {\n" +
+            "    }\n" +
+            "}\n" +
+            "}";
+        var evilFound = RawDetailReadersIn(StripComments(evilFieldBesideTheRealExemption));
+        Assert.Contains("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.CandidateSql", evilFound);
+        Assert.Contains("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.EvilSql", evilFound);
+        Assert.DoesNotContain("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.RunAsync", evilFound);
+        var evilStillViolating = System.Linq.Enumerable.Where(
+            evilFound, n => Array.IndexOf(RawDetailReaderExemptions, n) < 0);
+        Assert.Contains("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.EvilSql", evilStillViolating);
+
+        /* Positive control (b): the scrub's real exempted field passes — covered end to end by
+           RawDetailReaderExemption_RoundTrips_AgainstTheScrubsOwnAttribution below, restated here as the
+           companion half of control (a): CandidateSql above IS in RawDetailReaderExemptions and is not a
+           violation. */
+        Assert.DoesNotContain(
+            "PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.CandidateSql",
+            evilStillViolating);
+
+        /* Positive control (d): method-local SQL in another class attributes to that method's name, and
+           is not exempted. */
+        const string methodLocalInAnotherClass =
+            "namespace N {\n" +
+            "class OtherReader {\n" +
+            "    public void GetIt() {\n" +
+            "        const string sql = @\"SELECT detail FROM collect.plan_force_actions WHERE action_id = $1\";\n" +
+            "    }\n" +
+            "}\n" +
+            "}";
+        var methodLocalFound = RawDetailReadersIn(StripComments(methodLocalInAnotherClass));
+        Assert.Contains("N.OtherReader.GetIt", methodLocalFound);
+
+        /* Positive control (e): SQL sitting inside a NESTED type is attributed to the nested type's own
+           member, not to the outer type's. */
+        const string sqlInNestedType =
+            "namespace N {\n" +
+            "class Outer {\n" +
+            "    public class Inner {\n" +
+            "        public void ReadIt() {\n" +
+            "            var cmd = new NpgsqlCommand(@\"SELECT detail FROM collect.plan_force_actions\", connection);\n" +
+            "        }\n" +
+            "    }\n" +
+            "}\n" +
+            "}";
+        var nestedFound = RawDetailReadersIn(StripComments(sqlInNestedType));
+        Assert.Contains("N.Inner.ReadIt", nestedFound);
+        Assert.DoesNotContain("N.Outer.ReadIt", nestedFound);
+    }
+
+    /// <summary>
+    /// The second guard #4384 adds: an exempted field's name may not be REFERENCED anywhere outside its own
+    /// owning type (checked here, not just its own declaration — a raw read is only safe because the scrub
+    /// keeps this field to itself). Scans comment- and string-stripped source for the field's bare
+    /// identifier and asserts every occurrence's enclosing type is the exemption's own owner. The owning
+    /// type in this repo has only <c>RunAsync</c> and its private static helpers as members, so "referenced
+    /// only inside the owner type" and "referenced only by RunAsync or its private helpers" are the same
+    /// check here; this asserts the broader (type-scoped) form, which is what the source actually lets a
+    /// scan verify without re-deriving call graphs.
+    /// </summary>
+    private static void AssertExemptedFieldsOnlyReferencedInsideTheirOwner()
+    {
+        foreach (var exemption in RawDetailReaderExemptions)
+        {
+            var lastDot = exemption.LastIndexOf('.');
+            var ownerType = exemption[..lastDot];
+            var fieldName = exemption[(lastDot + 1)..];
+
+            foreach (var file in ProductionSourceFiles())
+            {
+                var text = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(file).ReplaceLineEndings("\n"));
+                foreach (Match m in Regex.Matches(text, $@"\b{Regex.Escape(fieldName)}\b"))
+                {
+                    var enclosingType = EnclosingTypeFqName(text, m.Index);
+                    Assert.True(
+                        enclosingType == ownerType,
+                        $"{fieldName} (exempted only inside {ownerType}) is referenced from {enclosingType ?? "<unknown>"} in {Path.GetFileName(file)}.");
+                }
+            }
+        }
     }
 
     /// <summary>
     /// #4346's own census-attribution bug, pinned directly: the scan's own detection function
     /// (<see cref="RawDetailReadersIn"/>, built on <see cref="EnclosingMethodFqName"/>) must derive the SAME
     /// fully qualified name for <c>PlanForceActionDetailScrub</c>'s raw SELECT that
-    /// <see cref="RawDetailReaderExemptions"/> lists — a round trip. Before the fix, the nested
+    /// <see cref="RawDetailReaderExemptions"/> lists — a round trip. Before the #4346 fix, the nested
     /// <c>Summary</c> class declared ABOVE <c>RunAsync</c> stole the attribution
     /// (<c>PerformanceMonitor.Darling.Service.Summary.Summary</c>) because the old
     /// <c>EnclosingMethodFqName</c> picked the nearest preceding <c>class</c> keyword rather than the type
-    /// whose braces actually enclose the SQL, which is exactly what would have caught the bug: the
-    /// exemption's string can never round-trip against a wrong name, so
-    /// <see cref="NoOtherProductionCode_ReadsTheDetailColumnDirectly"/> would fail in CI with the exemption
-    /// present and correct.
+    /// whose braces actually enclose the SQL. #4384 then found #4346's OWN replacement still wrong: the
+    /// SQL lives in a <c>const string CandidateSql</c> FIELD, not in <c>RunAsync</c>'s body, so a correct
+    /// attribution must name the FIELD — round-tripping against <c>RunAsync</c> would have been the same
+    /// false green this pin exists to catch, just shifted one bug later. The exemption's string can never
+    /// round-trip against a wrong name, so <see cref="NoOtherProductionCode_ReadsTheDetailColumnDirectly"/>
+    /// would fail in CI with the exemption present and correct.
     /// </summary>
     [Fact]
     public void RawDetailReaderExemption_RoundTrips_AgainstTheScrubsOwnAttribution()
@@ -520,16 +622,24 @@ public sealed class PlanForceActionAuditRedactionTests
         var found = RawDetailReadersIn(text);
 
         Assert.Contains(RawDetailReaderExemptions[0], found);
+        Assert.DoesNotContain("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.RunAsync", found);
     }
 
-    /// <summary>The ONE named exemption (#4346): <c>PlanForceActionDetailScrub.RunAsync</c>'s own SELECT,
-    /// which must read <c>detail</c> raw because every other reader already sanitizes it on the way out
-    /// (see <see cref="PlanForceActionDetailScrub_ExemptedMethod_ReturnsNoDetailText"/> for the exemption's
-    /// own contract pin: it returns no <c>detail</c> text, and writes back only sanitizer output). Any
-    /// OTHER raw reader added later still fails this pin — nothing else is grandfathered in silently.</summary>
+    /// <summary>The ONE exempted OWNER (#4346/#4384): <c>PlanForceActionDetailScrub</c>'s
+    /// <c>CandidateSql</c> field, the scrub's own raw SELECT, which must read <c>detail</c> raw because
+    /// every other reader already sanitizes it on the way out (see
+    /// <see cref="PlanForceActionDetailScrub_ExemptedMethod_ReturnsNoDetailText"/> for the exemption's own
+    /// contract pin: <c>RunAsync</c> returns no <c>detail</c> text, and writes back only sanitizer output).
+    /// Entries are field-scoped FQ names (<c>Namespace.Type.FieldName</c>), never a method name and never a
+    /// pattern — every entry here must share the same owning TYPE (checked in
+    /// <see cref="NoOtherProductionCode_ReadsTheDetailColumnDirectly"/>), so the scrub could in principle
+    /// carry a second SQL field without widening the exemption to a new owner, but nothing else is
+    /// grandfathered in silently: any OTHER raw reader — a different field, a different type — still fails
+    /// this pin, and any reference to one of these fields from OUTSIDE its own type fails
+    /// <see cref="AssertExemptedFieldsOnlyReferencedInsideTheirOwner"/>.</summary>
     private static readonly string[] RawDetailReaderExemptions =
     [
-        "PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.RunAsync",
+        "PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.CandidateSql",
     ];
 
     /// <summary>The two readers that feed <c>ReadRecord</c> — the sanitizer's own choke point — are
@@ -604,6 +714,7 @@ public sealed class PlanForceActionAuditRedactionTests
 
         const string methodPattern = @"(?:public|private|internal|protected)[^\n{;]*?\b(\w+)\s*\([^;{]*\)\s*(?=\{)";
         const string typePattern = @"\b(?:class|struct|record|interface)\s+(\w+)";
+        const string fieldPattern = @"(?:public|private|internal|protected)\s+(?:const|static\s+readonly)\s+string\??\s+(\w+)\s*=\s*";
 
         var typeMatch = InnermostEnclosingDeclaration(text, masked, position, typePattern);
         if (typeMatch is null)
@@ -612,25 +723,79 @@ public sealed class PlanForceActionAuditRedactionTests
         }
 
         var cls = typeMatch.Value.Name;
+        var ns = namespaceMatch?.Groups[1].Value;
 
         /* Usually the SQL text sits inside a method body, and brace-enclosure finds it directly (this is
            what fixes the #4346 bug: a nested type declared earlier no longer wins just for being nearer in
-           text). But a query built as a `const string` FIELD declared just above the method that uses it —
-           this scrub's own shape — is never enclosed by any method's braces at all: the field belongs to
-           the class, not to a method. For that shape, attribute it to the nearest method declared AFTER
-           the field, still inside the SAME innermost enclosing type — the one that reads the constant. */
-        var methodMatch = InnermostEnclosingDeclaration(text, masked, position, methodPattern)
-            ?? NextDeclarationInType(text, masked, position, methodPattern, typeMatch.Value.OpenBrace, typeMatch.Value.CloseBrace);
+           text). */
+        var methodMatch = InnermostEnclosingDeclaration(text, masked, position, methodPattern);
+        if (methodMatch is not null)
+        {
+            return ns is null ? $"{cls}.{methodMatch.Value.Name}" : $"{ns}.{cls}.{methodMatch.Value.Name}";
+        }
 
-        if (methodMatch is null)
+        /* #4384: a query built as a `const string`/`static readonly string` FIELD declared just above the
+           method that uses it — this scrub's own shape — is never enclosed by any method's braces at all:
+           the field belongs to the class, not to a method. The ORIGINAL fix for this shape (#4346)
+           attributed it to "the nearest method declared AFTER the field, in the same type" — which is a
+           false green waiting to happen: a raw `detail` SELECT added as a NEW const field just before
+           RunAsync would inherit RunAsync's own exemption purely by being textually adjacent to it, never
+           having to earn a name of its own. A field's identity is its own declared name, so the field is
+           attributed to ITSELF — `Namespace.Type.FieldName` — never to a neighbouring method. */
+        var fieldName = NearestPrecedingFieldInitializer(text, position, fieldPattern);
+        if (fieldName is null)
+        {
+            return null;
+        }
+
+        return ns is null ? $"{cls}.{fieldName}" : $"{ns}.{cls}.{fieldName}";
+    }
+
+    /// <summary>The name of the nearest <c>const string</c>/<c>static readonly string</c> field
+    /// declaration before <paramref name="position"/> whose <c>=</c> initializer leads directly (only
+    /// whitespace between) into the literal at <paramref name="position"/> — i.e. this field's own
+    /// initializer IS the literal being attributed, not some earlier field's. Returns <c>null</c> when no
+    /// such declaration is found, which lets the caller fall through cleanly rather than guessing.</summary>
+    private static string? NearestPrecedingFieldInitializer(string text, int position, string fieldPattern)
+    {
+        string? best = null;
+        var bestIndex = -1;
+
+        foreach (Match m in Regex.Matches(text[..position], fieldPattern))
+        {
+            var gap = text[(m.Index + m.Length)..position];
+            if (gap.Any(c => !char.IsWhiteSpace(c)))
+            {
+                continue;
+            }
+
+            if (m.Index > bestIndex)
+            {
+                bestIndex = m.Index;
+                best = m.Groups[1].Value;
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>The innermost <c>Namespace.Type</c> enclosing <paramref name="position"/> — the type-only
+    /// half of <see cref="EnclosingMethodFqName"/>, factored out so the exempted-field reference guard can
+    /// ask "which type owns this occurrence" without also needing a method name.</summary>
+    private static string? EnclosingTypeFqName(string text, int position)
+    {
+        var masked = CSharpSourceWalker.StripCommentsAndStrings(text);
+        var namespaceMatch = LastMatch(text[..position], @"\bnamespace\s+([\w.]+)");
+        const string typePattern = @"\b(?:class|struct|record|interface)\s+(\w+)";
+
+        var typeMatch = InnermostEnclosingDeclaration(text, masked, position, typePattern);
+        if (typeMatch is null)
         {
             return null;
         }
 
         var ns = namespaceMatch?.Groups[1].Value;
-        var method = methodMatch.Value.Name;
-
-        return ns is null ? $"{cls}.{method}" : $"{ns}.{cls}.{method}";
+        return ns is null ? typeMatch.Value.Name : $"{ns}.{typeMatch.Value.Name}";
     }
 
     /// <summary>Finds every declaration matching <paramref name="declPattern"/> before
@@ -667,35 +832,6 @@ public sealed class PlanForceActionAuditRedactionTests
         }
 
         return best;
-    }
-
-    /// <summary>Fallback for a declaration (a <c>const string</c> query field, this scrub's own shape)
-    /// that no method body encloses: the nearest declaration matching <paramref name="declPattern"/> AFTER
-    /// <paramref name="position"/> but still inside <paramref name="typeOpenBrace"/>/
-    /// <paramref name="typeCloseBrace"/> — the next member of the same innermost enclosing type, which for
-    /// a query constant declared just above the method that reads it is that method.</summary>
-    private static (string Name, int OpenBrace, int CloseBrace)? NextDeclarationInType(
-        string text, string masked, int position, string declPattern, int typeOpenBrace, int typeCloseBrace)
-    {
-        foreach (Match m in Regex.Matches(text, declPattern))
-        {
-            if (m.Index <= position || m.Index < typeOpenBrace || m.Index > typeCloseBrace)
-            {
-                continue;
-            }
-
-            var braceIndex = text.IndexOf('{', m.Index + m.Length);
-            if (braceIndex < 0 || braceIndex > typeCloseBrace)
-            {
-                continue;
-            }
-
-            var body = CSharpSourceWalker.BraceBalanced(masked, braceIndex);
-            var closeIndex = braceIndex + body.Length - 1;
-            return (m.Groups[1].Value, braceIndex, closeIndex);
-        }
-
-        return null;
     }
 
     private static Match? LastMatch(string text, string pattern)
