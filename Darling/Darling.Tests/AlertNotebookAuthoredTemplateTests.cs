@@ -319,4 +319,55 @@ public sealed class AlertNotebookAuthoredTemplateTests
 
         Assert.Null(byDatabase["filters"]);
     }
+
+    /* ═══════════════════════════ the registration table (#4223 lane 0) ═══════════════════════════ */
+
+    /// <summary>Every family in <see cref="AlertNotebookEndpoint.s_authoredTemplates"/> resolves to a
+    /// non-null entry for each of its own metric names, the ids are unique, and every entry's built cells
+    /// still pass <see cref="DarlingWebEndpoints.ValidateNotebookDefinition"/> against a fixed alert — the
+    /// pin the split into one-file-per-family (#4223) was ruled to require, so a future family can be added
+    /// to the table without anyone re-checking these by hand.</summary>
+    [Fact]
+    public void RegistrationTable_EveryFamilyResolvesAndValidates()
+    {
+        var table = AlertNotebookEndpoint.s_authoredTemplates;
+        Assert.NotEmpty(table);
+
+        var incident = IncidentWithDatabase("SalesDb");
+        var seenIds = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var (metrics, entry) in table)
+        {
+            Assert.NotEmpty(metrics);
+            Assert.True(seenIds.Add(entry.Id), $"duplicate template id: {entry.Id}");
+
+            foreach (var metric in metrics)
+            {
+                var resolved = AlertNotebookEndpoint.AuthoredTemplate(metric);
+                Assert.NotNull(resolved);
+                Assert.Equal(entry.Id, resolved!.Value.Id);
+
+                var cells = resolved.Value.BuildCells(
+                    metric, "SRV1", AsOf, WindowStart, WindowEnd, incident, null,
+                    "Unknown (not collected since " + AsOf + ")");
+
+                var definition = new JsonObject { ["kind"] = "notebook", ["cells"] = cells };
+                var validation = DarlingWebEndpoints.ValidateNotebookDefinition(definition);
+
+                Assert.True(validation.IsValid, validation.Error);
+            }
+        }
+    }
+
+    /// <summary>The table is sorted case-insensitively by each row's first metric name — keeps the table an
+    /// easy-to-scan, mergeable list as families are added in parallel (#4223's own stated point).</summary>
+    [Fact]
+    public void RegistrationTable_IsSortedByFirstMetricName()
+    {
+        var table = AlertNotebookEndpoint.s_authoredTemplates;
+        var firstMetrics = table.Select(row => row.Metrics[0]).ToArray();
+        var sorted = firstMetrics.OrderBy(m => m, StringComparer.OrdinalIgnoreCase).ToArray();
+
+        Assert.Equal(sorted, firstMetrics);
+    }
 }
