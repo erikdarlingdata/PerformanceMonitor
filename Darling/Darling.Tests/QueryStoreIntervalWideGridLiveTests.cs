@@ -34,7 +34,10 @@ namespace Darling.Tests;
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only
    to CREATE and DROP its own database through ScratchPostgres and then works entirely inside it (the clamp test
    converts query_store_stats to a real hypertable and drops one of its chunks), so it cannot race live
-   collection, and serializing it would be pure slowdown. */
+   collection, and serializing it would be pure slowdown. It IS in "query-store-interval-wide-read-routing"
+   (#3953): every test wraps its body in QueryStoreIntervalWide.EnableReadRoutingForTests, a process-wide static
+   override, so this class serializes against the collection's other members instead. */
+[Collection("query-store-interval-wide-read-routing")]
 public sealed class QueryStoreIntervalWideGridLiveTests
 {
     private const int ServerId = -3953930;
@@ -51,6 +54,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 grid live test.");
         var ct = TestContext.Current.CancellationToken;
+        using var _ = QueryStoreIntervalWide.EnableReadRoutingForTests();
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
@@ -137,6 +141,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 H1 round-trip test.");
         var ct = TestContext.Current.CancellationToken;
+        using var _ = QueryStoreIntervalWide.EnableReadRoutingForTests();
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
@@ -177,6 +182,53 @@ public sealed class QueryStoreIntervalWideGridLiveTests
     }
 
     /// <summary>
+    /// #3953: at production default (routing OFF, no <see cref="QueryStoreIntervalWide.EnableReadRoutingForTests"/>
+    /// override), <see cref="QueryStoreIntervalWide.ReadsTableAsync"/> must return <c>UseTable == false</c> for a
+    /// window the table fully covers — the fence, not the gate's own clauses, is what decides here — and must
+    /// issue ZERO round trips against <c>collect.query_store_interval_wide</c>, same seam as
+    /// <see cref="ShortWindowRead_IssuesNoRoundTripAgainstTheWideTable"/>. This test deliberately does NOT enable
+    /// the test override, so it exercises exactly what a production caller sees today.
+    /// </summary>
+    [Fact]
+    public async Task ProductionDefault_ReadsRaw_WithNoRoundTrip_EvenWhenTheTableFullyCoversTheWindow()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 read-routing fence test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+
+        await SeedGridAsync(runner, ServerId, WindowStart, ct);
+        await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
+
+        async Task<(long SeqScan, long IdxScan)> ScanCountsAsync()
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT COALESCE(seq_scan, 0), COALESCE(idx_scan, 0) FROM pg_stat_user_tables WHERE relname = 'query_store_interval_wide'", connection);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+            {
+                return (0, 0);
+            }
+
+            return (reader.GetInt64(0), reader.GetInt64(1));
+        }
+
+        var before = await ScanCountsAsync();
+
+        var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connection, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+        Assert.False(useTable, "production default must read raw even though the table fully covers this window");
+        Assert.Equal(WindowStart, clampedStart);
+
+        var after = await ScanCountsAsync();
+        Assert.Equal(before, after);
+    }
+
+    /// <summary>
     /// The clamp (review D4R H3): once raw's oldest chunk (this window's own day 0) is dropped, the table still
     /// holds those rows — its own retention is independent of raw's — so an UNCLAMPED table read would show rows
     /// raw no longer has. Bounding the table read at <see cref="QueryStoreIntervalWide.ClampedStart"/> instead
@@ -188,6 +240,7 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 grid clamp test.");
         var ct = TestContext.Current.CancellationToken;
+        using var _ = QueryStoreIntervalWide.EnableReadRoutingForTests();
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);

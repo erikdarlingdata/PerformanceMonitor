@@ -32,7 +32,10 @@ namespace Darling.Tests;
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every test here reaches DARLING_TEST_PG only
    to CREATE and DROP its own database through ScratchPostgres and then works entirely inside it (the clamp test
    converts query_store_stats to a real hypertable and drops one of its chunks), so it cannot race live
-   collection, and serializing it would be pure slowdown. */
+   collection, and serializing it would be pure slowdown. It IS in "query-store-interval-wide-read-routing"
+   (#3953): every test wraps its body in QueryStoreIntervalWide.EnableReadRoutingForTests, a process-wide static
+   override, so this class serializes against the collection's other members instead. */
+[Collection("query-store-interval-wide-read-routing")]
 public sealed class QueryStoreTopMcpLiveTests
 {
     private const int ServerId = -3953931;
@@ -50,6 +53,7 @@ public sealed class QueryStoreTopMcpLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 MCP top live test.");
         var ct = TestContext.Current.CancellationToken;
+        using var _ = QueryStoreIntervalWide.EnableReadRoutingForTests();
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
@@ -164,6 +168,7 @@ public sealed class QueryStoreTopMcpLiveTests
         var baseCs = BaseConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 MCP top clamp test.");
         var ct = TestContext.Current.CancellationToken;
+        using var _ = QueryStoreIntervalWide.EnableReadRoutingForTests();
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);

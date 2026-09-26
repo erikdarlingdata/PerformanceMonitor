@@ -64,6 +64,50 @@ public sealed class QueryStoreIntervalWide
     /// <summary>How often the gap check runs per server.</summary>
     public static readonly TimeSpan GapCheckInterval = TimeSpan.FromHours(1);
 
+    /// <summary>Process-wide override for <see cref="ReadRoutingEnabled"/>, set only by
+    /// <see cref="EnableReadRoutingForTests"/>. Null means "use the production default" (off).</summary>
+    private static bool? s_readRoutingOverride;
+
+    /// <summary>
+    /// Whether the grid/MCP top reads may route to <see cref="TableName"/> at all. Production default is
+    /// <c>false</c>: a measurement suggests the table's per-interval results may differ slightly from raw's
+    /// (#3953), so reads stay on raw until that is resolved. The writer keeps filling the table regardless — this
+    /// flag gates <see cref="ReadsTableAsync"/> only, never <see cref="UseTable"/> or <see cref="ClampedStart"/>,
+    /// so a later fix can flip it on without a backfill.
+    /// </summary>
+    public static bool ReadRoutingEnabled => s_readRoutingOverride ?? false;
+
+    /// <summary>
+    /// Test seam: flips <see cref="ReadRoutingEnabled"/> to <c>true</c> for the scope of the returned
+    /// <see cref="IDisposable"/>, restoring the prior value on <c>Dispose</c>. Callers must be serialized against
+    /// each other (this override is a process-wide static), never run under ordinary xUnit parallelism.
+    /// </summary>
+    internal static IDisposable EnableReadRoutingForTests()
+    {
+        var previous = s_readRoutingOverride;
+        s_readRoutingOverride = true;
+        return new ReadRoutingScope(previous);
+    }
+
+    private sealed class ReadRoutingScope : IDisposable
+    {
+        private readonly bool? _previous;
+        private bool _disposed;
+
+        public ReadRoutingScope(bool? previous) => _previous = previous;
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            s_readRoutingOverride = _previous;
+        }
+    }
+
     /// <summary>This table's own savepoint — distinct from <see cref="QueryStoreIntervalLatest.SavepointName"/> so
     /// the two applies, run one after the other in the same transaction, never share a rollback target.</summary>
     internal const string SavepointName = "qsiw_apply";
@@ -558,6 +602,10 @@ WHERE t.server_id = $1;";
     /// <see cref="UseTable"/> plus the store round trips it needs, and the clamp (<see cref="ClampedStart"/>) the
     /// caller's own table read must use as its lower bound — computed from the SAME <c>rawFloor</c> this decision
     /// read, on the SAME connection, so the decision and the clamp cannot see different snapshots.
+    ///
+    /// <para>Reads stay on raw while <see cref="ReadRoutingEnabled"/> is false; the writer still fills the table
+    /// (#3953). While routing is off, this method returns <c>(false, windowStart)</c> immediately, with NO store
+    /// round trip — callers that get <c>UseTable == false</c> read raw and ignore the returned clamp.</para>
     /// </summary>
     public static async Task<(bool UseTable, DateTime ClampedStart)> ReadsTableAsync(
         NpgsqlConnection connection,
@@ -570,6 +618,11 @@ WHERE t.server_id = $1;";
         ILogger? logger,
         CancellationToken cancellationToken)
     {
+        if (!ReadRoutingEnabled)
+        {
+            return (false, windowStart);
+        }
+
         try
         {
             DateTime? filledSince;

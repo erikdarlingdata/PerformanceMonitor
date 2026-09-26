@@ -17,7 +17,11 @@ namespace Darling.Tests;
 /// <see cref="QueryStoreIntervalWide.UseTable"/>, each clause alone flipping the answer to raw. Mirrors
 /// <c>PlanRegressionIntervalTableEquivalenceTests</c>' own <c>UseTable</c> theory for V143's gate. The live
 /// equality, clamp and end-to-end gate tests belong beside the grid/MCP top reads that call this decision.
+/// <c>ReadRoutingEnabled_DefaultsToFalse</c> below reads the same process-wide static the read-routing
+/// collection's members mutate, so this class is in that collection too (#3953) — cheap unit tests, so
+/// serializing the whole class costs nothing.
 /// </summary>
+[Collection("query-store-interval-wide-read-routing")]
 public sealed class QueryStoreIntervalWideGateTests
 {
     private static readonly DateTime WindowEnd = new(2026, 9, 25, 12, 0, 0, DateTimeKind.Unspecified);
@@ -99,4 +103,14 @@ public sealed class QueryStoreIntervalWideGateTests
         var laterFloor = WindowStart.AddHours(1);
         Assert.Equal(laterFloor, QueryStoreIntervalWide.ClampedStart(laterFloor, WindowStart));
     }
+
+    /// <summary>
+    /// #3953: production default is raw, not the table. A measurement suggests the table's per-interval results
+    /// may differ slightly from raw's, so the grid and MCP top reads must stay on raw until that is resolved —
+    /// this is the source-level guarantee that <see cref="QueryStoreIntervalWide.ReadRoutingEnabled"/> starts
+    /// (and, absent a test override, stays) <c>false</c>.
+    /// </summary>
+    [Fact]
+    public void ReadRoutingEnabled_DefaultsToFalse() =>
+        Assert.False(QueryStoreIntervalWide.ReadRoutingEnabled);
 }
