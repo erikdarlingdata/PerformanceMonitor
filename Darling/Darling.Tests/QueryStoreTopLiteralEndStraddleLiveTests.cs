@@ -103,11 +103,26 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
         }
 
         /* ---- the positive control: the SAME seeded store, an open end, proves the table path is live here
-           before the literal-end assertions below are read as clause 4's own doing. ---- */
+           before the literal-end assertions below are read as clause 4's own doing. If this ever refuses
+           again, the message below reads UseTable's own inputs — read on the SAME connection, with the SAME
+           SQL ReadsTableAsync uses — instead of leaving the next reader to re-derive them from the source. ---- */
         var (useTableOpenEnd, _) = await QueryStoreIntervalWide.ReadsTableAsync(
             connection, ServerId, WindowStart, WindowEnd, literalWindowEnd: null,
             DarlingDataReader.QueryStoreTopMinWindow, 30, null, ct);
-        Assert.True(useTableOpenEnd, "the positive control: an open end over this seeded, forced-covered window must route to the table");
+        if (!useTableOpenEnd)
+        {
+            var pendingCount = await ScalarLongAsync(connection,
+                "SELECT COUNT(*) FROM collect.query_store_interval_wide_pending WHERE server_id = @server_id", ct);
+            var rawFloor = await ScalarNullableDateTimeAsync(connection,
+                "SELECT MIN(range_start) AT TIME ZONE 'UTC' FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats'", ct);
+            var tableFloor = await ScalarNullableDateTimeAsync(connection,
+                "SELECT MIN(t.first_execution_time) FROM collect.query_store_interval_wide AS t WHERE t.server_id = @server_id", ct);
+            Assert.Fail(
+                $"the positive control: an open end over this seeded, forced-covered window must route to the table "
+                + $"(filled_since={filledSince:o}, applied_through={appliedThrough:o}, pending={pendingCount}, "
+                + $"rawFloor={rawFloor:o}, tableFloor={tableFloor:o}, window={WindowStart:o}-{WindowEnd:o}, "
+                + $"minWindow={DarlingDataReader.QueryStoreTopMinWindow})");
+        }
 
         var (useTableStraddle, _) = await QueryStoreIntervalWide.ReadsTableAsync(
             connection, ServerId, WindowStart, WindowEnd, literalWindowEnd: LiteralEnd,
@@ -168,6 +183,32 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
         };
 
         var day0 = WindowStart.AddHours(1);
+
+        /* Clause 3's own floor control: UseTable's tableFloor is MIN(first_execution_time) across the WHOLE
+           server, not just this identity, and clause 3 refuses unless raw's chunk floor or WindowStart minus
+           IntervalSpanMargin ("skewFloor") reaches at or past it. Left with only the 7001 identity below, the
+           table's floor sits at day0 (WindowStart + 1h) - AFTER skewFloor (WindowStart - 1 day) - so clause 3
+           alone refuses even the open-end positive control, before clause 4 is ever reached. A second,
+           unrelated identity anchored at or before skewFloor pulls the server's table floor down there, so
+           clause 3 passes and only clause 4 (LiteralEnd vs applied_through) can still refuse the straddle read. */
+        var floorAnchor = new QueryStoreCollector.Row
+        {
+            DatabaseName = "qsStraddle",
+            QueryId = 6999,
+            PlanId = 69991,
+            ExecutionTypeDesc = "Regular",
+            FirstExecutionTime = WindowStart.AddDays(-2),
+            LastExecutionTime = WindowStart.AddDays(-2).AddMinutes(9),
+            QueryHash = "0x00006999",
+            QueryPlanHash = "0x00069991",
+            ExecutionCount = 10,
+            AvgCpuTimeUs = 50,
+            AvgDurationUs = 100,
+            IsForcedPlan = false,
+            ForceFailureCount = 0,
+            RuntimeStatsIntervalId = 6998,
+        };
+        await runner.WriteBackfillBatchAsync(QueryStoreCollector.Instance, new List<QueryStoreCollector.Row> { floorAnchor }, server, WindowStart.AddDays(-2).AddMinutes(10), context, ct);
 
         var insideWindow = new QueryStoreCollector.Row
         {
@@ -234,5 +275,22 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("server_id", ServerId);
         return (DateTime)(await command.ExecuteScalarAsync(ct))!;
+    }
+
+    /// <summary>Same gate-input probe as <see cref="ScalarDateTimeAsync"/>, NULL-tolerant for a floor that may not
+    /// exist (no chunk, no table row) — read into the positive control's own failure message, not asserted on.</summary>
+    private static async Task<DateTime?> ScalarNullableDateTimeAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("server_id", ServerId);
+        var result = await command.ExecuteScalarAsync(ct);
+        return result is DateTime dt ? dt : null;
+    }
+
+    private static async Task<long> ScalarLongAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("server_id", ServerId);
+        return (long)(await command.ExecuteScalarAsync(ct))!;
     }
 }
