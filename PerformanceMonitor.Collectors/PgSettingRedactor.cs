@@ -183,7 +183,7 @@ public static class PgSettingRedactor
     /// double quote inside that run (<c>--user "u:it\"s"</c>) does not end it early, so the value is masked
     /// whole and a second pass over the masked output is a no-op. The unquoted branch's value likewise
     /// consumes a run of quoted segments glued to bare characters (<c>u:"a b"</c>), not just the first
-    /// non-space run, so nothing after an embedded-space quoted chunk leaks. A bare <c>-u user</c> with no
+    /// non-space run, so nothing after an embedded-space quoted chunk stays unmasked. A bare <c>-u user</c> with no
     /// colon (no password at all) does not match.</summary>
     private static readonly Regex CurlUserColon = new(
         @"(?<=^|\s)(?:(?<flag>-u|--user|-U|--proxy-user)[\s=]*""(?<user>[^:""]+):(?<val>(?:\\.|[^""\\])*)""|(?<flag>-u|--user|-U|--proxy-user)[\s=]*'(?<user>[^:']+):(?<val>[^']*)'|(?<flag>-u|--user|-U|--proxy-user)[\s=]*(?<user>[^:\s]+):(?<val>(?:""[^""]*""|'[^']*'|\S)+))",

@@ -530,18 +530,18 @@ public sealed class PgSettingScrubLiveTests
     }
 
     /// <summary>
-    /// One row per v2-rule form (#4348), all seeded under marker=1 so the run has to redact every one of them
-    /// to reach marker=2: a percent-encoded query key, a key-quoted assignment, <c>curl -u</c>,
-    /// <c>curl --proxy-user</c>, <c>sshpass -p</c>, a SAS-style <c>sig=</c> query parameter, and an
-    /// <c>X-Amz-Signature</c> query parameter. Every row is masked and the marker lands on
-    /// <see cref="PgSettingRedactor.RulesVersion"/>.
+    /// One row per redactor rule shape (#4348), all seeded under marker=1 so the run has to redact every one
+    /// of them to reach the current marker: a percent-encoded query key, a fully percent-encoded query key, a
+    /// key-quoted assignment, <c>curl -u</c>, <c>curl --proxy-user</c>, <c>sshpass -p</c>, a SAS-style
+    /// <c>sig=</c> query parameter, and an <c>X-Amz-Signature</c> query parameter. Every row is masked and
+    /// the marker lands on <see cref="PgSettingRedactor.RulesVersion"/>.
     /// </summary>
     [Fact]
-    public async Task TheScrubRedactsEveryV2RuleForm()
+    public async Task TheScrubMasksEveryRedactorRuleShape()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4348 v2-form census pin (it mints its own scratch database).");
+            "Set DARLING_TEST_PG … to run the per-rule scrub test");
 
         var ct = TestContext.Current.CancellationToken;
 
@@ -560,6 +560,7 @@ public sealed class PgSettingScrubLiveTests
         var forms = new (string Name, string Value)[]
         {
             ("primary_conninfo", "postgresql://alice@host/db?pass%77ord=hunter2"),
+            ("primary_conninfo", "postgresql://alice@host/db?%70ass%77ord=hunter2"),
             ("custom.json_blob", "{\"password\" = \"hunter2\", \"host\" = \"foo\"}"),
             ("archive_command", "curl -u user:hunter2 https://x"),
             ("archive_command", "curl --proxy-user user:hunter2 https://x"),
@@ -579,13 +580,19 @@ public sealed class PgSettingScrubLiveTests
 
         Assert.True(await ContainsSecretAsync(connection, "hunter2", ct), "seeding failed to plant the secret this test exists to catch");
 
+        /* Seeded at 1 (matching PgSettingScrub's own marker row shape, server_id = 0) so the run has to
+           redact every form to reach RulesVersion rather than trivially no-op on an already-current marker. */
+        await ExecAsync(connection,
+            "INSERT INTO collect.collector_state (server_id, collector_name, state_key, state_value, updated_at) " +
+            "VALUES (0, 'pg_setting_scrub', 'rules_version', '1', now())", ct);
+
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         var summary = await PgSettingScrub.RunAsync(postgres, logger: null, ct);
         Assert.False(summary.AlreadyDone);
         Assert.Equal(forms.Length, summary.RowsUpdated);
 
-        Assert.False(await ContainsSecretAsync(connection, "hunter2", ct), "a raw secret survived the v2-form scrub");
+        Assert.False(await ContainsSecretAsync(connection, "hunter2", ct), "a setting value is still unmasked after the scrub");
 
         var markerValue = await ScalarTextAsync(connection,
             "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",

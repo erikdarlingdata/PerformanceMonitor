@@ -197,6 +197,11 @@ public sealed class PgSettingRedactorTests
         yield return new object[] { "primary_conninfo",
         "postgresql://alice@host/db?pass%77ord=hunter2",
         "postgresql://alice@host/db?pass%77ord=********" };
+        // Every key character percent-encoded — %70ass%77ord decodes to "password" the same way a
+        // partially-encoded key does; the whole key stays encoded in the output.
+        yield return new object[] { "primary_conninfo",
+        "postgresql://alice@host/db?%70ass%77ord=hunter2",
+        "postgresql://alice@host/db?%70ass%77ord=********" };
         yield return new object[] { "primary_conninfo",
         "postgresql://alice@host/db?us%65r=x",
         "postgresql://alice@host/db?us%65r=x" };
