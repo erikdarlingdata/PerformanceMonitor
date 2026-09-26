@@ -4513,8 +4513,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
     /// <summary>
     /// What DarlingWorker knows, once per sweep tick, about this managed store's <c>darling-managed.conf</c>
-    /// outcome (#4215, lane A1d — the adopted review's items 2 and 3, plus the coordinator's RejectedValue
-    /// ruling). <paramref name="IsManagedStore"/> false means a bring-your-own store or a non-Windows host:
+    /// outcome (#4215). <paramref name="IsManagedStore"/> false means a bring-your-own store or a non-Windows host:
     /// nothing here was ever written by this service, so the alert never fires and every other field is
     /// meaningless. <paramref name="UsedLastGoodConf"/> and <paramref name="HandEdited"/> are THIS START's
     /// in-process facts (<see cref="DarlingManagedPostgres.LastStartUsedLastGoodManagedConf"/> and
@@ -4525,7 +4524,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// currently holding, read fresh each tick since a rejected value fixed by a later start replaces that
     /// row without this process restarting. <c>null</c> means the read FAILED this tick — unknown, not
     /// empty — so the evaluator neither fires nor resolves on this condition alone and instead keeps
-    /// whatever the family's rejected-settings state already was; a coordinator ruling on A1d (the read's
+    /// whatever the family's rejected-settings state already was (the read's
     /// own worker-side catch used to collapse a failure to an empty list, which made one bad read able to
     /// write a false "Store Settings Resolved" when rejected settings were the only condition standing).
     /// </summary>
@@ -4583,9 +4582,8 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>
-    /// Edge-applies the "a managed store's settings need an operator's attention" condition (#4215, the
-    /// adopted review's items 2 and 3, plus the RejectedValue ruling, plus #4336's failed-verification
-    /// condition): fires while any of four independent facts about THIS start holds — <paramref
+    /// Edge-applies the "a managed store's settings need an operator's attention" condition (#4215, plus
+    /// #4336's failed-verification condition): fires while any of four independent facts about THIS start holds — <paramref
     /// name="report"/>'s <c>UsedLastGoodConf</c> (the freshly rendered file failed <c>postgres -C</c>
     /// validation, or the write itself failed, and this start ran on the last file that proved it could start
     /// PostgreSQL), <c>HandEdited</c> (an operator's hand edit of <c>darling-managed.conf</c> is kept in
@@ -4631,7 +4629,7 @@ internal sealed class DarlingSelfAlertEvaluator
             reasons.Add("darling-managed.conf is hand-edited, and the edit is being kept in force rather than overwritten");
         }
 
-        /* #4336 lane 6b: a failed verification is a fourth, independent condition. Failed means a
+        /* #4336: a failed verification is a fourth, independent condition. Failed means a
            mismatch was found between the after-snapshot and pg_file_settings and the restore already ran
            (postgresql.conf when a backup path exists, otherwise the previous verified darling-managed.conf).
            This condition always states plainly when Status is Failed; Unknown is handled below with the
@@ -4646,8 +4644,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 $"verifying darling-managed.conf failed (step {verification.Step}): {mismatchedList} did not match pg_file_settings; {restoredFrom}"));
         }
 
-        /* #4215 A1d (coordinator ruling on comment 5840697338, item 2), extended to the verification read
-           (#4336 lane 6b): null means the rejected-settings read FAILED this tick, and Verification's
+        /* #4215, extended to the verification read (#4336): null means the rejected-settings read FAILED this tick, and Verification's
            Status being Unknown means the before/after snapshot itself could not be taken — both UNKNOWN, not
            empty. An unknown condition neither fires nor resolves on its own; it keeps the family's CURRENT
            state and lets the other conditions decide. If any of those is already true, the family is firing

@@ -16,7 +16,7 @@ using static PerformanceMonitor.Darling.Service.ManagedConfMigrationState;
 namespace Darling.Tests;
 
 /// <summary>
-/// <see cref="ManagedConfMigrationState.Classify"/> (#4336 lane 5c, plan decision (c)): the pure gate read
+/// <see cref="ManagedConfMigrationState.Classify"/> (#4336): the pure gate read
 /// once before the legacy appenders, over a real temp data directory so the include/marker/pending/stamp
 /// checks all run against files on disk exactly as the caller sees them.
 /// </summary>
@@ -172,12 +172,12 @@ public sealed class ManagedConfMigrationStateTests : IDisposable
     }
 
     /// <summary>
-    /// RED pin (proof, not a permanent test — kept green here because it exercises the REAL classifier, not a
-    /// stub): under the plan's rejected literal rule ("appenders run whenever the stamp is missing; a hash
+    /// Proof test (kept here because it exercises the REAL classifier, not a
+    /// stub): under a naive rule ("appenders run whenever the stamp is missing; a hash
     /// mismatch counts as missing"), a migrated-but-unstamped conf would be classified the same as a genuinely
-    /// legacy one — which is exactly the case the ruling forbids, because it would re-append all fifteen
-    /// blocks below the include on a conf that already migrated. This test names that literal rule directly
-    /// (a local stub, not <see cref="Classify"/>) and shows it disagrees with the ruled behavior above:
+    /// legacy one — which must not happen, because it would re-append all fifteen
+    /// blocks below the include on a conf that already migrated. This test names that naive rule directly
+    /// (a local stub, not <see cref="Classify"/>) and shows it disagrees with the correct behavior above:
     /// <see cref="Classify_MutatedManagedFile_IsMigratedUnstamped"/> asserts <c>MigratedUnstamped</c> for the
     /// same fixture this stub calls <c>Legacy</c>.
     /// </summary>
@@ -191,13 +191,13 @@ public sealed class ManagedConfMigrationStateTests : IDisposable
         ManagedConfMigrationSteps.WriteVerifiedStamp(_dataDir, managedConf);
         WriteManaged(managedConf + "\n# hand edit\n");
 
-        // The rejected literal rule: "no valid stamp -> Legacy". Applied to this exact fixture it would
-        // return Legacy, which the ruling forbids (re-appends on an already-migrated conf).
-        static Kind RejectedLiteralRule(string dataDir) =>
+        // The naive rule: "no valid stamp -> Legacy". Applied to this exact fixture it would
+        // return Legacy, which must not happen (it would re-append on an already-migrated conf).
+        static Kind NaiveRule(string dataDir) =>
             ManagedConfMigrationSteps.IsVerified(dataDir) ? Kind.Verified : Kind.Legacy;
 
-        Assert.NotEqual(RejectedLiteralRule(_dataDir), Classify(_dataDir));
-        Assert.Equal(Kind.Legacy, RejectedLiteralRule(_dataDir));
+        Assert.NotEqual(NaiveRule(_dataDir), Classify(_dataDir));
+        Assert.Equal(Kind.Legacy, NaiveRule(_dataDir));
         Assert.Equal(Kind.MigratedUnstamped, Classify(_dataDir));
     }
 }

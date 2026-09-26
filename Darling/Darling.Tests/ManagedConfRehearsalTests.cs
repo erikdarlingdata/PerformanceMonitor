@@ -17,9 +17,8 @@ using static PerformanceMonitor.Darling.Service.ManagedConfMigration;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins <c>ManagedConfMigration.Rewrite</c> against the committed rehearsal fixture (#4336 lane rehearsal,
-/// issuecomment-5827624802 §3): a synthetic <c>postgresql.conf</c> built the same way the design's own,
-/// never-committed rehearsal was — initdb's PG18 stock conf, every product block v1 through v14 appended in
+/// Pins <c>ManagedConfMigration.Rewrite</c> against the committed rehearsal fixture (#4336): a synthetic
+/// <c>postgresql.conf</c> built to reproduce a real one's shape — initdb's PG18 stock conf, every product block v1 through v14 appended in
 /// order (v8 written FOUR times, at 16 GB/66 hypertables then 16 GB/68 then 31 GB/70 then 31 GB/72, so the
 /// last-occurrence-wins reduction has real work to do), plus three hand edits: <c>max_connections = 300</c>
 /// between v4 and v5 (the LAST assignment of that key anywhere in the file, so it is effective and this
@@ -28,32 +27,23 @@ namespace Darling.Tests;
 /// stay exactly where it is); and <c>log_timezone = 'UTC'</c> at the end (a key no managed block owns, so it
 /// stays exactly where it is too).
 ///
-/// <para><b>Numbers versus the design's rehearsal.</b> The design ran this on a synthetic conf it did not
-/// commit and reported 48 lines removed / 23 managed keys / 1 operator line moved. This fixture's numbers are
-/// <b>69 lines removed / 24 managed keys / 1 operator line moved</b> — the "1 operator line moved" holds
-/// exactly, as required. The two counts differ because this lane could only rebuild the design's fixture from
-/// today's builders, not the exact builder revision the design ran against, and from its prose description of
-/// "17 marker lines" rather than its literal bytes:
+/// <para><b>This fixture's numbers</b> are 69 lines removed / 24 managed keys / 1 operator line moved.
+/// The "1 operator line moved" is exactly what the rewrite logic requires. The counts below explain why they
+/// are 69/24 rather than some other plausible pair, given how today's builders emit their blocks:
 /// <list type="bullet">
 /// <item><b>managed keys 24 vs 23.</b> <see cref="ManagedConfFile.RenderBody"/> emits one line per key
 /// <see cref="DarlingManagedPostgres.ParseConfText"/> reads back from calling every <c>Build*ConfAppend</c> in
-/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 24 keys,
-/// one more than the design's 23. The extra key is <c>min_wal_size</c>: v12's WAL-sizing block
+/// order with THIS PR's inputs (RAM authoritative, disk authoritative, PostgreSQL 18) — today that is 24 keys.
+/// The extra key is <c>min_wal_size</c>: v12's WAL-sizing block
 /// (<see cref="DarlingManagedPostgres.BuildWalSizingConfAppend"/>) writes both <c>max_wal_size</c> AND
 /// <c>min_wal_size</c>, and nothing later in the v1-v14 order overwrites the second one, so it survives the
-/// reduction as its own key. Whether the design's rehearsal counted 23 because its run supplied a
-/// non-authoritative disk reading (v12 skipped, and <c>max_wal_size</c> then comes from v4's fixed 4GB with no
-/// <c>min_wal_size</c> line at all) or because an earlier builder revision folded the two WAL keys differently
-/// cannot be recovered from the design comment's prose alone — but 24 is what THIS repo's builders produce
-/// today, pinned as such rather than fudged to 23.</item>
-/// <item><b>lines removed 69 vs 48.</b> Every line the design's prose names — the initdb stock conf, v1-v14
+/// reduction as its own key.</item>
+/// <item><b>lines removed 69.</b> The initdb stock conf, v1-v14
 /// each appended once except v8 four times, the three hand edits — this fixture reproduces, so the shapes
 /// match. The absolute REMOVAL count is a function of how many total OURS lines the classifier drops (three
 /// extra v8 copies alone contribute several lines each) plus exactly how many bytes today's builders emit per
-/// block (a block can gain or lose a line across the two years between the design's run and this lane without
-/// changing what a REWRITE should do to it) — the design comment gives no byte-for-byte listing to diff
-/// against, only the shape and the two counts that matter operationally: keys migrate, and one operator line
-/// moves. This lane pins ITS OWN fixture's actual number rather than adjusting builder inputs to chase 48.</item>
+/// block. This fixture pins its OWN actual numbers, verified against the rewrite logic's requirements: keys
+/// migrate, and one operator line moves.</item>
 /// </list>
 /// </para>
 /// </summary>

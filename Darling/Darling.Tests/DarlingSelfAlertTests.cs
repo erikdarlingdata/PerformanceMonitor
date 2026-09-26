@@ -1130,7 +1130,7 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("never expires", fired.DetailText);
     }
 
-    /* ---------------- managed store settings needing attention (#4215, lane A1d) ---------------- */
+    /* ---------------- managed store settings needing attention (#4215) ---------------- */
 
     private static DarlingSelfAlertEvaluator.StoreSettingsReport BuildStoreSettingsReport(
         bool isManagedStore = true, bool usedLastGood = false, bool handEdited = false,
@@ -1320,10 +1320,10 @@ public sealed class DarlingSelfAlertTests
         Assert.Empty(h.History.Records);
     }
 
-    /* ---------------- #4215 A1d: a failed rejected-settings read must not false-resolve ---------------- */
+    /* ---------------- #4215: a failed rejected-settings read must not false-resolve ---------------- */
 
     /// <summary>
-    /// THE PIN for the coordinator's A1d ruling (comment 5840697338, item 2). An active alert whose ONLY
+    /// The rule this pins (#4215): an active alert whose ONLY
     /// standing condition is a rejected setting must stay active — never resolve, and never re-fire with
     /// stale names — when the next tick's read of the rejected-verdict names fails (<c>RejectedSettingNames</c>
     /// null). Null means UNKNOWN, not empty: the rejected condition neither fires nor resolves on its own,
@@ -1384,7 +1384,7 @@ public sealed class DarlingSelfAlertTests
     /// <summary>
     /// NEW pin (a): the hand-edit case. An alert active ONLY because of the hand-edit condition, with the
     /// last good rejected read empty (no rejected names ever recorded). The hand edit clears AND the
-    /// rejected read fails in the same tick — the ruling requires NO resolve, because the rejected
+    /// rejected read fails in the same tick — this must NOT resolve, because the rejected
     /// condition's unknown state can't decide anything either way and the family must keep its current
     /// (active) state. The next tick, a SUCCESSFUL empty rejected read alongside the still-clear hand edit
     /// resolves it.
@@ -1416,8 +1416,8 @@ public sealed class DarlingSelfAlertTests
 
     /// <summary>
     /// NEW pin (b): no stale re-fire. An active alert (rejected-only), then consecutive FAILED rejected
-    /// reads across multiple refire intervals, must give no new fire or re-fire rows at all — the ruling
-    /// bars re-stating unknown data as if it were current.
+    /// reads across multiple refire intervals, must give no new fire or re-fire rows at all: unknown data
+    /// must never be re-stated as if it were current.
     /// </summary>
     [Fact]
     public async Task StoreSettings_RejectedValue_ConsecutiveFailedReads_NeverReFire()

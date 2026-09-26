@@ -15,10 +15,10 @@ using System.Text;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// The pure file-I/O building blocks for the #4215 migration's wiring (#4336 lane 5a; design rule 3, ruling
-/// comment-5827624802 §3): backing up the original <c>postgresql.conf</c>, writing the two new files in the
-/// order the crash-safety argument depends on, and stamping the data directory once the write is verified.
-/// Startup integration, the <c>pg_file_settings</c> snapshot, and verification itself are lane 5b.
+/// The pure file-I/O building blocks for the #4215 migration's wiring (#4336): backing up the original
+/// <c>postgresql.conf</c>, writing the two new files in the order the crash-safety argument depends on, and
+/// stamping the data directory once the write is verified. Startup integration, the <c>pg_file_settings</c>
+/// snapshot, and verification itself are covered separately.
 /// </summary>
 internal static class ManagedConfMigrationSteps
 {
@@ -188,8 +188,8 @@ internal static class ManagedConfMigrationSteps
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
-    /// <summary>The pending file's name, in the data directory alongside <c>postgresql.conf</c> (#4336 lane
-    /// 5b): the only record of the BEFORE <c>pg_file_settings</c> snapshot and the prior managed-file text
+    /// <summary>The pending file's name, in the data directory alongside <c>postgresql.conf</c> (#4336):
+    /// the only record of the BEFORE <c>pg_file_settings</c> snapshot and the prior managed-file text
     /// (when one existed) once <see cref="WriteTwoSteps"/> has overwritten both files — a crash after that
     /// point has nothing else to compare the after-snapshot against, or to restore to.</summary>
     internal const string PendingFileName = "darling-managed.conf.pending";
@@ -198,7 +198,7 @@ internal static class ManagedConfMigrationSteps
     private const char FieldValueTag = 'V';
 
     /// <summary>
-    /// Writes <see cref="PendingFileName"/> atomically (#4336 lane 5b): the BEFORE snapshot (tab-separated,
+    /// Writes <see cref="PendingFileName"/> atomically (#4336): the BEFORE snapshot (tab-separated,
     /// one row per line, every field escaped so a tab or newline INSIDE a setting's own value round-trips
     /// exactly — <see cref="EncodeField(string?)"/>) plus, on its own leading line, the prior managed-file text (null
     /// when none existed — a fresh initdb'd store migrating for the first time). This is the risk called out
@@ -295,7 +295,7 @@ internal static class ManagedConfMigrationSteps
     }
 
     /// <summary>
-    /// Restores the pre-migration state (#4336 lane 5b, the mismatch and the after-snapshot-throws paths
+    /// Restores the pre-migration state (#4336, the mismatch and the after-snapshot-throws paths
     /// alike): <paramref name="backupPath"/>'s bytes go back to <c>postgresql.conf</c> atomically, and
     /// <paramref name="priorManagedText"/> — null when no managed file existed before this run — either
     /// replaces <c>darling-managed.conf</c> (a prior migration's file, restored verbatim) or is left absent
@@ -340,7 +340,7 @@ internal static class ManagedConfMigrationSteps
         }
     }
 
-    /// <summary>Encodes one pending-file field (#4336 lane 5b): a leading <see cref="FieldNullTag"/> for a
+    /// <summary>Encodes one pending-file field (#4336): a leading <see cref="FieldNullTag"/> for a
     /// null value, or <see cref="FieldValueTag"/> followed by <paramref name="value"/> with backslash escaped
     /// first, then tab and newline — so a setting containing either round-trips through
     /// <see cref="DecodeField"/> exactly (the risk the plan calls out for <c>EscapeConfValue</c>, here for the

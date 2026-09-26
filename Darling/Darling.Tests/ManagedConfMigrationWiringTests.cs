@@ -12,7 +12,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Wiring pins for #4336 lane 5c, in the style of <see cref="StartupHostProfileLogTests"/> and
+/// Wiring pins for #4336, in the style of <see cref="StartupHostProfileLogTests"/> and
 /// <see cref="DarlingStoreUpgradeTests"/>'s source-order tests: what
 /// <c>DarlingManagedPostgres.EnsureRunningAsync</c>'s own source says, since none of this is otherwise
 /// reachable from a unit test without a real PostgreSQL bootstrap.
@@ -95,7 +95,7 @@ public sealed class ManagedConfMigrationWiringTests
         Assert.True(classify < gate, "confState must be classified before the Legacy append gate reads it.");
     }
 
-    /// <summary>#4336 lane 6: <c>MigrateManagedConfAsync</c> has a <c>Kind.Verified</c> case that calls
+    /// <summary>#4336: <c>MigrateManagedConfAsync</c> has a <c>Kind.Verified</c> case that calls
     /// <c>VerifyStepB</c>.</summary>
     [Fact]
     public void MigrateManagedConfAsync_HasVerifiedCase_CallingVerifyStepB()

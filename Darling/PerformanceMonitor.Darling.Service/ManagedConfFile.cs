@@ -59,17 +59,17 @@ internal static class ManagedConfFile
     /// <summary>The file's name, in the data directory beside <c>postgresql.conf</c>.</summary>
     internal const string FileName = "darling-managed.conf";
 
-    /// <summary>The last file this service wrote that PostgreSQL accepted (design H1 item 2): what a rejected
+    /// <summary>The last file this service wrote that PostgreSQL accepted: what a rejected
     /// render falls back to rather than failing the start outright.</summary>
     internal const string LastGoodFileName = "darling-managed.conf.last-good";
 
     /// <summary>The temp file <see cref="TryReplaceAtomic"/> writes and flushes before the rename that makes it
-    /// <see cref="FileName"/> — so a reader never observes a partially written file (design step 1, "never write
-    /// in place").</summary>
+    /// <see cref="FileName"/> — so a reader never observes a partially written file (this class never writes
+    /// in place).</summary>
     internal const string TempFileName = FileName + ".tmp";
 
     /// <summary>The plain <c>include</c> line <c>postgresql.conf</c> carries once this design is in force
-    /// (ruling decision 1: plain form, not <c>include_if_exists</c>). Single-quoted so a Windows path with no
+    /// (plain form, not <c>include_if_exists</c>). Single-quoted so a Windows path with no
     /// special characters never needs escaping in practice, and so the form matches every other quoted value
     /// this class and <c>DarlingManagedPostgres</c> write.</summary>
     internal const string IncludeLine = "include 'darling-managed.conf'";
@@ -209,7 +209,7 @@ internal static class ManagedConfFile
                 inputs.DataVolumeFreeBytes, inputs.DataVolumeTotalBytes, inputs.PostgresMajor));
         }
 
-        /* v13 (#3899, review M5): the preload list is the MERGE of what's in force plus timescaledb and
+        /* v13 (#3899): the preload list is the MERGE of what's in force plus timescaledb and
            pg_stat_statements — MergePreloadLibraries never shrinks the list, and BuildStatementStatisticsConfAppend
            calls it, so the merge lives in exactly the one place it always has. */
         blocks.Append(DarlingManagedPostgres.BuildStatementStatisticsConfAppend(inputs.EffectivePreloadList));
@@ -240,8 +240,8 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
-    /// Renders <c>darling-managed.conf</c> the way Step A's post-start verification needs (#4336 lane 5b,
-    /// design decision (b)): the SAME owned keys and order <see cref="RenderBody"/> would produce for
+    /// Renders <c>darling-managed.conf</c> the way Step A's post-start verification needs (#4336):
+    /// the SAME owned keys and order <see cref="RenderBody"/> would produce for
     /// <paramref name="inputs"/>, but each owned key's VALUE comes from <paramref name="values"/> — the raw
     /// text <c>pg_file_settings</c> reports as <c>applied</c> for that key — instead of the freshly derived
     /// one. An owned key <see cref="RenderBody"/> would have written that is missing from
@@ -328,8 +328,8 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
-    /// Whether an existing <see cref="FileName"/> is no longer what this class rendered (design step 1, "hand
-    /// edit", review H1 item 3): its body's hash no longer matches what its own header declares. A file with no
+    /// Whether an existing <see cref="FileName"/> is no longer what this class rendered (a "hand
+    /// edit"): its body's hash no longer matches what its own header declares. A file with no
     /// recognizable <see cref="BodyHashPrefix"/> line at all counts as a hand edit too — anything this class did
     /// not provably just write is never silently overwritten.
     /// </summary>

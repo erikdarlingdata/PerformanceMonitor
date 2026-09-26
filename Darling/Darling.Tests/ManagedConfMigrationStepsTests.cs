@@ -14,7 +14,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// <see cref="ManagedConfMigrationSteps"/> (#4336 lane 5a): the backup, the two-step atomic write, and the
+/// <see cref="ManagedConfMigrationSteps"/> (#4336): the backup, the two-step atomic write, and the
 /// verified stamp. Pure file I/O in throwaway temp directories, no database.
 /// </summary>
 public sealed class ManagedConfMigrationStepsTests : IDisposable

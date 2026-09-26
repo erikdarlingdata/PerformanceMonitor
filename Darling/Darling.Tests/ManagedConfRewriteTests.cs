@@ -16,8 +16,7 @@ using static PerformanceMonitor.Darling.Service.ManagedConfMigration;
 namespace Darling.Tests;
 
 /// <summary>
-/// <c>ManagedConfMigration.Rewrite</c> (#4336 lane rewrite2, correcting the earlier lane mig-b build under
-/// design ruling comment-5827624802 §3 rule 3): a non-Ours line for a managed key moves below the include
+/// <c>ManagedConfMigration.Rewrite</c> (#4336): a non-Ours line for a managed key moves below the include
 /// ONLY when it is the currently-effective assignment of that key; an already-overridden one stays exactly
 /// where it is. Pure logic, no wiring — no live PostgreSQL, no disk.
 /// </summary>
@@ -59,7 +58,7 @@ public sealed class ManagedConfRewriteTests
     }
 
     /// <summary>(b) An operator line for an owned key that a LATER line overrides is not effective — it
-    /// stays exactly where it is, and is not reported as excluded. #4336 lane rehearsal (CI on 9174da32):
+    /// stays exactly where it is, and is not reported as excluded. #4336:
     /// the ORIGINAL version of this test used <see cref="DarlingManagedPostgres.BuildLegacyMaintenanceWorkMemCapConfAppend"/>
     /// as the "later line", but that v14 block sets <c>maintenance_work_mem</c>, never <c>work_mem</c> —
     /// so the operator's <c>work_mem = 70MB</c> WAS the last (and only) assignment of that key in the file,
@@ -134,7 +133,7 @@ public sealed class ManagedConfRewriteTests
     }
 
     /// <summary>(f) A conf with no product blocks at all and no line for an OWNED key: only the include is
-    /// appended, and nothing moves. #4336 lane rehearsal (CI on 9174da32): the ORIGINAL version of this test
+    /// appended, and nothing moves. #4336: the ORIGINAL version of this test
     /// used <c>max_connections = 300</c>, an owned key — under rule 3, an effective operator line for an
     /// owned key moves below the include even with no product blocks present at all (there is nothing for
     /// it to be overridden BY), so <c>Rewrite</c> correctly moved it and the test's "nothing moves" name and

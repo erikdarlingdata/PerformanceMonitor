@@ -53,7 +53,7 @@ public sealed class ManagedConfFileLiveTests
 
     /// <summary>
     /// Rewrites a freshly rendered darling-managed.conf's <c>shared_buffers</c> line to a value <c>postgres
-    /// -C</c> refuses (design H1 item 2's own example). A render only ever produces a bad value through a bug,
+    /// -C</c> refuses (a known-bad example). A render only ever produces a bad value through a bug,
     /// so this is the seam a live test uses to reach the rejected-value path without one: installed through
     /// <see cref="DarlingManagedPostgres.TestOnlyRenderOverride"/>, never through anything a config file sets.
     /// </summary>

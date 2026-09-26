@@ -12,7 +12,7 @@ using System.Collections.Generic;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
-/// One row of PostgreSQL's <c>pg_file_settings</c> as Step A's verification needs it (#4336 lane 5b): the
+/// One row of PostgreSQL's <c>pg_file_settings</c> as Step A's verification needs it (#4336): the
 /// file and line the setting was found on (null when the row itself represents a parse error not tied to a
 /// resolved assignment), the setting's name, the raw value text as the file carries it, whether this row is
 /// the one actually in force (<c>applied</c>), and an error message when PostgreSQL rejected the line outright.

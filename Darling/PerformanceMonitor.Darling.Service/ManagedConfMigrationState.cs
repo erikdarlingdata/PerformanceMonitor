@@ -12,7 +12,7 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// The pure gate <see cref="Classify"/> reads once per start, before <see cref="DarlingManagedPostgres.EnsureConfAppended"/>
-/// runs (#4336 lane 5c, plan decision (c)): what state this data directory's conf is in, so the caller can
+/// runs (#4336): what state this data directory's conf is in, so the caller can
 /// decide whether the legacy v1-v15 appenders may run at all, whether Step A's write step runs, and which
 /// migration action (if any) belongs after this start.
 /// </summary>
@@ -27,7 +27,7 @@ internal static class ManagedConfMigrationState
     /// <see cref="ManagedConfMigrationSteps.PendingFileName"/> exists: a crash landed between
     /// <see cref="ManagedConfMigrationSteps.WriteTwoSteps"/> and the stamp. Resume, never re-append.</item>
     /// <item><see cref="Verified"/> — the conf carries the include, no v-marker, no pending file, and
-    /// <see cref="ManagedConfMigrationSteps.IsVerified"/> is true. Step A is done; Step B (#4336 lane 6) is
+    /// <see cref="ManagedConfMigrationSteps.IsVerified"/> is true. Step A is done; Step B (#4336) is
     /// what runs from here on.</item>
     /// <item><see cref="MigratedUnstamped"/> — the conf carries the include, no v-marker, no pending file,
     /// but the stamp is missing or stale (a hand edit of <c>darling-managed.conf</c>, or a crash inside Step
@@ -43,7 +43,7 @@ internal static class ManagedConfMigrationState
     }
 
     /// <summary>
-    /// Classifies <paramref name="dataDir"/>'s <c>postgresql.conf</c> exactly per the plan's ruling: a
+    /// Classifies <paramref name="dataDir"/>'s <c>postgresql.conf</c>: a
     /// v-marker present, or the managed include missing, is <see cref="Kind.Legacy"/> — checked FIRST and
     /// unconditionally, because a re-appended v-marker on an otherwise-migrated conf must never be read as
     /// migrated. Only once that is ruled out does the pending file, then the stamp, decide the rest.
