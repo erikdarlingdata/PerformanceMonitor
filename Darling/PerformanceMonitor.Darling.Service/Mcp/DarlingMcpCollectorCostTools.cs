@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -61,7 +62,8 @@ public sealed class DarlingMcpCollectorCostTools
     public static async Task<string> GetCollectorCost(
         NpgsqlDataSource postgres,
         [Description("Days of history to summarize. Default 7; max 90 (the series' own retention).")] int days_back = 7,
-        [Description("Optional: a collector name (e.g. query_store) to return its daily trend instead of the ranked fleet list.")] string? collector_name = null)
+        [Description("Optional: a collector name (e.g. query_store) to return its daily trend instead of the ranked fleet list.")] string? collector_name = null,
+        CancellationToken cancellationToken = default)
     {
         /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
            tool's (the series' own retention). */
@@ -77,7 +79,7 @@ public sealed class DarlingMcpCollectorCostTools
         {
             if (!string.IsNullOrWhiteSpace(collector_name))
             {
-                var trend = await DarlingCollectorCostReader.GetTrendAsync(postgres, collector_name.Trim(), since);
+                var trend = await DarlingCollectorCostReader.GetTrendAsync(postgres, collector_name.Trim(), since, cancellationToken);
                 if (trend.Count == 0)
                 {
                     return McpHelpers.Status(
@@ -103,7 +105,7 @@ public sealed class DarlingMcpCollectorCostTools
                 });
             }
 
-            var top = await DarlingCollectorCostReader.GetTopAsync(postgres, since);
+            var top = await DarlingCollectorCostReader.GetTopAsync(postgres, since, cancellationToken);
             if (top.Count == 0)
             {
                 return McpHelpers.Status(
@@ -130,7 +132,7 @@ public sealed class DarlingMcpCollectorCostTools
                 })
             });
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_collector_cost", ex);
         }

@@ -138,18 +138,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         "get_ag_health",
         "get_analysis_facts",
         "get_analysis_findings",
-        "get_collector_cost",
-        "get_collector_stall_probes",
         "get_cpu_scheduler_pressure",
         "get_default_trace_events",
         "get_file_io_trend",
-        "get_fleet_overview",
         "get_latch_stats",
         "get_memory_trend",
-        "get_oversized_plan_backlog",
         "get_perfmon_trend",
         "get_pg_autovacuum_health",
-        "get_pg_blocking",
         "get_pg_column_stats",
         "get_pg_cpu_utilization",
         "get_pg_database_stats",
@@ -165,16 +160,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         "get_pg_wraparound_risk",
         "get_pg_xmin_horizon",
         "get_plan_cache_bloat",
-        "get_plan_xml",
         "get_pvs_stats",
         "get_running_jobs",
         "get_session_stats",
         "get_spinlock_stats",
         "get_store_host",
-        "get_store_log",
-        "get_store_metrics",
-        "get_store_query_stats",
-        "get_sweep_reports",
         "get_waiting_tasks",
     };
 
@@ -3004,7 +2994,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                dashboard app's provider-less factory was the only alternative. Closure, not a fourth
                ReadToolHandler seat: widening the shared delegate would touch every entry in this
                table for the one tool that logs. */
-            ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state")),
+            ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state"), c.RequestAborted),
 
             /* ── blocking / deadlocks ── */
             ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -3127,7 +3117,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ? DarlingMcpPgTrendTools.GetPgDatabaseTrend(pg, Server(c), Str(c, "database"), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_pg_replication_stats"] = (c, pg, an) => DarlingMcpPgReplicationStatsTools.GetPgReplicationStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 25), as_of: AsOf(c)),
-            ["get_pg_blocking"] = (c, pg, an) => DarlingMcpPgBlockingTools.GetPgBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
+            ["get_pg_blocking"] = (c, pg, an) => DarlingMcpPgBlockingTools.GetPgBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_database_stats"] = (c, pg, an) => DarlingMcpPgDatabaseTools.GetPgDatabaseStats(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             ["get_pg_index_usage"] = (c, pg, an) => DarlingMcpPgIndexUsageTools.GetPgIndexUsage(pg, Server(c), Hours(c, 168), Rows(c, "limit", 25), as_of: AsOf(c)),
             ["get_pg_table_bloat"] = (c, pg, an) => DarlingMcpPgTableBloatTools.GetPgTableBloat(pg, Server(c), Hours(c, 168), Rows(c, "limit", 25), as_of: AsOf(c), cancellationToken: c.RequestAborted),
@@ -3173,19 +3163,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             ["get_server_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetServerSummary(pg, Server(c), c.RequestAborted),
             ["get_daily_summary"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummary(pg, Server(c), Str(c, "summary_date"), c.RequestAborted),
             ["get_daily_summary_range"] = (c, pg, an) => DarlingMcpHealthTools.GetDailySummaryRange(pg, Server(c), QueryInt(c, "days_back", null, 30), AsOf(c), c.RequestAborted),
-            ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band")),
+            ["get_fleet_overview"] = (c, pg, an) => DarlingMcpFleetTools.GetFleetOverview(pg, Hours(c, DefaultFleetHours), Str(c, "detail") ?? "summary", QueryBool(c, "worst_only", false), Str(c, "band"), c.RequestAborted),
             ["get_ag_health"] = (c, pg, an) => DarlingMcpAgTools.GetAgHealth(pg, Server(c)),
-            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit)),
-            ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c)),
-            ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false)),
+            ["get_store_metrics"] = (c, pg, an) => DarlingMcpStoreMetricsTools.GetStoreMetrics(pg, QueryInt(c, "days_back", null, 30), Str(c, "object_kind"), Str(c, "object_name"), Rows(c, "limit", DarlingMcpStoreMetricsTools.DefaultLimit), c.RequestAborted),
+            ["get_store_log"] = (c, pg, an) => DarlingMcpStoreLogTools.GetStoreLog(pg, Hours(c, 24), Rows(c, "limit", DarlingMcpStoreLogTools.DefaultRetainedLimit), AsOf(c), c.RequestAborted),
+            ["get_store_query_stats"] = (c, pg, an) => DarlingMcpStoreQueryStatsTools.GetStoreQueryStats(pg, Str(c, "role"), Str(c, "order_by") ?? "total_time", Rows(c, "top", DarlingMcpStoreQueryStatsTools.DefaultTop), QueryBool(c, "full_text", false), c.RequestAborted),
             /* #4214 part 2: postgresConfig rides by closure (this method's own doc comment), the same way
                logger does for get_sweep_reports two screens up. StoreHostProfileCache.Shared as a direct
                static reference, not a new BuildReadDispatch parameter (round-1 review, Medium 2) — unlike
                postgresConfig, the cache instance never varies by caller, so no threading is needed. */
             ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared),
-            ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name")),
-            ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit)),
-            ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit)),
+            ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
+            ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
+            ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
 
             /* ── latch / spinlock ── */
             ["get_latch_stats"] = (c, pg, an) => DarlingMcpLatchSpinlockTools.GetLatchStats(pg, Server(c), Hours(c, 24), Rows(c, "top", 10), as_of: AsOf(c)),
@@ -3219,7 +3209,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             /* ── stored plan XML (READ; the analyze_*_plan compute family stays excluded) ── */
             ["get_plan_xml"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
-                ? DarlingMcpPlanTools.GetPlanXml(pg, queryHash, Server(c), Str(c, "database_name"))
+                ? DarlingMcpPlanTools.GetPlanXml(pg, queryHash, Server(c), Str(c, "database_name"), c.RequestAborted)
                 : MissingParam("query_hash"),
 
             /* ── default trace ── */
