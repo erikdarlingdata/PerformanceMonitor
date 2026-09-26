@@ -108,4 +108,43 @@ public sealed class AlertNotebookRenderClientTests
         Assert.Contains("as_of", triage, StringComparison.Ordinal);
         Assert.Contains("onOpenLive: () => { def = stripAsOf(def); paint(); }", triage, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #4368: the header cell must render current_value/threshold_value/detail_text — the endpoint's alert
+    /// node carries all three (AlertNotebookEndpoint.cs's AlertRowNode), and the header dropped them entirely
+    /// before this slice. Pinned through <c>el()</c>'s text path only (R4): a rewrite that switches either
+    /// field to <c>innerHTML</c> or a template string must fail this build, not just an XSS review.
+    /// </summary>
+    [Fact]
+    public void Views_AlertHeaderCell_RendersValueThresholdAndDetailText_ThroughElsTextPath()
+    {
+        var views = ReadRepoFile(ViewsPath);
+
+        Assert.Contains("a.current_value", views, StringComparison.Ordinal);
+        Assert.Contains("a.threshold_value", views, StringComparison.Ordinal);
+        Assert.Contains("a.detail_text", views, StringComparison.Ordinal);
+
+        // The detail_text line must go through el()'s { text: ... } prop (textContent), never innerHTML.
+        Assert.Contains("el(\"pre\", { class: \"code\", text: a.detail_text })", views, StringComparison.Ordinal);
+        Assert.DoesNotContain("innerHTML", views, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4368: a route change (hashchange off #/triage, or navigating away entirely) while an alert-mode read
+    /// cell's slot is queued or its fetch is outstanding must not paint a stale result into a detached holder.
+    /// The fetch and the limiter's release still have to run either way — only the mount is guarded.
+    /// </summary>
+    [Fact]
+    public void Views_AlertModeReadCells_GuardAgainstRenderingAfterARouteChange()
+    {
+        var views = ReadRepoFile(ViewsPath);
+
+        Assert.Contains("opts.isLive", views, StringComparison.Ordinal);
+        Assert.Contains("const stillLive = !opts.isLive || opts.isLive();", views, StringComparison.Ordinal);
+        Assert.Contains("if (stillLive) mount(holder, rendered);", views, StringComparison.Ordinal);
+
+        var triage = ReadRepoFile(TriagePath);
+        Assert.Contains("const isLive = () => location.hash === ourHash;", triage, StringComparison.Ordinal);
+        Assert.Contains("isLive,", triage, StringComparison.Ordinal);
+    }
 }

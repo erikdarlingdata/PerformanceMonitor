@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, relTime, localTime } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, relTime, localTime, fmtNum } from "../util.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
@@ -498,12 +498,17 @@ export async function renderView(main, id) {
 /**
  * `opts`:
  *   { mode: "saved", view, session, catalog, fleetRes }                          — an ordinary saved notebook.
- *   { mode: "alert", definition, alert, status, notes, canEdit, provenance, onOpenLive } — #4222's read-only
- *     alert-notebook render: an IN-MEMORY definition bound to one firing (no saved `view` row, no /api/fleet
- *     read — the server is fixed — and no scope bar, since there is nothing to re-scope). `provenance` is the
- *     description string "Save as notebook" writes; `onOpenLive` is called (with no args) when the viewer clicks
- *     "Open live", and is this function's caller's job to turn into dropping the read cells' `as_of` and
- *     re-rendering — see triage.js.
+ *   { mode: "alert", definition, alert, status, notes, canEdit, provenance, isLive, onOpenLive } — #4222's
+ *     read-only alert-notebook render: an IN-MEMORY definition bound to one firing (no saved `view` row, no
+ *     /api/fleet read — the server is fixed — and no scope bar, since there is nothing to re-scope).
+ *     `provenance` is the description string "Save as notebook" writes; `onOpenLive` is called (with no args)
+ *     when the viewer clicks "Open live", and is this function's caller's job to turn into dropping the read
+ *     cells' `as_of` and re-rendering — see triage.js. `isLive` (#4368) is an optional `() => boolean` the
+ *     caller supplies to say whether its route is still the one on screen; each alert-mode read cell checks it
+ *     right before mounting its settled result, so a result that lands after a route change is dropped instead
+ *     of painted into a holder no longer attached to the visible document — the fetch and the limiter's
+ *     release still run either way. Omitted (saved mode, or an alert-mode caller that doesn't pass it) means
+ *     "always live", i.e. today's behaviour.
  * Saved-view behaviour (mode:"saved") is UNCHANGED by this refactor: same scope bar, same Export/Edit/Delete,
  * same panel-cell rendering. The alert mode is read-only: no scope bar (nothing to re-scope: read cells carry
  * their own `as_of`/`hours`; there are no composed cells yet), no Export/Edit/Delete, and a header/status cell
@@ -630,9 +635,21 @@ function renderAlertCell(cell, index, readSet, opts, limiter) {
     const holder = el("div", { class: "notebook-panel" }, [loadingStrip()]);
     /* Cells load top to bottom: acquiring a slot is async, so a later cell's slot request cannot resolve before
        an earlier one queued first (the limiter's queue is FIFO) — renderPanel itself is only called once the
-       slot is granted, at which point it starts the fetch and returns synchronously. */
+       slot is granted, at which point it starts the fetch and returns synchronously.
+       #4368: `opts.isLive` — set by triage.js to a `location.hash === ourHash` check, the same route-change
+       guard renderView already uses for its own await gap — is checked before mounting the settled result.
+       A route change after the slot was granted still lets the fetch finish and the limiter release (so the
+       NEXT page's own reads aren't starved by a request this page no longer owns); it only stops the result
+       from painting into a holder that is no longer attached to the visible document. */
     limiter.acquire().then(() => {
-      mount(holder, renderPanel(cell, () => limiter.release()));
+      /* A route change (a fresh #/triage link, or navigating off the page entirely) between queueing and the
+         slot opening: this cell's holder is no longer attached to the visible document, and its own reads
+         are for a firing nobody is looking at any more. renderPanel still runs and its own onSettled still
+         releases the limiter's slot below — the fetch and release always happen, so a superseded batch never
+         starves the page that replaced it — only the RESULT is dropped instead of painted into a dead node. */
+      const stillLive = !opts.isLive || opts.isLive();
+      const rendered = renderPanel(cell, () => limiter.release());
+      if (stillLive) mount(holder, rendered);
     });
     return holder;
   }
@@ -652,11 +669,22 @@ function renderAlertHeaderCell(cell, opts) {
     if (a.involved_objects) rows.push(["Involved objects", a.involved_objects]);
     if (a.database) rows.push(["Database", a.database]);
     if (typeof a.total_occurrences === "number") rows.push(["Total occurrences", String(a.total_occurrences)]);
+    /* current_value/threshold_value (#4368): same fmtNum(_, 1) triage.js's alertFields uses for the matched
+       alert card, so the two pages format the same fields the same way. Omitted only when BOTH are absent —
+       fmtNum already renders a lone missing side as "\u2014" rather than dropping the whole line. */
+    if (typeof a.current_value === "number" || typeof a.threshold_value === "number") {
+      rows.push(["Value vs threshold", "current " + fmtNum(a.current_value, 1) + " vs threshold " + fmtNum(a.threshold_value, 1)]);
+    }
   }
   const body = a
-    ? el("div", { class: "detail-fields" }, rows.map(([k, v]) =>
-        el("div", { class: "detail-field" }, [el("span", { class: "fk", text: k }), el("span", { class: "fv", text: v })])
-      ))
+    ? [
+        el("div", { class: "detail-fields" }, rows.map(([k, v]) =>
+          el("div", { class: "detail-field" }, [el("span", { class: "fk", text: k }), el("span", { class: "fv", text: v })])
+        )),
+        /* detail_text (#4368): the same <pre class="code"> block triage.js's alertFields uses — through el()'s
+           text path (textContent), never innerHTML, since this is alert/query text the server only echoes. */
+        a.detail_text ? el("pre", { class: "code", text: a.detail_text }) : null,
+      ]
     : emptyStrip("No matching alert history row for this link.");
   return el("div", { class: "notebook-panel panel card" }, [
     el("h3", {}, [cell.title || "Alert"]),

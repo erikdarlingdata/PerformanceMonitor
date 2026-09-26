@@ -106,16 +106,25 @@ function sectionCard(section) {
    route works whichever endpoint is live. Status refresh on the 60s poll is OUT of scope here: it needs the poll
    guard #4222(d) adds to app.js's refresh(), which is not in this slice. */
 async function renderAlertNotebook(main, box, server, metric, at, dedup) {
+  /* #4368: the same route-change guard renderView (views.js) already uses for its own await gap — captured
+     BEFORE the first await, so a hashchange between now and any later check is visible. Threaded into
+     renderNotebookDoc as `opts.isLive` so its alert-mode read cells can drop a result that lands after the
+     viewer has navigated off #/triage, without cancelling the fetch or starving the limiter's next slot. */
+  const ourHash = location.hash;
+  const isLive = () => location.hash === ourHash;
   const res = await apiGet("/api/alert-notebook" + buildQuery({ server, metric, at, dedup }));
   if (res.kind === "error" && res.status === 404) return false; // not on this build — caller falls back
   if (res.kind === "error") {
     mount(box, errorStrip(res.message));
     return true;
   }
+  if (!isLive()) return true; // navigated away during the fetch above — nothing left to mount into.
+
   const t = res.data || {};
   const notes = Array.isArray(t.notes) ? t.notes : [];
   const [session, catalog] = await Promise.all([getSession(), getCatalog()]);
   const canEdit = !!session.can_edit;
+  if (!isLive()) return true; // ditto, across the session/catalog await gap.
 
   let def = t.definition || { kind: "notebook", cells: [] };
   const provenance =
@@ -151,6 +160,7 @@ async function renderAlertNotebook(main, box, server, metric, at, dedup) {
       canEdit,
       catalog,
       provenance,
+      isLive,
       onOpenLive: () => { def = stripAsOf(def); paint(); },
     });
   }
