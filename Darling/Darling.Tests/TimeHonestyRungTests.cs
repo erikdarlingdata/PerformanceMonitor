@@ -442,16 +442,18 @@ public sealed class TimeHonestyRungTests
             DarlingCollectorRunner.BuildServerWatermarkPairSql(CpuTable, "sample_time", CpuColumn, bounded: true));
 
         var runner = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs").Replace("\r\n", "\n", StringComparison.Ordinal);
+        /* #4197 part b moved this block one level deeper, into ResolveServerWatermarkAsync's own try, so
+           the indentation grew by one level (4 spaces) versus its old home inline in RunCoreAsync. */
         Assert.Contains(
-            "            else if (definition.UtcWatermarkColumn is null)\n" +
-            "            {\n" +
-            "                watermark = await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);\n" +
-            "            }",
+            "                else if (definition.UtcWatermarkColumn is null)\n" +
+            "                {\n" +
+            "                    watermark = await GetLastCollectedTimeAsync(server.ServerId, definition.TargetTable, definition.WatermarkColumn, cancellationToken, serverReadFloor);\n" +
+            "                }",
             runner, StringComparison.Ordinal);
         Assert.Contains(
-            "                (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(\n" +
-            "                    server.ServerId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn,\n" +
-            "                    cancellationToken, serverReadFloor);",
+            "                    (watermark, watermarkFromUtcColumn) = await GetLastCollectedTimeWithFrameAsync(\n" +
+            "                        server.ServerId, definition.TargetTable, definition.WatermarkColumn, definition.UtcWatermarkColumn,\n" +
+            "                        cancellationToken, serverReadFloor);",
             runner, StringComparison.Ordinal);
         Assert.Contains("            WatermarkFromUtcColumn = watermarkFromUtcColumn,", runner, StringComparison.Ordinal);
 

@@ -1255,54 +1255,138 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
-    /// WATCHED (mutation, #4186): a stitched slot (a coverage relation with a frozen legacy, found through
-    /// <c>LegacyOf</c>) must probe raw for a seam row before it falls back to the legacy's floor — an
-    /// UNCONDITIONAL stitch is the #4186 data-loss defect: a raw tail between the legacy's last bucket and
-    /// the successor's floor, never materialized by either side, read Covered and the purge dropped it. A
-    /// non-stitched slot (no <c>LegacyOf</c> match) must stay the plain <c>min(bucket)</c> form untouched.
+    /// WATCHED (mutation, #4186 then #4301): a stitched slot (a coverage relation with a frozen legacy,
+    /// found through <c>LegacyOf</c>) must probe raw BUCKET-LEVEL, over the legacy's own interior AND the
+    /// seam, before it falls back to the legacy's floor — an UNCONDITIONAL stitch is the #4186 data-loss
+    /// defect: a raw tail between the legacy's last bucket and the successor's floor, never materialized by
+    /// either side, read Covered and the purge dropped it. #4301 replaced the #4186 row-level seam-only probe
+    /// with the shared <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/> hole definition, bounded
+    /// on the successor's first bucket ABOVE the legacy's last (not <c>s.mn</c>, which an interior repair can
+    /// move below the seam). A non-stitched slot (no <c>LegacyOf</c> match) must stay the plain
+    /// <c>min(bucket)</c> form untouched.
     /// </summary>
     [Fact]
-    public void RetentionArmSafetySql_StitchedSlot_ProbesSeamBeforeFallingBackToLegacyFloor()
+    public void RetentionArmSafetySql_StitchedSlot_ProbesLegacySuccessorHoleBeforeFallingBackToLegacyFloor()
     {
         var sql = TimescaleSupport.RetentionArmSafetySql(
             "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsIntervalHourlyView });
 
-        /* The seam probe: raw, bounded between the legacy's last bucket (+1h, so the legacy's own last
-           bucket is not re-counted) and the successor's floor (or infinity when it is empty). */
-        Assert.Contains("EXISTS (", sql, StringComparison.Ordinal);
-        Assert.Contains("FROM collect.query_stats AS seam", sql, StringComparison.Ordinal);
-        Assert.Contains("l.mx + INTERVAL '1 hour'", sql, StringComparison.Ordinal);
-        Assert.Contains("COALESCE(s.mn, 'infinity'::timestamp)", sql, StringComparison.Ordinal);
+        /* The shared hole definition: generate_series fenced with OFFSET 0, over raw/legacy/successor,
+           bounded on the successor's first bucket ABOVE l.mx — never s.mn, which an interior repair moves
+           down and would otherwise let the probe miss the seam once such a repair has run. */
+        Assert.Contains("generate_series(", sql, StringComparison.Ordinal);
+        Assert.Contains("sa.bucket > l.mx", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(s.mn, 'infinity'", sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsHourlyView} AS hl", sql, StringComparison.Ordinal);
+        Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView} AS hs", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.query_stats AS hr", sql, StringComparison.Ordinal);
 
-        /* The filter must appear TWICE: once for source_oldest (every relation with a filter gets that
-           already) and once more inside the seam probe itself — a seam probe with no filter would let a
-           post-restart interval-0 row hold the gate open forever, exactly like source_oldest without it. */
+        /* l.mx IS NULL -> today's plain LEAST, unconditionally, for a legacy that never materialized. */
+        Assert.Contains("WHEN l.mx IS NULL THEN LEAST(l.mn, s.mn)", sql, StringComparison.Ordinal);
+
+        /* The filter must appear at least TWICE: once for source_oldest and once more inside the hole
+           probe's raw-row EXISTS — a probe with no filter would let a post-restart interval-0 row read as
+           a hole that can never repair, holding the gate open forever. */
         var filterOccurrences = sql.Split(new[] { TimescaleSupport.IntervalHonestSourceFilter }, StringSplitOptions.None).Length - 1;
         Assert.True(filterOccurrences >= 2,
-            $"expected the seam probe to carry its own {nameof(TimescaleSupport.IntervalHonestSourceFilter)} in addition to source_oldest's, found {filterOccurrences} occurrence(s) in: {sql}");
+            $"expected the hole probe to carry its own {nameof(TimescaleSupport.IntervalHonestSourceFilter)} in addition to source_oldest's, found {filterOccurrences} occurrence(s) in: {sql}");
 
-        /* Seam empty -> the stitched floor. PostgreSQL's LEAST already ignores NULLs, so the old
+        /* No hole found -> the stitched floor. PostgreSQL's LEAST already ignores NULLs, so the old
            COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn) wrapper was redundant; it must not come back. */
         Assert.Contains("LEAST(l.mn, s.mn)", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("COALESCE(LEAST(", sql, StringComparison.Ordinal);
 
-        /* Seam NOT empty -> the successor's own floor alone, never the legacy's — the legacy cannot vouch
-           for raw history it never covered. */
-        Assert.Contains("THEN s.mn", sql, StringComparison.Ordinal);
+        /* A detectable hole -> NULL, which MeasureRetentionCoverageAsync reads as Short — never s.mn, which
+           an interior repair can move below the seam and read back Covered. */
+        Assert.Contains("THEN NULL", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("THEN s.mn", sql, StringComparison.Ordinal);
 
         Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsHourlyView}", sql, StringComparison.Ordinal);
         Assert.Contains($"FROM collect.{TimescaleSupport.QueryStatsIntervalHourlyView}", sql, StringComparison.Ordinal);
 
         /* A non-stitched slot (query_store_stats' two consumers have no LegacyOf match) stays the plain
-           form — none of the seam machinery leaks into a slot that never needed it. */
+           form — none of the hole-probe machinery leaks into a slot that never needed it. */
         var plainSql = TimescaleSupport.RetentionArmSafetySql(
             "query_store_stats", "collection_time",
             new[] { TimescaleSupport.QueryStoreStatsHourlyView, TimescaleSupport.QueryStoreStatsIntervalHourlyView });
 
+        Assert.DoesNotContain("generate_series(", plainSql, StringComparison.Ordinal);
         Assert.DoesNotContain("EXISTS (", plainSql, StringComparison.Ordinal);
-        Assert.DoesNotContain("seam", plainSql, StringComparison.Ordinal);
         Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsHourlyView}) AS coverage_oldest_0", plainSql, StringComparison.Ordinal);
         Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsIntervalHourlyView}) AS coverage_oldest_1", plainSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// PIN (#4300): when the stitched slot's fallback fires (no successor bucket above the legacy's last),
+    /// the probe's upper bound must be <c>now() - HourlyRefreshStartOffset</c>, not a bare <c>now()</c>.
+    /// A bare <c>now()</c> lets a healthy, upgrading store with an EMPTY successor read every hour back
+    /// to the legacy's freeze as unprobed and therefore Short, RE-HOLDING the raw purge for rows the
+    /// successor's own first refresh will reach within <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>
+    /// anyway. RED on dev: the fallback ends at a bare <c>time_bucket(INTERVAL '1 hour', now()::timestamp))</c>
+    /// with no offset subtraction.
+    /// </summary>
+    [Fact]
+    public void RetentionArmSafetySql_StitchedSlot_FallbackUpperBoundUsesHourlyRefreshStartOffset()
+    {
+        var sql = TimescaleSupport.RetentionArmSafetySql(
+            "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsIntervalHourlyView });
+
+        Assert.Contains(
+            $"time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '{TimescaleSupport.HourlyRefreshStartOffset}')",
+            sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("time_bucket(INTERVAL '1 hour', now()::timestamp))", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// PIN (#4301, RED on <c>e970834ba</c> and earlier): the generated coverage SQL for a stitched slot
+    /// carries the shared hole definition's <c>generate_series</c> AND its bound on the successor's first
+    /// bucket above the legacy's last (<c>sa.bucket &gt; l.mx</c>), and no longer carries the old row-level
+    /// seam-only probe (<c>COALESCE(s.mn, 'infinity'</c>). The old text existed only through <c>e970834ba</c>;
+    /// on that commit this pin fails the <c>generate_series</c>/<c>sa.bucket &gt; l.mx</c> assertions because
+    /// the old branch has neither — it reads <c>s.mn</c> unconditionally on any seam row instead.
+    /// </summary>
+    [Fact]
+    public void RetentionArmSafetySql_QueryStatsIntervalHourlyCoverage_UsesSharedHoleDefinition()
+    {
+        var sql = TimescaleSupport.RetentionArmSafetySql(
+            "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsIntervalHourlyView });
+
+        Assert.Contains("generate_series(", sql, StringComparison.Ordinal);
+        Assert.Contains("sa.bucket > l.mx", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(s.mn, 'infinity'", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// PIN (#4301, filter parity — RED before the fix, because the gate passed the bare
+    /// <see cref="TimescaleSupport.IntervalHonestSourceFilter"/> constant to every stitched slot's hole probe
+    /// regardless of the successor's own CREATE). The gate's hole probe
+    /// (<see cref="TimescaleSupport.RetentionArmSafetySql"/>, via
+    /// <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/>) must carry the SAME source filter the repair
+    /// walk reads off the successor's own CREATE (<see cref="TimescaleSupport.MaterializationHoleSourceFilterFor"/>)
+    /// for every <see cref="TimescaleSupport.SupersededHourlyRollups"/> successor — the gate and the walk
+    /// disagreeing about which raw rows count would let the gate call a bucket Short (or Covered) that the walk
+    /// judges by different rules, breaking the "never disagree about what a hole is" invariant
+    /// <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/>'s own doc states. Exercises the ACTUAL
+    /// generated SQL rather than comparing two constants, so a regression that restores the bare constant fails
+    /// this pin even when <see cref="TimescaleSupport.IntervalHonestSourceFilter"/> itself is untouched — the
+    /// case that matters for <see cref="TimescaleSupport.QueryStatsDbIntervalHourlyView"/>, whose own filter
+    /// (<c>delta_worker_time IS NOT NULL AND sample_interval_seconds IS DISTINCT FROM 0</c>) is strictly wider
+    /// than the bare constant.
+    /// </summary>
+    [Fact]
+    public void LegacySuccessorHoleProbe_UsesSameFilterAsTheRepairWalk_ForEverySupersededSuccessor()
+    {
+        foreach (var (_, successor, _) in TimescaleSupport.SupersededHourlyRollups)
+        {
+            var successorCreateSql = TimescaleSupport.HourlyAggregates.Single(a => a.View == successor).CreateSql;
+            var walkFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(successorCreateSql);
+            Assert.False(string.IsNullOrEmpty(walkFilter), $"{successor}'s CREATE has no WHERE for the walk to read a filter from.");
+
+            var coverageEntry = TimescaleSupport.RawTierCoverage.Single(t => t.Coverage.Contains(successor));
+            var sql = TimescaleSupport.RetentionArmSafetySql(coverageEntry.Relation, coverageEntry.TimeColumn, new[] { successor });
+
+            Assert.Contains(walkFilter, sql, StringComparison.Ordinal);
+        }
     }
 
     /// <summary>

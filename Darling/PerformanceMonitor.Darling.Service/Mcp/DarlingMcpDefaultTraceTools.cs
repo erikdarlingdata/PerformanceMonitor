@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -43,9 +44,10 @@ public sealed class DarlingMcpDefaultTraceTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to retrieve. Default 24.")] int hours_back = 24,
         [Description("Maximum number of events to return. Default 100.")] int limit = 100,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd) ?? McpHelpers.ValidateTop(limit);
@@ -55,7 +57,7 @@ public sealed class DarlingMcpDefaultTraceTools
         {
             var now = windowEnd;
             var all = await DarlingDefaultTraceReader.ReadEventsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
             /* The significant-set gate (shared with the viewer's System Events surface): every curated
                category is significant as collected, except ErrorLog which must clear the severity floor. */
@@ -64,7 +66,7 @@ public sealed class DarlingMcpDefaultTraceTools
                 .ToList();
 
             if (significant.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "default_trace_events", cancellationToken)
                     ?? McpHelpers.Status("empty", "No significant default trace events found in the requested time range.");
 
             var events = significant.Take(limit).Select(r =>
@@ -104,7 +106,7 @@ public sealed class DarlingMcpDefaultTraceTools
                 events
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_default_trace_events", ex);
         }

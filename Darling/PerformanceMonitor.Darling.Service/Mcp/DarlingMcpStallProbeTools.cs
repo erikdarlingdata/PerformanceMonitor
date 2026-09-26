@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -50,7 +51,8 @@ public sealed class DarlingMcpStallProbeTools
         NpgsqlDataSource postgres,
         [Description("Optional: server name or display name. Omit for the whole fleet.")] string? server_name = null,
         [Description("Days of history. Default 7; max 60 (the samples' own retention).")] int days_back = 7,
-        [Description("Maximum sample rows to return. Default 50.")] int limit = DefaultLimit)
+        [Description("Maximum sample rows to return. Default 50.")] int limit = DefaultLimit,
+        CancellationToken cancellationToken = default)
     {
         /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
            tool's (the samples' own retention). */
@@ -71,7 +73,7 @@ public sealed class DarlingMcpStallProbeTools
 
         if (!string.IsNullOrWhiteSpace(server_name))
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null)
             {
                 return error;
@@ -87,7 +89,7 @@ public sealed class DarlingMcpStallProbeTools
 
             /* The census FIRST, because it is what makes an empty answer honest — get_pg_blocking's
                ordering, for its reason. */
-            var census = await DarlingStallProbeReader.GetOutcomeCensusAsync(postgres, since, serverId);
+            var census = await DarlingStallProbeReader.GetOutcomeCensusAsync(postgres, since, serverId, cancellationToken);
 
             if (census.Count == 0)
             {
@@ -103,7 +105,7 @@ public sealed class DarlingMcpStallProbeTools
                     + "service build that carries the probe.");
             }
 
-            var probes = await DarlingStallProbeReader.GetProbesAsync(postgres, since, serverId, limit);
+            var probes = await DarlingStallProbeReader.GetProbesAsync(postgres, since, serverId, limit, cancellationToken);
 
             return JsonSerializer.Serialize(
                 new
@@ -156,7 +158,7 @@ public sealed class DarlingMcpStallProbeTools
                 },
                 McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_collector_stall_probes", ex);
         }

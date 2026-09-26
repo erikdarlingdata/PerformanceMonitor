@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -76,7 +77,8 @@ public sealed class DarlingMcpStoreMetricsTools
         [Description("Days of history the window deltas and series cover. Default 30; max 400 (the series' own retention).")] int days_back = 30,
         [Description("List every object of this kind instead of the summary: hypertable, continuous_aggregate, dimension, table, other, system or background_job.")] string? object_kind = null,
         [Description("An exact object name returns that object's daily series; otherwise the objects whose names contain it are listed.")] string? object_name = null,
-        [Description("Rows per list. Default 10, max 1000.")] int limit = DefaultLimit)
+        [Description("Rows per list. Default 10, max 1000.")] int limit = DefaultLimit,
+        CancellationToken cancellationToken = default)
     {
         /* #3653: the shared day-grained refusal, in ValidateHoursBack's sentence; the ceiling stays this
            tool's (the daily series' own retention). */
@@ -108,7 +110,7 @@ public sealed class DarlingMcpStoreMetricsTools
 
         try
         {
-            var latest = await DarlingStoreMetricsReader.GetLatestAsync(postgres);
+            var latest = await DarlingStoreMetricsReader.GetLatestAsync(postgres, cancellationToken);
             if (latest.Count == 0)
             {
                 return McpHelpers.Status(
@@ -128,7 +130,7 @@ public sealed class DarlingMcpStoreMetricsTools
             }
 
             var daily = await DarlingStoreMetricsReader.GetDailyAsync(
-                postgres, DateTime.UtcNow.AddDays(-days_back));
+                postgres, DateTime.UtcNow.AddDays(-days_back), cancellationToken);
 
             var storeDaily = daily
                 .Where(p => p.ObjectKind == StoreSelfMetrics.StoreObjectKind)
@@ -152,9 +154,9 @@ public sealed class DarlingMcpStoreMetricsTools
                which is cheap but is not free, and saying so is the point — a comment that overstates what
                the code does is worse than none. */
             List<RetentionHoldReading> holds;
-            await using (var connection = await postgres.OpenConnectionAsync())
+            await using (var connection = await postgres.OpenConnectionAsync(cancellationToken))
             {
-                holds = (await TimescaleSupport.ReadRetentionHoldReadingsAsync(connection, logger: null))
+                holds = (await TimescaleSupport.ReadRetentionHoldReadingsAsync(connection, logger: null, cancellationToken))
                     .ToList();
             }
 
@@ -177,8 +179,8 @@ public sealed class DarlingMcpStoreMetricsTools
                evaluate the predicate for itself rather than count and assume. A second statement rather than
                a column on the first: the two fail independently, and a count that timed out must not make
                the GUC read unknown. */
-            var jobLogging = await DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(postgres);
-            var jobEvidence = await DarlingStoreMetricsReader.GetJobHistoryEvidenceAsync(postgres, jobLogging);
+            var jobLogging = await DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(postgres, cancellationToken);
+            var jobEvidence = await DarlingStoreMetricsReader.GetJobHistoryEvidenceAsync(postgres, jobLogging, cancellationToken);
 
             /* #3574, the managed-mode half: the OWNER's reading, decoded from the row the hourly sweep
                persisted. Pure over rows already in hand — no fourth read — and dated, so the note can say
@@ -194,7 +196,7 @@ public sealed class DarlingMcpStoreMetricsTools
                read (the latest read takes one row per object and a difference needs two), not failure-isolated
                inside the reader: this is a primary block, and a throw here is a tool error the outer catch
                envelopes rather than a plausible 'Absent' dressed as a reading. */
-            var checkpointer = await DarlingStoreMetricsReader.GetCheckpointerAsync(postgres);
+            var checkpointer = await DarlingStoreMetricsReader.GetCheckpointerAsync(postgres, cancellationToken);
 
             /* #3582: two more LIVE catalog reads, both failure-isolated to null (never to an empty list,
                which would read as "no aggregates" / "nothing un-enumerated" and drop a section without a
@@ -203,8 +205,8 @@ public sealed class DarlingMcpStoreMetricsTools
                other row's byte count actionable: a growth investigation reads the table's name here
                instead of running the pg_class census by hand. Both skip the TimescaleDB catalogs where the
                GUC probe established they do not exist for this database. */
-            var aggregateStates = await DarlingStoreMetricsReader.GetContinuousAggregateStatesAsync(postgres, jobLogging);
-            var largestUnenumerated = await DarlingStoreMetricsReader.GetLargestUnenumeratedAsync(postgres, jobLogging);
+            var aggregateStates = await DarlingStoreMetricsReader.GetContinuousAggregateStatesAsync(postgres, jobLogging, cancellationToken);
+            var largestUnenumerated = await DarlingStoreMetricsReader.GetLargestUnenumeratedAsync(postgres, jobLogging, cancellationToken);
             var aggregateStateByView = (aggregateStates ?? Array.Empty<DarlingStoreMetricsReader.ContinuousAggregateState>())
                 .GroupBy(s => s.ViewName, StringComparer.Ordinal)
                 .ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
@@ -449,7 +451,7 @@ public sealed class DarlingMcpStoreMetricsTools
                 note = ViewNote(view, kind, name, ranked.Count, page.Count, truncated, limit, series?.Count),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_store_metrics", ex);
         }

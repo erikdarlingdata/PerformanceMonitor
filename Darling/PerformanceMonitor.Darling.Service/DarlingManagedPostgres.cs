@@ -3713,11 +3713,15 @@ public sealed class DarlingManagedPostgres
     internal static readonly AsyncLocal<Func<string, string>?> TestOnlyRenderOverride = new();
 
     /// <summary>
-    /// Renders and, unless the file on disk is a hand edit (<see cref="ManagedConfFile.IsHandEdited"/>) or the
-    /// render is already byte-identical to it, replaces <c>darling-managed.conf</c>. Always
-    /// ensures the <c>include</c> line is present in <c>postgresql.conf</c> — there is no opt-out —
-    /// whichever branch it takes. Never throws: an I/O failure is reported in the result and the file already
-    /// in force stays in force, exactly like a failed <see cref="EnsureConfAppended"/> append would today.
+    /// Renders and, unless the file on disk is a hand edit (<see cref="ManagedConfFile.IsHandEdited"/>) or its
+    /// BODY already matches the fresh render's body, replaces <c>darling-managed.conf</c> (<see
+    /// cref="ManagedConfFile.ShouldReplaceManagedConf"/> — #4215's flake fix: a header-only difference, such as
+    /// <c>data-volume-free-gib</c> crossing a rounding boundary between two starts with nothing else changed,
+    /// never triggers a rewrite, since the header describes the inputs as of the last body change and a
+    /// display field can legitimately lag). Always ensures the <c>include</c> line is present in
+    /// <c>postgresql.conf</c> — there is no opt-out — whichever branch it takes. Never throws: an I/O failure is
+    /// reported in the result and the file already in force stays in force, exactly like a failed <see
+    /// cref="EnsureConfAppended"/> append would today.
     /// </summary>
     [SupportedOSPlatform("windows")]
     internal ManagedConfWriteResult WriteManagedConfFile(string dataDirectory, int postgresMajor)
@@ -3760,7 +3764,7 @@ public sealed class DarlingManagedPostgres
             return new ManagedConfWriteResult(Written: false, HandEdited: true, WriteFailed: false, rendered, diffs);
         }
 
-        if (string.Equals(existingText, rendered, StringComparison.Ordinal))
+        if (!ManagedConfFile.ShouldReplaceManagedConf(existingText, rendered))
         {
             EnsureManagedIncludeLine(dataDirectory);
             return new ManagedConfWriteResult(Written: false, HandEdited: false, WriteFailed: false, rendered, []);

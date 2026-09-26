@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -45,7 +46,8 @@ public sealed class DarlingMcpStoreLogTools
         NpgsqlDataSource postgres,
         [Description("Hours of history. Default 24; max 168.")] int hours_back = 24,
         [Description("Maximum retained-message rows to return. Default 50.")] int limit = DefaultRetainedLimit,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
         if (validation != null)
@@ -66,7 +68,7 @@ public sealed class DarlingMcpStoreLogTools
             /* The denominator FIRST, because it is what makes an empty answer honest — the get_pg_blocking
                ordering, for its reason. */
             var captures = await DarlingStoreLogReader.GetCaptureSummaryAsync(
-                postgres, windowStart, windowEnd, hours_back);
+                postgres, windowStart, windowEnd, hours_back, cancellationToken);
 
             if (captures.Captures == 0)
             {
@@ -88,9 +90,9 @@ public sealed class DarlingMcpStoreLogTools
                     + "The service log carries a warning naming whichever it was.");
             }
 
-            var classes = await DarlingStoreLogReader.GetClassCensusAsync(postgres, windowStart, windowEnd);
+            var classes = await DarlingStoreLogReader.GetClassCensusAsync(postgres, windowStart, windowEnd, cancellationToken);
             var retained = await DarlingStoreLogReader.GetRetainedEventsAsync(
-                postgres, windowStart, windowEnd, limit);
+                postgres, windowStart, windowEnd, limit, cancellationToken);
 
             var report = new DarlingStoreLogReader.StoreLogReport
             {
@@ -104,7 +106,7 @@ public sealed class DarlingMcpStoreLogTools
 
             return JsonSerializer.Serialize(report, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_store_log", ex);
         }
