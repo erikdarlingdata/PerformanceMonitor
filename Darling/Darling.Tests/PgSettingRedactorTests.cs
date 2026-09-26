@@ -384,22 +384,56 @@ public sealed class PgSettingRedactorTests
     }
 
     /// <summary>
-    /// #4348: the anchor added to <c>AssignmentSecretName</c>'s name part must not change any existing
-    /// corpus case's output. Captured before the anchor, from dev, as a standalone hard-coded expectation
-    /// list independent of <see cref="RedactionCases"/> — a regression in that anchor would show up here
-    /// even if a future edit also touched the corpus above.
+    /// #4348: a frozen list of inputs whose expected output is hard-coded from dev's redactor (pre-lookahead),
+    /// captured independently of <see cref="RedactionCases"/> above. Its job is narrower than that member's:
+    /// it pins that the linear-pre-check change added to <c>AssignmentSecretName</c>, <c>OptionSecretSpaced</c>
+    /// and <c>QuotedSpacedAssignment</c> (#4348) changed no match, only how the engine gets there. A
+    /// regression there would show up here even if a future edit also touched the corpus above.
     /// </summary>
-    [Fact]
-    public void AnchoringAssignmentSecretName_DoesNotChangeExistingCorpus()
+    [Theory]
+    [InlineData("archive_command", "xpassword=s", "xpassword=********")]
+    [InlineData("archive_command", "a.password=s", "a.password=********")]
+    [InlineData("archive_command", "my-token=s", "my-token=********")]
+    [InlineData("archive_command", "env PGPASSWORD=s cmd", "env PGPASSWORD=******** cmd")]
+    [InlineData("archive_command", "--db.password=s", "--db.password=********")]
+    [InlineData("archive_command", "-Dpassword=s", "-Dpassword=********")]
+    [InlineData("archive_command", "foo.bar.PGPASSWORD=s", "foo.bar.PGPASSWORD=********")]
+    [InlineData("archive_command", "a;PGPASSWORD=s", "a;PGPASSWORD=********")]
+    [InlineData("archive_command", "sslkey=s", "sslkey=s")]
+    [InlineData("archive_command", "ab-KEY-cd=s", "ab-KEY-cd=********")]
+    [InlineData("archive_command", "abc--password=s", "abc--password=********")]
+    [InlineData("archive_command", "password = \"hunter2\"", "password=********")]
+    [InlineData("archive_command", "postgresql://u:p@h/db", "postgresql://u:********@h/db")]
+    [InlineData("archive_command", "host=h password=p", "host=h password=********")]
+    [InlineData("archive_command", "https://h/?password=p&x=1", "https://h/?password=********")]
+    [InlineData("archive_command", "sshpass -p p ssh h", "sshpass -p ******** ssh h")]
+    [InlineData("archive_command", "curl -u a:b", "curl -u a:********")]
+    [InlineData("password_encryption", "password_encryption", "password_encryption")]
+    [InlineData("archive_command", "host=localhost port=5432 dbname=mydb", "host=localhost port=5432 dbname=mydb")]
+    [InlineData("archive_command", "application_name=myapp", "application_name=myapp")]
+    [InlineData("archive_command", "sslmode=verify-full", "sslmode=verify-full")]
+    [InlineData("archive_command", "passfile=/x/.pgpass", "passfile=********")]
+    [InlineData("archive_command", "keep_alive=on", "keep_alive=on")]
+    [InlineData("archive_command", "monkey=1", "monkey=1")]
+    [InlineData("archive_command", "user=alice dbname=x", "user=alice dbname=x")]
+    [InlineData("archive_command", "connect_timeout=10", "connect_timeout=10")]
+    [InlineData("archive_command", "statement_timeout=5000", "statement_timeout=5000")]
+    [InlineData("archive_command", "search_path=public", "search_path=public")]
+    [InlineData("archive_command", "log_min_duration_statement=250", "log_min_duration_statement=250")]
+    [InlineData("archive_command", "archive_command=/bin/true", "archive_command=/bin/true")]
+    [InlineData("archive_command", "-Dpassword hunter2", "-Dpassword ********")]
+    [InlineData("archive_command", "--passphrase secret123", "--passphrase ********")]
+    [InlineData("archive_command", "openssl enc -pass pass:x", "openssl enc -pass ********")]
+    [InlineData("archive_command", "rds.accepted_password_auth_method", "rds.accepted_password_auth_method")]
+    [InlineData("vault.secret", "anything", "********")]
+    [InlineData("anon.salt", "seedvalue", "********")]
+    [InlineData("myext.api_key", "kv", "********")]
+    [InlineData("myext.keep_alive", "on", "on")]
+    [InlineData("ssl_passphrase_command", "echo x", "********")]
+    [InlineData("archive_command", "pg_password=abc", "pg_password=********")]
+    public void FrozenParityWithPreviousRedactor(string name, string value, string expectedFromDev)
     {
-        foreach (var caseData in RedactionCases())
-        {
-            var name = (string)caseData[0];
-            var value = (string)caseData[1];
-            var expected = (string)caseData[2];
-
-            Assert.Equal(expected, PgSettingRedactor.Redact(name, value));
-        }
+        Assert.Equal(expectedFromDev, PgSettingRedactor.Redact(name, value));
     }
 
     /// <summary>

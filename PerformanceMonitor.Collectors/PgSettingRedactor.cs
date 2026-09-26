@@ -175,9 +175,13 @@ public static class PgSettingRedactor
     /// libpq-style quoting as <see cref="LibpqPasswordKeyword"/>, plus double quotes, plus whatever
     /// non-whitespace immediately follows the closing quote, so a quoted value with an
     /// <c>=</c>, space, or trailing punctuation inside or after it is not mistaken for the start of the next
-    /// token.</summary>
+    /// token. The leading <c>(?=[\w.-]*=)</c> pre-check (#4348) is redundant with the <c>=</c> the pattern
+    /// already requires further on — it changes no match, only how the engine gets there. Without it, a
+    /// long run of name-class characters with no <c>=</c> anywhere makes the engine retry the whole
+    /// <c>[\w.-]*</c> body at every start position before failing, which is quadratic in the run's length; the
+    /// lookahead fails FAST, once, per start position instead.</summary>
     private static readonly TimeBoundPattern AssignmentSecretName = new(
-        @"(?<![\w.-])(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)=(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
+        @"(?<![\w.-])(?=[\w.-]*=)(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)=(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A space-separated option whose name contains PASS, SECRET, TOKEN, CREDENTIAL, PWD, or a
@@ -187,9 +191,12 @@ public static class PgSettingRedactor
     /// taking its value from the next whitespace-delimited token rather than an <c>=</c> (
     /// <c>--password hunter2</c> and <c>--secret-access-key hunter2</c> have no <c>=</c> at all, so
     /// <see cref="AssignmentSecretName"/> never fires on them). <c>(?!-)</c> keeps a value-less flag such as
-    /// <c>--no-password -h x</c> from swallowing the next option as its value.</summary>
+    /// <c>--no-password -h x</c> from swallowing the next option as its value. The leading
+    /// <c>(?=--?[\w.-]*\s)</c> pre-check (#4348) is redundant with the <c>\s+</c> the pattern already
+    /// requires after the option name — same fast-fail-per-start-position reasoning as
+    /// <see cref="AssignmentSecretName"/>'s pre-check.</summary>
     private static readonly TimeBoundPattern OptionSecretSpaced = new(
-        @"(?<=^|\s)(?<opt>--?[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)\s+(?!-)(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S+)",
+        @"(?<=^|\s)(?=--?[\w.-]*\s)(?<opt>--?[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)\s+(?!-)(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A percent-encoded key name in a URI
@@ -220,9 +227,11 @@ public static class PgSettingRedactor
     /// (<c>"password = hunter2"</c>, <c>'pwd = abc'</c> — the whole assignment sits inside one quote pair, so
     /// the value's end is <c>\k&lt;q&gt;</c>, not a quote of its own). Only the value half is masked; the
     /// quotes and the name are kept as they were. The value's own quote character does not have to match the
-    /// name's.</summary>
+    /// name's. The leading <c>(?=[\w.-]*["']?\s*=)</c> pre-check (#4348) mirrors the name-then-optional-quote
+    /// -then-<c>=</c> shape the pattern already requires further on — redundant by construction, same
+    /// fast-fail-per-start-position reasoning as <see cref="AssignmentSecretName"/>'s pre-check.</summary>
     private static readonly TimeBoundPattern QuotedSpacedAssignment = new(
-        @"(?<q>[""'])(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)(?<nameq>[""']?)\s*=\s*(?:(?<valq>[""'])(?<val>[^""']*)\k<valq>|(?<val>[^""']*)\k<q>)",
+        @"(?<q>[""'])(?=[\w.-]*[""']?\s*=)(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)(?<nameq>[""']?)\s*=\s*(?:(?<valq>[""'])(?<val>[^""']*)\k<valq>|(?<val>[^""']*)\k<q>)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary><c>curl -u user:secret</c> / <c>curl --user user:secret</c>, including the tightly-bound
