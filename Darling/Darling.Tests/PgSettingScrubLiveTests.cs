@@ -381,7 +381,6 @@ public sealed class PgSettingScrubLiveTests
         var ct = TestContext.Current.CancellationToken;
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
-        var bodySucceeded = false;
         try
         {
             PgSettingScrub.TestOnlyHourSliceCandidateThresholdOverride = 10;
@@ -404,13 +403,13 @@ public sealed class PgSettingScrubLiveTests
                     for (var row = 0; row < 5; row++)
                     {
                         var collectionTime = day.AddHours(hour).AddMinutes(row);
-                        await InsertRowAsync(setupConnection, serverId, collectionTime, $"custom.setting_{hour}_{row}", "password=x", databaseName: null, roleName: null, ct);
+                        await InsertRowAsync(setupConnection, serverId, collectionTime, $"custom.setting_{hour}_{row}", "password=hunter2", databaseName: null, roleName: null, ct);
                     }
                 }
 
                 await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_server_config') c", ct);
 
-                Assert.True(await ContainsSecretAsync(setupConnection, "x", ct), "seeding failed to plant the secret this test exists to catch");
+                Assert.True(await ContainsSecretAsync(setupConnection, "hunter2", ct), "seeding failed to plant the secret this test exists to catch");
             }
 
             await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
@@ -421,19 +420,16 @@ public sealed class PgSettingScrubLiveTests
 
             await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
             await verifyConnection.OpenAsync(ct);
-            Assert.False(await ContainsSecretAsync(verifyConnection, "x", ct), "a raw password survived the hour-sliced scrub");
+            Assert.False(await ContainsSecretAsync(verifyConnection, "hunter2", ct), "a raw password survived the hour-sliced scrub");
 
             var markerValue = await ScalarTextAsync(verifyConnection,
                 "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",
                 0, DateTime.MinValue, ct);
             Assert.Equal(PgSettingRedactor.RulesVersion.ToString(CultureInfo.InvariantCulture), markerValue);
-
-            bodySucceeded = true;
         }
         finally
         {
             PgSettingScrub.TestOnlyHourSliceCandidateThresholdOverride = null;
-            _ = bodySucceeded;
         }
     }
 
@@ -476,12 +472,12 @@ public sealed class PgSettingScrubLiveTests
                 for (var row = 0; row < 5; row++)
                 {
                     var collectionTime = day.AddHours(hour).AddMinutes(row);
-                    await InsertRowAsync(setupConnection, serverId, collectionTime, $"custom.setting_{hour}_{row}", "password=x", databaseName: null, roleName: null, ct);
+                    await InsertRowAsync(setupConnection, serverId, collectionTime, $"custom.setting_{hour}_{row}", "password=hunter2", databaseName: null, roleName: null, ct);
                 }
             }
 
             await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_server_config') c", ct);
-            Assert.True(await ContainsSecretAsync(setupConnection, "x", ct), "seeding failed to plant the secret this test exists to catch");
+            Assert.True(await ContainsSecretAsync(setupConnection, "hunter2", ct), "seeding failed to plant the secret this test exists to catch");
 
             var slicesCommitted = 0;
             PgSettingScrub.TestOnlyAfterSliceCommitted = () =>
@@ -499,11 +495,11 @@ public sealed class PgSettingScrubLiveTests
 
             // Hours 0..4 (5 slices, 25 rows) committed before the throw; hours 5..23 (95 rows) are still plaintext.
             var stillPlaintextCount = await ScalarLongAsync(setupConnection,
-                "SELECT count(*) FROM collect.pg_server_config WHERE server_id = $1 AND setting = 'password=x'", serverId, ct);
+                "SELECT count(*) FROM collect.pg_server_config WHERE server_id = $1 AND setting = 'password=hunter2'", serverId, ct);
             Assert.Equal(95, stillPlaintextCount);
 
             var redactedSoFarCount = await ScalarLongAsync(setupConnection,
-                "SELECT count(*) FROM collect.pg_server_config WHERE server_id = $1 AND setting <> 'password=x'", serverId, ct);
+                "SELECT count(*) FROM collect.pg_server_config WHERE server_id = $1 AND setting <> 'password=hunter2'", serverId, ct);
             Assert.Equal(25, redactedSoFarCount);
 
             var markerAfterInterruption = await ScalarTextAsync(setupConnection,
@@ -518,7 +514,7 @@ public sealed class PgSettingScrubLiveTests
             Assert.False(second.AlreadyDone);
             Assert.Equal(95, second.RowsUpdated);
 
-            Assert.False(await ContainsSecretAsync(setupConnection, "x", ct), "a raw password survived the resumed run");
+            Assert.False(await ContainsSecretAsync(setupConnection, "hunter2", ct), "a raw password survived the resumed run");
 
             var markerAfterResume = await ScalarTextAsync(setupConnection,
                 "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",
@@ -567,11 +563,11 @@ public sealed class PgSettingScrubLiveTests
             await ExecAsync(setupConnection, "SELECT create_hypertable('collect.pg_server_config', by_range('collection_time', INTERVAL '1 days'), if_not_exists => true)", ct);
             await ExecAsync(setupConnection, "ALTER TABLE collect.pg_server_config SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
 
-            await InsertRowAsync(setupConnection, slowServer, day, "primary_conninfo", "password=x", databaseName: null, roleName: null, ct);
-            await InsertRowAsync(setupConnection, fastServer, day, "primary_conninfo", "password=x", databaseName: null, roleName: null, ct);
+            await InsertRowAsync(setupConnection, slowServer, day, "primary_conninfo", "password=hunter2", databaseName: null, roleName: null, ct);
+            await InsertRowAsync(setupConnection, fastServer, day, "primary_conninfo", "password=hunter2", databaseName: null, roleName: null, ct);
 
             await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_server_config') c", ct);
-            Assert.True(await ContainsSecretAsync(setupConnection, "x", ct), "seeding failed to plant the secret this test exists to catch");
+            Assert.True(await ContainsSecretAsync(setupConnection, "hunter2", ct), "seeding failed to plant the secret this test exists to catch");
 
             PgSettingScrub.TestOnlyUpdateCommandTimeoutSecondsOverride = 1;
             PgSettingScrub.TestOnlyPreUpdateDelaySeconds = 3;
@@ -587,12 +583,12 @@ public sealed class PgSettingScrubLiveTests
             var slowValue = await ScalarTextAsync(setupConnection,
                 "SELECT setting FROM collect.pg_server_config WHERE server_id = $1 AND collection_time = $2 AND name = 'primary_conninfo'",
                 slowServer, day, ct);
-            Assert.Equal("password=x", slowValue);
+            Assert.Equal("password=hunter2", slowValue);
 
             var fastValue = await ScalarTextAsync(setupConnection,
                 "SELECT setting FROM collect.pg_server_config WHERE server_id = $1 AND collection_time = $2 AND name = 'primary_conninfo'",
                 fastServer, day, ct);
-            Assert.NotEqual("password=x", fastValue);
+            Assert.NotEqual("password=hunter2", fastValue);
 
             var markerValue = await ScalarTextAsync(setupConnection,
                 "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",

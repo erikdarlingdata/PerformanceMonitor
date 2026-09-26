@@ -164,7 +164,7 @@ public sealed class PgSettingRedactorTests
     [InlineData("restore_command",
         "password = S16 host=foo",
         "password=******** host=foo")]
-    // RulesVersion 2 (#4348): curl -u now masks the part after the colon; see the dedicated cases below.
+    // curl user:password in -u / --user: the password part is masked, the user name kept.
     [InlineData("restore_command",
         "curl -u admin:S22",
         "curl -u admin:********")]
@@ -181,7 +181,7 @@ public sealed class PgSettingRedactorTests
     [InlineData("unix_socket_directories", "passfile=/x/.pgpass", "passfile=********")]
     [InlineData("primary_conninfo", "host=a user=b", "host=a user=b")]
     [InlineData("primary_conninfo", "", "")]
-    // RulesVersion 2 (#4348): a percent-encoded key name in a URI query — %77 is 'w', so
+    // A percent-encoded key name in a URI query — %77 is 'w', so
     // pass%77ord decodes to "password". The key text itself stays encoded in the output; only the value
     // is masked. Untouched neighbour: an encoded key that does NOT decode to a password marker is left alone.
     [InlineData("primary_conninfo",
@@ -190,12 +190,16 @@ public sealed class PgSettingRedactorTests
     [InlineData("primary_conninfo",
         "postgresql://alice@host/db?us%65r=x",
         "postgresql://alice@host/db?us%65r=x")]
-    // RulesVersion 2: a double-quoted "password = x" assignment (quote before the name, spaces around '=').
+    // A double-quoted "password = x" assignment (quote before the name, spaces around '=').
     // Untouched neighbour: an adjacent unrelated quoted field stays as it is.
     [InlineData("custom.json_blob",
         "{\"password\" = \"hunter2\", \"host\" = \"foo\"}",
         "{\"password\" = \"********\", \"host\" = \"foo\"}")]
-    // RulesVersion 2: curl -u user:x and --user user:x mask the part after the colon, not the user name.
+    // A double-quoted, key-unquoted "password" = "x" mixed shape: name bare, value quoted.
+    [InlineData("custom.json_blob",
+        "password = \"hunter2\"",
+        "password = ********")]
+    // curl -u user:x and --user user:x mask the part after the colon, not the user name.
     [InlineData("archive_command",
         "curl -u admin:hunter2 https://x",
         "curl -u admin:******** https://x")]
@@ -206,11 +210,50 @@ public sealed class PgSettingRedactorTests
     [InlineData("archive_command",
         "curl -u admin https://x",
         "curl -u admin https://x")]
-    // RulesVersion 2: sshpass -p x.
+    // A quoted value with an embedded space is masked whole, not just up to the first space.
+    [InlineData("archive_command",
+        "curl -u \"admin:hunter 2\" https://x",
+        "curl -u admin:******** https://x")]
+    // Tightly-bound forms: -uuser:x, --user=user:x, --proxy-user, -U (case-sensitive), and untouched --USER.
+    [InlineData("archive_command",
+        "curl -uadmin:hunter2 https://x",
+        "curl -u admin:******** https://x")]
+    [InlineData("archive_command",
+        "curl --user=admin:hunter2 https://x",
+        "curl --user admin:******** https://x")]
+    [InlineData("archive_command",
+        "curl --proxy-user admin:hunter2 https://x",
+        "curl --proxy-user admin:******** https://x")]
+    [InlineData("archive_command",
+        "curl -U admin:hunter2 https://x",
+        "curl -U admin:******** https://x")]
+    [InlineData("archive_command",
+        "curl --USER admin:hunter2 https://x",
+        "curl --USER admin:hunter2 https://x")]
+    // sshpass -p x, including the tightly-bound -px and the path-prefixed /usr/bin/sshpass.
     [InlineData("archive_command",
         "sshpass -p hunter2 ssh user@host",
         "sshpass -p ******** ssh user@host")]
-    // RulesVersion 2: a SAS or pre-signed URL signature query parameter.
+    [InlineData("archive_command",
+        "sshpass -phunter2 ssh user@host",
+        "sshpass -p ******** ssh user@host")]
+    [InlineData("archive_command",
+        "/usr/bin/sshpass -p hunter2 ssh user@host",
+        "/usr/bin/sshpass -p ******** ssh user@host")]
+    // A quoted sshpass value with an embedded space is masked whole.
+    [InlineData("archive_command",
+        "sshpass -p \"hunter 2\" ssh user@host",
+        "sshpass -p ******** ssh user@host")]
+    // A quoted URI query password value with an embedded space is masked whole — the pre-existing
+    // UriQueryPassword rule (fixed alongside the new ones, same quote-aware value alternation).
+    [InlineData("primary_conninfo",
+        "https://x/db?sslmode=require&password=\"hunter 2\"",
+        "https://x/db?sslmode=require&password=********")]
+    // A quoted, percent-encoded-key query password with an embedded space is masked whole.
+    [InlineData("primary_conninfo",
+        "https://x/db?pass%77ord=\"hunter 2\"",
+        "https://x/db?pass%77ord=********")]
+    // A SAS or pre-signed URL signature query parameter.
     [InlineData("primary_conninfo",
         "https://acct.blob.core.windows.net/c/f?sig=abc123%2Fdef",
         "https://acct.blob.core.windows.net/c/f?sig=********")]

@@ -193,6 +193,13 @@ WHERE
     OR setting ILIKE '%key%' OR reset_val ILIKE '%key%' OR boot_val ILIKE '%key%'
     OR setting ILIKE '%credential%' OR reset_val ILIKE '%credential%' OR boot_val ILIKE '%credential%'
     OR setting ILIKE '%pwd%' OR reset_val ILIKE '%pwd%' OR boot_val ILIKE '%pwd%'
+    OR setting ILIKE '%-u %' OR reset_val ILIKE '%-u %' OR boot_val ILIKE '%-u %'
+    OR setting ILIKE '%--user%' OR reset_val ILIKE '%--user%' OR boot_val ILIKE '%--user%'
+    OR setting ILIKE '%-U %' OR reset_val ILIKE '%-U %' OR boot_val ILIKE '%-U %'
+    OR setting ILIKE '%sshpass%' OR reset_val ILIKE '%sshpass%' OR boot_val ILIKE '%sshpass%'
+    OR setting ILIKE '%sig=%' OR reset_val ILIKE '%sig=%' OR boot_val ILIKE '%sig=%'
+    OR setting ILIKE '%signature=%' OR reset_val ILIKE '%signature=%' OR boot_val ILIKE '%signature=%'
+    OR setting LIKE '%\%%' ESCAPE '\' OR reset_val LIKE '%\%%' ESCAPE '\' OR boot_val LIKE '%\%%' ESCAPE '\'
     OR (name = 'ssl_passphrase_command' AND (setting <> '' OR boot_val <> '' OR reset_val <> ''))
     OR (name LIKE '%.%' AND (
         name ILIKE '%password%' OR name ILIKE '%passwd%' OR name ILIKE '%passphrase%'
@@ -334,10 +341,11 @@ AND   t.server_id = $11";
                     /* One slice per hour of collection_time within this day, each its own transaction with
                        its own literal [start, end) bound alongside the constant server_id predicate. A slice
                        whose changed set is still large gets MaxKeysPerUpdate sub-batching same as the
-                       single-range path below. Candidate selection already finds only unredacted rows (the
-                       coarse ILIKE filter plus PgSettingRedactor.Redact's own comparison to the original), so
-                       a restart's candidate read never re-selects a slice's rows once they are redacted —
-                       there is nothing there for it to find. */
+                       single-range path below. The coarse ILIKE filter DOES re-select an already-redacted
+                       row on a restart (a masked value such as password=******** still matches %password%),
+                       but resume is still correct: PgSettingRedactor.Redact is idempotent, so a re-selected,
+                       already-redacted row's new value equals its current value, the changed-set comparison
+                       drops it, and no UPDATE is issued for it. */
                     for (var hour = 0; hour < 24; hour++)
                     {
                         var sliceStart = day.AddHours(hour);
