@@ -78,11 +78,21 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             await PlantAsync(connection, ct, WindowStart.AddHours(2), "0xTOPQ2", "usp_HostA", 200_000L, 180_000L, 5L, 3600);
             await PlantAsync(connection, ct, WindowStart.AddHours(3), "0xTOPQ3", "usp_HostB", 50_000L, 40_000L, 2L, 3600);
 
+            /* ── seed (b'): #4394's own case — a planted zero-interval row with a nonzero delta, for a
+               group that ALSO has ordinary, nonzero-interval rows (0xTOPQ1, already seeded above). The
+               collector doesn't write this shape (a zero interval comes with zero deltas — see #2235
+               CollectorDeltaCalculator), but planting it is what makes the filter observable: before #4394,
+               TopQueriesSql summed this row's delta_worker_time into raw's total for 0xTOPQ1, while the
+               hourly successor's CREATE already excludes it via IntervalHonestSourceFilter — the two tiers
+               ranked the same window differently. #4394 adds the same filter to raw's read, so raw and
+               hourly now agree on 0xTOPQ1's total. RED on dev: raw's 0xTOPQ1 total exceeds hourly's by
+               exactly this row's 700,000 CPU-us / 1 execution. ── */
+            await PlantAsync(connection, ct, WindowStart.AddHours(1).AddMinutes(40), "0xTOPQ1", "usp_HostA", 700_000L, 650_000L, 1L, 0);
+
             /* ── seed (b): one raw row for a query_hash that appears ONLY as a zero-interval first-collection
                row. The hourly successor's CREATE bakes in IntervalHonestSourceFilter
-               (sample_interval_seconds IS DISTINCT FROM 0), so this row is admitted to raw's read but
-               EXCLUDED from the hourly rollup by construction — reported below as a real finding, not bent
-               into a passing assertion. ── */
+               (sample_interval_seconds IS DISTINCT FROM 0), and #4394 now excludes it from raw's read too, so
+               a hash whose ONLY rows are zero-interval is absent from BOTH tiers. ── */
             await PlantAsync(connection, ct, WindowStart.AddHours(4), "0xZEROINTERVAL", "usp_HostA", 900_000L, 900_000L, 1L, 0);
 
             await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
@@ -94,7 +104,10 @@ public sealed class TopQueriesHourlyRoutingLiveTests
 
             var rawTotalsByKey = RollUpByHash(rawResult.Rows);
             Assert.True(rawTotalsByKey.ContainsKey("0xTOPQ1"), "seed (a) group 1 must be present in the raw read");
-            Assert.True(rawTotalsByKey.ContainsKey("0xZEROINTERVAL"), "raw's read admits the zero-interval row (#4231 3a finding)");
+            /* #4394: 0xZEROINTERVAL's only row is zero-interval, so raw's own read now excludes it too —
+               the fix, not a regression; see the finding assertion below for the equivalent hourly check. */
+            Assert.False(rawTotalsByKey.ContainsKey("0xZEROINTERVAL"),
+                "a hash whose only rows are zero-interval is excluded from raw's own read by #4394's fix");
 
             /* Refresh the hourly successor over the window BEFORE deleting raw — the product's own
                backfill/refresh path, not a hand-built rollup row. */
@@ -131,10 +144,10 @@ public sealed class TopQueriesHourlyRoutingLiveTests
 
             var hourlyTotalsByKey = RollUpByHash(hourlyResult.Rows);
 
-            /* ── the equality assertion, over the (database_name, query_hash) totals for the population the
-               hourly rollup CAN answer — seed (a)'s three groups. Not 0xZEROINTERVAL: that row is excluded
-               from the hourly rollup by IntervalHonestSourceFilter, so raw and hourly deliberately DISAGREE
-               there — asserted separately below as the real finding, never smoothed into this comparison. ── */
+            /* ── the equality assertion, over the (database_name, query_hash) totals for the population BOTH
+               tiers can answer — seed (a)'s three groups, now INCLUDING 0xTOPQ1 which also carries seed (b')'s
+               zero-interval row (#4394's pin): before the fix raw's 0xTOPQ1 total exceeded hourly's by
+               that row's 700,000 CPU-us / 1 execution; after the fix both tiers exclude it and agree. ── */
             foreach (var hash in new[] { "0xTOPQ1", "0xTOPQ2", "0xTOPQ3" })
             {
                 Assert.True(rawTotalsByKey.TryGetValue(hash, out var rawTotal), $"{hash} missing from raw's totals");
@@ -143,13 +156,11 @@ public sealed class TopQueriesHourlyRoutingLiveTests
                 Assert.Equal(rawTotal.Executions, hourlyTotal.Executions);
             }
 
-            /* ── the finding (brief step 2): the zero-interval row counted in raw is ABSENT from the hourly
-               rollup — a real precision loss at the hourly tier, not a test that was bent to hide it. Raw's
-               0xZEROINTERVAL total is 900,000 CPU-us / 1 execution; the hourly-routed read has no row for it
-               at all. Reported in the PR body's Deviations section; raw's own read is unchanged in this
-               lane. ── */
+            /* ── 0xZEROINTERVAL's only row is zero-interval, so #4394 excludes it from BOTH tiers — it is
+               absent from the hourly rollup exactly as it was before this fix (that half was never broken),
+               and now also absent from raw's own read (checked above), which is this fix. ── */
             Assert.False(hourlyTotalsByKey.ContainsKey("0xZEROINTERVAL"),
-                "the zero-interval seed row is excluded from the hourly rollup by IntervalHonestSourceFilter — raw and hourly disagree here BY DESIGN (#4231 3a finding, see PR body)");
+                "the zero-interval seed row is excluded from the hourly rollup by IntervalHonestSourceFilter");
 
             bodySucceeded = true;
         }
