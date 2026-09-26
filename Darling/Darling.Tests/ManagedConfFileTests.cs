@@ -138,6 +138,58 @@ public sealed class ManagedConfFileTests
     }
 
     [Fact]
+    public void ShouldReplaceManagedConf_DataVolumeFreeCrossesGiBBoundary_BodyUnchanged_IsFalse(
+    )
+    {
+        /* #4215's flake: two starts whose ONLY difference is DataVolumeFreeBytes crossing a GiB rounding
+           boundary (RenderHeader's display-only data-volume-free-gib field) must not be treated as a change —
+           the body neither reader would derive differently changes at all. */
+        var before = ManagedConfFile.Render(SampleInputs() with { DataVolumeFreeBytes = 29L * 1024 * 1024 * 1024 });
+        var after = ManagedConfFile.Render(SampleInputs() with { DataVolumeFreeBytes = 28L * 1024 * 1024 * 1024 - 1 });
+
+        Assert.NotEqual(before, after);
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(before, after));
+    }
+
+    [Fact]
+    public void ShouldReplaceManagedConf_BodyChanges_IsTrue()
+    {
+        /* Contrast case: a real input change (RAM) changes the body, so it must still be written. */
+        var before = ManagedConfFile.Render(SampleInputs());
+        var after = ManagedConfFile.Render(SampleInputs() with { RamBytes = 34_359_738_368L /* 32 GiB */ });
+
+        Assert.NotEqual(before, after);
+        Assert.True(ManagedConfFile.ShouldReplaceManagedConf(before, after));
+    }
+
+    [Fact]
+    public void ShouldReplaceManagedConf_ByteIdentical_IsFalse()
+    {
+        var rendered = ManagedConfFile.Render(SampleInputs());
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(rendered, rendered));
+    }
+
+    [Fact]
+    public void ShouldReplaceManagedConf_NoExistingFile_IsTrue()
+    {
+        var rendered = ManagedConfFile.Render(SampleInputs());
+        Assert.True(ManagedConfFile.ShouldReplaceManagedConf(null, rendered));
+    }
+
+    [Fact]
+    public void ShouldReplaceManagedConf_HandEditedExisting_IsFalse()
+    {
+        var rendered = ManagedConfFile.Render(SampleInputs());
+        var parsed = ManagedConfFile.ParseExisting(rendered);
+        var header = rendered[..^parsed.Body.Length];
+        var handEdited = header + parsed.Body.Replace("= '", "= 'EDITED-", StringComparison.Ordinal);
+
+        var newRender = ManagedConfFile.Render(SampleInputs() with { RamBytes = 34_359_738_368L });
+        Assert.True(ManagedConfFile.IsHandEdited(handEdited));
+        Assert.False(ManagedConfFile.ShouldReplaceManagedConf(handEdited, newRender));
+    }
+
+    [Fact]
     public void DiffBodyKeys_ChangedValue_NamesTheKeyAndBothValues()
     {
         var diffs = ManagedConfFile.DiffBodyKeys(

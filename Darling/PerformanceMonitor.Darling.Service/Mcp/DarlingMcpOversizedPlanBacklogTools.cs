@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -54,7 +55,8 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
         NpgsqlDataSource postgres,
         [Description("Optional: server name or display name. Omit for the whole fleet.")] string? server_name = null,
         [Description("If true, also return the per-row listing for the named server. Requires server_name - the claim key is only meaningful within one server. Default false.")] bool include_rows = false,
-        [Description("Maximum backlog rows to return when include_rows is true. Default 50.")] int limit = DefaultLimit)
+        [Description("Maximum backlog rows to return when include_rows is true. Default 50.")] int limit = DefaultLimit,
+        CancellationToken cancellationToken = default)
     {
         var validation = McpHelpers.ValidateTop(limit);
         if (validation != null)
@@ -67,7 +69,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
 
         if (!string.IsNullOrWhiteSpace(server_name))
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null)
             {
                 return error;
@@ -95,7 +97,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
         {
             /* The census FIRST, because it is what makes an empty answer honest — get_collector_stall_probes'
                ordering, for its reason. */
-            var census = await DarlingOversizedPlanBacklogReader.GetCollectorCensusAsync(postgres, serverId);
+            var census = await DarlingOversizedPlanBacklogReader.GetCollectorCensusAsync(postgres, serverId, cancellationToken);
 
             if (census.Count == 0)
             {
@@ -112,10 +114,10 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                     + "store you have not confirmed the rung of.");
             }
 
-            var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, serverId);
+            var servers = await DarlingOversizedPlanBacklogReader.GetPerServerRollupAsync(postgres, serverId, cancellationToken);
 
             var rows = include_rows && serverId is { } id
-                ? await DarlingOversizedPlanBacklogReader.GetRowsAsync(postgres, id, limit)
+                ? await DarlingOversizedPlanBacklogReader.GetRowsAsync(postgres, id, limit, cancellationToken)
                 : null;
 
             return JsonSerializer.Serialize(
@@ -203,7 +205,7 @@ public sealed class DarlingMcpOversizedPlanBacklogTools
                 },
                 McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_oversized_plan_backlog", ex);
         }

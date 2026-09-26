@@ -364,6 +364,40 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
+    /// Whether <see cref="DarlingManagedPostgres.WriteManagedConfFile"/> should replace <paramref
+    /// name="existingText"/> on disk with <paramref name="renderedText"/> (#4215 flake fix). The header
+    /// describes the inputs as of the last time the BODY changed — <c>data-volume-free-gib</c> and the other
+    /// display-only fields in <see cref="RenderHeader"/> can legitimately lag reality between starts, since
+    /// free disk space moves on its own. A header-only difference must never trigger a rewrite: two renders
+    /// whose bodies are byte-identical are the SAME file for this decision, no matter what their headers say.
+    /// Returns <c>false</c> (no rewrite) when there is no existing file to compare — that case writes
+    /// unconditionally and never reaches this helper — or when the existing file is a hand edit (<see
+    /// cref="IsHandEdited"/>; never silently overwritten) or when its BODY already matches the fresh render's
+    /// body byte-for-byte. Pure and portable so a unit test can drive it with literal text.
+    /// </summary>
+    internal static bool ShouldReplaceManagedConf(string? existingText, string renderedText)
+    {
+        if (existingText is null)
+        {
+            return true;
+        }
+
+        if (string.Equals(existingText, renderedText, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (IsHandEdited(existingText))
+        {
+            return false;
+        }
+
+        var existingBody = ParseExisting(existingText).Body;
+        var renderedBody = ParseExisting(renderedText).Body;
+        return !string.Equals(existingBody, renderedBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Every key where <paramref name="fileBody"/> (what is on disk) and <paramref name="renderedBody"/> (what a
     /// fresh render would write) disagree — for the hand-edit log line (design step 1) to name each one, rather
     /// than say only that a difference exists.

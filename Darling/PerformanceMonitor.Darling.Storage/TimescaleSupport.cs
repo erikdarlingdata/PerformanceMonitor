@@ -6119,44 +6119,57 @@ AND   j.hypertable_name = '{relation}'";
     /// the successor's first refresh leaves raw rows between the legacy's last bucket and the successor's
     /// floor that NEITHER side ever materializes (the outage shape <c>MaterializationHoles.cs</c>'s class doc
     /// works through in full). An unconditional stitch reports that seam Covered right up to the moment the
-    /// raw purge destroys it. So the SQL probes raw itself, filtered the same way <see cref="IntervalHonestSourceFilter"/>
-    /// filters everything else here, for a row at or after the legacy's last bucket and before the successor's
-    /// floor (or +infinity when the successor is empty): none found → <c>LEAST(legacy.min, successor.min)</c>,
-    /// the stitched floor, honest because the seam really is empty; a row found → the successor's OWN
-    /// <c>min(bucket)</c> alone (NULL when empty, giving <c>Short</c>), because the legacy cannot vouch for
-    /// history it never covered. Once the successor's own floor reaches back past the legacy's last bucket,
-    /// there is no seam left to hold a row, the probe always comes back empty, and the two branches converge —
-    /// the same steady state the old unconditional stitch reached, just no longer assumed along the way. Both
-    /// empty → <c>NULL</c> → <c>Short</c> (correct: fresh install, no history yet). The seam is what
-    /// <see cref="RepairMaterializationHolesAsync"/> repairs, by giving a stitched successor a SEAM scan window
-    /// down to the legacy's last bucket, unclamped by the horizon that bounds its ordinary scan window — so an
-    /// outage longer than that horizon's own span (#4186 follow-up: the first cut folded the seam into the same
-    /// horizon clamp as the ordinary window, and a seam older than it was silently never scanned) still gets
-    /// repaired instead of clamped away — PROVIDED the raw purge was already held when the store stopped.
-    /// That proviso is real, not decoration: PostgreSQL runs its own overdue retention jobs at start, before
-    /// this service's start sweep can hold anything, so a purge left armed across a long enough stop drops the
-    /// chunk holding the seam before the walk ever gets a turn (#4299, pre-existing — 3.8.0 loses the same
-    /// chunk on the same schedule). Once the repair does run, the seam is empty and this gate's fallback
-    /// releases — automatically within the hour on a store that keeps running (#3812), but only from the
-    /// SECOND start after an outage that crosses the upgrade: the walk skips a successor with nothing
-    /// materialized yet, so the seam does not exist for it to find until the successor's own first refresh has
-    /// run, and nothing re-runs the walk between starts (#4300). Once it does run, release is bounded only by
-    /// the repair's own per-start cap — a seam wider than one start's cap takes more than one start to close in
-    /// full, but every start makes progress on it.</para>
+    /// raw purge destroys it. So the SQL probes BUCKET-LEVEL, over the legacy's own interior AND the seam
+    /// together (#4301, sharing <see cref="LegacySuccessorHoleExistsSql"/> TEXT-IDENTICAL with the repair
+    /// walk — the gate and the walk must never disagree about what a hole is): from raw's own filtered floor
+    /// (below it raw admits no row, so no hole can exist there — a gap an EARLIER version's purge left below
+    /// that floor is invisible here BY CONSTRUCTION, not merely undetected) up to the successor's first
+    /// bucket strictly ABOVE the legacy's last bucket, minus one bucket width — bounded there and not by the
+    /// successor's <c>min(bucket)</c>, because an INTERIOR repair (the next lane's walk branch) materializes
+    /// successor buckets AT OR BELOW the legacy's last bucket, which moves the successor's own floor down; a
+    /// probe bounded on that floor would then miss the seam once even one such repair had run, while bounding
+    /// on the successor's first bucket above the legacy's last keeps the seam fully probed regardless. Any
+    /// detectable hole in that range — a bucket where raw admits a row and neither the legacy nor the
+    /// successor has materialized it — makes the slot NULL, which <c>MeasureRetentionCoverageAsync</c> reads
+    /// as <c>Short</c>, rather than falling back to the successor's own floor: that floor could itself read
+    /// back as Covered by the same interior-repair shape the bound above exists to catch. No hole found →
+    /// <c>LEAST(legacy.min, successor.min)</c>, the stitched floor, honest because the whole probed range
+    /// really is gap-free. Legacy never materialized (<c>l.mx IS NULL</c>) → today's plain
+    /// <c>LEAST(legacy.min, successor.min)</c>, unchanged, because the comparison it would otherwise run is
+    /// against nothing. The seam and any interior hole are what <see cref="RepairMaterializationHolesAsync"/>
+    /// repairs, by giving a stitched successor a SEAM scan window down to the legacy's last bucket, unclamped
+    /// by the horizon that bounds its ordinary scan window — so an outage longer than that horizon's own span
+    /// (#4186 follow-up: the first cut folded the seam into the same horizon clamp as the ordinary window, and
+    /// a seam older than it was silently never scanned) still gets repaired instead of clamped away —
+    /// PROVIDED the raw purge was already held when the store stopped. That proviso is real, not decoration:
+    /// PostgreSQL runs its own overdue retention jobs at start, before this service's start sweep can hold
+    /// anything, so a purge left armed across a long enough stop drops the chunk holding the seam before the
+    /// walk ever gets a turn (#4299, pre-existing — 3.8.0 loses the same chunk on the same schedule). Once the
+    /// repair does run, every detectable hole is closed and this gate's fallback releases — automatically
+    /// within the hour on a store that keeps running (#3812), but only from the SECOND start after an outage
+    /// that crosses the upgrade: the walk skips a successor with nothing materialized yet, so the seam does
+    /// not exist for it to find until the successor's own first refresh has run, and nothing re-runs the walk
+    /// between starts (#4300). Once it does run, release is bounded only by the repair's own per-start cap —
+    /// a seam wider than one start's cap takes more than one start to close in full, but every start makes
+    /// progress on it. GAPS LEFT BY EARLIER VERSIONS' PURGES BELOW THE RAW FLOOR CANNOT BE DETECTED OR
+    /// REPAIRED; FROM THIS VERSION THE PURGE HOLDS UNTIL EVERY DETECTABLE HOLE IS REPAIRED.</para>
     ///
-    /// <para><b>The stitch also trusts the frozen legacy's OWN span unconditionally — accepted as 3.8.0 parity,
-    /// not fixed by this round.</b> The seam probe above only checks AT OR AFTER the legacy's last bucket.
-    /// Below that bucket, <c>LEAST(legacy.min, successor.min)</c> runs with no check at all: a raw-row gap that
-    /// opened INSIDE the frozen legacy's own materialized span — from an outage before this store ever took the
-    /// freeze, that 3.8.0's own retention already lost before the upgrade — reads Covered forever, because the
-    /// legacy stopped refreshing at the freeze and the six frozen views never re-enter the walk to close it
-    /// (<see cref="MaterializationHoleTargets"/> excludes them; see its note). This is accepted, not a
-    /// regression: 3.8.0 has no walk at all, so it loses the exact same rows on the exact same schedule — its
-    /// raw purge drops them once they age past the horizon, upgrade or not. What this build adds beyond that
-    /// parity is the A6 backfill (<c>--backfill-rollups</c>, <see cref="RollupBackfill"/>), which — unlike the
-    /// automatic walk — fills the successor down to RAW's own oldest row, not merely the legacy's boundary, so
-    /// an operator who runs it closes a pre-upgrade hole the automatic gate will otherwise trust without ever
-    /// looking.</para>
+    /// <para><b>The probe now reaches INSIDE the frozen legacy's own materialized span too (#4301), not only
+    /// the seam above it — accepted below raw's own floor as 3.8.0 parity, not fixed by this round.</b> The
+    /// probe's <c>fromExpr</c> starts at raw's own filtered floor, which sits at or below the legacy's last
+    /// bucket, so a raw-row gap that opened INSIDE the frozen legacy's own materialized span — an outage that
+    /// predates this store's freeze — is now caught the same way a seam gap is: the slot goes NULL (Short)
+    /// rather than the unconditional <c>LEAST(legacy.min, successor.min)</c> the six frozen views used to get
+    /// with no check at all. What stays accepted as 3.8.0 parity is strictly BELOW raw's own current floor:
+    /// a gap 3.8.0's own retention already purged before this store ever took the freeze is invisible to the
+    /// probe by construction (raw admits no row there to prove the hole), and the six frozen views never
+    /// re-enter the walk to close it (<see cref="MaterializationHoleTargets"/> excludes them; see its note).
+    /// This is accepted, not a regression: 3.8.0 has no walk at all, so it loses the exact same rows on the
+    /// exact same schedule — its raw purge drops them once they age past the horizon, upgrade or not. What
+    /// this build adds beyond that parity is the A6 backfill (<c>--backfill-rollups</c>,
+    /// <see cref="RollupBackfill"/>), which — unlike the automatic walk — fills the successor down to RAW's
+    /// own oldest row, not merely the legacy's boundary, so an operator who runs it closes a pre-upgrade hole
+    /// the automatic gate can only detect from raw's current floor, not resurrect from below it.</para>
     ///
     /// <para><b>Source filter for 0-interval rows.</b> For <c>query_stats</c> and <c>procedure_stats</c> the
     /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude
@@ -6180,36 +6193,52 @@ AND   j.hypertable_name = '{relation}'";
 
         /* Coverage SQL: for a coverage relation that is an interval-honest successor, stitch it with
            its frozen legacy so an empty successor on an upgrading store falls back to the legacy's
-           floor — BUT ONLY WHEN THE SEAM IS EMPTY (#4186). The legacy stopped refreshing at the
-           freeze; if the store was down past HourlyRefreshStartOffset before the successor's first
-           refresh, the raw rows collected between the legacy's last bucket and the successor's floor
-           were never materialized by either side (see MaterializationHoles.cs's class doc for the
-           shape). A stitch that ignores that seam reports Covered over history nobody holds.
-           So: probe raw for a filter-admitted row at or after the legacy's last bucket (+ one hour, so
-           the legacy's own last bucket is not re-counted as seam) and before the successor's floor (or
-           +infinity when the successor is empty). Any such row means the seam is NOT gap-free, so the
-           slot falls back to the successor's OWN min(bucket) — NULL when empty, which reports Short
-           honestly instead of the false Covered the unconditional stitch gave. LEGACY.mx is NULL for a
-           legacy that never materialized anything; the comparison against it is then UNKNOWN for every
-           row, EXISTS is false, and the stitch behaves exactly as it did before this seam probe existed.
-           LegacyOf() returns null for any relation that is not in SupersededHourlyRollups (dailies,
-           query_store_stats, baseline aggregates), keeping those as simple min(bucket). PostgreSQL's
-           LEAST ignores NULL arguments (returns NULL only when EVERY argument is NULL), so
-           LEAST(l.mn, s.mn) already is what COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn) computed. */
+           floor — BUT ONLY WHEN THE SEAM (AND THE LEGACY'S OWN INTERIOR) IS GAP-FREE (#4186, #4301).
+           The legacy stopped refreshing at the freeze; if the store was down past HourlyRefreshStartOffset
+           before the successor's first refresh, the raw rows collected between the legacy's last bucket
+           and the successor's floor were never materialized by either side (see MaterializationHoles.cs's
+           class doc for the shape). A stitch that ignores that seam reports Covered over history nobody
+           holds. This is now a BUCKET-LEVEL probe over the legacy's interior AND the seam, sharing its
+           hole definition TEXT-IDENTICAL with the repair walk via LegacySuccessorHoleExistsSql (#4301) —
+           the gate and the walk must never disagree about what a hole is, or a bucket the gate calls Short
+           that the walk never repairs holds the raw purge forever with no self-release. The scanned range
+           runs from raw's own filtered floor (below it raw admits no row, so no hole can exist there — a
+           gap left by an EARLIER version's purge below that floor is invisible here BY CONSTRUCTION, not
+           merely undetected) up to the successor's first bucket strictly ABOVE the legacy's last bucket
+           (or, when the successor holds nothing that high, now() minus HourlyRefreshStartOffset — the successor's
+           own first refresh reaches every bucket newer than that, so a bare empty successor is not a hole)
+           minus one bucket width. That
+           upper bound is deliberately NOT s.mn: an interior repair materializes successor buckets AT OR
+           BELOW l.mx, which moves s.mn itself down, and a probe bounded on s.mn would then miss the seam
+           entirely once even one such repair has run. Bounding instead on the successor's first bucket
+           ABOVE l.mx holds the seam '(l.mx, that bucket)' fully probed no matter how many interior repairs
+           ran; buckets from that point up are the successor's own span, which the walk's ordinary window
+           repairs, so they are left out of this gate exactly as before. WHEN THE PROBE FINDS ANY HOLE the
+           slot is NULL — MeasureRetentionCoverageAsync reads a NULL coverage column as Short — rather than
+           falling back to s.mn: s.mn could read back as Covered by the same interior-repair shape the
+           bound above exists to catch. LEGACY.mx is NULL for a legacy that never materialized anything; the
+           WHEN branch below only applies when l.mx IS NOT NULL, and in that case the stitch behaves exactly
+           as it did before this probe existed (today's plain LEAST). LegacyOf() returns null for any
+           relation that is not in SupersededHourlyRollups (dailies, query_store_stats, baseline aggregates),
+           keeping those as simple min(bucket). PostgreSQL's LEAST ignores NULL arguments (returns NULL only
+           when EVERY argument is NULL), so LEAST(l.mn, s.mn) already is what
+           COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn) computed. */
         var columns = coverageRelations.Select((c, i) =>
         {
             var legacy = LegacyOf(c);
+            var successorFilter = legacy is not null
+                ? MaterializationHoleSourceFilterFor(HourlyAggregates.Single(a => a.View == c).CreateSql)
+                : string.Empty;
+            var successorFloorWhere = successorFilter.Length == 0 ? string.Empty : $" WHERE {successorFilter}";
             var subquery = legacy is not null
                 ? $"(SELECT CASE{Environment.NewLine}"
-                + $"                WHEN EXISTS ({Environment.NewLine}"
-                + $"                    SELECT 1{Environment.NewLine}"
-                + $"                    FROM collect.{relation} AS seam{Environment.NewLine}"
-                + $"                    WHERE seam.{sourceTimeColumn} >= l.mx + INTERVAL '1 hour'{Environment.NewLine}"
-                + $"                    AND   seam.{sourceTimeColumn} < COALESCE(s.mn, 'infinity'::timestamp){Environment.NewLine}"
-                + $"                    AND   {IntervalHonestSourceFilter}{Environment.NewLine}"
-                + $"                    ORDER BY seam.{sourceTimeColumn}{Environment.NewLine}"
-                + $"                    LIMIT 1){Environment.NewLine}"
-                + $"                THEN s.mn{Environment.NewLine}"
+                + $"                WHEN l.mx IS NULL THEN LEAST(l.mn, s.mn){Environment.NewLine}"
+                + $"                WHEN {LegacySuccessorHoleExistsSql(
+                        relation, sourceTimeColumn, successorFilter, legacy, c,
+                        fromExpr: $"time_bucket(INTERVAL '1 hour', (SELECT min(src.{sourceTimeColumn}) FROM collect.{relation} AS src{successorFloorWhere}))",
+                        toExpr: $"COALESCE((SELECT min(sa.bucket) FROM collect.{c} AS sa WHERE sa.bucket > l.mx), time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '{HourlyRefreshStartOffset}')) - INTERVAL '1 hour'",
+                        bucketWidthLiteral: "INTERVAL '1 hour'")}{Environment.NewLine}"
+                + $"                THEN NULL{Environment.NewLine}"
                 + $"                ELSE LEAST(l.mn, s.mn){Environment.NewLine}"
                 + $"           END{Environment.NewLine}"
                 + $"     FROM (SELECT min(bucket) AS mn, max(bucket) AS mx FROM collect.{legacy}) l{Environment.NewLine}"

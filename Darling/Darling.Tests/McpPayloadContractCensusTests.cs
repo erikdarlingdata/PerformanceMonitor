@@ -1717,7 +1717,7 @@ public sealed class McpPayloadContractCensusTests
     public void TheAutovacuumRunHistory_BindsToItsCapAndObserves()
     {
         var source = StripComments(ToolSources().Single(s => s.File == "DarlingMcpPgAutovacuumTools.cs").Source);
-        Assert.Contains("RunsReadPerTable + 1);", source, StringComparison.Ordinal);
+        Assert.Contains("RunsReadPerTable + 1, cancellationToken);", source, StringComparison.Ordinal);
         Assert.Contains("McpHelpers.BoundPage(runs, RunsReadPerTable)", source, StringComparison.Ordinal);
         Assert.DoesNotContain("history_capped", source, StringComparison.Ordinal);
         Assert.DoesNotContain(">= RunsReadPerTable", source, StringComparison.Ordinal);

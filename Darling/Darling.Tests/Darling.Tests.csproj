@@ -93,5 +93,10 @@
          into the product — so the only thing that keeps them true as the catalog grows is parsing them
          back against it. Same Link+copy delivery as the workflows above. -->
     <None Include="..\README.md" Link="Fixtures\Darling-README.md" CopyToOutputDirectory="PreserveNewest" />
+    <!-- #4322: the Linux compose file, copied beside the test binary so CiComposeWorkerSizingTests parses
+         the REAL file rather than a copy that can go stale. Its worker-sizing flags are a restatement of
+         TimescaleSupport.HypertableCount via the same formula BuildWorkerSizingConfAppend writes for the
+         managed Windows store, and compose's command: line cannot call into the product. -->
+    <None Include="..\compose\docker-compose.yml" Link="Fixtures\docker-compose.yml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
