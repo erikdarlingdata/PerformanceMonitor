@@ -138,7 +138,7 @@ public static class PgSettingRedactor
         @"(?<=^|\s)(?<opt>--?[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)\s+(?!-)(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /// <summary>RulesVersion 2 (#4348 follow-up, review round 2's L2). A percent-encoded key name in a URI
+    /// <summary>RulesVersion 2 (#4348). A percent-encoded key name in a URI
     /// query string, such as <c>?pass%77ord=x</c> (<c>%77</c> is <c>w</c>). The key is decoded before it is
     /// tested against <see cref="QueryKeySecretMarkers"/>, so an encoded variant of any letter in the key
     /// still matches; the RAW (still-encoded) key text is kept in the output, only the value is masked.</summary>

@@ -164,7 +164,7 @@ public sealed class PgSettingRedactorTests
     [InlineData("restore_command",
         "password = S16 host=foo",
         "password=******** host=foo")]
-    // RulesVersion 2 (L2 follow-up): curl -u now masks the part after the colon; see the dedicated cases below.
+    // RulesVersion 2 (#4348): curl -u now masks the part after the colon; see the dedicated cases below.
     [InlineData("restore_command",
         "curl -u admin:S22",
         "curl -u admin:********")]
@@ -181,7 +181,7 @@ public sealed class PgSettingRedactorTests
     [InlineData("unix_socket_directories", "passfile=/x/.pgpass", "passfile=********")]
     [InlineData("primary_conninfo", "host=a user=b", "host=a user=b")]
     [InlineData("primary_conninfo", "", "")]
-    // RulesVersion 2 (review round 2's L2): a percent-encoded key name in a URI query — %77 is 'w', so
+    // RulesVersion 2 (#4348): a percent-encoded key name in a URI query — %77 is 'w', so
     // pass%77ord decodes to "password". The key text itself stays encoded in the output; only the value
     // is masked. Untouched neighbour: an encoded key that does NOT decode to a password marker is left alone.
     [InlineData("primary_conninfo",
