@@ -6,6 +6,8 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
+using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -256,5 +258,63 @@ public sealed class PlanForceActionAuditRedactionTests
 
         Assert.DoesNotContain("db-primary-02", PgPlanForceActionStore.SanitizeDetailForAudit(recentActionsShape));
         Assert.DoesNotContain("db-primary-02", PgPlanForceActionStore.SanitizeDetailForAudit(pendingReviewShape));
+    }
+
+    /// <summary>
+    /// #4376's CENSUS pin: every method on <c>PgPlanForceActionStore</c> that builds a
+    /// <c>PlanForceActionRecord</c> from an <c>NpgsqlDataReader</c> does it by calling the shared
+    /// <c>ReadRecord</c> mapper — the sanitizer's one choke point — rather than constructing the record
+    /// directly. Reads the class's own source text rather than trusting a comment, so a reader added later
+    /// that builds <c>new PlanForceActionRecord(...)</c> straight from reader columns (bypassing
+    /// <c>ReadRecord</c>, and so the sanitizer) fails THIS pin, not just a live-store test that may never
+    /// run against a legacy row.
+    ///
+    /// <para>The negative control below is the pin's own positive control (the same shape
+    /// <c>MigrationDataMovingRungCensusPins.TheScan_ActuallyReadsTheLadder</c> uses): a source string that
+    /// SHOULD trip the guard is asserted to trip it, so a regex that stopped matching anything would fail
+    /// loudly here instead of leaving this pin vacuous.</para>
+    /// </summary>
+    [Fact]
+    public void EveryRecordConstruction_GoesThroughReadRecord()
+    {
+        var source = ReadStoreSource();
+
+        /* Every 'new(' or 'new PlanForceActionRecord(' construction of the record type, outside the
+           ReadRecord method itself, is a bypass of the choke point. ReadRecord's own body is the one
+           legitimate construction site, so it is excluded by name before scanning the rest of the class. */
+        var readRecordStart = source.IndexOf("private static PlanForceActionRecord ReadRecord(", StringComparison.Ordinal);
+        Assert.True(readRecordStart >= 0, "ReadRecord itself was not found in PgPlanForceActionStore.cs — the scan below has nothing to exclude.");
+
+        var readRecordEnd = source.IndexOf("\n}", readRecordStart, StringComparison.Ordinal);
+        Assert.True(readRecordEnd >= 0, "could not find the end of ReadRecord's body — the exclusion window is unbounded.");
+
+        var beforeReadRecord = source[..readRecordStart];
+        var afterReadRecord = source[(readRecordEnd + 2)..];
+        var outsideReadRecord = beforeReadRecord + afterReadRecord;
+
+        var bypassPattern = new Regex(@"new\s+PlanForceActionRecord\s*\(", RegexOptions.Compiled);
+
+        Assert.False(
+            bypassPattern.IsMatch(outsideReadRecord),
+            "a PlanForceActionRecord is constructed outside ReadRecord — that reader bypasses the sanitizer "
+            + "choke point #4376 put on ReadRecord. Route it through ReadRecord instead.");
+
+        /* The positive control: a record literally CAN be built this way (it is exactly ReadRecord's own
+           shape), so the pattern is proven live before it is trusted to have found nothing above. */
+        var mustMatch = "var bypass = new PlanForceActionRecord(1, DateTime.UtcNow, 1, \"s\", \"d\", 1, 1, \"a\", \"m\", \"actor\", \"dec\", \"r\", 1, 1, 1, null, false, \"o\", null, null);";
+        Assert.True(bypassPattern.IsMatch(mustMatch), "the bypass pattern itself does not match a known bypass shape — the census pin above is vacuous.");
+    }
+
+    private static string ReadStoreSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        var dir = System.IO.Path.GetDirectoryName(thisFile)!;
+        var relative = System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PgPlanForceActionStore.cs");
+        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relative)))
+        {
+            dir = System.IO.Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relative));
     }
 }
