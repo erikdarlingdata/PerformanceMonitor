@@ -170,9 +170,9 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
-    /// The body alone: one <c>key = 'value'</c> line per setting the v1 through v15 blocks set today, in the
+    /// The body alone: one <c>key = 'value'</c> line per setting the v1 through v16 blocks set today, in the
     /// order each key is FIRST introduced (v1 before v2 before v3 ...), holding the value each key has LAST —
-    /// exactly what PostgreSQL itself would read from those fifteen blocks appended in order to one file. Every
+    /// exactly what PostgreSQL itself would read from those sixteen blocks appended in order to one file. Every
     /// value is single-quoted and escaped (<c>DarlingManagedPostgres.EscapeConfValue</c>): PostgreSQL accepts a
     /// quoted string for a numeric or boolean GUC too, and quoting uniformly means no value's own content (a
     /// path with a backslash, say) needs a second escaping rule here.
@@ -226,6 +226,9 @@ internal static class ManagedConfFile
         }
 
         blocks.Append(DarlingManagedPostgres.BuildWalVolumeConfAppend());
+
+        /* v16 (#4246): a fixed checkpoint_timeout, appended in the same order as the legacy blocks above. */
+        blocks.Append(DarlingManagedPostgres.BuildCheckpointIntervalConfAppend());
 
         var (order, values) = ReduceToLastOccurrence(blocks.ToString());
         var body = new StringBuilder();
