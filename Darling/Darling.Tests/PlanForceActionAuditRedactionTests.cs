@@ -377,6 +377,51 @@ public sealed class PlanForceActionAuditRedactionTests
         return explicitCtor + targetTyped;
     }
 
+    /// <summary>
+    /// #4346/#4377's exemption contract: the ONE named raw reader (<c>PlanForceActionDetailScrub.RunAsync</c>)
+    /// must return no <c>detail</c> text to its caller — its public <c>Summary</c> carries counts only — and
+    /// its write path must be built from <c>SanitizeDetailForAudit</c>'s output, not from the raw value it
+    /// read. Reads the scrub's own source text (same technique as <see cref="PlanForceActionDetailCensusTests"/>
+    /// uses) rather than trusting a comment, so a later change that widens the exemption's surface fails this
+    /// pin directly.
+    /// </summary>
+    [Fact]
+    public void PlanForceActionDetailScrub_ExemptedMethod_ReturnsNoDetailText()
+    {
+        var source = StripComments(ReadScrubSource().ReplaceLineEndings("\n"));
+
+        /* Summary's public surface is counts only: no string-typed property. A `string` or `string?`
+           property on the public Summary class would be the exemption smuggling detail text back out. */
+        var summaryStart = source.IndexOf("public sealed class Summary", StringComparison.Ordinal);
+        Assert.True(summaryStart >= 0, "could not find PlanForceActionDetailScrub.Summary to check its public surface.");
+        var summaryEnd = source.IndexOf("\n}", summaryStart, StringComparison.Ordinal);
+        Assert.True(summaryEnd >= 0, "could not find the end of Summary's body.");
+        var summaryWindow = source[summaryStart..summaryEnd];
+        Assert.DoesNotContain("public string", summaryWindow, StringComparison.Ordinal);
+
+        /* RunAsync's return type is Task<Summary> — not a string, not a string-bearing tuple. */
+        Assert.Contains("public static async Task<Summary> RunAsync(", source, StringComparison.Ordinal);
+
+        /* The write path calls SanitizeDetailForAudit and stores exactly that result (the `sanitized`
+           local), never the raw `detail` local it read, into the list that becomes the UPDATE payload. */
+        Assert.Contains("PgPlanForceActionStore.SanitizeDetailForAudit(detail)", source, StringComparison.Ordinal);
+        Assert.Contains("toUpdateDetails.Add(sanitized)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("toUpdateDetails.Add(detail)", source, StringComparison.Ordinal);
+    }
+
+    private static string ReadScrubSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        var dir = System.IO.Path.GetDirectoryName(thisFile)!;
+        var relative = System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PlanForceActionDetailScrub.cs");
+        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relative)))
+        {
+            dir = System.IO.Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relative));
+    }
+
     /// <summary>Derives the detail column's ordinal from ReadRecord's own
     /// <c>IsDBNull(N) ? null : reader.GetString(N)</c> pair on the <c>Detail:</c> line, rather than
     /// hard-coding it.</summary>
@@ -388,182 +433,6 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.True(match.Success, "could not find ReadRecord's Detail: line in the expected shape to derive the detail column ordinal.");
         return int.Parse(match.Groups["ordinal"].Value, System.Globalization.CultureInfo.InvariantCulture);
     }
-
-    /// <summary>
-    /// #4376: the raw-<c>detail</c>-read choke point isn't just
-    /// <c>PgPlanForceActionStore</c> — nothing under <c>Darling/</c> (outside <c>Darling.Tests</c>) or
-    /// <c>PerformanceMonitor.Common/</c> may read the <c>detail</c> column of
-    /// <c>collect.plan_force_actions</c> except <see cref="PgPlanForceActionStore.GetRecentActionsAsync"/>
-    /// and <see cref="PgPlanForceActionStore.GetPendingReviewsAsync"/> (the two readers that feed
-    /// <c>ReadRecord</c>). A SELECT list naming <c>detail</c> or <c>pfa.detail</c> in a string that also
-    /// mentions <c>plan_force_actions</c> counts as a read; the INSERT column list in
-    /// <c>JournalAsync</c> (and its <c>RETURNING action_id</c>) does not.
-    ///
-    /// <para>A method may be exempted by adding its fully qualified name to
-    /// <see cref="RawDetailReaderExemptions"/> — capped at one entry, reserved for a future one-time
-    /// audit-detail scrub (#4346), and itself asserted below to return no detail text.</para>
-    /// </summary>
-    [Fact]
-    public void NoOtherProductionCode_ReadsTheDetailColumnDirectly()
-    {
-        Assert.True(RawDetailReaderExemptions.Length <= 1, "at most one raw-detail-reader exemption is allowed.");
-
-        var violations = new System.Collections.Generic.List<string>();
-        foreach (var file in ProductionSourceFiles())
-        {
-            var text = StripComments(File.ReadAllText(file).ReplaceLineEndings("\n"));
-            foreach (var fqName in RawDetailReadersIn(text))
-            {
-                if (Array.IndexOf(RawDetailReaderExemptions, fqName) < 0
-                    && Array.IndexOf(AllowedRawDetailReaders, fqName) < 0)
-                {
-                    violations.Add($"{Path.GetFileName(file)}: {fqName}");
-                }
-            }
-        }
-
-        Assert.True(
-            violations.Count == 0,
-            "raw read(s) of collect.plan_force_actions.detail outside ReadRecord's two callers, not in "
-            + "RawDetailReaderExemptions: " + string.Join("; ", violations));
-
-        /* Positive controls: the SAME detection function, run against synthetic sources. */
-        const string rawSelectBypass =
-            "namespace N {\n" +
-            "class SomeOtherReader {\n" +
-            "    public void ReadIt() {\n" +
-            "        var cmd = new NpgsqlCommand(@\"SELECT detail FROM collect.plan_force_actions WHERE server_id = $1\", connection);\n" +
-            "    }\n" +
-            "}\n" +
-            "}";
-        var found = RawDetailReadersIn(StripComments(rawSelectBypass));
-        Assert.Contains("N.SomeOtherReader.ReadIt", found);
-
-        var exempted = new[] { "N.SomeOtherReader.ReadIt" };
-        var stillViolating = System.Linq.Enumerable.Where(found, n => Array.IndexOf(exempted, n) < 0);
-        Assert.Empty(stillViolating);
-
-        const string insertOnlyMention =
-            "namespace N {\n" +
-            "class Journal {\n" +
-            "    public void JournalAsync() {\n" +
-            "        var cmd = new NpgsqlCommand(@\"INSERT INTO collect.plan_force_actions (action_time, detail) VALUES ($1, $2) RETURNING action_id\", connection);\n" +
-            "    }\n" +
-            "}\n" +
-            "}";
-        Assert.Empty(RawDetailReadersIn(StripComments(insertOnlyMention)));
-    }
-
-    /// <summary>At most ONE entry, reserved for a future one-time audit-detail scrub (#4346). Empty
-    /// today: the scrub doesn't exist yet, so any new raw reader must be named here explicitly before
-    /// it can pass — nothing is grandfathered in silently.</summary>
-    private static readonly string[] RawDetailReaderExemptions = Array.Empty<string>();
-
-    /// <summary>The two readers that feed <c>ReadRecord</c> — the sanitizer's own choke point — are
-    /// allowed to mention the <c>detail</c> column in their SQL text; they never touch it in C# code
-    /// outside the mapper.</summary>
-    private static readonly string[] AllowedRawDetailReaders =
-    [
-        "PerformanceMonitor.Darling.Service.PgPlanForceActionStore.GetRecentActionsAsync",
-        "PerformanceMonitor.Darling.Service.PgPlanForceActionStore.GetPendingReviewsAsync",
-    ];
-
-    /// <summary>Finds every verbatim-string SQL statement mentioning <c>plan_force_actions</c> that reads
-    /// (rather than writes) the <c>detail</c> column, and attributes each to its enclosing
-    /// <c>Namespace.Type.Method</c> by scanning backward from the match for the nearest preceding
-    /// <c>namespace</c>, <c>class</c>, and method signature.</summary>
-    private static System.Collections.Generic.List<string> RawDetailReadersIn(string text)
-    {
-        var results = new System.Collections.Generic.List<string>();
-        foreach (Match sqlMatch in Regex.Matches(text, "@\"[^\"]*\"", RegexOptions.Singleline))
-        {
-            var sql = sqlMatch.Value;
-            if (!sql.Contains("plan_force_actions", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            var isInsert = Regex.IsMatch(sql, @"INSERT\s+INTO\s+collect\.plan_force_actions", RegexOptions.IgnoreCase);
-            var mentionsDetail = Regex.IsMatch(sql, @"(?<!insert\s(?:.|\n)*?)\bpfa\.detail\b", RegexOptions.IgnoreCase)
-                || Regex.IsMatch(sql, @"\bpfa\.detail\b", RegexOptions.IgnoreCase)
-                || (Regex.IsMatch(sql, @"\bSELECT\b", RegexOptions.IgnoreCase) && Regex.IsMatch(sql, @"(?<![\w.])detail(?![\w])", RegexOptions.IgnoreCase));
-
-            if (isInsert || !mentionsDetail)
-            {
-                continue;
-            }
-
-            var fqName = EnclosingMethodFqName(text, sqlMatch.Index);
-            if (fqName is not null)
-            {
-                results.Add(fqName);
-            }
-        }
-
-        return results;
-    }
-
-    private static string? EnclosingMethodFqName(string text, int position)
-    {
-        var before = text[..position];
-
-        var methodMatch = LastMatch(before, @"(?:public|private|internal|protected)[^\n{;]*?\b(\w+)\s*\([^;{]*\)\s*(?:=>|\{)");
-        var classMatch = LastMatch(before, @"\bclass\s+(\w+)");
-        var namespaceMatch = LastMatch(before, @"\bnamespace\s+([\w.]+)");
-
-        if (methodMatch is null || classMatch is null)
-        {
-            return null;
-        }
-
-        var ns = namespaceMatch?.Groups[1].Value;
-        var cls = classMatch.Groups[1].Value;
-        var method = methodMatch.Groups[1].Value;
-
-        return ns is null ? $"{cls}.{method}" : $"{ns}.{cls}.{method}";
-    }
-
-    private static Match? LastMatch(string text, string pattern)
-    {
-        Match? last = null;
-        foreach (Match m in Regex.Matches(text, pattern))
-        {
-            last = m;
-        }
-
-        return last;
-    }
-
-    /// <summary>Every <c>.cs</c> file under <c>Darling/</c> (excluding <c>Darling.Tests</c> and build
-    /// output) plus <c>PerformanceMonitor.Common/</c>, resolved from this test file's own path the same
-    /// way <see cref="ReadStoreSource"/> finds the store.</summary>
-    private static System.Collections.Generic.IEnumerable<string> ProductionSourceFiles(
-        [System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !Directory.Exists(Path.Combine(dir, "Darling")))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        var root = dir!;
-
-        var darlingFiles = Directory.EnumerateFiles(Path.Combine(root, "Darling"), "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}Darling.Tests{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
-
-        var commonDir = Path.Combine(root, "PerformanceMonitor.Common");
-        var commonFiles = Directory.Exists(commonDir)
-            ? Directory.EnumerateFiles(commonDir, "*.cs", SearchOption.AllDirectories)
-                .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
-                    && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
-            : Enumerable.Empty<string>();
-
-        return darlingFiles.Concat(commonFiles);
-    }
-
 
     private static string ReadStoreSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
     {

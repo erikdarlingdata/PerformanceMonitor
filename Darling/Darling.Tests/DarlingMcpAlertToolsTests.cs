@@ -693,7 +693,7 @@ public sealed class DarlingMcpAlertToolsSurfaceAndSqlTests
         /* And both tool paths go through the combined entry point -- get_alert_settings and the post-write
            re-read, which is the one described to the caller as the authoritative merged state. */
         Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(
-            tools, @"GetAlertConfigurationAsync\(postgres\)").Count);
+            tools, @"GetAlertConfigurationAsync\(postgres(, cancellationToken)?\)").Count);
     }
 
     /// <summary>
@@ -1324,7 +1324,7 @@ internal sealed class FakeMuteRuleStore : IMuteRuleStore
 
     internal void Remove(string id) => _rows.RemoveAll(r => r.Id == id);
 
-    public Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+    public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
         LoadAllCalls++;
         return Task.FromResult<IReadOnlyList<MuteRule>>(
