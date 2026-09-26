@@ -144,7 +144,7 @@ public sealed class TopQueriesHourlyRoutingLiveTests
 
             /* ── the equality assertion, over the (database_name, query_hash) totals for the population BOTH
                tiers can answer — seed (a)'s three groups, now INCLUDING 0xTOPQ1 which also carries seed (b')'s
-               zero-interval row (#4394's ruled pin): before the fix raw's 0xTOPQ1 total exceeded hourly's by
+               zero-interval row (#4394's pin): before the fix raw's 0xTOPQ1 total exceeded hourly's by
                that row's 700,000 CPU-us / 1 execution; after the fix both tiers exclude it and agree. ── */
             foreach (var hash in new[] { "0xTOPQ1", "0xTOPQ2", "0xTOPQ3" })
             {
@@ -156,7 +156,7 @@ public sealed class TopQueriesHourlyRoutingLiveTests
 
             /* ── 0xZEROINTERVAL's only row is zero-interval, so #4394 excludes it from BOTH tiers — it is
                absent from the hourly rollup exactly as it was before this fix (that half was never broken),
-               and now also absent from raw's own read (checked above), which is the change this lane makes. ── */
+               and now also absent from raw's own read (checked above), which is this fix. ── */
             Assert.False(hourlyTotalsByKey.ContainsKey("0xZEROINTERVAL"),
                 "the zero-interval seed row is excluded from the hourly rollup by IntervalHonestSourceFilter");
 
