@@ -609,11 +609,6 @@ ORDER BY local_bucket, story_path_hash";
     /// <summary>
     /// Returns the most recent findings for a server within the given time range, newest and
     /// most severe first, including each finding's persisted remediation action.
-    ///
-    /// <para>#2443 exempt: off the analysis pass. This surface serves the viewer, the MCP and the
-    /// retention sweep — lifetimes with no per-pass budget and no wedged analysis to abandon — so
-    /// its store calls take no pass token. Threading one here would mean inventing a caller that
-    /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
         int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)

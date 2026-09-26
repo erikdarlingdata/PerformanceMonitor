@@ -75,7 +75,6 @@ public sealed class AnalysisPassTokenThreadingTests
     /// </summary>
     private static readonly Dictionary<string, string> s_exempt = new(StringComparer.Ordinal)
     {
-        ["GetRecentFindingsAsync"] = "read-back: the MCP + viewer findings read, no pass to abandon",
         ["GetLatestFindingsAsync"] = "read-back: the viewer's Recommendations tab, no pass to abandon",
         ["GetMutedStoriesAsync"] = "read-back: the viewer's mute registry read, no pass to abandon",
         ["MuteStoryAsync"] = "off-pass write: the MCP/viewer mute verb, no pass to abandon",
