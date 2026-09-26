@@ -343,9 +343,8 @@ public sealed class ManagedConfFileTests
     /// written, but whose builder call is never added to <c>RenderBody</c> (exactly this PR's own bug, for v16),
     /// fails this test on its own keys — with no hand roster to forget to update alongside it.
     ///
-    /// <para>v14 (the legacy <c>maintenance_work_mem</c> cap) is the one documented skip, and the reason is NOT
-    /// what an earlier version of this comment said (that it depends on a data-directory read <c>RenderBody</c>
-    /// cannot drive). <c>RenderBody</c> DOES decide v14 purely from its own inputs: it reduces the blocks above v14,
+    /// <para>v14 (the legacy <c>maintenance_work_mem</c> cap) is the one documented skip. <c>RenderBody</c>
+    /// decides v14 purely from its own inputs: it reduces the blocks above v14,
     /// reads whatever <c>maintenance_work_mem</c> is in force from that reduction, and calls the SAME
     /// <see cref="DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap"/> predicate
     /// <c>EnsureConfAppended</c>'s own heal uses. The skip is arithmetic, not a missing input: every
