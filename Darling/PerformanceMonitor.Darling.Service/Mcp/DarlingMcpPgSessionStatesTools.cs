@@ -11,6 +11,7 @@ using System.Globalization;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -218,9 +219,10 @@ public sealed class DarlingMcpPgSessionStatesTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum sessions to return, horizon holders first then longest transaction. Default 25. See the tool's reading guide.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -236,17 +238,17 @@ public sealed class DarlingMcpPgSessionStatesTools
                (the #3594 dialect), replacing `limit_reached = sessions.Count >= limit` — which read a window of
                exactly `limit` sessions as a cut page. */
             var fetched = await DarlingPgSessionStatesReader.GetPgSessionStatesAsync(
-                postgres, resolved.ServerId, start, end, limit + 1);
+                postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             /* Fetched whether or not there are rows. On a surface where zero rows is the healthy answer, the
                denominator is not an error path - it is what makes a healthy answer believable. */
             var captures = await DarlingPgSessionStatesReader.GetPgSessionStatesCaptureCountsAsync(
-                postgres, resolved.ServerId, start, end);
+                postgres, resolved.ServerId, start, end, cancellationToken);
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, captures);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, captures, cancellationToken);
             }
 
             var holders = rows.Count(r => r.HorizonHolderSamples > 0 && !r.StateWasRedacted);
@@ -369,7 +371,7 @@ public sealed class DarlingMcpPgSessionStatesTools
                 sessions,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_session_states", ex);
         }
@@ -385,10 +387,11 @@ public sealed class DarlingMcpPgSessionStatesTools
     /// </summary>
     private static async Task<string> EmptyAsync(
         NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack,
-        DarlingPgSessionStatesReader.PgSessionStatesCaptureCounts captures)
+        DarlingPgSessionStatesReader.PgSessionStatesCaptureCounts captures,
+        CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_session_states");
+            postgres, serverId, serverName, "pg_session_states", cancellationToken);
         if (gated != null)
         {
             return gated;
