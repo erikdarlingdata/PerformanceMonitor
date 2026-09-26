@@ -144,7 +144,7 @@ public sealed partial class ViewerDataService
     ///
     /// <para>#4231 stage 3b: routes to Raw or the hourly rollup exactly as the MCP reader's
     /// <c>DarlingDataReader.GetTopProceduresByCpuRoutedAsync</c> does — the tier decided over
-    /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (out of scope for this lane).
+    /// <see cref="RollupCoverage.For"/>'s legacy pair, Daily clamped to Hourly (#4231).
     /// An hourly-routed page carries only what the rollup has: <c>object_type</c>/<c>sql_handle</c>/
     /// <c>plan_handle</c>/reads/writes/spills columns are unavailable and read as their defaults, exactly the
     /// same disclosure the MCP payload's <c>tier_used</c>/<c>precision_note</c> make. Use

@@ -1287,8 +1287,8 @@ internal static class DarlingDataReader
     }
 
     /// <summary>#4231 stage 3: which tier <see cref="GetTopQueriesByCpuRoutedAsync"/> actually read —
-    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly, this
-    /// lane's scope); the MCP tool's <c>tier_used</c> comes from here.</summary>
+    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
+    /// the MCP tool's <c>tier_used</c> comes from here.</summary>
     public sealed record TopQueriesReadResult(List<TopQueryRow> Rows, RetentionTier Tier);
 
     /// <summary>
@@ -1534,8 +1534,8 @@ internal static class DarlingDataReader
 
     /// <summary>
     /// #4231 stage 3b: which tier <see cref="GetTopProceduresByCpuRoutedAsync"/> actually read —
-    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly, this
-    /// lane's scope); the MCP tool's <c>tier_used</c> comes from here.</summary>
+    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
+    /// the MCP tool's <c>tier_used</c> comes from here.</summary>
     public sealed record TopProceduresReadResult(List<TopProcedureRow> Rows, RetentionTier Tier);
 
     public static async Task<List<TopProcedureRow>> GetTopProceduresByCpuAsync(
@@ -1548,7 +1548,7 @@ internal static class DarlingDataReader
     /// <summary>
     /// #4231 stage 3b: <see cref="GetTopProceduresByCpuAsync"/>'s routed form, exposing the tier it read so a
     /// caller can disclose it. Tier is decided over the LEGACY pair's coverage (<see cref="RollupCoverage.For"/>);
-    /// Daily is out of scope for this lane and is clamped to Hourly.
+    /// Daily is clamped to Hourly (#4231).
     /// </summary>
     public static async Task<TopProceduresReadResult> GetTopProceduresByCpuRoutedAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)

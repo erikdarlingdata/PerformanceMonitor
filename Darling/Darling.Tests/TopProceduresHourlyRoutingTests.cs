@@ -17,7 +17,7 @@ namespace Darling.Tests;
 /// <summary>
 /// #4231 stage 3b pins for <see cref="DarlingDataReader.TopProceduresHourlySql"/> and the routed
 /// <c>GetTopProceduresByCpuRoutedAsync</c>'s hourly arm. Purely source-level (no live store): the
-/// SQL-shape pin RED before this lane (the const did not exist); the source pin RED if a future edit ever
+/// SQL-shape pin RED before this change (the const did not exist); the source pin RED if a future edit ever
 /// names <c>procedure_stats_interval_hourly</c> / <c>procedure_stats_hourly</c> directly in the hourly path
 /// instead of going through <see cref="PerformanceMonitor.Darling.Storage.RollupCoverage.StitchedRelationSql"/>.
 /// </summary>
@@ -26,7 +26,7 @@ public sealed class TopProceduresHourlyRoutingTests
     /// <summary>
     /// SQL-shape pin: <see cref="DarlingDataReader.TopProceduresHourlySql"/> groups by
     /// (database_name, schema_name, object_name) only — no object_type, the rollup has none — and ranks by
-    /// SUM(worker_time_sum) DESC, mirroring TopProceduresSql's CPU-ranking promise. RED before this lane: the
+    /// SUM(worker_time_sum) DESC, mirroring TopProceduresSql's CPU-ranking promise. RED before this change: the
     /// const did not exist, so this test would not compile.
     /// </summary>
     [Fact]
@@ -58,7 +58,7 @@ public sealed class TopProceduresHourlyRoutingTests
         var readerPath = FindReaderSourcePath();
         var source = File.ReadAllText(readerPath);
         var methodStart = source.IndexOf("private static async Task<List<TopProcedureRow>> GetTopProceduresByCpuHourlyAsync", StringComparison.Ordinal);
-        Assert.True(methodStart >= 0, "GetTopProceduresByCpuHourlyAsync not found in DarlingDataReader.cs — the brief's method name may have changed.");
+        Assert.True(methodStart >= 0, "GetTopProceduresByCpuHourlyAsync not found in DarlingDataReader.cs — the method name may have changed.");
 
         // Bound the scan to roughly this one method's body (the next top-level member, or end of file).
         var nextMemberStart = source.IndexOf("\n    /* ─────────────────────────── ", methodStart + 1, StringComparison.Ordinal);
