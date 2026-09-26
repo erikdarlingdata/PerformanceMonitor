@@ -63,7 +63,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
     [Fact]
     public void AuthoredTemplate_NonAuthoredMetric_StaysMechanical()
     {
-        var template = AlertNotebookEndpoint.AuthoredTemplate("High CPU");
+        var template = AlertNotebookEndpoint.AuthoredTemplate("tempdb Space");
 
         Assert.Null(template);
     }
@@ -243,6 +243,16 @@ public sealed class AlertNotebookAuthoredTemplateTests
                 if (AlertNotebookEndpoint.s_authoredLimitlessTrendReads.Contains(read))
                 {
                     Assert.False(parameters.ContainsKey("limit"), $"{read} must not carry a limit param");
+                }
+                else if (read == "get_top_queries_by_cpu" || read == "get_top_procedures_by_cpu")
+                {
+                    /* #4223: these two declare no 'limit' param -- they cap with 'top' instead. */
+                    Assert.True(parameters.ContainsKey("top"), $"read cell '{read}' must carry a top param");
+                }
+                else if (read == "get_cpu_scheduler_pressure")
+                {
+                    /* #4223: a newest-snapshot read (DarlingWebEndpoints' own catalog entry) -- no row cap to carry. */
+                    Assert.False(parameters.ContainsKey("limit"), "get_cpu_scheduler_pressure must not carry a limit param");
                 }
                 else
                 {

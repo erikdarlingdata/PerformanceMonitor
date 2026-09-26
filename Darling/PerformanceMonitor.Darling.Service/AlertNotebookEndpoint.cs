@@ -378,6 +378,8 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/agent-job", AgentJobTemplateVersion, BuildAgentJobCells)),
         (new[] { "Forced Plan Failing" },
             new AuthoredTemplateEntry("authored/forced-plan-failing", ForcedPlanFailingTemplateVersion, BuildForcedPlanFailingCells)),
+        (new[] { "High CPU" },
+            new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCpuCells)),
         (new[] { "Long-Running Query" },
             new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
         (new[] { "PostgreSQL Replication Slot Retention" },
@@ -429,6 +431,12 @@ internal static partial class AlertNotebookEndpoint
     internal static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_deadlock_trend",
+        /* #4223: get_top_queries_by_cpu / get_top_procedures_by_cpu / get_cpu_scheduler_pressure declare no
+           'limit' param at all -- the first two cap with 'top' (carried explicitly below), the last has no
+           row cap to carry. */
+        "get_top_queries_by_cpu",
+        "get_top_procedures_by_cpu",
+        "get_cpu_scheduler_pressure",
         /* #4223: get_collection_health and get_running_jobs declare only PServer() — no hours/limit/as_of at
            all — so ServerOnlyReadCell never adds a limit param and this exemption applies here too, even
            though neither is a trend read. */
