@@ -43,11 +43,16 @@ public sealed class AlertNotebookAuthoredTemplateTests
 
     /* ═══════════════════════════ metric routing ═══════════════════════════ */
 
+    /// <summary>Data-driven off <see cref="AlertNotebookEndpoint.s_authoredTemplates"/> itself: every
+    /// registered metric must route to its OWN row's <c>Entry.Id</c>, so a new family's row is covered here
+    /// without an added <c>InlineData</c> line.</summary>
+    public static IEnumerable<object[]> AllAuthoredMetricsWithExpectedId() =>
+        AlertNotebookEndpoint.s_authoredTemplates
+            .SelectMany(row => row.Metrics.Select(metric => new object[] { metric, row.Entry.Id }));
+
     [Theory]
-    [InlineData("Blocking Detected", "authored/blocking")]
-    [InlineData("Blocking Wait Time", "authored/blocking")]
-    [InlineData("Deadlocks Detected", "authored/deadlocks")]
-    public void AuthoredTemplate_RoutesTheThreeAlertEngineMetrics_ToTheRightTemplate(string metric, string expectedId)
+    [MemberData(nameof(AllAuthoredMetricsWithExpectedId))]
+    public void AuthoredTemplate_RoutesEveryRegisteredMetric_ToItsOwnTemplate(string metric, string expectedId)
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
 
@@ -74,14 +79,16 @@ public sealed class AlertNotebookAuthoredTemplateTests
 
     /* ═══════════════════════════ both templates validate ═══════════════════════════ */
 
-    public static IEnumerable<object[]> BothTemplates()
-    {
-        yield return new object[] { "Blocking Detected" };
-        yield return new object[] { "Deadlocks Detected" };
-    }
+    /// <summary>Every metric <see cref="AlertNotebookEndpoint.s_authoredTemplates"/> registers, flattened
+    /// from its rows so the shared theories below cover a new authored family (#4223) the moment its row
+    /// lands here — nothing in this file has to change to pick it up.</summary>
+    public static IEnumerable<object[]> AllAuthoredMetrics() =>
+        AlertNotebookEndpoint.s_authoredTemplates
+            .SelectMany(row => row.Metrics)
+            .Select(metric => new object[] { metric });
 
     [Theory]
-    [MemberData(nameof(BothTemplates))]
+    [MemberData(nameof(AllAuthoredMetrics))]
     public void AuthoredTemplate_BuiltAgainstAMatchedIncident_PassesValidateNotebookDefinition(string metric)
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
@@ -103,7 +110,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
     }
 
     [Theory]
-    [MemberData(nameof(BothTemplates))]
+    [MemberData(nameof(AllAuthoredMetrics))]
     public void AuthoredTemplate_WithNoMatchedIncident_StillDegradesAndValidates(string metric)
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
@@ -131,7 +138,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
     /// so an authored read cell naming a read with no dispatch entry was invisible. This walks BOTH authored
     /// templates' actual built cells instead of the section table.</summary>
     [Theory]
-    [MemberData(nameof(BothTemplates))]
+    [MemberData(nameof(AllAuthoredMetrics))]
     public void EveryAuthoredReadCell_NamesAKnownDispatchEntry(string metric)
     {
         var dispatch = DarlingWebEndpoints.BuildReadDispatch();
@@ -161,7 +168,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
     /// this test the same way it would red a real save -- exactly the gap the brief calls out as missing from
     /// the harness.</summary>
     [Theory]
-    [MemberData(nameof(BothTemplates))]
+    [MemberData(nameof(AllAuthoredMetrics))]
     public void EveryComposedCell_NamesAMeasureAndBreakdownInTheComposeCatalog(string metric)
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
@@ -209,7 +216,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
     /// trend read, exempted by name); no read names <c>audit_config</c>/an <c>analyze_*</c> compute read; every
     /// composed cell's window is <![CDATA[<=]]> 24h.</summary>
     [Theory]
-    [MemberData(nameof(BothTemplates))]
+    [MemberData(nameof(AllAuthoredMetrics))]
     public void Budget_ReadCellsHaveLimitsExceptTheTrendRead_ComposedWindowsAreAtMost24h(string metric)
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
@@ -252,7 +259,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
     /* ═══════════════════════════ binding ═══════════════════════════ */
 
     [Theory]
-    [MemberData(nameof(BothTemplates))]
+    [MemberData(nameof(AllAuthoredMetrics))]
     public void Binding_ComposedCellRangeEqualsWindow_ReadCellAsOfEqualsWindowEnd(string metric)
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
@@ -283,7 +290,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
     /* ═══════════════════════════ explicit viz ═══════════════════════════ */
 
     [Theory]
-    [MemberData(nameof(BothTemplates))]
+    [MemberData(nameof(AllAuthoredMetrics))]
     public void EveryReadOrPanelCell_HasAnExplicitViz(string metric)
     {
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
@@ -320,7 +327,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
         Assert.Null(byDatabase["filters"]);
     }
 
-    /* ═══════════════════════════ the registration table (#4223 lane 0) ═══════════════════════════ */
+    /* ═══════════════════════════ the registration table (#4223) ═══════════════════════════ */
 
     /// <summary>Every family in <see cref="AlertNotebookEndpoint.s_authoredTemplates"/> resolves to a
     /// non-null entry for each of its own metric names, the ids are unique, and every entry's built cells

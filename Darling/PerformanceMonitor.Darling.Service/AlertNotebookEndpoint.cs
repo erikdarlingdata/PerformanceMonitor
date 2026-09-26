@@ -155,6 +155,7 @@ internal static partial class AlertNotebookEndpoint
                the match read above is centered on `anchor` and mostly backward-looking -- bounded by the SAME
                row cap and cancellable the SAME way. */
             List<DarlingAlertReader.AlertHistoryReadRow> statusRows = new();
+            var statusHistoryStopwatch = Stopwatch.StartNew();
             try
             {
                 var statusUntil = anchor + DarlingTriageEndpoint.AlertMatchLookback;
@@ -170,7 +171,7 @@ internal static partial class AlertNotebookEndpoint
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:status-history", 0, ex);
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:status-history", statusHistoryStopwatch.ElapsedMilliseconds, ex);
                 notes.Add((JsonNode)"Status lookup failed. The service log names what failed.");
             }
 
@@ -548,13 +549,25 @@ internal static partial class AlertNotebookEndpoint
         return cell;
     }
 
+    /// <summary>The collector-freshness read (arms 3/4): the newest row for this server that counts as
+    /// evidence the instrument is up. <c>SUCCESS</c> and <c>SKIPPED</c> both count — a <c>SKIPPED</c> run is a
+    /// collector that ran and found nothing to do (<c>EnumeratedCollectorDriver.FreshnessSuccessStatuses</c>
+    /// is the same pair, for the same reason: the other freshness reads in this codebase — the self-alert
+    /// evaluator's <c>last_success</c>/<c>recent_success</c> and the health reads' <c>last_success_time</c> —
+    /// all treat it as a healthy no-op, not as evidence the run never happened). An <c>ERROR</c> row must NOT
+    /// count: it is proof the collector attempted and failed, which is exactly the case this arm exists to
+    /// tell apart from a collector that never ran at all.</summary>
+    internal const string CollectorFreshnessSql =
+        "SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND status IN ('SUCCESS', 'SKIPPED') " +
+        "ORDER BY collection_time DESC LIMIT 1";
+
     /// <summary>
     /// The four status arms (#4222): a resolution row for this metric after <c>at</c> -&gt; "Resolved at T";
     /// else a later same-metric firing -&gt; "Fired again at T"; else, if the metric's collector has run since
     /// <c>at</c> -&gt; "No resolution recorded"; else "Unknown (not collected since T)". NEVER "ongoing" — an
     /// absence of rows is not evidence while the instrument is down.
     /// </summary>
-    private static async Task<string> ResolveStatusAsync(
+    internal static async Task<string> ResolveStatusAsync(
         NpgsqlDataSource postgres, int? serverId, bool fleetLevelStore, string? metric, DateTime anchor, DateTime now,
         List<DarlingAlertReader.AlertHistoryReadRow> historyRows,
         DarlingAlertReader.AlertHistoryReadRow? matchedRow, ILogger logger, System.Threading.CancellationToken cancellationToken)
@@ -579,11 +592,14 @@ internal static partial class AlertNotebookEndpoint
             return "Unknown (not collected since " + anchorStamp + ")";
         }
 
+        var freshnessStopwatch = Stopwatch.StartNew();
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            await using var command = new NpgsqlCommand(
-                "SELECT collection_time FROM v_collection_log WHERE server_id = $1 ORDER BY collection_time DESC LIMIT 1", connection);
+            await using var command = new NpgsqlCommand(CollectorFreshnessSql, connection)
+            {
+                CommandTimeout = McpCommandDeadlines.ReadSeconds,
+            };
             command.Parameters.AddWithValue(serverId.Value);
             var result = await command.ExecuteScalarAsync(cancellationToken);
             if (result is DateTime lastCollected && lastCollected >= anchor)
@@ -593,7 +609,7 @@ internal static partial class AlertNotebookEndpoint
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:collector-freshness", 0, ex);
+            DarlingWebFailureLog.Report(logger, "/api/alert-notebook:collector-freshness", freshnessStopwatch.ElapsedMilliseconds, ex);
         }
 
         return "Unknown (not collected since " + anchorStamp + ")";
@@ -673,6 +689,22 @@ internal static partial class AlertNotebookEndpoint
         return (matchedRow, matchedIncident);
     }
 
+    /// <summary>The AG and self-monitor connect family's own recovery edges (#4378): each pair already fires
+    /// under its OWN metric name (<see cref="DarlingTriageEndpoint.SectionsByMetric"/> maps every one of
+    /// these directly, so they need no <see cref="DarlingTriageEndpoint.ResolutionAliases"/> entry — that
+    /// list folds a resolution TITLE onto a different firing metric, which none of these do). Kept here
+    /// rather than in <c>ResolutionAliases</c> because that list also builds
+    /// <see cref="DarlingTriageEndpoint.SectionsByMetric"/>, and every metric below already has its own
+    /// entry there; adding these pairs to it would define the SAME key twice. <c>AG Failover</c> has no
+    /// natural recovery — a failover is an event, not a condition that clears — so it is deliberately absent.</summary>
+    internal static readonly IReadOnlyList<(string Firing, string Recovery)> NotebookRecoveryEdges = new[]
+    {
+        ("AG Replica Disconnected", "AG Replica Reconnected"),
+        ("AG Database Suspended", "AG Data Movement Resumed"),
+        ("AG Sync Fell Behind", "AG Sync Recovered"),
+        ("Server Unreachable", "Server Restored"),
+    };
+
     /// <summary>Status arms 1 and 2 (#4222), extracted as a pure seam (#4366 review F4) over whatever rows the
     /// caller has already gathered — the caller is responsible for the window (#4366 F1: the caller now
     /// passes rows from BOTH the backward match read and a forward-looking read so a late resolution or
@@ -710,16 +742,33 @@ internal static partial class AlertNotebookEndpoint
                 continue;
             }
 
+            var isResolutionRow = false;
             foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
             {
                 if (string.Equals(canonical, trimmedMetric, StringComparison.OrdinalIgnoreCase)
                     && string.Equals(row.MetricName, alias, StringComparison.OrdinalIgnoreCase))
                 {
-                    if (resolvedAt is null || row.AlertTime < resolvedAt)
+                    isResolutionRow = true;
+                    break;
+                }
+            }
+
+            if (!isResolutionRow)
+            {
+                foreach (var (firing, recovery) in NotebookRecoveryEdges)
+                {
+                    if (string.Equals(firing, trimmedMetric, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(row.MetricName, recovery, StringComparison.OrdinalIgnoreCase))
                     {
-                        resolvedAt = row.AlertTime;
+                        isResolutionRow = true;
+                        break;
                     }
                 }
+            }
+
+            if (isResolutionRow && (resolvedAt is null || row.AlertTime < resolvedAt))
+            {
+                resolvedAt = row.AlertTime;
             }
         }
 

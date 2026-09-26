@@ -423,6 +423,64 @@ public sealed class AlertNotebookEndpointTests
         }
     }
 
+    [Fact]
+    public void StatusFromHistory_AgReconnected_AfterDisconnected_ReadsResolved()
+    {
+        var anchor = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var matched = Row(anchor, "AG Replica Disconnected", serverId: 7);
+
+        var status = AlertNotebookEndpoint.StatusFromHistory(
+            new List<DarlingAlertReader.AlertHistoryReadRow> { matched, Row(anchor + TimeSpan.FromMinutes(1), "AG Replica Reconnected", serverId: 7) },
+            "AG Replica Disconnected", anchor, matched, 7, false);
+
+        Assert.StartsWith("Resolved at ", status, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StatusFromHistory_ServerRestored_AfterUnreachable_ReadsResolved()
+    {
+        var anchor = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+        var matched = Row(anchor, "Server Unreachable", serverId: 7);
+
+        var status = AlertNotebookEndpoint.StatusFromHistory(
+            new List<DarlingAlertReader.AlertHistoryReadRow> { matched, Row(anchor + TimeSpan.FromMinutes(1), "Server Restored", serverId: 7) },
+            "Server Unreachable", anchor, matched, 7, false);
+
+        Assert.StartsWith("Resolved at ", status, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StatusFromHistory_AgFailover_HasNoRecoveryEdge()
+    {
+        // AG Failover is deliberately absent from NotebookRecoveryEdges (an event, not a clearing condition).
+        Assert.DoesNotContain(
+            AlertNotebookEndpoint.NotebookRecoveryEdges,
+            pair => string.Equals(pair.Firing, "AG Failover", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /* ═══════════════════════════ pure: the collector-freshness read's own shape ═══════════════════════════ */
+
+    [Fact]
+    public void CollectorFreshnessSql_CountsOnlySuccessAndSkipped_NeverError()
+    {
+        var sql = AlertNotebookEndpoint.CollectorFreshnessSql;
+
+        Assert.Contains("status IN ('SUCCESS', 'SKIPPED')", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'ERROR'", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ResolveStatusAsync_Source_SetsCommandTimeout_AndNeverReportsZeroElapsed()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "AlertNotebookEndpoint.cs");
+
+        Assert.Contains("CommandTimeout = McpCommandDeadlines.ReadSeconds", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "DarlingWebFailureLog.Report(logger, \"/api/alert-notebook:collector-freshness\", 0, ex)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "DarlingWebFailureLog.Report(logger, \"/api/alert-notebook:status-history\", 0, ex)", source, StringComparison.Ordinal);
+    }
+
     /* ═══════════════════════════ pure: window math and the future-`at` clamp ═══════════════════════════ */
 
     /// <summary>A far-future <c>at</c> clamps to <c>now</c> rather than reading as a request to widen the
