@@ -588,21 +588,30 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
         }
     }
 
-    /// <summary>#4299 L2 (two-service pin): two INDEPENDENT <see cref="NpgsqlDataSource"/>s against the SAME
-    /// scratch store, standing in for two service processes. Service A stamps the current postmaster epoch;
-    /// Service B's own relaunch-decision read (<see cref="DarlingWorker.ShouldLaunchMaterializationHoleRepair"/>,
+    /// <summary>#4299/#4391 L2 (two-service pin): two INDEPENDENT <see cref="NpgsqlDataSource"/>s against the
+    /// SAME scratch store, standing in for two service processes. Service A stamps the current postmaster
+    /// epoch; Service B's own relaunch-decision read (<see cref="DarlingWorker.ShouldLaunchMaterializationHoleRepair"/>,
     /// fed by a fresh <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/> read on B's OWN connection) must
     /// see the stamp A wrote and answer "don't launch" — the store-side guard
     /// (<see cref="TimescaleSupport.RawRepairEpochStampSql"/>'s <c>IS DISTINCT FROM</c>) is what stops a SECOND
     /// SERVICE from repeating A's repair, independent of either process's own in-memory flag. B then re-stamping
-    /// the identical value touches 0 rows (the same guard, proven from the write side). Finally A and B both call
-    /// <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/> in turn on state (a): the chunk count drops once, on
-    /// A's call, and B's later call — same relation, chunk already gone — drops nothing further and throws
-    /// nothing, proving the purge itself is naturally idempotent once the chunks are already dropped. RED on
-    /// <c>d70358a5b</c>: neither <c>TriggerRawPurgeCoreAsync</c> nor <c>ShouldLaunchMaterializationHoleRepair</c>
-    /// existed to call.</summary>
+    /// the identical value touches 0 rows (the same guard, proven from the write side).
+    ///
+    /// <para>Nothing in <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/> stops a second service from
+    /// calling it after the first: the repair-epoch guard checked inside it governs the same relaunch
+    /// decision as above, not a second purge call, and it still reads as current for B. So A and B both call
+    /// it in turn on state (a): A's call drops the chunks past the drop range, and B's later call — same
+    /// relation, nothing left in that range — is a harmless no-op that drops nothing further. This pin states
+    /// that specifically, rather than claiming the purge itself is gated to run once: it asserts B's OWN
+    /// recorded outcome (<see cref="TimescaleSupport.ReadRawLastPurgeStateAsync"/>) is a fresh <c>ran</c> pass
+    /// — the underlying <c>CALL run_job</c> succeeds even with nothing left in range to drop — timestamped
+    /// after A's, not merely that the chunk count held steady (which it would even if B had never run at
+    /// all).</para>
+    ///
+    /// RED on <c>d70358a5b</c>: neither <c>TriggerRawPurgeCoreAsync</c> nor
+    /// <c>ShouldLaunchMaterializationHoleRepair</c> existed to call.</summary>
     [Fact]
-    public async Task TwoServices_RelaunchGuardHolds_PurgeRunsOnceOnly()
+    public async Task TwoServices_RelaunchGuardHolds_SecondServicePurgeDropsNothing()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -690,11 +699,25 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             var afterA = await ChunkCountAsync(connectionA);
             Assert.True(afterA < before, $"Service A's purge call must drop chunks (before={before}, after={afterA}); log: {loggerA.Joined}");
 
+            var (stateAfterA, recordAfterA) = await TimescaleSupport.ReadRawLastPurgeStateAsync(connectionA, Raw, NullLogger.Instance, default);
+            Assert.Equal(TimescaleSupport.RawLastPurgeReadState.Present, stateAfterA);
+            Assert.Equal("ran", recordAfterA!.Outcome);
+
             var loggerB = new CapturingTestLogger();
             await DarlingWorker.TriggerRawPurgeCoreAsync(connectionB, loggerB, default);
 
+            /* Nothing stops B's own trigger call from running: it is B's OUTCOME, not the chunk count, that
+               proves it ran and found nothing left to drop — the chunk count alone would hold steady even if
+               B had never called TriggerRawPurgeCoreAsync at all, which is exactly what made the old assertion
+               here prove nothing (#4391). */
             var afterB = await ChunkCountAsync(connectionA);
             Assert.Equal(afterA, afterB);
+
+            var (stateAfterB, recordAfterB) = await TimescaleSupport.ReadRawLastPurgeStateAsync(connectionA, Raw, NullLogger.Instance, default);
+            Assert.Equal(TimescaleSupport.RawLastPurgeReadState.Present, stateAfterB);
+            Assert.Equal("ran", recordAfterB!.Outcome);
+            Assert.True(recordAfterB.At > recordAfterA.At,
+                $"Service B's own recorded pass must postdate Service A's (A={recordAfterA.At:O}, B={recordAfterB.At:O}), or this pin does not prove B actually ran");
 
             bodySucceeded = true;
         }
