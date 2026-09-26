@@ -163,6 +163,9 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Equal(original, File.ReadAllText(Path.Combine(_dataDir, "postgresql.conf")));
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfFile.FileName)));
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
+        Assert.Contains("before-snapshot", outcome.Detail);
+        Assert.Contains("simulated connection failure", outcome.Detail);
+        Assert.Contains("simulated connection failure", logger.Joined);
     }
 
     /// <summary>Ruled pin: the after-snapshot throws. Both postgresql.conf and darling-managed.conf are
@@ -205,6 +208,8 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfFile.FileName)));
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.StampFileName)));
         Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
+        Assert.Contains("after-snapshot", outcome.Detail);
+        Assert.Contains("simulated connection failure on re-read", outcome.Detail);
     }
 
     /// <summary>Ruled pin variant: the same as above, but a prior managed file already existed before this

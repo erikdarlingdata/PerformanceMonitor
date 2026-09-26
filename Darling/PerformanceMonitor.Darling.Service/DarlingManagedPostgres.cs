@@ -2930,11 +2930,12 @@ public sealed class DarlingManagedPostgres
                             "{DataDirectory} has a pending #4215 migration but no backup file — cannot resume; reporting Unknown.",
                             _dataDirectory);
                         return new ManagedConfMigrationOutcome(
-                            ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+                            ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A,
+                            "resume: no backup file found for a PendingVerify conf");
                     }
 
                     Array.Sort(backupPath, StringComparer.Ordinal);
-                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[0], cancellationToken);
+                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[0], cancellationToken, _logger);
                     break;
                 }
 
@@ -3029,12 +3030,13 @@ public sealed class DarlingManagedPostgres
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger.LogWarning(ex, "The #4215 conf migration failed for {DataDirectory}; the store keeps running on its current conf.", _dataDirectory);
+            var detail = FormattableString.Invariant($"outer: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogWarning(ex, "The #4215 conf migration failed for {DataDirectory}; the store keeps running on its current conf. {Detail}", _dataDirectory, detail);
             var failedStep = confState == ManagedConfMigrationState.Kind.Verified
                 ? ManagedConfMigrationStep.B
                 : ManagedConfMigrationStep.A;
             return new ManagedConfMigrationOutcome(
-                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, failedStep);
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, failedStep, detail);
         }
     }
 
@@ -3052,8 +3054,8 @@ public sealed class DarlingManagedPostgres
         }
 
         _logger.LogWarning(
-            "#4215 conf migration {Status} for {DataDirectory} (step {Step}); backup {BackupPath}; mismatched keys: {MismatchedKeys}.",
-            outcome.Status, _dataDirectory, outcome.Step, outcome.BackupPath ?? "(none)", string.Join(", ", outcome.MismatchedKeys));
+            "#4215 conf migration {Status} for {DataDirectory} (step {Step}); backup {BackupPath}; mismatched keys: {MismatchedKeys}; detail: {Detail}.",
+            outcome.Status, _dataDirectory, outcome.Step, outcome.BackupPath ?? "(none)", string.Join(", ", outcome.MismatchedKeys), outcome.Detail ?? "(none)");
     }
 
     /// <summary>

@@ -39,13 +39,16 @@ internal enum ManagedConfVerificationStatus
 /// call's result (#4336 lane 5b, design decision (d)): the status, the keys a <c>Failed</c> result named as
 /// mismatched (empty otherwise), the backup path once one exists (null only when nothing was ever written —
 /// the before-snapshot-throws and pending-write-failed cases), and which step produced this (always
-/// <see cref="ManagedConfMigrationStep.A"/> from this lane; Step B is #4336 lane 6).
+/// <see cref="ManagedConfMigrationStep.A"/> from this lane; Step B is #4336 lane 6), and for an <c>Unknown</c>
+/// result the exception type, message, and the phase it was caught in (null otherwise; never file contents —
+/// #4336 lane 6c).
 /// </summary>
 internal readonly record struct ManagedConfMigrationOutcome(
     ManagedConfVerificationStatus Status,
     IReadOnlyList<string> MismatchedKeys,
     string? BackupPath,
-    ManagedConfMigrationStep Step);
+    ManagedConfMigrationStep Step,
+    string? Detail = null);
 
 /// <summary>
 /// Drives Step A (#4336 lane 5b, design decisions (a)-(d)) end to end over the pure building blocks
@@ -101,22 +104,28 @@ internal static class ManagedConfMigrationRunner
         {
             before = await snapshot(ct).ConfigureAwait(false);
         }
-        catch (Exception) when (ct.IsCancellationRequested is false)
+        catch (Exception ex) when (ct.IsCancellationRequested is false)
         {
             /* Nothing has been written yet — the before-snapshot-throws case. Nothing to restore. */
+            var detail = FormattableString.Invariant($"before-snapshot: {ex.GetType().Name}: {ex.Message}");
+            logger.LogWarning(
+                "The #4215 conf migration's before-snapshot failed for {DataDirectory}: {Detail}", dataDir, detail);
             return new ManagedConfMigrationOutcome(
-                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A, detail);
         }
 
         try
         {
             ManagedConfMigrationSteps.WritePending(dataDir, before, priorManagedText);
         }
-        catch (IOException)
+        catch (IOException ex)
         {
             /* Ruled: the pending file could not be written — abort before BackupOriginal, nothing changed. */
+            var detail = FormattableString.Invariant($"pending write: {ex.GetType().Name}: {ex.Message}");
+            logger.LogWarning(
+                "The #4215 conf migration's pending-file write failed for {DataDirectory}: {Detail}", dataDir, detail);
             return new ManagedConfMigrationOutcome(
-                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A, detail);
         }
 
         var backupPath = ManagedConfMigrationSteps.BackupOriginal(dataDir, postgresqlConfPath, utcNow);
@@ -146,14 +155,17 @@ internal static class ManagedConfMigrationRunner
         {
             after = await snapshot(ct).ConfigureAwait(false);
         }
-        catch (Exception) when (ct.IsCancellationRequested is false)
+        catch (Exception ex) when (ct.IsCancellationRequested is false)
         {
             /* Ruled: the after-snapshot throws — restore both files to their exact pre-migration bytes, no
                stamp, delete the pending file, report Unknown. */
+            var detail = FormattableString.Invariant($"after-snapshot: {ex.GetType().Name}: {ex.Message}");
+            logger.LogWarning(
+                "The #4215 conf migration's after-snapshot failed for {DataDirectory}: {Detail}", dataDir, detail);
             ManagedConfMigrationSteps.RestoreOriginal(dataDir, backupPath, priorManagedText);
             ManagedConfMigrationSteps.DeletePending(dataDir);
             return new ManagedConfMigrationOutcome(
-                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), backupPath, ManagedConfMigrationStep.A);
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), backupPath, ManagedConfMigrationStep.A, detail);
         }
 
         return CompareAndFinish(dataDir, backupPath, priorManagedText, newManagedConfText, before, after);
@@ -170,7 +182,8 @@ internal static class ManagedConfMigrationRunner
         string dataDir,
         Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot,
         string backupPath,
-        CancellationToken ct)
+        CancellationToken ct,
+        ILogger? logger = null)
     {
         ManagedConfMigrationSteps.TryReadPending(dataDir, out var before, out var priorManagedText);
 
@@ -182,12 +195,15 @@ internal static class ManagedConfMigrationRunner
         {
             after = await snapshot(ct).ConfigureAwait(false);
         }
-        catch (Exception) when (ct.IsCancellationRequested is false)
+        catch (Exception ex) when (ct.IsCancellationRequested is false)
         {
+            var detail = FormattableString.Invariant($"resume: {ex.GetType().Name}: {ex.Message}");
+            logger?.LogWarning(
+                "The #4215 conf migration's resume after-snapshot failed for {DataDirectory}: {Detail}", dataDir, detail);
             ManagedConfMigrationSteps.RestoreOriginal(dataDir, backupPath, priorManagedText);
             ManagedConfMigrationSteps.DeletePending(dataDir);
             return new ManagedConfMigrationOutcome(
-                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), backupPath, ManagedConfMigrationStep.A);
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), backupPath, ManagedConfMigrationStep.A, detail);
         }
 
         return CompareAndFinish(dataDir, backupPath, priorManagedText, currentManagedConfText, before, after);
