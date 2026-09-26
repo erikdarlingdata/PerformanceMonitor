@@ -588,7 +588,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
         }
     }
 
-    /// <summary>#4299/#4391 L2 (two-service pin): two INDEPENDENT <see cref="NpgsqlDataSource"/>s against the
+    /// <summary>#4299/#4391 (two-service pin): two INDEPENDENT <see cref="NpgsqlDataSource"/>s against the
     /// SAME scratch store, standing in for two service processes. Service A stamps the current postmaster
     /// epoch; Service B's own relaunch-decision read (<see cref="DarlingWorker.ShouldLaunchMaterializationHoleRepair"/>,
     /// fed by a fresh <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/> read on B's OWN connection) must
@@ -615,7 +615,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 L2 two-service pin.");
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 two-service pin.");
 
         var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
         var bodySucceeded = false;
@@ -631,7 +631,7 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             await PgMigrations.MigrateAsync(connectionA, default);
 
             var enabled = await TimescaleSupport.TryEnableAsync(connectionA, null, default);
-            Assert.SkipWhen(!enabled, "The live #4299 L2 two-service pin needs TimescaleDB.");
+            Assert.SkipWhen(!enabled, "The live #4299 two-service pin needs TimescaleDB.");
             await TimescaleSupport.ConvertToHypertablesAsync(connectionA, null, default);
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connectionA, null, default);
 
