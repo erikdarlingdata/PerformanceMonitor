@@ -1337,6 +1337,8 @@ public sealed class TimescaleContinuousAggregateTests
         Assert.DoesNotContain("time_bucket(INTERVAL '1 hour', now()::timestamp))", sql, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// PIN (#4301, RED on <c>e970834ba</c> and earlier): the generated coverage SQL for a stitched slot
     /// carries the shared hole definition's <c>generate_series</c> AND its bound on the successor's first
     /// bucket above the legacy's last (<c>sa.bucket &gt; l.mx</c>), and no longer carries the old row-level
     /// seam-only probe (<c>COALESCE(s.mn, 'infinity'</c>). The old text existed only through <c>e970834ba</c>;
