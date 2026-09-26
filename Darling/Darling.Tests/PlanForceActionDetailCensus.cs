@@ -485,7 +485,7 @@ internal static class PlanForceActionDetailCensus
 
     /// <summary>Reads a raw string literal (<c>"""..."""</c>, N&gt;=3 quotes, optionally interpolated),
     /// replacing each hole with a single space. <paramref name="holeBraceCount"/> is the number of
-    /// leading <c>$</c> signs : a hole opens with exactly that many <c>{</c> and closes with that many
+    /// leading <c>$</c> signs: a hole opens with exactly that many <c>{</c> and closes with that many
     /// <c>}</c>; fewer braces than that in a row are literal text, not a hole delimiter.</summary>
     private static (string Text, int End) ReadRawString(
         string source, int literalStart, int quoteStart, int quoteRunLength, bool isInterpolated,

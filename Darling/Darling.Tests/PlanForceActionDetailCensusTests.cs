@@ -176,7 +176,9 @@ public sealed class PlanForceActionDetailCensusTests
      * --------------------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// Today's real per-file count, computed and hard-coded . Sites, one line each:
+    /// Today's real per-file count, computed and hard-coded. Sites, one line each. Keyed by repo-relative
+    /// path, the same shape as <see cref="ExpectedTableMentionCountsByPath"/> below — a bare file name is
+    /// ambiguous once two files anywhere in the tree happen to share a name.
     ///
     /// <para><b><see cref="StoreFileName"/> = 3:</b>
     /// (1) <c>JournalAsync</c>'s INSERT — the column list names <c>detail</c>;
@@ -192,9 +194,6 @@ public sealed class PlanForceActionDetailCensusTests
     /// text</c> column, so the same literal names both words; this is schema DDL, never a read, and needs
     /// no exemption entry (only READS are exempted here), but the census counts literals, not readers.</para>
     /// </summary>
-    /// <summary>Keyed by repo-relative path , the same shape as
-    /// <see cref="ExpectedTableMentionCountsByPath"/> below — a bare file name is ambiguous once two
-    /// files anywhere in the tree happen to share a name.</summary>
     private static readonly Dictionary<string, int> ExpectedCountsByFileName = new()
     {
         ["Darling/PerformanceMonitor.Darling.Service/PgPlanForceActionStore.cs"] = 3,
@@ -270,7 +269,7 @@ public sealed class PlanForceActionDetailCensusTests
      * --------------------------------------------------------------------------------------------------- */
 
     /// <summary>
-    /// Today's real per-file table-mention count, computed and hard-coded . Sites, one line each:
+    /// Today's real per-file table-mention count, computed and hard-coded. Sites, one line each:
     ///
     /// <para><b>Darling/PerformanceMonitor.Darling.Service/PgPlanForceActionStore.cs = 4:</b>
     /// the INSERT (<c>JournalAsync</c>), the last-action-time subquery, and the two SELECTs
