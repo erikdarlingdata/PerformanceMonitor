@@ -512,14 +512,16 @@ public sealed class FrozenRollupLiveTests
             /* The seam holds raw rows the stitch cannot see through unconditionally — Short, not Covered. */
             Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
 
-            /* The product's own start-path entry point (DarlingWorker calls this exact method). */
+            /* The product's own start-path entry point (DarlingWorker calls this exact method). #4301: the
+               walk now fills CONTIGUOUSLY down to raw's own filtered floor (s-6h), not just the seam tail
+               above the legacy's boundary — 7 buckets (s-6h..s), not the old 2-bucket seam tail. */
             var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
-            Assert.True(summary.BucketsRepaired >= 2, $"expected the 2-bucket seam tail to be repaired, got {summary.BucketsRepaired}");
+            Assert.Equal(7, summary.BucketsRepaired);
 
             await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
             {
                 var newFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
-                Assert.Equal(s.AddHours(-1), newFloor);
+                Assert.Equal(s.AddHours(-6), newFloor);
             }
 
             /* The seam is now empty (the successor's own floor reaches the legacy's boundary) — Covered. */
@@ -607,14 +609,16 @@ public sealed class FrozenRollupLiveTests
             /* The product's own start-path entry point (DarlingWorker calls this exact method). Before the
                #4186 follow-up fix, the seam's lower bound was clamped to U minus the 4-day span — comfortably
                ABOVE the seam, since the outage is 6 days — so this repaired 0 buckets and the seam stood
-               forever without a manual --backfill-rollups. */
+               forever without a manual --backfill-rollups. #4301: the walk now fills CONTIGUOUSLY down to
+               raw's own filtered floor (s-6h), not just the seam tail above the legacy's boundary — 7
+               buckets (s-6h..s), not the old 2-bucket seam tail. */
             var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
-            Assert.True(summary.BucketsRepaired >= 2, $"expected the 2-bucket seam tail to be repaired, got {summary.BucketsRepaired}");
+            Assert.Equal(7, summary.BucketsRepaired);
 
             await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
             {
                 var newFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
-                Assert.Equal(s.AddHours(-1), newFloor);
+                Assert.Equal(s.AddHours(-6), newFloor);
             }
 
             /* The seam is now empty (the successor's own floor reaches the legacy's boundary) — Covered. */
@@ -640,8 +644,8 @@ public sealed class FrozenRollupLiveTests
     /// early. Oldest-first repaired the buckets FARTHEST from the successor's floor first, which still moved
     /// the floor (a bare <c>min(bucket)</c>) all the way down to them — stranding the un-repaired NEWER seam
     /// buckets above the new floor and outside <see cref="TimescaleSupport.RetentionArmSafetySql"/>'s probe.
-    /// Newest-first must NOT do that: repairing the top 24 of a 35-bucket seam should leave the floor exactly
-    /// adjacent to the still-open 11-bucket remainder, so the probe keeps finding it and the gate stays Short
+    /// Newest-first must NOT do that: repairing the top 24 of a 36-bucket seam should leave the floor exactly
+    /// adjacent to the still-open 12-bucket remainder, so the probe keeps finding it and the gate stays Short
     /// until a second walk closes the rest.
     /// </summary>
     [Fact]
@@ -674,9 +678,11 @@ public sealed class FrozenRollupLiveTests
         var bodySucceeded = false;
         try
         {
-            /* S is the stop. The legacy materializes only ONE bucket, 35 hours back, so l.mx = S-35h and the
-               seam floor is S-34h. Raw carries an unbroken run of 35 hourly buckets from S-34h through S —
-               wider than the 24-bucket cap, so ONE walk cannot close it in one pass. */
+            /* S is the stop. The legacy materializes only ONE bucket, 35 hours back, so l.mx = S-35h. Raw
+               carries an unbroken run of 36 hourly buckets from S-35h through S — #4301: the walk's seam
+               floor is raw's own filtered floor (S-35h), not the legacy's max+width (S-34h), so the oldest
+               raw bucket is IN the seam too — wider than the 24-bucket cap, so ONE walk cannot close it in
+               one pass. */
             var s = D0.AddDays(3);
 
             for (var hour = 0; hour <= 35; hour++)
@@ -692,9 +698,11 @@ public sealed class FrozenRollupLiveTests
 
             Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
 
-            /* Walk 1: the cap takes the NEWEST 24 of the 35 seam buckets (S-23h..S), leaving the OLDER 11
-               (S-34h..S-24h) as a hole immediately below the new floor. The product's own start-path entry
-               point (DarlingWorker calls this exact method). */
+            /* Walk 1: the cap takes the NEWEST 24 of the 36 seam buckets (S-23h..S), leaving the OLDER 12
+               (S-35h..S-24h) as a hole immediately below the new floor. The product's own start-path entry
+               point (DarlingWorker calls this exact method). #4301: the seam floor is raw's own filtered
+               floor (S-35h, the oldest raw row), not the legacy's max+width (S-34h) — one bucket lower, so
+               the seam is 36 wide, not 35. */
             var summary1 = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
             Assert.Equal(24, summary1.BucketsRepaired);
 
@@ -704,10 +712,10 @@ public sealed class FrozenRollupLiveTests
                walk. */
             Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
 
-            /* Walk 2: the remaining 11-bucket range is now the whole seam (S-34h..S-24h, under the cap), and
+            /* Walk 2: the remaining 12-bucket range is now the whole seam (S-35h..S-24h, under the cap), and
                closes it completely. */
             var summary2 = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, u, ct);
-            Assert.Equal(11, summary2.BucketsRepaired);
+            Assert.Equal(12, summary2.BucketsRepaired);
 
             Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
 
