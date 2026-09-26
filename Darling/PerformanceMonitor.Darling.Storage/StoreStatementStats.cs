@@ -84,14 +84,6 @@ public static class StoreStatementStats
     public static readonly Version InfoViewVersion = new(1, 9);
 
     /// <summary>
-    /// What may separate two SQL tokens: whitespace, a block comment or a line comment, in the regex dialect
-    /// below. Used only by <see cref="SensitiveStatementPattern"/>, a blocklist, where reading a comment short
-    /// (a line comment ends at the first control character, a block comment at its first <c>*/</c>) can only
-    /// add matches. The allowlist does not use it (#3920's review).
-    /// </summary>
-    private const string TokenGap = "([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)";
-
-    /// <summary>
     /// The only statements whose TEXT the reader returns (#3915): normalized DML. After any leading whitespace
     /// and parentheses, the statement is a SELECT, INSERT, UPDATE, DELETE, MERGE, WITH, VALUES or TABLE, and
     /// pg_stat_statements has replaced every constant in it with <c>$n</c>, so its text carries no value. A
@@ -125,25 +117,17 @@ public static class StoreStatementStats
     public const string InsufficientPrivilegeText = "<insufficient privilege>";
 
     /// <summary>
-    /// The statements whose text can carry a credential, as a case-insensitive PostgreSQL regular expression:
-    /// role, user and group DDL (their <c>PASSWORD</c> clause, and <c>CREATE/ALTER USER MAPPING</c>'s password
-    /// option), subscription DDL (a connection string), foreign server DDL (its options), a <c>PASSWORD</c>
-    /// keyword followed by a literal, a libpq <c>password=</c> or <c>PGPASSWORD=</c> setting, and a URI's
-    /// <c>user:secret@</c>, with comments allowed wherever the grammar allows whitespace. The SCRUB removes
-    /// these from the view, for every other reader of it on the cluster; the reader function uses
-    /// <see cref="ReadableStatementPattern"/>, an allowlist, and this as a second guard on DML whose comments
-    /// carry one (pg_stat_statements keeps comments verbatim).
+    /// The statements whose text can carry a credential, as a case-insensitive PostgreSQL regular expression.
+    /// The SCRUB removes these from the view, for every other reader of it on the cluster; the reader function
+    /// uses <see cref="ReadableStatementPattern"/>, an allowlist, and this as a second guard on DML whose
+    /// comments carry one (pg_stat_statements keeps comments verbatim).
     ///
-    /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
-    /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes, so the literal means
-    /// the same under either <c>standard_conforming_strings</c> setting. A normalized DML parameter
-    /// (<c>password = $1</c>) is not a hit: it carries no value.</para>
+    /// <para><b>The one definition, shared (#4348).</b> This is <see cref="PgSensitiveStatementFilter.SensitiveStatementPattern"/>
+    /// — the same rule <c>PgStatementText</c> and <c>PgBlockingCollector</c> apply to a monitored target's
+    /// statement text, so the store and every collector agree on what counts as sensitive. This alias exists so
+    /// existing call sites and tests naming <c>StoreStatementStats.SensitiveStatementPattern</c> keep working.</para>
     /// </summary>
-    public const string SensitiveStatementPattern =
-        "[[:<:]](create|alter)" + TokenGap + "+(role|user|group|subscription|server)[[:>:]]"
-        + "|[[:<:]]password[[:>:]]" + TokenGap + "*(=|to)?" + TokenGap + "*(e?'|u&'|[$][^0-9])"
-        + "|[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]"
-        + "|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@";
+    public const string SensitiveStatementPattern = PerformanceMonitor.Collectors.PgSensitiveStatementFilter.SensitiveStatementPattern;
 
     /// <summary>What <see cref="EnsureAsync"/> found and did. An unexpected failure is not an outcome: it
     /// throws, and the store-object convergence runner that calls this tallies and logs it (#3817).</summary>

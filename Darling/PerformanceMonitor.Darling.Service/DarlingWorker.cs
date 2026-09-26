@@ -1826,6 +1826,13 @@ public sealed class DarlingWorker : BackgroundService
            reason about. Drained with the other background startup work below. */
         var settingScrub = RunPgSettingScrubAsync(postgres, stoppingToken);
 
+        /* #4348: the one-time scrub of collected statement text (collect.pg_statement_text,
+           collect.pg_blocking_edges) an older build stored before the shared sensitive-statement filter
+           existed. Same launch discipline as the setting scrub immediately above — after migrations
+           confirm both target tables exist, not gated on TimescaleDB, drained with the rest of startup
+           below. */
+        var statementTextScrub = RunPgStatementTextScrubAsync(postgres, stoppingToken);
+
         /* #4346: the one-time scrub of the legacy plan_force_actions.detail state_unavailable line
            #4326/#4363/#4376 stop new rows from ever carrying. Same launch shape as settingScrub above —
            its own connection, its own catch, drained with the other background startup work below. */
@@ -3102,6 +3109,16 @@ public sealed class DarlingWorker : BackgroundService
             /* Expected on shutdown. */
         }
 
+        /* And the statement-text scrub (#4348), for the same reason. */
+        try
+        {
+            await statementTextScrub;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         /* And the plan-force-actions detail scrub (#4346), for the same reason. */
         try
         {
@@ -3483,6 +3500,44 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning(
                 "Postgres setting scrub (#4348) could not run — any row an older collector build stored unredacted stays as it is until the next start retries: {Message}",
                 ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="PgStatementTextScrub.RunAsync"/> once (#4348), concurrently with the rest of startup.
+    /// Same isolation as <see cref="RunPgSettingScrubAsync"/>: its own connection, its own catch, and a
+    /// store this cannot reach retries the scrub at the next start, never blocking the service from
+    /// starting.
+    /// </summary>
+    private async Task RunPgStatementTextScrubAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await PgStatementTextScrub.RunAsync(postgres, _logger, stoppingToken);
+            if (summary.AlreadyDone)
+            {
+                _logger.LogInformation("Postgres statement-text scrub (#4348): already scrubbed at the current scrub version — nothing to do.");
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Postgres statement-text scrub (#4348): {StatementTextUpdated} pg_statement_text row(s) and {BlockingEdgesUpdated} pg_blocking_edges row(s) updated.",
+                    summary.StatementTextRowsUpdated, summary.BlockingEdgesRowsUpdated);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation(
+                "Postgres statement-text scrub (#4348) was cancelled before it could report — at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* Never the exception TEXT — just the exception type and SQLSTATE (when it is an NpgsqlException),
+               the same discipline PgStatementTextScrub's own per-server/per-day catches apply. */
+            _logger.LogWarning(
+                "Postgres statement-text scrub (#4348) could not run ({ExceptionType}{SqlState}) — the scrub retries at the next start.",
+                ex.GetType().Name, ex is NpgsqlException npgsqlEx ? $", SQLSTATE {npgsqlEx.SqlState}" : string.Empty);
         }
     }
 
