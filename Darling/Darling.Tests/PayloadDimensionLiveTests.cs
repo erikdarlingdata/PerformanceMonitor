@@ -43,16 +43,6 @@ namespace Darling.Tests;
 public sealed class PayloadDimensionLiveTests
 {
     /// <summary>
-    /// The exact line the catalog sweep emits when the #1784 coverage gate holds a tiered drop, pinned in FULL
-    /// for the same reason its dimension-GC sibling is: it is a field signature the client's operator reads,
-    /// and its TAIL is the actionable half — "resumes by itself once a backfill extends coverage" is what tells
-    /// them this is self-correcting rather than a fault to chase. A prefix pin covers only the part that names
-    /// the table, which is exactly the shape that let a wrong line ship earlier in this work.
-    /// </summary>
-    private const string CoverageSkipSignature =
-        "Retention purge SKIPPED for query_stats: its rollup does not yet cover the oldest rows, so dropping would delete history no aggregate holds. Resumes by itself once a backfill extends coverage.";
-
-    /// <summary>
     /// The exact line the dimension GC emits when it stands down, pinned in FULL rather than by prefix: it is
     /// a field signature an operator greps for, and a partial pin would let the wording drift to name a cause
     /// the guard does not actually detect -- which is how it came to say "raw purges held" while the shipped
@@ -1770,8 +1760,9 @@ public sealed class PayloadDimensionLiveTests
             var log = new CapturingTestLogger();
             await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, log, ct, PurgeDimFeeding(30));
 
-            /* The clamp held (the fact survived its horizon) — and the GC ran ANYWAY, bounded. */
-            Assert.Contains(CoverageSkipSignature, log.Joined, StringComparison.Ordinal);
+            /* #4427: query_stats is a raw relation, so it now leaves the sweep's drop path before the
+               floor check ever runs — there is no coverage-skip log line to look for. The fact itself is
+               the property: the held fact row survives the sweep regardless, and the GC ran ANYWAY, bounded. */
             Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
             Assert.DoesNotContain(DeferralSignature, log.Joined, StringComparison.Ordinal);
             Assert.Contains(BoundedSignature, log.Joined, StringComparison.Ordinal);
@@ -1795,19 +1786,24 @@ public sealed class PayloadDimensionLiveTests
     }
 
     /// <summary>
-    /// The catalog sweep must not drop raw chunks the rollup has not captured (#1784).
+    /// The catalog sweep must never drop raw <c>query_stats</c> chunks (#4427). <c>query_stats</c> is one of
+    /// the three <see cref="TimescaleSupport.RawRelations"/> that #4427 took out of this sweep's drop path
+    /// entirely on a TimescaleDB store: the service-triggered, fully-gated purge
+    /// (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>) owns them now, not the per-collector floor check
+    /// this sweep used to run for them (<c>IsTieredDropSafeAsync</c>/<c>IsRawTierDropSafeAsync</c>).
     ///
-    /// <para>Two purges drop these same chunks: the tiered 4-day POLICY, which the #1680 gate holds paused
-    /// until the hourly aggregate covers the table's history, and this catalog sweep at the per-collector
-    /// 30-day horizon — which had no coverage check at all. On a store where the gate is deliberately holding
-    /// the policy, the sweep destroyed exactly the uncovered history the gate exists to protect, silently.</para>
-    ///
-    /// <para>Both halves are asserted, because a guard that never lets anything drop would pass the first one
-    /// alone: with coverage lagging the old row SURVIVES, and once the aggregate reaches back over it the very
-    /// same row is dropped. The backstop still backstops.</para>
+    /// <para>Both halves are asserted — an ancient row survives the sweep whether the rollup coverage LAGS
+    /// behind it or reaches back OVER it — because the old contract's second half (the floor check granting a
+    /// drop once coverage caught up) no longer applies to this table at all: coverage is irrelevant to whether
+    /// query_stats drops, since it never drops here regardless. There is no OTHER catalog table that reaches
+    /// <c>IsTieredDropSafeAsync</c>'s gated branch — <c>IsCoverageGatedRelation</c> matches only the three raw
+    /// relations, and none of the non-raw tiered rollups (query_stats_hourly and siblings) sit in
+    /// <see cref="PerformanceMonitor.Collectors.CollectorCatalog"/>, the only list this sweep's per-definition
+    /// loop walks — so no live proof of the floor check's "resumes once covered" half exists anywhere else in
+    /// this sweep to preserve.</para>
     /// </summary>
     [Fact]
-    public async Task CatalogSweep_SkipsARawDropTheRollupHasNotCovered_AndResumesOnceItHas()
+    public async Task CatalogSweep_NeverDropsRawQueryStats_TheGatedPurgeOwnsThem()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
@@ -1824,7 +1820,7 @@ public sealed class PayloadDimensionLiveTests
 
         var (serverId, serverName) = NewServer();
 
-        /* Well past the 30-day catalog horizon, so the sweep would certainly take it if allowed. */
+        /* Well past the 30-day catalog horizon, so the sweep would certainly take it if it still could. */
         var ancient = DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-45), DateTimeKind.Unspecified);
 
         await using var postgres = NpgsqlDataSource.Create(connectionString!);
@@ -1863,15 +1859,13 @@ public sealed class PayloadDimensionLiveTests
 
             Assert.False(
                 await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct),
-                "with the rollup starting after raw's oldest row, dropping must NOT be judged safe");
+                "with the rollup starting after raw's oldest row, the floor-only check must still read not-safe (unused by the sweep, but its own contract is unchanged)");
 
-            var skipLog = new CapturingTestLogger();
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, skipLog, ct, OnlyPurge("query_stats", 40));
+            var laggingLog = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, laggingLog, ct, OnlyPurge("query_stats", 40));
 
-            /* THE property: uncovered history survives the sweep. Asserted before the log line so a mutation
-               lands on the data loss, not on missing text. */
+            /* THE property, half one: the ancient row survives while coverage lags. */
             Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
-            Assert.Contains(CoverageSkipSignature, skipLog.Joined, StringComparison.Ordinal);
 
             /* Now let coverage reach back over the ancient row for BOTH successor hourlies (force to recompute). */
             foreach (var coverView in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsDbIntervalHourlyView })
@@ -1883,13 +1877,14 @@ public sealed class PayloadDimensionLiveTests
 
             Assert.True(
                 await TimescaleSupport.IsRawTierDropSafeAsync(connection, "query_stats", ct),
-                "once the rollup covers raw's oldest row the drop must be judged safe again");
+                "once the rollup covers raw's oldest row the floor-only check must read safe again (its own contract is unchanged; the sweep just never asks it for this table)");
 
-            var dropLog = new CapturingTestLogger();
-            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, dropLog, ct, OnlyPurge("query_stats", 40));
+            var coveredLog = new CapturingTestLogger();
+            await DarlingRetention.PurgeAsync(postgres, timescaleAvailable: true, coveredLog, ct, OnlyPurge("query_stats", 40));
 
-            Assert.Equal(0L, await AncientRowCountAsync(connection, serverId, ct));
-            Assert.DoesNotContain(CoverageSkipSignature, dropLog.Joined, StringComparison.Ordinal);
+            /* THE property, half two: the SAME ancient row still survives now that coverage caught up — under
+               #4427 that no longer matters, because query_stats never reaches the floor check in this sweep. */
+            Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
 
             bodySucceeded = true;
         }

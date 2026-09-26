@@ -8688,6 +8688,55 @@ AND   j.hypertable_name = '{relation}'", connection))
             summary.TablesPurged, summary.TotalPurged,
             customRetentionDays is int cd ? $" (custom retention {cd}d)" : string.Empty);
 
+        /* #4427: the sweep above (DarlingRetention.PurgeAsync) no longer drops the three raw tables on a
+           TimescaleDB store — they left its drop path entirely. purge_now must not go silent about them:
+           run the SAME gated trigger the daily fleet-loop tick uses (TriggerRawPurgeCoreAsync), on a pooled
+           connection, then read back what each relation's pass just decided (or held at). Plain-PostgreSQL
+           mode has no gate and no rollups — the sweep's DELETE fallback already purged raw there, so
+           rawTables is omitted rather than reporting on a trigger that never runs off Timescale.
+
+           The whole raw step is wrapped: if opening rawConnection or the trigger itself throws, the sweep
+           summary above already ran and must not be discarded — the command reports it plus a single
+           gate_error entry rather than failing the whole purge_now over a step that is, from the caller's
+           side, purely additional reporting. A shutdown OperationCanceledException still propagates; that
+           is the service stopping, not a raw-step failure to report around. */
+        List<object>? rawTables = null;
+        if (_timescaleAvailable)
+        {
+            try
+            {
+                await using var rawConnection = await _postgres!.OpenConnectionAsync(cancellationToken);
+
+                /* #4427 H1: read the clock BEFORE the trigger runs, on the SAME connection the trigger and the
+                   report both use. RecordRawLastPurgeOutcomeAsync never throws (TimescaleSupport, logs at
+                   Debug on a write failure) — if THIS pass's write fails, ReadRawLastPurgeStateAsync falls
+                   back to whatever the PREVIOUS pass recorded, and without this stamp the report would claim
+                   that stale record as this run's decision. Comparing against a time taken right here, rather
+                   than DateTime.UtcNow, keeps the comparison honest under clock skew between the app host and
+                   the database server. */
+                DateTime passStartUtc;
+                await using (var nowCommand = new NpgsqlCommand("SELECT now()", rawConnection) { CommandTimeout = 30 })
+                {
+                    passStartUtc = (DateTime)(await nowCommand.ExecuteScalarAsync(cancellationToken))!;
+                }
+
+                await TriggerRawPurgeCoreAsync(rawConnection, _logger, cancellationToken);
+                rawTables = await BuildRawTablePurgeNowReportAsync(rawConnection, customRetentionDays, passStartUtc, _logger, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "purge_now's raw-table reporting step failed; the sweep above still ran and is reported");
+                rawTables = new List<object>
+                {
+                    new { relation = "(all three raw tables)", outcome = "gate_error", note = $"Could not report on the gated raw purge this pass: {ex.Message}" },
+                };
+            }
+        }
+
         var json = JsonSerializer.Serialize(new
         {
             success = true,
@@ -8696,9 +8745,95 @@ AND   j.hypertable_name = '{relation}'", connection))
             rowsDeleted = summary.RowsDeleted,
             chunksDropped = summary.ChunksDropped,
             customRetentionDays,
+            rawTables,
         });
         return new CommandOutcome(true, "purge complete", json);
     }
+
+    /// <summary>
+    /// #4427: <c>purge_now</c>'s raw-table reporting step, extracted so <c>Darling.Tests</c> can drive it
+    /// directly against a live store (the same reach <see cref="TriggerRawPurgeCoreAsync"/> already has).
+    /// Reads back, per <see cref="TimescaleSupport.RawRelations"/> entry, the outcome the trigger pass just
+    /// recorded (<see cref="TimescaleSupport.ReadRawLastPurgeStateAsync"/>) — <c>ran</c>, <c>not_covered</c>,
+    /// <c>hole</c>, <c>epoch_stale</c>, <c>gate_unknown</c>, <c>gate_error</c>, <c>no_chunks</c> or
+    /// <c>run_failed</c> — with a plain-language note. A record that was never written or could not be read
+    /// reports as <c>gate_unknown</c>: the trigger just ran on this same connection, so either state means the
+    /// gate's own answer for this relation cannot be confirmed, the same fail-closed reading
+    /// <see cref="TriggerRawPurgeCoreAsync"/> gives an unresolvable successor.
+    ///
+    /// <para><b>#4427 H1:</b> <paramref name="passStartUtc"/> is a timestamp read on <paramref name="connection"/>
+    /// BEFORE the trigger ran this pass. <c>RecordRawLastPurgeOutcomeAsync</c> never throws — a failed write is
+    /// only logged at Debug — so on its own a failed write means <c>ReadRawLastPurgeStateAsync</c> silently
+    /// hands back the PREVIOUS pass's record, and the report would then claim that stale decision as this run's.
+    /// Any record whose <c>At</c> is earlier than <paramref name="passStartUtc"/> reports <c>gate_unknown</c>
+    /// instead, with a plain "no outcome was recorded for this pass" note — never <c>ran</c> or any other
+    /// outcome the trigger did not actually just write.</para>
+    ///
+    /// <para>When <paramref name="customRetentionDays"/> is set and does not match the gated horizon
+    /// (<see cref="TimescaleSupport.RawRetentionSpan"/>), every note gets a trailing sentence: SHORTER means
+    /// the value was never applied (the gate, not the requested horizon, decides when raw purges); LONGER
+    /// means the same thing for the opposite reason — the gated horizon still applies, so a longer custom
+    /// value is not honored either.</para>
+    /// </summary>
+    internal static async Task<List<object>> BuildRawTablePurgeNowReportAsync(
+        NpgsqlConnection connection, int? customRetentionDays, DateTime passStartUtc, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var gatedHorizonDays = (int)TimescaleSupport.RawRetentionSpan.TotalDays;
+        var customDiffersFromGatedHorizon = customRetentionDays is int days && days != gatedHorizonDays;
+        var customBelowGatedHorizon = customRetentionDays is int belowDays && TimeSpan.FromDays(belowDays) < TimescaleSupport.RawRetentionSpan;
+        var reports = new List<object>(TimescaleSupport.RawRelations.Count);
+
+        foreach (var relation in TimescaleSupport.RawRelations)
+        {
+            var (state, record) = await TimescaleSupport.ReadRawLastPurgeStateAsync(connection, relation, logger, cancellationToken);
+
+            string outcome;
+            string note;
+            if (record is not null && record.At < passStartUtc)
+            {
+                /* #4427 H1: a record exists, but it predates this pass's own start — it is the PREVIOUS pass's
+                   outcome, not this one's. Report honestly rather than pass it off as "ran this pass". */
+                outcome = "gate_unknown";
+                note = "No outcome was recorded for this pass; the last recorded outcome is from an earlier pass and is not reported here.";
+            }
+            else
+            {
+                outcome = record?.Outcome ?? "gate_unknown";
+                note = DescribeRawPurgeNowOutcome(outcome, state);
+            }
+
+            if (customDiffersFromGatedHorizon)
+            {
+                note += customBelowGatedHorizon
+                    ? $" Raw tables are purged only at the gated horizon ({gatedHorizonDays} days) and only when the gate passes; the custom retention was not applied to them."
+                    : $" Raw tables are purged only at the gated horizon ({gatedHorizonDays} days) and only when the gate passes; the longer custom retention does not apply to them.";
+            }
+
+            reports.Add(new { relation, outcome, note });
+        }
+
+        return reports;
+    }
+
+    /// <summary>
+    /// Plain-language text for one <see cref="BuildRawTablePurgeNowReportAsync"/> entry's <c>outcome</c> —
+    /// the same vocabulary <see cref="TriggerRawPurgeCoreAsync"/> records, read back by
+    /// <paramref name="readState"/> (used only to distinguish "never written" from "could not be read" when
+    /// <paramref name="outcome"/> fell back to <c>gate_unknown</c> for a missing record).
+    /// </summary>
+    internal static string DescribeRawPurgeNowOutcome(string outcome, TimescaleSupport.RawLastPurgeReadState readState) => outcome switch
+    {
+        "ran" => "The gated purge ran this pass.",
+        "not_covered" => "Held — the rollup does not yet cover the oldest rows.",
+        "hole" => "Held — a hole was found inside the range the gate would have dropped.",
+        "epoch_stale" => "Held — no materialization repair has finished under the current start yet.",
+        "gate_error" => "Held — the gate's own check failed partway through.",
+        "no_chunks" => "Nothing to purge — no chunks exist yet.",
+        "run_failed" => "Held — the gate passed, but the purge run itself failed.",
+        _ => readState == TimescaleSupport.RawLastPurgeReadState.NeverWritten
+            ? "Held — a successor's materialization could not be resolved, or no purge pass has recorded an outcome for it yet."
+            : "Held — a successor's materialization could not be resolved, or the last outcome could not be read.",
+    };
 
     /// <summary>
     /// The worker's <see cref="IDarlingCommandHost"/> adapter (Stage 2): lets the command executor reach the
