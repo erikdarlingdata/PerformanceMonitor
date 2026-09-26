@@ -74,8 +74,13 @@ public sealed class ViewerMemorySqlTests
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(SUM(granted_memory_mb) AS double precision)", sql, StringComparison.Ordinal);
+        /* per_collection still sums per collection_time before the outer bucket AVERAGES the gauge (#4349). */
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("AVG(total_granted_mb) AS total_granted_mb", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
+        Assert.Contains("MIN(collection_time) AS first_collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) AS collection_count", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY 1", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -129,21 +134,29 @@ public sealed class ViewerMemorySqlTests
         var sql = ViewerDataService.MemoryGrantChartDataSql;
 
         Assert.Contains("FROM v_memory_grant_stats", sql, StringComparison.Ordinal);
+        /* per_collection still groups per collection_time + pool_id (#4349); the outer bucket then AVERAGES
+           the sizing/count gauges per pool over the date_bin grid. */
         Assert.Contains("GROUP BY collection_time, pool_id", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY collection_time, pool_id", sql, StringComparison.Ordinal);
+        Assert.Contains("GROUP BY pool_id, 2", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY pool_id, 2", sql, StringComparison.Ordinal);
+        Assert.Contains("date_bin(CAST($4 AS integer) * INTERVAL '1 minute'", sql, StringComparison.Ordinal);
 
         /* pool_id is the integer group key, selected raw (GetInt32). */
         Assert.Contains("pool_id", sql, StringComparison.Ordinal);
 
         /* The three sizing MB SUMs plus the workspace-memory ceiling (target / max target — item 2) all
-           CAST to double precision. */
+           CAST to double precision inside per_collection; the outer bucket AVERAGES them (a gauge). */
         foreach (var col in new[] { "available_memory_mb", "granted_memory_mb", "used_memory_mb", "target_memory_mb", "max_target_memory_mb" })
         {
             Assert.Contains($"CAST(SUM({col}) AS double precision)", sql, StringComparison.Ordinal);
+            Assert.Contains($"AVG({col})", sql, StringComparison.Ordinal);
         }
 
         /* The four activity count SUMs CAST to bigint (integer→bigint / bigint→numeric both land on
-           GetInt64). */
+           GetInt64). grantee_count/waiter_count are gauges: SUMMED per collection, then AVERAGED per
+           bucket (rounded back to bigint). timeout_error_count_delta/forced_grant_count_delta are TRUE
+           accumulating deltas: SUMMED per collection AND summed again across the bucket's collections
+           (#4364) — averaging an event count across collections silently drops real events. */
         foreach (var col in new[]
         {
             "grantee_count", "waiter_count", "timeout_error_count_delta", "forced_grant_count_delta",
@@ -151,6 +164,14 @@ public sealed class ViewerMemorySqlTests
         {
             Assert.Contains($"CAST(SUM({col}) AS bigint)", sql, StringComparison.Ordinal);
         }
+
+        /* #4364: the outer bucket must SUM the two rated deltas (CAST to bigint), never AVG them — a
+           bucket holding two collections with deltas 3 and 4 must report 7, not AVG(3,4)=3.5 rounded
+           to a confident-but-wrong 4. */
+        Assert.Contains("CAST(SUM(rated_timeout_error_count_delta) AS bigint)", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_forced_grant_count_delta) AS bigint)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AVG(rated_timeout_error_count_delta)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AVG(rated_forced_grant_count_delta)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -438,6 +459,9 @@ public sealed class ViewerMemoryLivePostgresTests
 
     private const int GrantChartServerId = -930004;
     private const string GrantChartServerName = "viewer-memory-grantchart-e2e";
+
+    private const int GrantChartMergedServerId = -930009;
+    private const string GrantChartMergedServerName = "viewer-memory-grantchart-merged-e2e";
 
     private const int PressureServerId = -930005;
     private const string PressureServerName = "viewer-memory-pressure-e2e";
@@ -816,6 +840,68 @@ public sealed class ViewerMemoryLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "memory_grant_stats", GrantChartServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4364: two DISTINCT collections that the outer date_bin bucket merges together (a wide
+    /// enough window forces the auto-bucket width past the 10-minute gap between them). The sizing MB is a
+    /// GAUGE — the bucket AVERAGES the two collections' totals. The activity-count deltas are TRUE
+    /// accumulating counters — the bucket must SUM them, or two real timeout/forced-grant events silently
+    /// vanish into a rounded average. Before #4364 this bucket reported AVG(3,4)=3.5 -> CAST to bigint = 4;
+    /// after, it reports the true 7.</summary>
+    [Fact]
+    public async Task MemoryGrantChart_MergedBucket_SumsDeltas_AveragesGauges_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live grant-chart merged-bucket test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "memory_grant_stats", GrantChartMergedServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* #4364 fix: a 7-day window auto-buckets to a WIDE grid (tens of minutes), not the fixed
+               10-minute width the old comment assumed — two collections 6 days apart do NOT land in the
+               same bucket at that width. Put both collections inside the SAME minute instead (floored to
+               the minute so a 30s offset can never spill into the next one), so date_bin's grid merges
+               them regardless of the auto-chosen width for the (now short) window this call requests. */
+            var nowFloor = DateTime.UtcNow;
+            var t1 = new DateTime(nowFloor.Year, nowFloor.Month, nowFloor.Day, nowFloor.Hour, nowFloor.Minute, 0, DateTimeKind.Utc);
+            var t2 = t1.AddSeconds(30);
+
+            await InsertMemoryGrantAsync(connection, GrantChartMergedServerId, GrantChartMergedServerName, t1, poolId: 1,
+                availMb: 10.00m, grantedMb: 10.00m, usedMb: 10.00m, grantee: 1, waiter: 0, timeoutDelta: 3, forcedDelta: 3);
+            await InsertMemoryGrantAsync(connection, GrantChartMergedServerId, GrantChartMergedServerName, t2, poolId: 1,
+                availMb: 20.00m, grantedMb: 20.00m, usedMb: 20.00m, grantee: 1, waiter: 0, timeoutDelta: 4, forcedDelta: 4);
+
+            var rows = await viewer.GetMemoryGrantChartDataAsync(GrantChartMergedServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+
+            /* Both collections merge into ONE bucket for pool 1. */
+            var merged = Assert.Single(rows);
+            Assert.Equal(1, merged.PoolId);
+
+            /* Gauges: AVERAGED across the merged bucket's two collections. */
+            Assert.Equal(15.00, merged.GrantedMemoryMb, precision: 2);
+            Assert.Equal(15.00, merged.AvailableMemoryMb, precision: 2);
+            Assert.Equal(15.00, merged.UsedMemoryMb, precision: 2);
+
+            /* True deltas: SUMMED across the merged bucket's two collections — 3 + 4 = 7, never
+               AVG(3, 4) = 3.5 rounded to a confident-but-wrong 4. */
+            Assert.Equal(7L, merged.TimeoutErrorCountDelta);
+            Assert.Equal(7L, merged.ForcedGrantCountDelta);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_grant_stats", GrantChartMergedServerId, cleanupCt));
         }
     }
 

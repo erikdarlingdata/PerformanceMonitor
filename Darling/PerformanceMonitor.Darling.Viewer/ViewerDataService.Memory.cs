@@ -36,9 +36,15 @@ public sealed record MemoryStatsRow(
     double PlanCacheMb);
 
 /// <summary>One point of the Memory Overview's memory-grant overlay line: total granted MB across all
-/// pools at a collection. Lite crammed this into its mutable <c>MemoryTrendPoint.TotalGrantedMb</c> and
-/// left the other fields 0; the viewer's <see cref="MemoryTrendPoint"/> is an immutable positional
-/// record with no grant slot, so the overlay gets its own two-field record.</summary>
+/// pools at a collection (or, for a singleton bucket, a raw collection). Lite crammed this into its
+/// mutable <c>MemoryTrendPoint.TotalGrantedMb</c> and left the other fields 0; the viewer's
+/// <see cref="MemoryTrendPoint"/> is an immutable positional record with no grant slot, so the overlay
+/// gets its own two-field record.
+/// <para>#4349: bucketed like <see cref="MemoryClerkTrendPoint"/> — <c>CollectionTime</c> is a
+/// <c>date_bin</c> bucket start, EXCEPT when every bucket the call returned holds exactly one physical
+/// collection, in which case every point is stamped at its own raw collection time instead — see
+/// <see cref="ViewerDataService.GetMemoryGrantTrendAsync"/>.</para>
+/// </summary>
 public sealed record MemoryGrantTrendPoint(
     DateTime CollectionTime,
     double TotalGrantedMb);
@@ -56,14 +62,18 @@ public sealed record MemoryClerkTrendPoint(
     DateTime CollectionTime,
     double MemoryMb);
 
-/// <summary>One aggregated Memory Grants chart point (per collection_time + resource pool): the three
+/// <summary>One aggregated Memory Grants chart point (per collection_time/bucket + resource pool): the three
 /// sizing MB metrics, the workspace-memory ceiling (<see cref="TargetMemoryMb"/> = the semaphore's current
 /// grant target, <see cref="MaxTargetMemoryMb"/> = its hard maximum — the granted-vs-ceiling headroom
 /// signal the Dashboard's get_resource_semaphore surfaces), and the four activity counts. A mirror of Lite's
 /// <c>MemoryGrantChartPoint</c> plus the ceiling columns. MB SUMs CAST to double precision; the count SUMs
 /// CAST to bigint (Postgres <c>SUM(integer)</c> widens to bigint and <c>SUM(bigint)</c> to numeric — the CAST
 /// keeps the typed GetInt64 reader happy either way, the same reason the perfmon trend CASTs its
-/// aggregates).</summary>
+/// aggregates).
+/// <para>#4349: <c>CollectionTime</c> is a <c>date_bin</c> bucket start, EXCEPT when every bucket the call
+/// returned holds exactly one physical collection, in which case every point is stamped at its own raw
+/// collection time instead — see <see cref="ViewerDataService.GetMemoryGrantChartDataAsync"/>.</para>
+/// </summary>
 public sealed record MemoryGrantChartPoint(
     DateTime CollectionTime,
     int PoolId,
@@ -129,21 +139,31 @@ public sealed partial class ViewerDataService
         """;
 
     /// <summary>
-    /// The Overview's memory-grant overlay — Lite's <c>GetMemoryGrantTrendAsync</c> ported to Postgres:
-    /// total granted MB across all pools per collection. SUM CAST to double precision. Lite selected four
+    /// The Overview's memory-grant overlay — Lite's <c>GetMemoryGrantTrendAsync</c> ported to Postgres,
+    /// then bucketed (#4349) exactly like <see cref="MemoryTrendSql"/> (<c>ViewerDataService.OverviewLanes.cs</c>):
+    /// total granted MB across all pools per collection, SUM CAST to double precision, then AVERAGED per
+    /// bucket (a gauge, not an accumulating counter — no #3540 rated split applies). Lite selected four
     /// dummy 0-columns to reuse its <c>MemoryTrendPoint</c> shape; the viewer reads only the two fields it
-    /// plots. $1 server_id, $2 window start, $3 window end (naive UTC).
+    /// plots. $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes.
+    /// <para>#3548/#4349: the <c>per_collection</c> CTE body is <see cref="TrendBucketSql.MemoryGrantPerCollectionSql"/>,
+    /// byte-for-byte the same text the MCP tool's unbucketed <c>DarlingTrendReader.MemoryGrantTrendSql</c>
+    /// reads — the one shared per-collection read #3548 requires. This outer bucketing select is the
+    /// viewer's OWN wrapper on top of it; MCP wraps the same shared text in its own separate
+    /// <c>date_bin</c> (<c>MemoryGrantTrendBucketedSql</c>) rather than this one, so neither SKU buckets
+    /// twice.</para>
     /// </summary>
-    public const string MemoryGrantTrendSql = """
+    public const string MemoryGrantTrendSql = $$"""
+        WITH per_collection AS (
+            {{TrendBucketSql.MemoryGrantPerCollectionSql}}
+        )
         SELECT
-            collection_time,
-            CAST(SUM(granted_memory_mb) AS double precision) AS total_granted_mb
-        FROM v_memory_grant_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY collection_time
-        ORDER BY collection_time
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+            AVG(total_granted_mb) AS total_granted_mb,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
+        FROM per_collection
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>
@@ -205,31 +225,82 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
-    /// The Memory Grants chart data — Lite's <c>GetMemoryGrantChartDataAsync</c> ported to Postgres:
-    /// per collection_time + pool_id, the summed sizing MB (available/granted/used) and activity counts
-    /// (grantees/waiters/timeouts/forced). The MB SUMs CAST to double precision; the count SUMs CAST to
-    /// bigint (see <see cref="MemoryGrantChartPoint"/>). $1 server_id, $2 window start, $3 window end
-    /// (naive UTC).
+    /// The Memory Grants chart data — Lite's <c>GetMemoryGrantChartDataAsync</c> ported to Postgres, then
+    /// bucketed (#4349): per collection_time + pool_id, the summed sizing MB (available/granted/used) and
+    /// activity counts (grantees/waiters/timeouts/forced) — the inner <c>per_collection</c> CTE is the
+    /// UNCHANGED pre-bucket aggregation (multiple resource-semaphore rows per pool summed to one row per
+    /// collection + pool). The outer bucket then AVERAGES every gauge (sizing MB, grantee/waiter counts —
+    /// point-in-time readings, not accumulating counters) and SUMS the two true deltas
+    /// (<c>timeout_error_count_delta</c> / <c>forced_grant_count_delta</c>) over a <c>rated</c> CTE that
+    /// nulls them out (not filters the row) when <c>sample_interval_seconds</c> is 0 (#3540) — the same
+    /// null-not-drop treatment <see cref="TempDbFileIoTrendSql"/> uses, so a bucket's sizing gauges are
+    /// never lost just because its one collection's delta was unrated. <c>grantee_count</c> /
+    /// <c>waiter_count</c> round their averaged bigint back to bigint (<c>ROUND</c> before the CAST — an
+    /// AVG of integers is fractional). $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket
+    /// width minutes.
     /// </summary>
-    public const string MemoryGrantChartDataSql = """
+    public const string MemoryGrantChartDataSql = $$"""
+        WITH per_collection AS (
+            SELECT
+                collection_time,
+                pool_id,
+                CAST(SUM(available_memory_mb) AS double precision) AS available_memory_mb,
+                CAST(SUM(granted_memory_mb) AS double precision) AS granted_memory_mb,
+                CAST(SUM(used_memory_mb) AS double precision) AS used_memory_mb,
+                CAST(SUM(target_memory_mb) AS double precision) AS target_memory_mb,
+                CAST(SUM(max_target_memory_mb) AS double precision) AS max_target_memory_mb,
+                CAST(SUM(grantee_count) AS bigint) AS grantee_count,
+                CAST(SUM(waiter_count) AS bigint) AS waiter_count,
+                /* #3540/#4349/#4364: MAX over the collection's own resource-semaphore rows. interval_seconds
+                   is the sanctioned NULLIF form the measurement-contract census requires of any alias named
+                   interval_sec(onds) — 0 (a restart, the ONLY known-unrateable case) becomes NULL through it.
+                   But NULLIF cannot by itself tell that known-zero NULL apart from a pre-V128 row's true NULL
+                   (interval never recorded) once collapsed into one alias, so the rated CTE below tests the
+                   RAW max_interval_seconds_raw instead — the same IS DISTINCT FROM 0 the pre-#4364 guard used —
+                   to keep an unknown interval's delta (LockWaitTrendSql's NULL-falls-back idiom, not #3540's
+                   drop rule) while still nulling a genuine restart's. */
+                NULLIF(MAX(sample_interval_seconds), 0) AS interval_seconds,
+                MAX(sample_interval_seconds) AS max_interval_seconds_raw,
+                CAST(SUM(timeout_error_count_delta) AS bigint) AS timeout_error_count_delta,
+                CAST(SUM(forced_grant_count_delta) AS bigint) AS forced_grant_count_delta
+            FROM v_memory_grant_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            GROUP BY collection_time, pool_id
+        ),
+        rated AS (
+            SELECT
+                collection_time,
+                pool_id,
+                available_memory_mb,
+                granted_memory_mb,
+                used_memory_mb,
+                target_memory_mb,
+                max_target_memory_mb,
+                grantee_count,
+                waiter_count,
+                CASE WHEN max_interval_seconds_raw IS DISTINCT FROM 0 THEN timeout_error_count_delta END AS rated_timeout_error_count_delta,
+                CASE WHEN max_interval_seconds_raw IS DISTINCT FROM 0 THEN forced_grant_count_delta END AS rated_forced_grant_count_delta
+            FROM per_collection
+        )
         SELECT
-            collection_time,
             pool_id,
-            CAST(SUM(available_memory_mb) AS double precision) AS available_memory_mb,
-            CAST(SUM(granted_memory_mb) AS double precision) AS granted_memory_mb,
-            CAST(SUM(used_memory_mb) AS double precision) AS used_memory_mb,
-            CAST(SUM(grantee_count) AS bigint) AS grantee_count,
-            CAST(SUM(waiter_count) AS bigint) AS waiter_count,
-            CAST(SUM(timeout_error_count_delta) AS bigint) AS timeout_error_count_delta,
-            CAST(SUM(forced_grant_count_delta) AS bigint) AS forced_grant_count_delta,
-            CAST(SUM(target_memory_mb) AS double precision) AS target_memory_mb,
-            CAST(SUM(max_target_memory_mb) AS double precision) AS max_target_memory_mb
-        FROM v_memory_grant_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        GROUP BY collection_time, pool_id
-        ORDER BY collection_time, pool_id
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
+            AVG(available_memory_mb) AS available_memory_mb,
+            AVG(granted_memory_mb) AS granted_memory_mb,
+            AVG(used_memory_mb) AS used_memory_mb,
+            CAST(ROUND(AVG(grantee_count)) AS bigint) AS grantee_count,
+            CAST(ROUND(AVG(waiter_count)) AS bigint) AS waiter_count,
+            CAST(SUM(rated_timeout_error_count_delta) AS bigint) AS timeout_error_count_delta,
+            CAST(SUM(rated_forced_grant_count_delta) AS bigint) AS forced_grant_count_delta,
+            AVG(target_memory_mb) AS target_memory_mb,
+            AVG(max_target_memory_mb) AS max_target_memory_mb,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
+        FROM rated
+        GROUP BY pool_id, 2
+        ORDER BY pool_id, 2
         """;
 
     /// <summary>
@@ -286,11 +357,14 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>Total granted MB across all pools per collection over the window — the Overview memory
-    /// chart's grant overlay line.</summary>
+    /// chart's grant overlay line. Bucketed to <see cref="TrendBudget.Chart"/>'s point budget (#4349); a
+    /// bucket holding exactly one physical collection is stamped at that collection's own raw time rather
+    /// than the bucket grid when EVERY bucket this call returned is such a singleton (ruling item 3).</summary>
     public async Task<List<MemoryGrantTrendPoint>> GetMemoryGrantTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var items = new List<MemoryGrantTrendPoint>();
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(MemoryGrantTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -303,13 +377,31 @@ public sealed partial class ViewerDataService
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, double TotalGrantedMb)>();
+        var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new MemoryGrantTrendPoint(
+            if (reader.GetInt64(3) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
                 reader.GetDateTime(0),
+                reader.GetDateTime(2),
                 reader.IsDBNull(1) ? 0 : reader.GetDouble(1)));
+        }
+
+        var items = new List<MemoryGrantTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
+            items.Add(new MemoryGrantTrendPoint(
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.TotalGrantedMb));
         }
 
         return items;
@@ -425,11 +517,15 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>The per-pool grant sizing + activity chart data over the window (the Memory Grants
-    /// sub-tab's two charts).</summary>
+    /// sub-tab's two charts). Bucketed to <see cref="TrendBudget.Chart"/>'s point budget PER POOL (#4349);
+    /// a bucket holding exactly one physical collection is stamped at that collection's own raw time
+    /// rather than the bucket grid when EVERY bucket this call returned (across every pool) is such a
+    /// singleton (ruling item 3).</summary>
     public async Task<List<MemoryGrantChartPoint>> GetMemoryGrantChartDataAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var items = new List<MemoryGrantChartPoint>();
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(MemoryGrantChartDataSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -442,13 +538,23 @@ public sealed partial class ViewerDataService
         {
             TypedValue = DateTime.SpecifyKind(endUtc, DateTimeKind.Unspecified),
         });
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+
+        var rows = new List<(int PoolId, DateTime BucketStart, DateTime FirstCollectionTime, double Available, double Granted, double Used, int Grantee, int Waiter, long TimeoutDelta, long ForcedDelta, double Target, double MaxTarget)>();
+        var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new MemoryGrantChartPoint(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+            if (reader.GetInt64(12) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(11),
                 reader.IsDBNull(2) ? 0 : reader.GetDouble(2),
                 reader.IsDBNull(3) ? 0 : reader.GetDouble(3),
                 reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
@@ -458,6 +564,23 @@ public sealed partial class ViewerDataService
                 reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
                 reader.IsDBNull(9) ? 0 : reader.GetDouble(9),
                 reader.IsDBNull(10) ? 0 : reader.GetDouble(10)));
+        }
+
+        var items = new List<MemoryGrantChartPoint>(rows.Count);
+        foreach (var row in rows)
+        {
+            items.Add(new MemoryGrantChartPoint(
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.PoolId,
+                row.Available,
+                row.Granted,
+                row.Used,
+                row.Grantee,
+                row.Waiter,
+                row.TimeoutDelta,
+                row.ForcedDelta,
+                row.Target,
+                row.MaxTarget));
         }
 
         return items;
