@@ -562,4 +562,69 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         var managedText = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
         Assert.Contains("min_wal_size = '2048MB'", managedText, StringComparison.Ordinal);
     }
+
+    /// <summary>Pin (#4336): a carried <c>maintenance_work_mem</c> — present in the BEFORE
+    /// snapshot at a pre-#3909 <c>2048MB</c>, which this render does not itself derive (v7's own value is
+    /// smaller here) — goes through the same <c>NeedsLegacyMaintenanceWorkMemCap</c> predicate
+    /// <see cref="ManagedConfFile.RenderBody"/>'s v14 block uses, so PostgreSQL 17 never receives an
+    /// uncapped value it rejects on start.</summary>
+    [Fact]
+    public async Task RunStepA_CarriedMaintenanceWorkMemOver2047_Postgres17_Caps()
+    {
+        WriteConf("# base conf\nmaintenance_work_mem = '2048MB'\n");
+
+        var inputs = SampleInputs() with { PostgresMajor = 17 };
+        var derived = DerivedValues(inputs);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            var value = kvp.Key == DarlingManagedPostgres.MaintenanceWorkMemSetting ? "2048MB" : kvp.Value;
+            beforeRows.Add(Applied(kvp.Key, value));
+        }
+
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(beforeRows);
+
+        var logger = new CapturingTestLogger();
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, logger, CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+
+        var managedText = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
+        Assert.Contains(
+            $"maintenance_work_mem = '{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB'", managedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("maintenance_work_mem = '2048MB'", managedText, StringComparison.Ordinal);
+    }
+
+    /// <summary>Pin: the same carried <c>2048MB</c> on PostgreSQL 18 is kept exactly — the cap is major-aware,
+    /// same as <see cref="DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap"/> itself.</summary>
+    [Fact]
+    public async Task RunStepA_CarriedMaintenanceWorkMemOver2047_Postgres18_KeepsIt()
+    {
+        WriteConf("# base conf\nmaintenance_work_mem = '2048MB'\n");
+
+        var inputs = SampleInputs() with { PostgresMajor = 18 };
+        var derived = DerivedValues(inputs);
+
+        var beforeRows = new List<FileSettingRow>();
+        foreach (var kvp in derived)
+        {
+            var value = kvp.Key == DarlingManagedPostgres.MaintenanceWorkMemSetting ? "2048MB" : kvp.Value;
+            beforeRows.Add(Applied(kvp.Key, value));
+        }
+
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = _ =>
+            Task.FromResult<IReadOnlyList<FileSettingRow>>(beforeRows);
+
+        var logger = new CapturingTestLogger();
+        var outcome = await ManagedConfMigrationRunner.RunStepA(
+            _dataDir, snapshot, derived, inputs, inputs.Port, UtcNow, logger, CancellationToken.None);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+
+        var managedText = File.ReadAllText(Path.Combine(_dataDir, ManagedConfFile.FileName));
+        Assert.Contains("maintenance_work_mem = '2048MB'", managedText, StringComparison.Ordinal);
+    }
 }
