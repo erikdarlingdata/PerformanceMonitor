@@ -20,13 +20,78 @@ namespace Darling.Tests;
 /// <summary>
 /// Live, end-to-end proof of the #4348 S1b one-time scrub against a REAL compressed TimescaleDB chunk.
 ///
-/// <para><b>#1776 own-store</b> — mints its own scratch database (<see cref="ScratchPostgres"/>) rather than
+/// <para><b>#4348 own-store</b> — mints its own scratch database (<see cref="ScratchPostgres"/>) rather than
 /// sharing the live fixture, so it is deliberately NOT in the <c>live-postgres</c> collection: it creates its
 /// own hypertable/compression shape on <c>collect.pg_server_config</c>, which the shared fixture must never
 /// inherit from a test.</para>
 /// </summary>
 public sealed class PgSettingScrubLiveTests
 {
+    /// <summary>
+    /// Pins round 2's H1 fix: batches are grouped by (server, day), not day alone, and every UPDATE carries a
+    /// constant <c>server_id</c> predicate alongside the day range — not just the join equality — so
+    /// TimescaleDB can exclude every other server's compressed segment in that day's chunk. Two servers each
+    /// get a secret-bearing row on the SAME day, in the SAME compressed chunk. The connection's
+    /// <c>Options=-c timescaledb.max_tuples_decompressed_per_dml_transaction=N</c> is set to one target's row
+    /// count plus one: a day-only batch (the pre-H1 shape) would decompress BOTH servers' rows in the shared
+    /// chunk and trip the limit with 53400; the (server, day) batch decompresses only the one server's
+    /// segment and stays under it.
+    /// </summary>
+    [Fact]
+    public async Task TheScrubBatchesPerServerAndDay_NotDayAlone()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4351 H1 batching pin (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        /* Seed and shape the chunk using an UNCAPPED connection: capping max_tuples_decompressed at
+           connection scope would also block the seeding compress_chunk() call itself. */
+        await using (var setupConnection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setupConnection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setupConnection, ct);
+
+            Assert.True(await TimescaleSupport.TryEnableAsync(setupConnection, null, ct),
+                "the dev fixture is expected to have TimescaleDB installed");
+            await ExecAsync(setupConnection, "SELECT create_hypertable('collect.pg_server_config', by_range('collection_time', INTERVAL '1 days'), if_not_exists => true)", ct);
+            await ExecAsync(setupConnection, "ALTER TABLE collect.pg_server_config SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
+
+            const int serverA = -444445;
+            const int serverB = -444446;
+
+            /* One secret-bearing row per server, same day, same chunk. */
+            await InsertRowAsync(setupConnection, serverA, OldTime, "primary_conninfo", Secret, databaseName: null, roleName: null, ct);
+            await InsertRowAsync(setupConnection, serverB, OldTime, "primary_conninfo", Secret, databaseName: null, roleName: null, ct);
+
+            await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_server_config') c", ct);
+
+            Assert.True(await ContainsSecretAsync(setupConnection, ct), "seeding failed to plant the secret this test exists to catch");
+        }
+
+        /* One target's own day has 1 candidate row. Cap at 1 (target-row-count) so a day-only batch, which
+           would decompress both servers' rows sharing this chunk, trips 53400 with room to spare; a
+           (server, day) batch touches only 1 row and stays at the cap. */
+        var cappedConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+        {
+            Options = "-c timescaledb.max_tuples_decompressed_per_dml_transaction=1",
+        }.ConnectionString;
+
+        await using var postgres = NpgsqlDataSource.Create(cappedConnectionString);
+
+        var summary = await PgSettingScrub.RunAsync(postgres, logger: null, ct);
+
+        Assert.False(summary.AlreadyDone);
+        Assert.Equal(2, summary.RowsUpdated);
+
+        await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await verifyConnection.OpenAsync(ct);
+        Assert.False(await ContainsSecretAsync(verifyConnection, ct), "the raw password survived the scrub under a tight decompress cap");
+    }
+
     private const int ServerId = -444444;
     private const string ServerName = "darling-setting-scrub-e2e";
     private const string Secret = "host=replica1.internal port=5432 user=replicator password=hunter2 sslmode=require";
