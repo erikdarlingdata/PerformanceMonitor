@@ -102,11 +102,29 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
     public void RegressionsSql_SplitsBaselineFromRecent_OnTheSameBoundary()
     {
         var sql = DarlingQueryStoreRegressionReader.QueryStoreRegressionsSql;
+        /* #4217/#4310: the baseline has a FIXED lower bound too, not "everything before the window" — this
+           is the assertion that fails against the pre-#4217 shape (the grid's twin,
+           ViewerQueryStoreRegressionsTests.RegressionsSql_SplitsBaselineBeforeWindow_RecentInWindow_OverTheBaseTable,
+           already carries it for the viewer's copy; this reader's own copy was uncovered). */
+        Assert.Contains("collection_time >= $6", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
         Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
         Assert.Contains("FROM query_store_stats", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4310: the grid keeps its own copy of <c>BaselineLookbackDays</c> (it cannot reference this project)
+    /// and pins it equal to 7 in <c>ViewerQueryStoreRegressionsTests.BaselineLookbackDays_IsSevenDays_SameAsTheMcpReaderAndLite</c>.
+    /// This reader's OWN constant had no such pin — nothing stopped the two copies drifting apart, since
+    /// #4217's fixed-baseline lower bound above depends on this constant's value at the call site rather
+    /// than in the SQL text.
+    /// </summary>
+    [Fact]
+    public void BaselineLookbackDays_IsSevenDays_SameAsTheViewerAndLite()
+    {
+        Assert.Equal(7, DarlingQueryStoreRegressionReader.BaselineLookbackDays);
     }
 
     /// <summary>
@@ -144,6 +162,11 @@ public sealed class DarlingQueryStoreRegressionsSurfaceAndSqlTests
         var sql = DarlingQueryStoreRegressionReader.RegressionCoverageSql;
         Assert.Equal(2, CountOf(sql, "FROM query_store_stats"));
         Assert.DoesNotContain("v_query_store_stats", sql, StringComparison.Ordinal);
+        /* #4310: the coverage probe's own baseline arm must use the SAME fixed lower bound as the read it
+           probes for — an unbounded coverage probe over a bounded read would answer "has_baseline" for
+           history the read itself can no longer see, and report the no-baseline branch (#4195/#4217) as
+           false whenever it is in fact true. */
+        Assert.Contains("collection_time >= $4", sql, StringComparison.Ordinal);  /* baseline: window start minus BaselineLookbackDays */
         Assert.Contains("collection_time < $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time >= $2", sql, StringComparison.Ordinal);
         Assert.Contains("collection_time <= $3", sql, StringComparison.Ordinal);
