@@ -967,6 +967,18 @@ internal static class ManagedConfMigration
     /// file — rule 3's "a line that was already overridden stays where it is and stays overridden";</item>
     /// <item>every other non-Ours line — an unowned key, a comment, a blank line, a stock PostgreSQL
     /// default — stays exactly where it is, byte for byte;</item>
+    /// <item>an <c>include</c>, <c>include_if_exists</c> or <c>include_dir</c> line that is not itself the
+    /// managed file's own include, appearing AFTER the first product marker line, moves below the include
+    /// the same way an effective operator assignment does, in original relative order with any moved
+    /// assignment line (#4336). Before this rewrite touched the file, that line's own content was read
+    /// AFTER the blocks and so won over them; moving it below the new include keeps it winning over the
+    /// managed file the same way. One before the first product marker line stays exactly where it is — it
+    /// was already losing to the blocks, and stays losing to the managed file's own include in the same
+    /// position, so nothing about its effect changes;</item>
+    /// <item>owning a key ownership test is case-insensitive, the same way PostgreSQL itself reads GUC
+    /// names (#4336) — an operator line spelling an owned key with different casing, such as
+    /// <c>Work_Mem = 64MB</c>, is still recognised as the currently-effective assignment of
+    /// <c>work_mem</c> and moves, verbatim (its own casing untouched), below the include;</item>
     /// <item>exactly one <see cref="ManagedConfFile.IncludeLine"/> is written, once, right after the
     /// surviving non-block content and before the moved operator lines (design §2 "where the line goes: the
     /// end"; if one is already present and un-migrated — no opt-out — it is treated as ordinary
@@ -987,7 +999,7 @@ internal static class ManagedConfMigration
         if (HasNoProductMarkers(postgresqlConf) && HasIncludeLine(postgresqlConf))
         {
             /* Rule 6: nothing left to migrate and the include is already there — a genuine no-op. */
-            return new RewriteResult(postgresqlConf, Array.Empty<RewriteLogEntry>(), new HashSet<string>(StringComparer.Ordinal));
+            return new RewriteResult(postgresqlConf, Array.Empty<RewriteLogEntry>(), new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         }
 
         var classified = ClassifyLines(postgresqlConf, configuredPort);
@@ -999,7 +1011,17 @@ internal static class ManagedConfMigration
             rawLines = rawLines[..^1];
         }
 
-        var managedKeys = managedValues.Keys.ToArray();
+        /* Case-insensitive key ownership (#4336): PostgreSQL GUC names are case-insensitive, so
+           'Work_Mem = 64MB' owns the same key as 'work_mem'. This maps any casing of an owned key to
+           managedValues' own canonical casing, so a moved line's log entry and ExcludedKeys carry the
+           canonical name — never whatever casing happened to be on the operator's line. */
+        var managedKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in managedValues.Keys)
+        {
+            managedKeys[key] = key;
+        }
+
+        var firstProductMarkerLine = FindFirstProductMarkerLine(normalized);
 
         /* Rule 3's "currently effective" test needs the LAST assignment of each managed key anywhere in the
            ORIGINAL file, Ours or not — an Ours line can be the effective one just as easily as a hand edit,
@@ -1007,7 +1029,7 @@ internal static class ManagedConfMigration
         var lastAssignmentLineByKey = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var (line, key, _) in DarlingManagedPostgres.ParseConfText(normalized))
         {
-            if (managedKeys.Contains(key))
+            if (managedKeys.ContainsKey(key))
             {
                 lastAssignmentLineByKey[key] = line;
             }
@@ -1016,7 +1038,7 @@ internal static class ManagedConfMigration
         var kept = new List<string>();
         var movedOperatorLines = new List<string>();
         var log = new List<RewriteLogEntry>();
-        var excluded = new HashSet<string>(StringComparer.Ordinal);
+        var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 0; i < rawLines.Length; i++)
         {
@@ -1040,6 +1062,22 @@ internal static class ManagedConfMigration
             }
 
             var lineNumber = i + 1;
+
+            if (IsOperatorIncludeDirective(rawLines[i], out var includeTarget) &&
+                firstProductMarkerLine is { } markerLine && lineNumber > markerLine)
+            {
+                /* #4336: this include won over the blocks by file order before this rewrite touched the
+                   file (it was read after them); moving it below the new include, in original relative
+                   order with any moved assignment line, keeps it winning over the managed file the same
+                   way. An include before the first product marker line is left where TryFindSpan/the loop
+                   below already leaves it — it was already losing to the blocks, so nothing changes. */
+                movedOperatorLines.Add(rawLines[i]);
+                log.Add(new RewriteLogEntry(
+                    FormattableString.Invariant($"include '{includeTarget}': operator include after the product settings, moved below the include"),
+                    OverriddenKey: null));
+                continue;
+            }
+
             if (TryFindEffectiveManagedAssignment(rawLines[i], managedKeys, lastAssignmentLineByKey, lineNumber, out var effectiveKey))
             {
                 /* Rule 3: this is the line currently in force for a key the managed file will own. It moves
@@ -1074,31 +1112,91 @@ internal static class ManagedConfMigration
     }
 
     /// <summary>Whether <paramref name="rawLine"/> is the line currently in force for SOME key in
-    /// <paramref name="managedKeys"/> — it assigns a managed key, and <paramref name="lastAssignmentLineByKey"/>
-    /// (built once, over the whole file, before this loop runs) says <paramref name="lineNumber"/> is that
-    /// key's last assignment anywhere. A line assigning more than one key (never emitted by any covered
-    /// builder or by PostgreSQL's own <c>key = value</c> grammar) is not a case this needs to handle; the
-    /// first managed, currently-effective key on the line wins.</summary>
+    /// <paramref name="managedKeys"/> — it assigns a managed key (case-insensitively, per #4336; PostgreSQL
+    /// GUC names are case-insensitive) and <paramref name="lastAssignmentLineByKey"/> (built once, over the
+    /// whole file, before this loop runs) says <paramref name="lineNumber"/> is that key's last assignment
+    /// anywhere. <paramref name="effectiveKey"/> comes back in <paramref name="managedKeys"/>' own canonical
+    /// casing, never the operator line's, so callers can look it up in <c>managedValues</c> and
+    /// <c>ExcludedKeys</c> by that one spelling regardless of how the operator wrote it. A line assigning
+    /// more than one key (never emitted by any covered builder or by PostgreSQL's own <c>key = value</c>
+    /// grammar) is not a case this needs to handle; the first managed, currently-effective key on the line
+    /// wins.</summary>
     private static bool TryFindEffectiveManagedAssignment(
         string rawLine,
-        IReadOnlyCollection<string> managedKeys,
+        Dictionary<string, string> managedKeys,
         Dictionary<string, int> lastAssignmentLineByKey,
         int lineNumber,
         out string effectiveKey)
     {
         foreach (var (_, name, _) in DarlingManagedPostgres.ParseConfText(rawLine))
         {
-            if (managedKeys.Contains(name) &&
+            if (managedKeys.TryGetValue(name, out var canonicalKey) &&
                 lastAssignmentLineByKey.TryGetValue(name, out var lastLine) &&
                 lastLine == lineNumber)
             {
-                effectiveKey = name;
+                effectiveKey = canonicalKey;
                 return true;
             }
         }
 
         effectiveKey = string.Empty;
         return false;
+    }
+
+    /// <summary>Whether <paramref name="rawLine"/> is an <c>include</c>, <c>include_if_exists</c> or
+    /// <c>include_dir</c> directive — the three forms PostgreSQL itself follows when reading a conf file
+    /// (#4336; <see cref="DarlingManagedPostgres.ReadConfAssignments"/> follows the same three). Its target
+    /// path or directory comes back in <paramref name="target"/> exactly as
+    /// <see cref="DarlingManagedPostgres.ParseConfText"/> reads it (unquoted).</summary>
+    private static bool IsOperatorIncludeDirective(string rawLine, out string target)
+    {
+        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(rawLine))
+        {
+            if (name.Equals("include", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("include_if_exists", StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("include_dir", StringComparison.OrdinalIgnoreCase))
+            {
+                target = value;
+                return true;
+            }
+        }
+
+        target = string.Empty;
+        return false;
+    }
+
+    /// <summary>The 1-based line number of the FIRST product marker line anywhere in <paramref name="conf"/>
+    /// (covered or not — a pending upgrade to a newer version still counts, same as
+    /// <see cref="HasNoProductMarkers"/>), or null if none is present at all (#4336; decides which side of
+    /// "before/after the blocks" an operator include directive falls on).</summary>
+    private static int? FindFirstProductMarkerLine(string conf)
+    {
+        int? first = null;
+        foreach (var marker in DarlingManagedPostgres.AllManagedConfMarkers)
+        {
+            var searchFrom = 0;
+            while (true)
+            {
+                var markerStart = conf.IndexOf(marker, searchFrom, StringComparison.Ordinal);
+                if (markerStart < 0)
+                {
+                    break;
+                }
+
+                if (markerStart == 0 || conf[markerStart - 1] == '\n')
+                {
+                    var lineNumber = conf[..markerStart].Split('\n').Length;
+                    if (first is null || lineNumber < first)
+                    {
+                        first = lineNumber;
+                    }
+                }
+
+                searchFrom = markerStart + marker.Length;
+            }
+        }
+
+        return first;
     }
 
     /// <summary>Rule 6's cheap marker check: whether ANY managed marker (covered or not — a pending upgrade
