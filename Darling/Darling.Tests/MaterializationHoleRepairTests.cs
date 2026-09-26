@@ -598,6 +598,21 @@ public sealed class MaterializationHoleRepairTests
         Assert.NotNull(wide);
         Assert.Equal(new DateTime(2026, 9, 16, 0, 0, 0, DateTimeKind.Unspecified), wide!.Value.Start);
         Assert.Equal(new DateTime(2026, 9, 19, 0, 0, 0, DateTimeKind.Unspecified), wide.Value.End);
+
+        /* The catch-up caller passes (hourlyFloor, dailyFloor): when the daily already reaches back at least
+           as far as the hourly floor, there is nothing older left to chase — the common case where the daily
+           is already caught up and the retry should be a no-op, not a whole-window re-chase. */
+        var alreadyCaughtUp = TimescaleSupport.ChainedDailyRange(
+            new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Unspecified),
+            new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Unspecified),
+            windowStart, capDays: 30);
+        Assert.Null(alreadyCaughtUp);
+
+        var dailyAlreadyOlder = TimescaleSupport.ChainedDailyRange(
+            new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Unspecified),
+            new DateTime(2026, 9, 10, 0, 0, 0, DateTimeKind.Unspecified),
+            windowStart, capDays: 30);
+        Assert.Null(dailyAlreadyOlder);
     }
 
     private static int CountOf(string text, string needle)
