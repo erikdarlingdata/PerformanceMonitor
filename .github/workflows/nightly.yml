@@ -500,6 +500,38 @@ jobs:
       # above. When one of those tests fails, its cluster's own server log (pg_ctl's -l file,
       # named "logfile" inside each temp root, plus any "log\\" ring directory a managed-conf boot
       # writes) is the only record of what postgres itself said, and it wasn't captured before.
+      # Those clusters land under %TEMP% (the Windows per-user temp directory), NOT
+      # ${{ runner.temp }} (RUNNER_TEMP) - the two are different directories on this runner - so
+      # this step copies them into RUNNER_TEMP first, preserving relative paths, before the
+      # upload step below (which can only reach RUNNER_TEMP). A test's own "finally" block may
+      # already have deleted its temp root by the time this runs, so this only catches clusters
+      # that survive; the test's own failure message (the in-place upgrade test appends the
+      # upgraded server's own log to its assertion) remains the primary record.
+      - name: Collect the gated tests' own cluster logs
+        if: failure()
+        shell: pwsh
+        run: |
+          $dest = "$env:RUNNER_TEMP\darling-cluster-logs"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $maxBytes = 50MB
+          $copied = 0
+          $roots = Get-ChildItem -Path $env:TEMP -Directory -Filter "darling-*" -ErrorAction SilentlyContinue
+          foreach ($root in $roots) {
+            $files = Get-ChildItem -Path $root.FullName -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+              $_.Name -eq "logfile" -or $_.Name -like "*.log" -or
+              $_.FullName -match "\\log\\" -or $_.FullName -match "\\pg_log\\"
+            }
+            foreach ($file in $files) {
+              if ($file.Length -gt $maxBytes) { continue }
+              $relative = $file.FullName.Substring($env:TEMP.Length).TrimStart("\")
+              $target = Join-Path $dest $relative
+              New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
+              Copy-Item -Path $file.FullName -Destination $target -ErrorAction SilentlyContinue
+              $copied++
+            }
+          }
+          Write-Host "Collected $copied gated-test cluster log file(s) into $dest"
+
       - name: Upload PG log and test results on failure
         if: failure()
         uses: actions/upload-artifact@v6
@@ -507,9 +539,7 @@ jobs:
           name: darling-pg-failure
           path: |
             ${{ runner.temp }}/darling-pg.log
-            ${{ runner.temp }}/darling-*/**/logfile
-            ${{ runner.temp }}/darling-*/**/log/**
-            ${{ runner.temp }}/darling-*/**/pg_log/**
+            ${{ runner.temp }}/darling-cluster-logs/**
             TestResults/
           if-no-files-found: ignore
 
