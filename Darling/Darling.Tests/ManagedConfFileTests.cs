@@ -343,12 +343,22 @@ public sealed class ManagedConfFileTests
     /// written, but whose builder call is never added to <c>RenderBody</c> (exactly this PR's own bug, for v16),
     /// fails this test on its own keys — with no hand roster to forget to update alongside it.
     ///
-    /// <para>v14 (the legacy <c>maintenance_work_mem</c> cap) is the one documented skip: it is EnsureConfAppended's
-    /// own healing append for a pre-18 data directory whose in-force value already exceeds the limit, gated by
-    /// <see cref="DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap"/> on BOTH the data directory's PostgreSQL
-    /// major and its already-written value — not a RenderBody input this fixture's inputs can drive on their own
-    /// (RenderBody re-derives that predicate from RenderBody's OWN reduction of the blocks above it, not from a
-    /// caller-supplied major/value pair the way EnsureConfAppended's own call site does). It is exercised directly by
+    /// <para>v14 (the legacy <c>maintenance_work_mem</c> cap) is the one documented skip, and the reason is NOT
+    /// what an earlier version of this comment said (that it depends on a data-directory read <c>RenderBody</c>
+    /// cannot drive). <c>RenderBody</c> DOES decide v14 purely from its own inputs: it reduces the blocks above v14,
+    /// reads whatever <c>maintenance_work_mem</c> is in force from that reduction, and calls the SAME
+    /// <see cref="DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap"/> predicate
+    /// <c>EnsureConfAppended</c>'s own heal uses. The skip is arithmetic, not a missing input: every
+    /// <c>maintenance_work_mem</c> value this fixture's memory-sizing builders can ever produce is
+    /// <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>'s own value, which is capped at
+    /// <see cref="DarlingManagedPostgres.MaintenanceWorkMemCapMb"/> (2047 MB = 2,096,128 kB) for ANY RAM size —
+    /// the cap is a MIN in the formula, so raising RAM without bound never raises the derived value past it. That
+    /// cap sits 1,023 kB UNDER <see cref="DarlingManagedPostgres.LegacyMaintenanceWorkMemMaxKb"/> (2,097,151 kB) —
+    /// deliberately, so a fresh derivation never crosses the very limit v14 exists to cap. So no RAM figure this
+    /// fixture could supply (there is no upper bound to check: the derivation's cap makes every RAM equally
+    /// incapable) ever drives <c>RenderBody</c> to append v14 on its own. v14 only fires for a value ALREADY on
+    /// disk from before this cap existed (a pre-#3909 store) or set directly by <c>ALTER SYSTEM</c> — inputs
+    /// <c>RenderBody</c>'s formula-only inputs cannot produce. It is exercised directly by
     /// <c>NeedsLegacyMaintenanceWorkMemCap_OnlyForAnOverLimitValueOnPostgres17OrEarlier</c> in
     /// <c>DarlingManagedPostgresTests</c>, not here.</para>
     /// </summary>
@@ -451,7 +461,7 @@ public sealed class ManagedConfFileTests
 
         if (marker == DarlingManagedPostgres.ConfMarkerV14)
         {
-            return null; // documented skip -- see the class doc comment on RenderBody_CarriesEveryManagedConfMarkersOwnedKeys
+            return null; // documented skip -- no RAM ever drives RenderBody's own inputs past the cap; see the class doc comment on RenderBody_CarriesEveryManagedConfMarkersOwnedKeys
         }
 
         if (marker == DarlingManagedPostgres.ConfMarkerV15)
