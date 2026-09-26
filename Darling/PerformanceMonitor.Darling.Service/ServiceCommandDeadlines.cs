@@ -268,9 +268,10 @@ public static class ServiceCommandDeadlines
     /// <para><b>BELOW the budget the same startup path gives its heaviest statements.</b>
     /// <c>PgMigrations.MigrationCommandTimeoutSeconds</c> is 300 s per rung, and its lock wait is five
     /// multiples of that. Those bound data-MOVING DDL on a cold busy store. The sites here are catalog
-    /// reads, single-row <c>config</c> seeds, one <c>count(*)</c> and one idempotent grant batch — strictly
-    /// cheaper by construction, so granting them a migration rung's budget would be borrowing a number
-    /// rather than deriving one. 60 s is also exactly 2x the default it replaces, which keeps the change
+    /// reads, single-row <c>config</c> seeds, one <c>count(*)</c>, one idempotent grant batch and the
+    /// first start's <c>CREATE DATABASE</c> (a copy of the few-megabyte <c>template1</c>, measured at
+    /// 19-68 ms) — strictly cheaper by construction, so granting them a migration rung's budget would be
+    /// borrowing a number rather than deriving one. 60 s is also exactly 2x the default it replaces, which keeps the change
     /// legible: it widens by one multiple and names why.</para>
     ///
     /// <para><b>What this is NOT derived from.</b> Not #1772, which is this group's justification but not
@@ -291,36 +292,40 @@ public static class ServiceCommandDeadlines
     public const int BootstrapSeconds = 60;
 
     /// <summary>
-    /// The two commands in <c>DarlingManagedPostgres.EnsureDatabaseOnceAsync</c> — the
-    /// <c>pg_database</c> probe and <c>CREATE DATABASE</c> — which are the bootstrap's first real
-    /// interaction with the freshly started server, and the ONLY sites in this group with a retry above
-    /// them.
+    /// The <c>pg_database</c> probe in <c>DarlingManagedPostgres.OpenProbedMaintenanceConnectionAsync</c>,
+    /// which is the bootstrap's first real interaction with the freshly started server, and the ONLY site in
+    /// this group with a retry above it.
     ///
-    /// <para><b>Why they cannot take <see cref="BootstrapSeconds"/>.</b> <c>EnsureDatabaseAsync</c> wraps
-    /// the whole unit in six attempts separated by 2 s, and an Npgsql command deadline is inside what that
-    /// loop retries. Measured against Npgsql 10.0.3: a command that exceeds its <c>CommandTimeout</c>
+    /// <para><b>Why it cannot take <see cref="BootstrapSeconds"/>.</b> The connect and this probe retry as
+    /// one unit, six attempts separated by 2 s, and an Npgsql command deadline is inside what that loop
+    /// retries. Measured against Npgsql 10.0.3: a command that exceeds its <c>CommandTimeout</c>
     /// throws <c>NpgsqlException("Exception while reading from stream")</c> wrapping a
     /// <c>TimeoutException</c>, and <c>IsTransientConnectionFault</c> walks the inner chain and returns
     /// true for exactly that. (A SERVER-side <c>statement_timeout</c> is the mirror image — it arrives as
     /// <c>PostgresException 57014</c>, which that same test rejects as "the server replied", so it is not
     /// retried. The same wall-clock event, named two ways, and only one of them gets six chances.) So the
-    /// deadline here multiplies: the worst-case bootstrap delay this pair can contribute is
+    /// deadline here multiplies: the worst-case bootstrap delay the probe can contribute is
     /// <c>6 x deadline + 10 s</c> of pauses before the throw reaches <c>LogCritical</c>-and-exit. At the
     /// inherited 30 s that is 190 s; at <see cref="BootstrapSeconds"/> it would be 370 s. At 10 s it is
     /// 70 s, which sits just past the installers' 60 s <c>WaitForStatus('Running')</c> and inside the
     /// 2-minute variant — i.e. inside the window an operator is already waiting through, rather than
     /// several minutes beyond it.</para>
     ///
-    /// <para><b>ABOVE the measured worst case with room to spare.</b> The probe measured 12-14 ms and
-    /// <c>CREATE DATABASE</c> 19-68 ms, so 10 s is ~147x the slower of the two. And it is generous for the
+    /// <para><b>ABOVE the measured worst case with room to spare.</b> The probe measured 12-14 ms, so 10 s
+    /// is ~700x it. And it is generous for the
     /// fault the retry actually exists for, which is not slowness at all: a Windows backend that loses the
     /// shared-memory reservation race authenticates and then DIES on its first query, which arrives as a
     /// reset in milliseconds. Waiting a full <see cref="BootstrapSeconds"/> for a backend that is already
     /// gone spends the retry's whole purpose — getting a fresh one quickly — on a corpse.</para>
     ///
-    /// <para>These two are also the only sites in the group that run against the MAINTENANCE database
-    /// (<c>postgres</c>) rather than the store, which is what makes their floor a connection probe's floor
-    /// rather than a query's.</para>
+    /// <para><b>Why <c>CREATE DATABASE</c> is not under it.</b> The create runs once, after the probe, on the
+    /// probe's own connection, so its backend has already survived the race the retry exists for, and it
+    /// takes <see cref="BootstrapSeconds"/>. A timeout there means the template copy is slow, and a retry
+    /// cannot help: the timeout cancels the statement, the server rolls the partial copy back, and the next
+    /// attempt starts the copy over under the same deadline (#4352).</para>
+    ///
+    /// <para>The probe runs against the MAINTENANCE database (<c>postgres</c>) rather than the store, which
+    /// is what makes its floor a connection probe's floor rather than a query's.</para>
     /// </summary>
     public const int BootstrapConnectProbeSeconds = 10;
 

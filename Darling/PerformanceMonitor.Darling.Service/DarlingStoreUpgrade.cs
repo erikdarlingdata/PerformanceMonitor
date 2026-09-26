@@ -2180,7 +2180,7 @@ internal sealed class DarlingStoreUpgrade
 
     /// <summary>
     /// Retries <paramref name="action"/> on a TRANSPORT fault only (a backend that lost the post-start
-    /// shared-memory race, #2185), the same classification <c>EnsureDatabaseAsync</c> uses. Every caller wraps a
+    /// shared-memory race, #2185), the same classification <c>OpenProbedMaintenanceConnectionAsync</c> uses. Every caller wraps a
     /// connection OPEN in it and nothing else, so what a retry repeats is a connection attempt, never a
     /// statement. Any PostgreSQL error is an answer, not a transient, and propagates at once.
     /// </summary>

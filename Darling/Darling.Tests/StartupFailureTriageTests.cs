@@ -313,8 +313,8 @@ public class StartupFailureTriageTests
 
     /// <summary>
     /// Every attempt opens a FRESH connection, because a connector that died on a transport failure cannot
-    /// carry the next attempt — the same reason <c>DarlingManagedPostgres.EnsureDatabaseAsync</c> retries
-    /// the whole unit rather than just the open.
+    /// carry the next attempt — the same reason <c>DarlingManagedPostgres.OpenProbedMaintenanceConnectionAsync</c>
+    /// retries the connect and its first query as one unit rather than just the open.
     ///
     /// <para>Asserted by OFFSET, not by occurrence count. Hoisting the open above the loop is a
     /// RELOCATION: it leaves every count in this file invariant (one loop, one open, one migrate call), so
