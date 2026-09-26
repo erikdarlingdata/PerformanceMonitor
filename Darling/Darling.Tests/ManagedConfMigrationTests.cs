@@ -189,8 +189,10 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(ConfLineClassification.Ours, line.Classification);
     }
 
+    /// <summary>An untouched v8 block, at the RAM/hypertable inputs its own fingerprint records, is Ours —
+    /// the plain case (#4336 lane c1, ruling comment-5836185470 item 1).</summary>
     [Fact]
-    public void ClassifyLines_V8Block_AtCurrentInputs_IsOurs()
+    public void ClassifyLines_UntouchedV8Block_AtItsOwnRecordedInputs_IsOurs()
     {
         var ram = 16L * 1024 * 1024 * 1024;
         var hypertables = 30;
@@ -198,23 +200,182 @@ public sealed class ManagedConfMigrationTests
 
         var lines = ClassifyLines(conf);
         var marker = lines.First(l => l.Text == DarlingManagedPostgres.ConfMarkerV8);
+        var effectiveCache = FindByText(lines, "effective_cache_size");
 
-        /* v8 is not in CoveredMarkers today, so even the untouched block classifies Unclassified, never
-           Ours. If a follow-up lane covers v8, this pin should flip to Ours and is the marker of that. */
-        Assert.Equal(ConfLineClassification.Unclassified, marker.Classification);
+        Assert.Equal(ConfLineClassification.Ours, marker.Classification);
+        Assert.Equal(ConfLineClassification.Ours, effectiveCache.Classification);
     }
 
+    /// <summary>A hand edit to one of v8's setting values fails the rebuild at the block's own recorded
+    /// fingerprint and is a hand edit, never Ours.</summary>
     [Fact]
-    public void ClassifyLines_V8Block_AtStaleInputs_IsUnclassified_NeverOurs()
+    public void ClassifyLines_EditedV8Value_IsHandEdit_RebuildMismatch()
     {
-        /* A v8 block written under 16 GB/30 hypertables, present on a store now reading 32 GB. Whatever the
-           eventual v8 rule, it must never call this Ours: it does not match the current inputs. */
+        var built = DarlingManagedPostgres.BuildHardwareSizingConfAppend(16L * 1024 * 1024 * 1024, 30);
+        var edited = built.Replace("work_mem = 32MB", "work_mem = 1024MB", StringComparison.Ordinal);
+        Assert.NotEqual(built, edited); /* guards the pin against a formula change silently no-oping the edit */
+
+        var lines = ClassifyLines(edited);
+        var workMem = FindByText(lines, "work_mem");
+
+        Assert.Equal(ConfLineClassification.HandEdit, workMem.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, workMem.Reason);
+    }
+
+    /// <summary>A v8 block whose recorded fingerprint (16 GB/30 hypertables) no longer matches the HOST's
+    /// current inputs (a resize to 32 GB since) is still Ours: it rebuilds exactly from its OWN recorded
+    /// inputs, whatever the host is now. A resize makes the block stale — <see cref="DarlingManagedPostgres.ShouldAppendHardwareSizing"/>'s
+    /// job to notice and replace — not a hand edit for this classifier to punish (#4336 lane c1, ruling
+    /// comment-5836185470 item 1).</summary>
+    [Fact]
+    public void ClassifyLines_StaleV8Block_AtItsOwnRecordedInputs_IsStillOurs()
+    {
+        /* Written under 16 GB/30 hypertables; the host now reads 32 GB, but nothing here re-derives from
+           that — only from the fingerprint the block itself carries. */
         var stale = DarlingManagedPostgres.BuildHardwareSizingConfAppend(16L * 1024 * 1024 * 1024, 30);
 
         var lines = ClassifyLines(stale);
         var marker = lines.First(l => l.Text == DarlingManagedPostgres.ConfMarkerV8);
+        var effectiveCache = FindByText(lines, "effective_cache_size");
 
-        Assert.Equal(ConfLineClassification.Unclassified, marker.Classification);
+        Assert.Equal(ConfLineClassification.Ours, marker.Classification);
+        Assert.Equal(ConfLineClassification.Ours, effectiveCache.Classification);
+    }
+
+    /// <summary>A v8 block with its fingerprint line deleted (or spliced in without one) cannot be rebuilt
+    /// at all and is a hand edit — the fallback c1 implemented for a missing recorded-inputs line.</summary>
+    [Fact]
+    public void ClassifyLines_V8BlockMissingFingerprint_IsHandEdit_RebuildMismatch()
+    {
+        var built = DarlingManagedPostgres.BuildHardwareSizingConfAppend(16L * 1024 * 1024 * 1024, 30);
+        var withoutFingerprint = string.Join(
+            '\n',
+            built.Split('\n').Where(l => !l.StartsWith(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, StringComparison.Ordinal)));
+
+        var lines = ClassifyLines(withoutFingerprint);
+        var effectiveCache = FindByText(lines, "effective_cache_size");
+
+        Assert.Equal(ConfLineClassification.HandEdit, effectiveCache.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, effectiveCache.Reason);
+    }
+
+    /// <summary>An untouched v12 block, at the free/total-disk inputs its builder derived from, is Ours.</summary>
+    [Fact]
+    public void ClassifyLines_UntouchedV12Block_AtItsOwnRecordedInputs_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildWalSizingConfAppend(
+            freeDiskBytesOnDataVolume: 64L * 1024 * 1024 * 1024,
+            totalDiskBytesOnDataVolume: 256L * 1024 * 1024 * 1024,
+            postgresMajor: 13);
+
+        var lines = ClassifyLines(conf);
+        var marker = lines.First(l => l.Text == DarlingManagedPostgres.ConfMarkerV12);
+        var maxWal = FindByText(lines, "max_wal_size");
+        var checkpoint = FindByText(lines, "checkpoint_completion_target");
+
+        Assert.Equal(ConfLineClassification.Ours, marker.Classification);
+        Assert.Equal(ConfLineClassification.Ours, maxWal.Classification);
+        Assert.Equal(ConfLineClassification.Ours, checkpoint.Classification);
+    }
+
+    /// <summary>A hand edit to v12's <c>max_wal_size</c> fails the rebuild against the block's own stamp
+    /// and is a hand edit.</summary>
+    [Fact]
+    public void ClassifyLines_EditedV12Value_IsHandEdit_RebuildMismatch()
+    {
+        var built = DarlingManagedPostgres.BuildWalSizingConfAppend(
+            freeDiskBytesOnDataVolume: 64L * 1024 * 1024 * 1024,
+            totalDiskBytesOnDataVolume: 256L * 1024 * 1024 * 1024,
+            postgresMajor: 13);
+        var edited = built.Replace("max_wal_size = 8192MB", "max_wal_size = 16384MB", StringComparison.Ordinal);
+        Assert.NotEqual(built, edited);
+
+        var lines = ClassifyLines(edited);
+        var maxWal = FindByText(lines, "max_wal_size");
+
+        Assert.Equal(ConfLineClassification.HandEdit, maxWal.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, maxWal.Reason);
+    }
+
+    /// <summary>A v12 block whose recorded stamp no longer matches the host's CURRENT disk headroom is
+    /// still Ours: the rebuild reads only the stamp's own recorded max/min-WAL outputs and major, never the
+    /// host's live free-disk figure (#4336 lane c1, ruling comment-5836185470 item 1 — same rule as v8).</summary>
+    [Fact]
+    public void ClassifyLines_StaleV12Block_AtItsOwnRecordedInputs_IsStillOurs()
+    {
+        /* Written under 64 GB free of 256 GB; nothing here re-derives from a different current free-disk
+           figure — only from the stamp the block itself carries. */
+        var stale = DarlingManagedPostgres.BuildWalSizingConfAppend(
+            freeDiskBytesOnDataVolume: 64L * 1024 * 1024 * 1024,
+            totalDiskBytesOnDataVolume: 256L * 1024 * 1024 * 1024,
+            postgresMajor: 13);
+
+        var lines = ClassifyLines(stale);
+        var marker = lines.First(l => l.Text == DarlingManagedPostgres.ConfMarkerV12);
+        var maxWal = FindByText(lines, "max_wal_size");
+
+        Assert.Equal(ConfLineClassification.Ours, marker.Classification);
+        Assert.Equal(ConfLineClassification.Ours, maxWal.Classification);
+    }
+
+    /// <summary>A v12 block with its stamp line deleted cannot be rebuilt at all and is a hand edit.</summary>
+    [Fact]
+    public void ClassifyLines_V12BlockMissingStamp_IsHandEdit_RebuildMismatch()
+    {
+        var built = DarlingManagedPostgres.BuildWalSizingConfAppend(
+            freeDiskBytesOnDataVolume: 64L * 1024 * 1024 * 1024,
+            totalDiskBytesOnDataVolume: 256L * 1024 * 1024 * 1024,
+            postgresMajor: 13);
+        var withoutStamp = string.Join(
+            '\n',
+            built.Split('\n').Where(l => !l.StartsWith(DarlingManagedPostgres.ConfWalSizingStampPrefix, StringComparison.Ordinal)));
+
+        var lines = ClassifyLines(withoutStamp);
+        var maxWal = FindByText(lines, "max_wal_size");
+
+        Assert.Equal(ConfLineClassification.HandEdit, maxWal.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, maxWal.Reason);
+    }
+
+    /// <summary>v1's <c>port</c> line rebuilds Ours when the caller supplies the store's configured port
+    /// and it matches (#4336 lane c1, ruling comment-5836185470 item 2).</summary>
+    [Fact]
+    public void ClassifyLines_V1PortLine_WithMatchingConfiguredPort_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildConfAppend(port: 5432);
+
+        var lines = ClassifyLines(conf, configuredPort: 5432);
+        var port = FindByText(lines, "port");
+
+        Assert.Equal(ConfLineClassification.Ours, port.Classification);
+    }
+
+    /// <summary>v1's <c>port</c> line is a hand edit when the supplied configured port does not match what
+    /// is actually written.</summary>
+    [Fact]
+    public void ClassifyLines_V1PortLine_WithWrongConfiguredPort_IsHandEdit()
+    {
+        var conf = DarlingManagedPostgres.BuildConfAppend(port: 5432);
+
+        var lines = ClassifyLines(conf, configuredPort: 5433);
+        var port = FindByText(lines, "port");
+
+        Assert.Equal(ConfLineClassification.HandEdit, port.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, port.Reason);
+    }
+
+    /// <summary>v1's <c>port</c> line stays Unclassified — never guessed, never a hand edit — when the
+    /// caller has no configured port to rebuild against (the zero-arg overload's own contract).</summary>
+    [Fact]
+    public void ClassifyLines_V1PortLine_WithNoConfiguredPort_IsUnclassified()
+    {
+        var conf = DarlingManagedPostgres.BuildConfAppend(port: 5432);
+
+        var lines = ClassifyLines(conf);
+        var port = FindByText(lines, "port");
+
+        Assert.Equal(ConfLineClassification.Unclassified, port.Classification);
+        Assert.Equal(HandEditReason.None, port.Reason);
     }
 
     [Fact]
