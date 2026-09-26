@@ -28,7 +28,44 @@ services:
     # shared_preload_libraries is silently ignored while this line is present). track_utility=off keeps
     # utility statements, role DDL's password literals among them, out of the view. The service creates the
     # extension and its reader functions itself.
-    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off"]
+    #
+    # Worker sizing and work_mem, below, are the two settings `timescaledb-tune` (which the image runs on
+    # every start) gets WRONG for this product, measured against timescaledb/timescaledb:latest-pg17 under
+    # `docker run --memory` (#4322; the managed-Windows-store rule table is
+    # `DarlingManagedPostgres.DeriveMemorySettings`/`BuildWorkerSizingConfAppend`). Everything ELSE tune
+    # picks (shared_buffers, effective_cache_size, maintenance_work_mem, max_connections) is left to it: the
+    # service doesn't manage this container (#4215 review M7 — don't read the service container's own
+    # limit), and tune already sizes those from the container's cgroup limit the way the managed store
+    # sizes them from host RAM. Path B (#4322): explicit flags ONLY where tune's choice is a known miss,
+    # each with the floor/cap and the reason below. The cgroup-in-service alternative was considered and
+    # dropped — see the PR body's closing note.
+    #
+    # timescaledb.max_background_workers / max_worker_processes: tune sizes these from CPU count, not from
+    # the hypertable count, and measured at 2 GB / 8 GB it gives 16 / 34 — PostgreSQL's own default shape,
+    # which is exactly what the managed Windows store exists to avoid (build.yml ~936-952: TimescaleDB's
+    # per-hypertable compression/retention/CAGG policy jobs launch background workers, and at 16 slots most
+    # policy runs never happen). The values below are the SAME formula the managed store writes
+    # (BuildWorkerSizingConfAppend): max_background_workers = HypertableCount + 2, max_worker_processes =
+    # 3 + max_background_workers + 8. HypertableCount is 72 today (TimescaleSupport.HypertableCount) — 74
+    # and 85. CiComposeWorkerSizingTests pins these two numbers against that same live formula, so an added
+    # collector fails this file's test instead of drifting silently.
+    #
+    # work_mem: tune measured 4 MB at 2/4 GB and ~3.9 MB at 8 GB (#4322 lane-4322m) — below the managed
+    # store's own floor at EVERY size in this range: DeriveMemorySettings' clamp(RAM/512, 16 MB, 64 MB)
+    # already floors to 16 MB for any host at or under 8 GB (8 GB / 512 = 16 MB exactly), and the spill
+    # evidence (#4310 lane-4310m, ~4 MB work_mem) shows the cost of staying at tune's number: a 7-day
+    # QueryStoreTopSql read spilled ~38 MB per worker across 5 workers. 16 MB is the fixed floor, not a
+    # host-scaled number, so it needs no TS_TUNE_MAX_CONNS companion (fewer hard-coded numbers than
+    # deriving a second one to make tune's OWN work_mem come out right). Safety at the smallest supported
+    # container: tune gives max_connections = 25 at 2 GB (measured), so worst case (all connections running
+    # a worker's ~3 concurrent sort/hash nodes at once, the same bound DeriveMemorySettings documents) is
+    # 25 x 3 x 16 MB = 1200 MB, plus shared_buffers' 512 MB = 1712 MB — under the 2 GB limit with headroom
+    # for the rest of the server. cc #4310.
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb,pg_stat_statements", "-c", "pg_stat_statements.track_utility=off", "-c", "timescaledb.max_background_workers=74", "-c", "max_worker_processes=85", "-c", "work_mem=16MB"]
+    # Uncomment and set to the host's own budget if this container should be capped — left commented
+    # because a host's memory varies and a wrong default could starve a big store (#4322). Example for an
+    # 8 GB host:
+    #   mem_limit: 8g
     environment:
       # darling is this store's bootstrap superuser, which is how the service knows the store is its own and
       # provisions the least-privilege admin/viewer/mcp roles on it (#3914). The service's connection string in
