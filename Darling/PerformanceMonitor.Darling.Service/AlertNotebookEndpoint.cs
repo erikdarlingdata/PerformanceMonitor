@@ -107,10 +107,11 @@ internal static class AlertNotebookEndpoint
                 }
             }
 
-            /* window_end = min(at + 15 min, now); window_start = min(Incident Since, at) - family lookback.
-               Incident Since is only known once the alert match below picks a row, so window_start is
-               finalized after that match — anchor - AlertMatchLookback is the provisional value used to
-               scope the match query itself (identical to the triage endpoint's own window). */
+            /* window_end = min(at + 15 min, now) (#4222's spec). The paired window_start = min(Incident
+               Since, at) - family lookback only binds a composed cell's absolute range — #2735/#2788 — and
+               this mechanical slice emits none (every cell here is a header, status, or read cell; read cells
+               take server/as_of/hours, not a range). So window_start is not computed below; the anchor
+               minus AlertMatchLookback already scopes the match query itself, same as the triage endpoint. */
             var windowEnd = anchor + DarlingTriageEndpoint.AnchorSlack;
             if (windowEnd > now)
             {
@@ -193,13 +194,6 @@ internal static class AlertNotebookEndpoint
             {
                 DarlingWebFailureLog.Report(logger, "/api/alert-notebook:alert-history", alertHistoryStopwatch.ElapsedMilliseconds, ex);
                 notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
-            }
-
-            var incidentSince = matchedIncident?.IncidentStartedUtc ?? matchedRow?.AlertTime;
-            var windowStart = anchor - DarlingTriageEndpoint.AlertMatchLookback;
-            if (incidentSince is DateTime since && since < anchor)
-            {
-                windowStart = since - DarlingTriageEndpoint.AlertMatchLookback;
             }
 
             var status = await ResolveStatusAsync(
