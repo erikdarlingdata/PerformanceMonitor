@@ -98,6 +98,24 @@ public interface ICollectorDefinition<TRow> : ICollectorSchemaInfo
     /// </summary>
     string? NumericWatermarkColumn { get; }
 
+    /// <summary>
+    /// Reads <see cref="WatermarkColumn"/>'s value off one already-materialized row (#4197 part b), so
+    /// the host can compute a batch's own max watermark from the rows it just wrote instead of reading it
+    /// back from the store. Null (the common case) opts the collector OUT of the in-memory server-scoped
+    /// watermark cache entirely — the host then reads the store's watermark every cycle, exactly as it
+    /// did before this member existed. <c>pg_cpu_utilization</c> declares no accessor for exactly this
+    /// reason: <c>Targets/RdsCpuIngestor.cs</c> is a second writer under the same collector name, so a
+    /// cached value here could go stale without this runner ever seeing the write that staled it.
+    /// </summary>
+    Func<TRow, DateTime?>? WatermarkValueAccessor => null;
+
+    /// <summary>
+    /// The numeric (bigint) twin of <see cref="WatermarkValueAccessor"/>, for <see cref="NumericWatermarkColumn"/>
+    /// (job_history's <c>instance_id</c>). Null (the common case, and every definition that declares no
+    /// <see cref="NumericWatermarkColumn"/>) opts out the same way.
+    /// </summary>
+    Func<TRow, long?>? NumericWatermarkValueAccessor => null;
+
     /* StateKeys is declared on the base ICollectorSchemaInfo — like AppliesTo and YieldsOnLockTimeout,
        so the declaring collectors are enumerable off CollectorCatalog.All without the row type. */
 

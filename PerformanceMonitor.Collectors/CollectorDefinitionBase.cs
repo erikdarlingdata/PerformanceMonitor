@@ -42,6 +42,12 @@ public abstract class CollectorDefinitionBase<TRow> : ICollectorDefinition<TRow>
 
     public virtual string? NumericWatermarkColumn => null;
 
+    /// <summary>#4197 part b: null opts the collector out of the in-memory watermark cache (the common case).</summary>
+    public virtual Func<TRow, DateTime?>? WatermarkValueAccessor => null;
+
+    /// <summary>#4197 part b: the numeric twin, same default.</summary>
+    public virtual Func<TRow, long?>? NumericWatermarkValueAccessor => null;
+
     public virtual string? PerDatabaseWatermarkColumn => null;
 
     public virtual IReadOnlyList<string> StateKeys => System.Array.Empty<string>();

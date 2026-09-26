@@ -275,6 +275,12 @@ AND   (
     /// </summary>
     public override string? NumericWatermarkColumn => "instance_id";
 
+    /// <summary>#4197 part b: lets the host cache this collector's server-scoped watermark in memory.</summary>
+    public override Func<Row, DateTime?>? WatermarkValueAccessor => static row => row.RunDateTime;
+
+    /// <summary>#4197 part b: the numeric twin, for the same reason.</summary>
+    public override Func<Row, long?>? NumericWatermarkValueAccessor => static row => row.InstanceId;
+
     /// <summary>
     /// Collects on SQL Server, Azure SQL Managed Instance, and AWS RDS — everywhere SQL Agent exists. NOT
     /// Azure SQL Database (edition 5): there is no Agent / <c>msdb.dbo.sysjobhistory</c> there. NOT a login

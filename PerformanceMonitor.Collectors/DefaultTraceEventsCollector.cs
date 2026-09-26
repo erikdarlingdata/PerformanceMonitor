@@ -335,6 +335,9 @@ SELECT
     /// </summary>
     public override string? WatermarkColumn => "event_time";
 
+    /// <summary>#4197 part b: lets the host cache this collector's server-scoped watermark in memory.</summary>
+    public override Func<Row, DateTime?>? WatermarkValueAccessor => static row => row.EventTime;
+
     /// <summary>
     /// The last-seen trace file path (see <see cref="LastTraceFilePathStateKey"/>): the host loads it
     /// before the query is built and persists whatever this cycle observed once the cycle completes.

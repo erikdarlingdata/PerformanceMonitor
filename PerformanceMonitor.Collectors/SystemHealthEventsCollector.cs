@@ -138,6 +138,9 @@ OPTION(RECOMPILE);";
     /// </summary>
     public override string? WatermarkColumn => "event_time";
 
+    /// <summary>#4197 part b: lets the host cache this collector's server-scoped watermark in memory.</summary>
+    public override Func<Row, DateTime?>? WatermarkValueAccessor => static row => row.EventTime;
+
     /// <summary>
     /// Collects on SQL Server, Azure SQL Managed Instance, and AWS RDS — everywhere the built-in
     /// server-scoped system_health session exists. NOT Azure SQL Database (edition 5): there is no
