@@ -2159,9 +2159,14 @@ public sealed class DarlingManagedPostgresTests
                 Assert.True(
                     !healedPostgresqlConf.Contains(DarlingManagedPostgres.ConfMarkerV8, StringComparison.Ordinal),
                     $"postgresql.conf should carry no v8 marker after Step A migrates it out. {diagnostics}");
+
+                /* darling-managed.conf renders every value quoted ("work_mem = '64MB'"), so the healed
+                   value is read back through the product's own parser (ParseConfText) rather than matched
+                   as literal text. */
+                var migratedWorkMem = LastConfAssignment(healedManagedConf, "work_mem");
                 Assert.True(
-                    healedManagedConf.Contains("work_mem = " + derivedWorkMem, StringComparison.Ordinal),
-                    $"darling-managed.conf should carry the healed work_mem value. {diagnostics}");
+                    migratedWorkMem == derivedWorkMem,
+                    $"darling-managed.conf should carry the healed work_mem value (parsed={migratedWorkMem ?? "(absent)"}, expected={derivedWorkMem}). {diagnostics}");
 
                 var (live, expected) = await ReadSettingAndLiteralBytesAsync(
                     healedConnectionString, "work_mem", derivedWorkMem!, timeout.Token);
@@ -2872,13 +2877,16 @@ public sealed class DarlingManagedPostgresTests
                 $"parsed keys=[{string.Join(", ", managedConfKeys.Select(kv => $"{kv.Key}={kv.Value}"))}]";
 
             /* No live check exists in this test for shared_preload_libraries or listen_addresses, so both
-               move to darling-managed.conf's rendered text rather than being dropped. */
+               move to darling-managed.conf's rendered text rather than being dropped. ParseConfText already
+               strips the render's quoting, so the comparison is against the unquoted, comma-split, trimmed
+               list -- CONTAINS timescaledb rather than equality, since the exact list also carries
+               pg_stat_statements and may carry more (#4336). */
             Assert.True(
                 managedConfKeys.TryGetValue("shared_preload_libraries", out var preload)
-                && (preload == "'timescaledb,pg_stat_statements'" || preload == "'timescaledb'"),
+                && preload.Split(',').Select(p => p.Trim()).Contains("timescaledb", StringComparer.Ordinal),
                 $"darling-managed.conf should carry the timescaledb preload. {migrationDiagnostics} {managedConfKeysDiagnostics}");
             Assert.True(
-                managedConfKeys.TryGetValue("listen_addresses", out var listenAddresses) && listenAddresses == "'127.0.0.1'",
+                managedConfKeys.TryGetValue("listen_addresses", out var listenAddresses) && listenAddresses == "127.0.0.1",
                 $"darling-managed.conf should carry listen_addresses. {migrationDiagnostics} {managedConfKeysDiagnostics}");
 
             /* max_worker_processes: DROPPED as a conf-text check -- reader.GetString(2) below already proves
@@ -2899,7 +2907,7 @@ public sealed class DarlingManagedPostgresTests
                is checked for presence only -- its rendered value depends on the runner's disk size (the same
                ladder BuildWalSizingConfAppend uses), not a fixed "4GB". */
             Assert.True(
-                managedConfKeys.TryGetValue("max_connections", out var maxConnections) && maxConnections == "'200'",
+                managedConfKeys.TryGetValue("max_connections", out var maxConnections) && maxConnections == "200",
                 $"darling-managed.conf should carry max_connections. {migrationDiagnostics} {managedConfKeysDiagnostics}");
             Assert.True(
                 managedConfKeys.ContainsKey("max_wal_size"),
@@ -2912,9 +2920,12 @@ public sealed class DarlingManagedPostgresTests
 
             /* v7 compression memory (#1777): its EFFECTIVE value (the last assignment, the one the server
                honors) now lives in darling-managed.conf, and is captured here to compare against the live
-               setting below. */
-            var confMaintenanceWorkMem = LastSettingValue(managedConf, "maintenance_work_mem");
-            Assert.NotNull(confMaintenanceWorkMem);
+               setting below. Through ParseConfText (via the managedConfKeys map built above), not
+               LastSettingValue's literal text match, since the render quotes every value ("'1536MB'") and
+               that literal quoting is not a byte size pg_size_bytes can parse (#4336). */
+            Assert.True(
+                managedConfKeys.TryGetValue("maintenance_work_mem", out var confMaintenanceWorkMem),
+                $"darling-managed.conf should carry maintenance_work_mem. {migrationDiagnostics} {managedConfKeysDiagnostics}");
 
             /* The derived credential really authenticates (scram, not trust) into the darling
                database — and the server started with our appended conf, so the timescaledb
@@ -3116,9 +3127,14 @@ public sealed class DarlingManagedPostgresTests
                 Assert.True(
                     !healedPostgresqlConf.Contains(DarlingManagedPostgres.ConfMarkerV7, StringComparison.Ordinal),
                     $"postgresql.conf should carry no v7 marker after Step A migrates it out. {diagnostics}");
+
+                /* darling-managed.conf renders every value quoted ("maintenance_work_mem = '1536MB'"), so the
+                   raised value is read back through the product's own parser (ParseConfText) rather than
+                   matched as literal text. */
+                var migratedValue = LastConfAssignment(healedManagedConf, "maintenance_work_mem");
                 Assert.True(
-                    healedManagedConf.Contains($"maintenance_work_mem = {derivedValue}", StringComparison.Ordinal),
-                    $"darling-managed.conf should carry the raised maintenance_work_mem value. {diagnostics}");
+                    migratedValue == derivedValue,
+                    $"darling-managed.conf should carry the raised maintenance_work_mem value (parsed={migratedValue ?? "(absent)"}, expected={derivedValue}). {diagnostics}");
 
                 var (live, expected) = await ReadSettingAndLiteralBytesAsync(
                     healedConnectionString, "maintenance_work_mem", derivedValue!, timeout.Token);
@@ -3297,14 +3313,19 @@ public sealed class DarlingManagedPostgresTests
                 Assert.Equal("on", reading.Setting);
                 Assert.Equal("configuration file", reading.Source);
 
-                /* #4215: EnsureConfAppended's v11 heal lands the setting directly in postgresql.conf on
-                   THIS start, but Step A runs post-start and rewrites postgresql.conf to the single include
-                   line before the next start ever boots on it -- so darling-managed.conf, not a v11 heal
-                   line, is what pg_settings reports as the source. */
+                /* #4215/#4336: EnsureConfAppended's v11 heal lands the setting directly in postgresql.conf
+                   on THIS start, and Step A runs post-start and rewrites postgresql.conf to the single
+                   include line -- but Step A deliberately does not reload (see MigrateManagedConfAsync), so
+                   pg_settings.sourcefile still names postgresql.conf until the NEXT start. pg_file_settings
+                   re-parses the files at query time instead of reporting what booted, so it already shows
+                   the APPLIED row for this key resolving to darling-managed.conf; that is what this
+                   assertion reads. */
+                var appliedSourceFile = await ReadAppliedFileSettingSourceAsync(
+                    healedConnectionString, StoreSelfMetrics.JobExecutionLoggingSetting, timeout.Token);
                 Assert.True(
-                    Path.GetFullPath(Path.Combine(dataDirectory, ManagedConfFile.FileName))
-                        == Path.GetFullPath(reading.SourceFile ?? string.Empty),
-                    $"sourcefile should be darling-managed.conf, was {reading.SourceFile}. {diagnostics}");
+                    appliedSourceFile is not null
+                        && appliedSourceFile.EndsWith(ManagedConfFile.FileName, StringComparison.Ordinal),
+                    $"sourcefile should be darling-managed.conf, was {appliedSourceFile ?? "(no applied row)"}. {diagnostics}");
 
                 /* SIGHUP-context, which is what makes "the append before pg_ctl start is enough, and no
                    reload is issued" a decision rather than a gamble. */
@@ -3366,6 +3387,30 @@ public sealed class DarlingManagedPostgresTests
             reader.IsDBNull(2) ? null : reader.GetString(2),
             reader.IsDBNull(3) ? null : reader.GetString(3),
             reader.IsDBNull(4) ? null : reader.GetString(4));
+    }
+
+    /// <summary>
+    /// The <c>sourcefile</c> that would apply for <paramref name="name"/> if the config files were reloaded
+    /// right now, through <c>pg_file_settings</c> — which re-parses postgresql.conf and its includes at
+    /// query time rather than reporting what booted the running server, unlike <c>pg_settings.sourcefile</c>
+    /// (which lags until the next reload or restart). Reads only the row marked <c>applied</c>, since
+    /// <c>pg_file_settings</c> can carry one row per file that ever assigned the name and only the applied
+    /// one is the value PostgreSQL would actually honor.
+    /// </summary>
+    private static async Task<string?> ReadAppliedFileSettingSourceAsync(
+        string connectionString, string name, CancellationToken cancellationToken)
+    {
+        var unpooled = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
+        await using var connection = new NpgsqlConnection(unpooled);
+        await connection.OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand(
+            "SELECT sourcefile FROM pg_file_settings WHERE name = @name AND applied",
+            connection);
+        command.Parameters.AddWithValue("name", name);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? (reader.IsDBNull(0) ? null : reader.GetString(0))
+            : null;
     }
 
     /// <summary>
