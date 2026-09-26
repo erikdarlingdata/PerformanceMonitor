@@ -529,6 +529,70 @@ public sealed class PgSettingScrubLiveTests
     }
 
     /// <summary>
+    /// One row per v2-rule form (#4348), all seeded under marker=1 so the run has to redact every one of them
+    /// to reach marker=2: a percent-encoded query key, a key-quoted assignment, <c>curl -u</c>,
+    /// <c>curl --proxy-user</c>, <c>sshpass -p</c>, a SAS-style <c>sig=</c> query parameter, and an
+    /// <c>X-Amz-Signature</c> query parameter. Every row is masked and the marker lands on
+    /// <see cref="PgSettingRedactor.RulesVersion"/>.
+    /// </summary>
+    [Fact]
+    public async Task TheScrubRedactsEveryV2RuleForm()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4348 v2-form census pin (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await ExecAsync(connection, "SELECT create_hypertable('collect.pg_server_config', by_range('collection_time', INTERVAL '1 days'), if_not_exists => true)", ct);
+        await ExecAsync(connection, "ALTER TABLE collect.pg_server_config SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
+
+        const int serverId = -444460;
+
+        var forms = new (string Name, string Value)[]
+        {
+            ("primary_conninfo", "postgresql://alice@host/db?pass%77ord=hunter2"),
+            ("custom.json_blob", "{\"password\" = \"hunter2\", \"host\" = \"foo\"}"),
+            ("archive_command", "curl -u user:hunter2 https://x"),
+            ("archive_command", "curl --proxy-user user:hunter2 https://x"),
+            ("archive_command", "sshpass -p hunter2 ssh user@host"),
+            ("primary_conninfo", "https://acct.blob.core.windows.net/c/f?sv=2024&sig=hunter2"),
+            ("primary_conninfo", "https://b.s3.amazonaws.com/f?X-Amz-Signature=hunter2"),
+        };
+
+        var collectionTime = OldTime;
+        foreach (var (name, value) in forms)
+        {
+            await InsertRowAsync(connection, serverId, collectionTime, name, value, databaseName: null, roleName: null, ct);
+            collectionTime = collectionTime.AddMinutes(1);
+        }
+
+        await ExecAsync(connection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_server_config') c", ct);
+
+        Assert.True(await ContainsSecretAsync(connection, "hunter2", ct), "seeding failed to plant the secret this test exists to catch");
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var summary = await PgSettingScrub.RunAsync(postgres, logger: null, ct);
+        Assert.False(summary.AlreadyDone);
+        Assert.Equal(forms.Length, summary.RowsUpdated);
+
+        Assert.False(await ContainsSecretAsync(connection, "hunter2", ct), "a raw secret survived the v2-form scrub");
+
+        var markerValue = await ScalarTextAsync(connection,
+            "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",
+            0, DateTime.MinValue, ct);
+        Assert.Equal(PgSettingRedactor.RulesVersion.ToString(CultureInfo.InvariantCulture), markerValue);
+    }
+
+    /// <summary>
     /// A client-side command timeout on one target, with the other target unaffected: two servers, a
     /// pre-update <c>pg_sleep</c> scoped to ONE server id via
     /// <see cref="PgSettingScrub.TestOnlyPreUpdateDelayServerId"/>, and the UPDATE's command timeout forced
@@ -537,6 +601,12 @@ public sealed class PgSettingScrubLiveTests
     /// isolation), the other server's row is fully redacted, and the marker is withheld because one target
     /// failed. <see cref="CapturingTestLogger"/> is used (not <c>logger: null</c>) so the timeout's own log
     /// line can be asserted.
+    ///
+    /// <para>The slow server's id is deliberately the smaller of the two, so it sorts FIRST in
+    /// <c>byServerDay</c>'s ordering. It also carries a SECOND day, so once its first day's batch times out
+    /// and <c>failedServerIds</c> records the failure, its remaining day is skipped for the rest of THIS run
+    /// (per the type remarks' per-server isolation) rather than retried — both of the slow server's days stay
+    /// plaintext, while the other server, later in the ordering, is unaffected and fully redacted.</para>
     /// </summary>
     [Fact]
     public async Task TheScrubTimesOutOnOneServer_AndStillRedactsTheOther()
@@ -550,9 +620,10 @@ public sealed class PgSettingScrubLiveTests
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         try
         {
-            const int slowServer = -444452;
-            const int fastServer = -444453;
+            const int slowServer = -444453;
+            const int fastServer = -444452;
             var day = new DateTime(2026, 2, 3, 0, 0, 0, DateTimeKind.Unspecified);
+            var secondDay = day.AddDays(1);
 
             await using var setupConnection = new NpgsqlConnection(scratch.ConnectionString);
             await setupConnection.OpenAsync(ct);
@@ -564,6 +635,7 @@ public sealed class PgSettingScrubLiveTests
             await ExecAsync(setupConnection, "ALTER TABLE collect.pg_server_config SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
 
             await InsertRowAsync(setupConnection, slowServer, day, "primary_conninfo", "password=hunter2", databaseName: null, roleName: null, ct);
+            await InsertRowAsync(setupConnection, slowServer, secondDay, "primary_conninfo", "password=hunter2", databaseName: null, roleName: null, ct);
             await InsertRowAsync(setupConnection, fastServer, day, "primary_conninfo", "password=hunter2", databaseName: null, roleName: null, ct);
 
             await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_server_config') c", ct);
@@ -580,10 +652,17 @@ public sealed class PgSettingScrubLiveTests
 
             Assert.False(summary.AlreadyDone);
 
-            var slowValue = await ScalarTextAsync(setupConnection,
+            var slowFirstDayValue = await ScalarTextAsync(setupConnection,
                 "SELECT setting FROM collect.pg_server_config WHERE server_id = $1 AND collection_time = $2 AND name = 'primary_conninfo'",
                 slowServer, day, ct);
-            Assert.Equal("password=hunter2", slowValue);
+            Assert.Equal("password=hunter2", slowFirstDayValue);
+
+            /* The slow server's SECOND day is skipped too — once the first day's batch times out and the
+               server is marked failed, its remaining days are never attempted for the rest of this run. */
+            var slowSecondDayValue = await ScalarTextAsync(setupConnection,
+                "SELECT setting FROM collect.pg_server_config WHERE server_id = $1 AND collection_time = $2 AND name = 'primary_conninfo'",
+                slowServer, secondDay, ct);
+            Assert.Equal("password=hunter2", slowSecondDayValue);
 
             var fastValue = await ScalarTextAsync(setupConnection,
                 "SELECT setting FROM collect.pg_server_config WHERE server_id = $1 AND collection_time = $2 AND name = 'primary_conninfo'",
