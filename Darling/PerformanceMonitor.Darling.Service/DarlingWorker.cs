@@ -1092,7 +1092,12 @@ public sealed class DarlingWorker : BackgroundService
        the MCP and web hosts hand theirs. */
     private readonly BaselineCache _baselineCache;
 
-    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache)
+    /* #4442 scope 2: the same process-lifetime accumulator DarlingWebEndpoints.MapAll and RunComposedPanelAsync
+       record into — the DI container hands this worker and the web host the SAME singleton instance, so a read
+       recorded by either side is drained by this worker's hourly flush. */
+    private readonly ReadLatencyAccumulator _readLatency;
+
+    public DarlingWorker(ILogger<DarlingWorker> logger, ILoggerFactory loggerFactory, McpRuntimeState mcpState, WebRuntimeState webState, MonitoredServerRegistryState registryState, CollectorRuntimeState collectorState, WebTlsCertificateState webTlsCertState, BaselineCache baselineCache, ReadLatencyAccumulator readLatency)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -1102,6 +1107,7 @@ public sealed class DarlingWorker : BackgroundService
         _collectorState = collectorState;
         _webTlsCertState = webTlsCertState;
         _baselineCache = baselineCache;
+        _readLatency = readLatency;
     }
 
     private sealed class ServerLoopState
@@ -7924,6 +7930,19 @@ AND   j.hypertable_name = '{relation}'", connection))
             /* #2674: reuse the same hourly connection and budget — one aggregate row per (server, collector)
                for the window, plus the accumulator's own bounded retention DELETE. */
             await _collectorCost.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+
+            /* #4442 scope 2: the read-latency flush runs on the SAME tick, isolated from collector_cost's own
+               failure — a bad read-latency flush must not cost the collector_cost series its hourly row, and
+               vice versa (collector_cost's own catch above already isolates it from everything ABOVE this
+               line). */
+            try
+            {
+                await _readLatency.FlushAsync(connection, DateTime.UtcNow, _logger, budget.Token);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !budget.IsCancellationRequested)
+            {
+                _logger.LogWarning("Read-latency flush failed; this hour's histogram rows are dropped: {Message}", ex.Message);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

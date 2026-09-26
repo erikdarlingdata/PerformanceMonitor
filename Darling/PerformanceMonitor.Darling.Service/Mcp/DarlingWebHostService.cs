@@ -128,13 +128,19 @@ public sealed class DarlingWebHostService : BackgroundService
        Optional so a host built outside the service's DI (a test) keeps a private one. */
     private readonly BaselineCache _baselineCache;
 
-    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null)
+    /// <summary>#4442 scope 2: the process-wide read-latency histogram, passed through to <see
+    /// cref="DarlingWebEndpoints.MapAll"/>. Optional so a host built outside the service's DI (a test) simply
+    /// records nothing rather than needing its own instance.</summary>
+    private readonly ReadLatencyAccumulator? _readLatency;
+
+    public DarlingWebHostService(ILogger<DarlingWebHostService> logger, WebRuntimeState state, CollectorRuntimeState collectorState, WebTlsCertificateState certState, BaselineCache? baselineCache = null, ReadLatencyAccumulator? readLatency = null)
     {
         _logger = logger;
         _state = state;
         _collectorState = collectorState;
         _certState = certState;
         _baselineCache = baselineCache ?? new BaselineCache();
+        _readLatency = readLatency;
     }
 
     /// <summary>The supervisor's per-tick verdict — pure over (running, runningPort, enabled, desiredPort) so a
@@ -1279,7 +1285,7 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig);
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes

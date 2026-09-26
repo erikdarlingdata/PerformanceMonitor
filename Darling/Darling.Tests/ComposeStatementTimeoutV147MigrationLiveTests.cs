@@ -25,6 +25,9 @@ namespace Darling.Tests;
 /// the same statement <see cref="DarlingManagedRoles.ReassertComposeStatementTimeoutAsync"/> runs on a
 /// control-plane reload), <c>pg_db_role_setting</c> shows the new ceiling on both <c>viewer</c> and <c>mcp</c>
 /// after the upgrade.
+///
+/// <para>This file's "I am the top rung" claim moved on to <c>ReadLatencyFlushLiveTests</c> (V148, #4442
+/// scope 2) the moment that rung landed.</para>
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Each fact mints its own scratch database
    through ScratchPostgres and never touches the shared store's tables, so it cannot race the live collection
@@ -34,34 +37,38 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
     private const int RungVersion = 147;
     private const int PreviousVersion = 146;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe. No longer the last argument — V148
+    /// appended its own — so the invariant that outlives the handoff is that the ordinal is FIXED: a later
+    /// rung appends after it and never shifts it.</summary>
     private const int ProbeOrdinal = 122;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>
-    /// The rung is registered and is the new top of the ladder — the claim this class takes over from
-    /// <c>ManagedConfVerdictsRungTests</c> (V146) now that V147 has landed.
+    /// The rung is registered — the claim this class took over from
+    /// <c>ManagedConfVerdictsRungTests</c> (V146) when V147 landed, and handed on to
+    /// <c>ReadLatencyFlushLiveTests</c> (V148) when that one did.
     /// </summary>
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegisteredInADenseLadder()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("compose-statement-timeout-sixty", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* One below the top since V148 landed; the "RungVersion == StorageVersion.SchemaVersion" half of
+           the top-arm claim moved to ReadLatencyFlushLiveTests with the top. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion, "V147 is expected to sit below the ladder's top now that V148 has landed");
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung, and the map treats it as the TOP arm: a missing top arm
-    /// maps a fully-migrated store one rung short, permanently, because <see cref="ViewerDataService.RequiredStoreSchemaVersion"/>
-    /// is <see cref="StorageVersion.SchemaVersion"/>.
+    /// The viewer probe's sentinel carries this rung, and the map's arm for it returns 147 — a position
+    /// within the signature, not its end, now that V148 has appended its own.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
         Assert.Contains(
             "column_name = 'compose_statement_timeout_seconds' AND column_default = '60'",
@@ -69,28 +76,36 @@ public sealed class ComposeStatementTimeoutV147MigrationLiveTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+
+        /* A position within the signature, not its end: "ProbeOrdinal == arity - 1" asserted this rung was
+           the NEWEST sentinel, which stopped being true the moment V148 appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasComposeTimeoutSixty", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
-        var behind = (object[])all.Clone();
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
+        /* In the source, this rung's arm sits ABOVE the previous rung's and BELOW V148's, and returns this
+           rung's own version. */
         var thisArm = viewer.IndexOf("if (hasComposeTimeoutSixty)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasManagedConfVerdicts)", StringComparison.Ordinal);
+        var nextArm = viewer.IndexOf("if (hasReadLatency)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V147 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
+        Assert.True(nextArm >= 0, "the V148 arm is gone, so the handoff this file claims never happened");
         Assert.True(thisArm < previousArm, "the V147 arm sits below V146's, so a current store maps one rung low");
+        Assert.True(nextArm < thisArm, "the V148 arm sits below the V147 arm, so a current V148 store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 

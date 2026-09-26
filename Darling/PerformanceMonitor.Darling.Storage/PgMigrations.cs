@@ -227,6 +227,7 @@ public static class PgMigrations
         new Migration(145, "query-store-interval-wide", V145Sql),
         new Migration(146, "managed-conf-verdicts", V146Sql),
         new Migration(147, "compose-statement-timeout-sixty", V147Sql),
+        new Migration(148, "read-latency", V148Sql),
     };
 
     /// <summary>
@@ -2290,6 +2291,40 @@ CREATE TABLE IF NOT EXISTS collect.managed_conf_verdicts
     private const string V147Sql = @"
 ALTER TABLE config.config_service ALTER COLUMN compose_statement_timeout_seconds SET DEFAULT 60;
 UPDATE config.config_service SET compose_statement_timeout_seconds = 60 WHERE compose_statement_timeout_seconds = 15;";
+
+    /// <summary>
+    /// V148 — <c>collect.read_latency</c>, the hourly histogram of <c>/api/read/*</c> and composed-panel
+    /// read durations (#4442 scope 2), the <c>collector_cost</c> (V105) shape applied to reads instead of
+    /// collector runs. NOT a collector: it is INTERNAL self-telemetry, written by the worker's hourly
+    /// self-metrics sweep on the same tick as <c>collector_cost</c>'s flush, so it is deliberately absent
+    /// from <c>CollectorCatalog.All</c> and from the generator-parity pins, and needs no per-table GRANT (the
+    /// <c>collect</c> schema's blanket <c>GRANT … ON ALL TABLES IN SCHEMA collect</c> covers it the moment
+    /// provisioning re-runs). Hand-written DDL, a plain table (not a hypertable — the accumulator aggregates
+    /// to one row per (surface, route, outcome) per hour before it ever reaches this table, and its own
+    /// bounded retention DELETE keeps it small, the same shape <c>collector_cost</c> and <c>store_metrics</c>
+    /// use). <c>bucket_counts</c> is the fixed log-scale histogram <c>ReadLatencyAccumulator.BucketUpperBoundsMs</c>
+    /// produces — the same array's length for every row, so two rows can be summed element-wise across a
+    /// window without knowing which release wrote which. The primary key is <c>(metric_time, surface, route,
+    /// outcome)</c> — the accumulator drains and flushes at most once per key per hour, and the flush's own
+    /// <c>ON CONFLICT</c> upsert relies on exactly this key existing twice only when two flushes land in the
+    /// same hour.
+    /// </summary>
+    private const string V148Sql = @"
+CREATE TABLE IF NOT EXISTS collect.read_latency
+(
+    metric_time timestamp NOT NULL,
+    surface text NOT NULL,
+    route text NOT NULL,
+    outcome text NOT NULL,
+    run_count integer NOT NULL,
+    total_ms bigint NOT NULL,
+    max_ms bigint NOT NULL,
+    bucket_counts bigint[] NOT NULL,
+    PRIMARY KEY (metric_time, surface, route, outcome)
+);
+
+CREATE INDEX IF NOT EXISTS idx_read_latency_time
+    ON collect.read_latency(metric_time);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
