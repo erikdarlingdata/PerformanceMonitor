@@ -1165,11 +1165,15 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void ArmRetentionPolicy_TargetsExactlyOneRelationsRetentionJob()
     {
-        var sql = TimescaleSupport.ArmRetentionPolicySql("query_stats");
+        /* #4299 (d′): query_stats moved off this statement — it is one of the three raw relations whose
+           armed verdict now lives in ConvergeRawArmedStateSql / RawArmedReadExpression, never here. Renders
+           against a NON-raw relation (an hourly CAGG) instead, which keeps today's scheduled semantics this
+           statement targets. */
+        var sql = TimescaleSupport.ArmRetentionPolicySql(TimescaleSupport.QueryStatsHourlyView);
 
         Assert.Contains("scheduled => true", sql, StringComparison.Ordinal);
         Assert.Contains("proc_name = 'policy_retention'", sql, StringComparison.Ordinal);
-        Assert.Contains("hypertable_name = 'query_stats'", sql, StringComparison.Ordinal);
+        Assert.Contains($"hypertable_name = '{TimescaleSupport.QueryStatsHourlyView}'", sql, StringComparison.Ordinal);
         Assert.Contains("hypertable_schema = 'collect'", sql, StringComparison.Ordinal);
     }
 
@@ -1186,8 +1190,11 @@ public sealed class TimescaleContinuousAggregateTests
     [Fact]
     public void HoldRetentionPolicy_IsTheMirrorOfArming_SameTargetOppositeFlag()
     {
-        var hold = TimescaleSupport.HoldRetentionPolicySql("query_stats");
-        var arm = TimescaleSupport.ArmRetentionPolicySql("query_stats");
+        /* #4299 (d′): same move as the arm pin above — query_stats is a raw relation now, so it never
+           reaches HoldRetentionPolicySql / ArmRetentionPolicySql; a non-raw relation keeps this pin testing
+           the statement it names. */
+        var hold = TimescaleSupport.HoldRetentionPolicySql(TimescaleSupport.QueryStatsHourlyView);
+        var arm = TimescaleSupport.ArmRetentionPolicySql(TimescaleSupport.QueryStatsHourlyView);
 
         Assert.Contains("scheduled => false", hold, StringComparison.Ordinal);
         Assert.DoesNotContain("scheduled => true", hold, StringComparison.Ordinal);
@@ -1196,7 +1203,7 @@ public sealed class TimescaleContinuousAggregateTests
         {
             "proc_name = 'policy_retention'",
             "hypertable_schema = 'collect'",
-            "hypertable_name = 'query_stats'",
+            $"hypertable_name = '{TimescaleSupport.QueryStatsHourlyView}'",
         })
         {
             Assert.Contains(filter, hold, StringComparison.Ordinal);

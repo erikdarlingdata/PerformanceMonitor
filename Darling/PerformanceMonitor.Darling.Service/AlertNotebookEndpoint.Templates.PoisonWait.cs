@@ -71,7 +71,7 @@ internal static partial class AlertNotebookEndpoint
                 ("hours", "1")));
         }
 
-        /* Optional per the brief: a timeline on wait_stats/wait_time_ms, filtered to the firing wait type
+        /* A timeline on wait_stats/wait_time_ms, filtered to the firing wait type
            when one is known -- built inline (not through TimelinePanel, which only knows a database_name
            filter) rather than widening that shared helper for one family's dimension. */
         var wallPanel = new JsonObject

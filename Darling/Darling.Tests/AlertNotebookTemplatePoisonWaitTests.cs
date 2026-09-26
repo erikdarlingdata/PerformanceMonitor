@@ -83,7 +83,7 @@ public sealed class AlertNotebookTemplatePoisonWaitTests
         Assert.Contains("get_wait_trend", reads);
     }
 
-    /// <summary>Case-insensitive ordinal match, per the brief.</summary>
+    /// <summary>Case-insensitive ordinal match.</summary>
     [Fact]
     public void BuildPoisonWaitCells_ResourceSemaphoreLowercase_StillIncludesBothSemaphoreReads()
     {

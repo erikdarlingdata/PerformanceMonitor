@@ -621,6 +621,19 @@ public sealed class DarlingWorker : BackgroundService
     internal static bool ShouldRunCollection(bool paused) => !paused;
 
     /// <summary>
+    /// #4299 (two-service pin): the relaunch decision, extracted pure so a second service's own read can be
+    /// asserted directly rather than re-driving the whole Periodic pass. Launch a materialization-hole repair
+    /// only when BOTH independent guards agree: this process is not already running one
+    /// (<paramref name="repairRunningInThisProcess"/>, the in-memory <c>_materializationHoleRepairRunning</c>
+    /// flag) AND the store's own repair-epoch stamp is stale under the current postmaster start
+    /// (<paramref name="epochCurrentInStore"/> false, read via <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/>).
+    /// Either guard alone is not enough — two processes each with the in-memory flag clear would otherwise both
+    /// launch — so this method states the AND explicitly rather than leaving it implicit in the call site.
+    /// </summary>
+    internal static bool ShouldLaunchMaterializationHoleRepair(bool repairRunningInThisProcess, bool epochCurrentInStore)
+        => !repairRunningInThisProcess && !epochCurrentInStore;
+
+    /// <summary>
     /// The network-endpoint startup warnings the worker emits AFTER <see cref="DarlingConfig.Validate"/>
     /// passes (darling-network-endpoints) — NEVER inside Validate(), which is all-fatal, so an optional,
     /// default-off endpoint note can never abort collection (D-BYO / D-validate):
@@ -681,6 +694,19 @@ public sealed class DarlingWorker : BackgroundService
 
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
+
+    /* #4299: set for the lifetime of a materialization-hole repair this process launched, cleared in a
+       finally around the same call — the Periodic pass's "no repair running in this process" half of the
+       relaunch gate. A per-process flag, not a store one: the epoch stamp in the store (RawRepairEpochStampSql)
+       is what stops a SECOND service from repeating the work; this flag only stops THIS process's own
+       Periodic tick from launching a second overlapping repair while one it started is still running. */
+    private volatile bool _materializationHoleRepairRunning;
+
+    /* #4299/#4391: the Periodic pass's own launch of RunMaterializationHoleRepairAsync, kept so the same
+       shutdown drain that awaits the start-path launch (holeRepair, above) also awaits this one — before
+       this field existed the Periodic launch was fired with a bare "_ = ", neither drained on shutdown nor
+       observed for a fault, so an exception it threw after the calling tick returned would go unlogged. */
+    private Task? _periodicHoleRepair;
 
     /* #2138 phase 1: the auto force-plan bot, constructed by RunCollectionLoopAsync alongside the
        analysis pieces. Null until then. It holds no executor and this build ships none, so its whole
@@ -2013,8 +2039,14 @@ public sealed class DarlingWorker : BackgroundService
                    is a few hundred index probes per aggregate and starts at once, but a capped repair on the
                    heaviest aggregate is a policy run's worth of work, and holding a restarted service dark for
                    it is the trade #1757 already declined for the baseline backfill. Ordering against the
-                   retention re-arm is not load-bearing (TimescaleSupport.MaterializationHoles states why).
-                   Drained with the command loop at shutdown. */
+                   retention re-arm is not load-bearing (TimescaleSupport.MaterializationHoles states why in
+                   full): under #4299's design the raw purge no longer runs on its own schedule at all, so this
+                   scan and EnsureRetentionPoliciesAsync can run in either order on the same start without a
+                   race — the only trigger for an actual purge is the service's OWN hourly Periodic pass, which
+                   cannot fire before the next hourly tick. The first start after the upgrade, which still runs
+                   whichever raw job the old scheduled-based code had already armed once, and a DBA's own
+                   alter_job/run_job against a raw job, are the two named exceptions to that gate; both are
+                   unaffected by this ordering either way. Drained with the command loop at shutdown. */
                 holeRepair = RunMaterializationHoleRepairAsync(postgres, stoppingToken);
 
                 /* #3817 segment two: the ensures that must run AFTER the hole repair is LAUNCHED — #3597's
@@ -3167,6 +3199,21 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
+        /* #4299/#4391: the Periodic pass's own repair launch, same drain as the start-path one above —
+           a repair the Periodic tick started is awaited here too, so shutdown does not race it and any fault
+           it throws is observed rather than lost with the task. */
+        if (_periodicHoleRepair is not null)
+        {
+            try
+            {
+                await _periodicHoleRepair;
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown. */
+            }
+        }
+
         /* And the setting scrub (#4348 S1b): a run cut short by shutdown left its marker unwritten (the
            marker is only written after every batch completes), so the next start tries again from the top. */
         try
@@ -3473,6 +3520,16 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
+    /// #4391: whether a materialization-hole repair pass's summary is clean enough to stamp the repair
+    /// epoch — true only when the pass had zero isolated per-aggregate failures. Deferred holes
+    /// (<see cref="TimescaleSupport.MaterializationHoleRepairSummary.HolesDeferred"/>) and holes still
+    /// remaining after repair do not disqualify a stamp: those are re-measured fresh by the Periodic raw
+    /// purge trigger's own hole scan at drop time, so a deferred-but-otherwise-clean pass may still stamp.
+    /// </summary>
+    internal static bool RepairEpochStampAllowed(TimescaleSupport.MaterializationHoleRepairSummary summary)
+        => summary.Failures == 0;
+
+    /// <summary>
     /// Scans every continuous aggregate for materialization holes and closes each with one targeted forced
     /// refresh (#3653, Q10 — <see cref="TimescaleSupport.RepairMaterializationHolesAsync"/>), concurrently with
     /// the rest of startup rather than ahead of it, for the reason <see cref="RunBaselineBackfillAsync"/> gives:
@@ -3503,9 +3560,21 @@ public sealed class DarlingWorker : BackgroundService
     /// </summary>
     private async Task RunMaterializationHoleRepairAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
     {
+        _materializationHoleRepairRunning = true;
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+
+            /* #4299: read BEFORE the repair runs, so the value stamped on a clean finish is the postmaster
+               start this repair actually ran under, not whatever it is by the time the repair returns. A
+               connection-open failure here throws out to the catch below with nothing stamped, which is right —
+               a repair that never ran must not make the trigger's epoch check pass. */
+            long postmasterEpoch;
+            await using (var epochRead = new NpgsqlCommand(TimescaleSupport.PostmasterStartEpochMicrosecondsSql, connection))
+            {
+                postmasterEpoch = (long)(await epochRead.ExecuteScalarAsync(stoppingToken))!;
+            }
+
             var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
 
             /* #3756: not gated on any count — the zero-hole start is the one this line exists for. Every figure
@@ -3517,6 +3586,46 @@ public sealed class DarlingWorker : BackgroundService
                 summary.AggregatesScanned, summary.AggregatesSkipped, summary.HolesFound, summary.BucketsFound,
                 summary.HolesRepaired, summary.BucketsRepaired, summary.HolesForced, summary.HolesDeferred, summary.BucketsDeferred,
                 summary.HolesRemaining, summary.Failures, (long)summary.Elapsed.TotalMilliseconds);
+
+            /* #4299/#4391: the completion stamp — reached ONLY here, past both the epoch read and the
+               repair call, neither of which threw or was cancelled. Stamped on every one of the three raw jobs
+               (TimescaleSupport.RawRelations), one statement per job, each guarded by its own
+               IS DISTINCT FROM so a repeat stamp of the same value writes nothing. A stamp failure here is
+               logged and swallowed per job — the repair itself already succeeded and reporting that success
+               is not conditional on the stamp also landing; a job whose stamp did not take simply stays
+               ungated for the Periodic trigger until the next repair tries again.
+
+               The stamp itself is gated on RepairEpochStampAllowed(summary): a repair that ran with one or
+               more isolated per-aggregate failures (summary.Failures > 0) must NOT stamp, because the epoch
+               is the trigger's promise that the repair covering it finished clean — TimescaleSupport's own
+               doc on the stamp says an isolated failure must not make that check pass. Deferred holes and
+               holes still remaining after repair (summary.HolesDeferred, summary.HolesRemaining) do NOT block
+               the stamp: those are read fresh by the trigger's own hole scan at purge time, which is the gate
+               for them; only a failure that means this pass never finished cleanly blocks it here. */
+            if (RepairEpochStampAllowed(summary))
+            {
+                foreach (var relation in TimescaleSupport.RawRelations)
+                {
+                    try
+                    {
+                        await using var stamp = new NpgsqlCommand(TimescaleSupport.RawRepairEpochStampSql(relation), connection);
+                        stamp.Parameters.AddWithValue(postmasterEpoch);
+                        await stamp.ExecuteNonQueryAsync(stoppingToken);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(
+                            "Materialization-hole repair finished, but stamping the repair epoch on {Relation}'s raw retention job failed — the Periodic trigger will not purge it until a later repair stamps it: {Message}",
+                            relation, ex.Message);
+                    }
+                }
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Materialization-hole repair finished with {Failures} failure(s); the repair epoch stays unstamped, so the Periodic raw purge keeps holding until a repair completes cleanly.",
+                    summary.Failures);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -3532,6 +3641,10 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning(
                 "Materialization-hole repair could not run — any pre-outage tail the refresh policies skipped stays unmaterialized until the next start retries: {Message}",
                 ex.Message);
+        }
+        finally
+        {
+            _materializationHoleRepairRunning = false;
         }
     }
 
@@ -6824,8 +6937,6 @@ LIMIT 1";
             var cadenceReadings = await TimescaleSupport.ReadJobCadenceReadingsAsync(
                 connection, _logger, cancellationToken);
             readClock.Restart();
-            await _selfAlerts!.EvaluateStoreJobCadenceAsync(cadenceReadings, cancellationToken);
-            readClock.Restart();
 
             /* #2813: the Retention Held check rides the same connection and hourly cadence. A retention
                policy the #1680/#1877 coverage gate has paused reports total_failures = 0 and a plausible
@@ -6836,7 +6947,39 @@ LIMIT 1";
             var retentionHolds = await TimescaleSupport.ReadRetentionHoldReadingsAsync(
                 connection, _logger, cancellationToken);
             readClock.Restart();
+
+            /* #4299: the three raw jobs are excluded from JobCadenceReadSql (they are never
+               timescaledb_information.jobs.scheduled, so job_stats carries no meaningful last_run_duration
+               for them) and take their #2136 cadence from the SERVICE'S OWN trigger instead — the #2136
+               cadence check takes its cadence from the trigger. The duration is the last RECORDED
+               "ran" outcome's elapsed_ms (TimescaleSupport.RawLastPurgeRecord, read below via the SAME
+               rawPurgeOverHorizon reading the over-horizon check judges — reused, not re-read); the interval
+               is the worker's own hourly Periodic pass, s_compressionCheckInterval, because that pass is the
+               ONLY caller of the raw trigger (TriggerRawPurgeCoreAsync). No record, or a last outcome other
+               than "ran", yields no cadence reading — being over horizon with no successful run is the #4299
+               alert's job, not cadence's; a raw job that has never run at all must not read as running at
+               0% of its interval, and a job whose last recorded attempt failed must not be graded on a
+               duration that never happened. Merged into the list #2136's evaluator already iterates rather
+               than a parallel check, so the raw jobs share JobOverCadence's exact firing, cooldown and
+               resolution machinery instead of a second copy of it. */
+            var rawPurgeOverHorizon = await TimescaleSupport.ReadRawPurgeOverHorizonReadingsAsync(
+                connection, retentionHolds, _logger, cancellationToken);
+            readClock.Restart();
+
+            var rawCadenceReadings = RawCadenceReadings(rawPurgeOverHorizon, s_compressionCheckInterval);
+
+            await _selfAlerts!.EvaluateStoreJobCadenceAsync(
+                cadenceReadings.Concat(rawCadenceReadings).ToList(), cancellationToken);
+            readClock.Restart();
+
             await _selfAlerts!.EvaluateRetentionHoldsAsync(retentionHolds, cancellationToken);
+            readClock.Restart();
+
+            /* #4299: the raw purge over-horizon check rides the SAME connection, hourly cadence and
+               retentionHolds/rawPurgeOverHorizon readings as the checks just above — reused, not re-read, so
+               this tick's raw rows are the exact ones EvaluateRetentionHoldsAsync and the cadence merge just
+               judged. */
+            await _selfAlerts!.EvaluateRawPurgeOverHorizonAsync(rawPurgeOverHorizon, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -6865,6 +7008,23 @@ LIMIT 1";
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
         }
     }
+
+    /// <summary>
+    /// #4299: the raw-cadence merge pulled out of <see cref="EvaluateCompressionJobHealthAsync"/> as its
+    /// own seam so it pins directly, without a connection. Behaviour is unchanged from the inline LINQ it
+    /// replaces: only readings whose last recorded purge outcome is <c>"ran"</c> AND carries an elapsed-ms
+    /// value become a cadence reading, at the given interval.
+    /// </summary>
+    internal static IReadOnlyList<StoreJobCadenceReading> RawCadenceReadings(
+        IReadOnlyList<RawPurgeOverHorizonReading> readings, TimeSpan interval) =>
+        readings
+            .Where(reading => reading.LastPurge is { Outcome: "ran", ElapsedMs: long })
+            .Select(reading => new StoreJobCadenceReading(
+                reading.JobId,
+                $"policy_retention {reading.HypertableName}",
+                reading.LastPurge!.ElapsedMs,
+                (long)interval.TotalMilliseconds))
+            .ToList();
 
     /// <summary>
     /// The #3815 TimescaleDB availability re-probe (fleet-level, on the hourly store-maintenance tick, and
@@ -6932,7 +7092,7 @@ LIMIT 1";
 
             _timescaleAvailable = true;
             _logger.LogInformation(
-                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart (#3815). The store background-job health check that latch gates - the compression-job self-heal (#1581), Store Job Over Cadence (#2136) and Retention Held (#2813) - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and the composer's covering indexes are re-converged on this same tick by the store-object convergence pass (#3817), which runs a few statements after this line and writes its own 'Store object convergence:' summary — so anything the start path left unbuilt while the latch was false is rebuilt now, not at the next restart. This pass took {ElapsedMs} ms, connection acquisition included.",
+                "TimescaleDB is available after all - the store reports the extension present while this service has been running in plain-PostgreSQL mode, so the availability latch flips back on this tick WITHOUT a restart (#3815). The store background-job health check that latch gates - the compression-job self-heal (#1581), Store Job Over Cadence (#2136), Retention Held (#2813) and Raw Purge Over Horizon (#4299) - has been skipped on every tick since the start-path detection came back false, and runs again immediately after this line. Hypertable conversion, compression policies, continuous aggregates and the composer's covering indexes are re-converged on this same tick by the store-object convergence pass (#3817), which runs a few statements after this line and writes its own 'Store object convergence:' summary — so anything the start path left unbuilt while the latch was false is rebuilt now, not at the next restart. This pass took {ElapsedMs} ms, connection acquisition included.",
                 probeClock.ElapsedMilliseconds);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -6998,6 +7158,59 @@ LIMIT 1";
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
             await TimescaleSupport.EnsureRetentionPoliciesAsync(
                 connection, _logger, TimescaleSupport.RetentionSweepPass.Periodic, budget.Token);
+
+            /* #4299: the service's own raw-purge trigger — ONLY reached from this Periodic pass, never
+               from the start path. TriggerRawPurgeAsync re-reads the sweep's own verdict (config->>'darling_armed',
+               written moments ago by the call above) rather than threading it through as a parameter, so a
+               future caller of EnsureRetentionPoliciesAsync cannot accidentally skip the trigger by forgetting
+               to wire a return value through. */
+            await TriggerRawPurgeAsync(connection, budget.Token);
+
+            /* #4299/#4391: the relaunch — when the epoch does not match the CURRENT postmaster start on
+               ANY raw job and no repair this process launched is still running, start a new one. Checked
+               against ALL THREE raw relations, not just the first: RunMaterializationHoleRepairAsync stamps
+               all three under the SAME postmaster-start value in the same pass ON A CLEAN COMPLETION, but a
+               repair that failed on (or was cancelled during) the second or third relation stamps only the
+               ones it reached, leaving the rest stale — reading only relation zero would then miss that and
+               never relaunch. A store that has never had a repair run under this start (every key null) reads
+               the same "no match" as a store whose repair is simply stale. _materializationHoleRepairRunning is
+               this PROCESS's own guard against launching a second overlapping repair; the epoch stamp in the
+               store is the separate guard (RawRepairEpochStampSql's IS DISTINCT FROM) that stops a SECOND
+               SERVICE from repeating the work — the two are independent and both are checked here because
+               either alone is not enough: two processes each with the flag clear would otherwise both launch. */
+            if (!_materializationHoleRepairRunning && TimescaleSupport.RawRelations.Count > 0)
+            {
+                bool epochCurrent = true;
+                var staleRelations = new List<string>();
+                foreach (var relation in TimescaleSupport.RawRelations)
+                {
+                    await using var epochCheck = new NpgsqlCommand(
+                        TimescaleSupport.RawRepairEpochMatchesSql(relation), connection);
+                    var value = await epochCheck.ExecuteScalarAsync(budget.Token);
+                    var relationCurrent = value is bool b && b;
+                    epochCurrent &= relationCurrent;
+                    if (!relationCurrent)
+                    {
+                        staleRelations.Add(relation);
+                    }
+                }
+
+                if (ShouldLaunchMaterializationHoleRepair(_materializationHoleRepairRunning, epochCurrent) && _postgres is not null)
+                {
+                    _logger.LogInformation(
+                        "Retention re-evaluation: the repair epoch is stale under the current postmaster start for {StaleRelations} and no repair is running in this process — launching one now (Periodic pass only).",
+                        string.Join(", ", staleRelations));
+
+                    /* Deliberately NOT awaited, the same posture the start path takes for the identical call:
+                       a capped repair on the heaviest aggregate is a policy run's worth of work, and this pass
+                       has three more tenants to reach this hour. _materializationHoleRepairRunning is set at
+                       the top of the method and cleared in its finally, so the NEXT Periodic tick (an hour on)
+                       sees it running and does not launch a second one; TriggerRawPurgeAsync above already saw
+                       the stale epoch this tick and skipped the purge, which is correct — the repair this
+                       launches has not finished yet, so nothing this tick should have purged. */
+                    _periodicHoleRepair = RunMaterializationHoleRepairAsync(_postgres, cancellationToken);
+                }
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -7014,6 +7227,208 @@ LIMIT 1";
             _logger.LogWarning(
                 "Retention re-evaluation could not run after {ElapsedMs} ms - every held policy stays held until the next hour retries (or the next start): {Message}",
                 passClock.ElapsedMilliseconds, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #4299: the Periodic pass's trigger for the three raw jobs' own purge — reached only from
+    /// <see cref="ReevaluateRetentionPoliciesAsync"/>, on the SAME connection and immediately after
+    /// <see cref="TimescaleSupport.EnsureRetentionPoliciesAsync(NpgsqlConnection, ILogger, TimescaleSupport.RetentionSweepPass, CancellationToken)"/>
+    /// has run this pass's coverage sweep, so the drop decision below is measured fresh, not read back from a
+    /// value the sweep merely wrote. For each raw relation, in the same pass:
+    /// <list type="bullet">
+    /// <item>a FRESH Covered verdict — <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/>, called again
+    /// here rather than trusting <c>config-&gt;&gt;'darling_armed'</c> the sweep just above wrote: <c>darling_armed</c>
+    /// is the readers' and alerts' standing verdict and is deliberately left as it was on anything OTHER than
+    /// Covered (#1877's bounded-depth-cap posture), so an Unknown probe (one that throws, times out, or comes
+    /// back empty) leaves a PRIOR pass's <c>true</c> in place; a purge gated on that stale value would drop
+    /// chunks on a coverage state this pass itself could not confirm. <c>IsRawTierDropSafeAsync</c> answers
+    /// true ONLY on a Covered verdict measured THIS call — Short and Unknown both answer false — so the purge
+    /// can never run on a verdict older than the pass that is about to act on it;</item>
+    /// <item>a repair finished under the CURRENT <c>pg_postmaster_start_time()</c> — <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/>;</item>
+    /// <item>no hole in the range the purge is about to drop — <see cref="TimescaleSupport.HoleFreeThroughAsync"/>
+    /// over every registered aggregate whose source is this raw relation, from the oldest raw chunk's
+    /// <c>range_start</c> to <c>now() - drop_after</c>. A successor <see cref="TimescaleSupport.ResolveMaterializationAsync"/>
+    /// cannot resolve (mid-rebuild, renamed, or dropped) is NOT skipped as though it were hole-free: an
+    /// unresolvable successor means the gate cannot tell whether the range it should be covering is intact,
+    /// which is exactly the state <c>hole-free</c> must never mean. This records <c>gate_unknown</c> and blocks
+    /// the purge, the same fail-closed posture as an Unknown coverage verdict.</item>
+    /// </list>
+    /// All hold → <see cref="TimescaleSupport.RunRetentionPurgeJobAsync"/>. One INFORMATION line per raw
+    /// job either way, naming which gate it failed (or that the run itself failed).
+    ///
+    /// <para>Deferred ranges are passed empty: a deferred range is still a hole (the source has rows, the
+    /// materialization has none), so the fresh hole scan below finds it.</para>
+    /// </summary>
+    private Task TriggerRawPurgeAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+        => TriggerRawPurgeCoreAsync(connection, _logger, cancellationToken);
+
+    /// <summary>
+    /// #4299: the exact body of <see cref="TriggerRawPurgeAsync"/>, extracted as an internal static
+    /// method so <c>Darling.Tests</c> (already reachable via this project's <c>InternalsVisibleTo</c>) can
+    /// drive it directly against a live store without standing up a whole <see cref="DarlingWorker"/>. No
+    /// behaviour change: the instance method above is now a one-line forward to this, with <c>_logger</c>
+    /// threaded through as the <paramref name="logger"/> parameter.
+    /// </summary>
+    internal static async Task TriggerRawPurgeCoreAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
+    {
+        var emptyDeferred = Array.Empty<(DateTime Start, DateTime End)>();
+
+        foreach (var relation in TimescaleSupport.RawRelations)
+        {
+            try
+            {
+                /* Measured THIS call, not read back from config->>'darling_armed' — that key stays as the
+                   readers' and alerts' standing verdict and can hold a PRIOR pass's true through an Unknown
+                   probe (#1877). The purge decision needs this pass's own fresh answer, so it calls the same
+                   probe IsRawTierDropSafeAsync arms against, again, right here. */
+                var covered = await TimescaleSupport.IsRawTierDropSafeAsync(connection, relation, cancellationToken);
+
+                if (!covered)
+                {
+                    logger.LogInformation(
+                        "Raw retention purge for {Relation} did not run this pass — not covered (a fresh measurement this pass found Short or Unknown for it).",
+                        relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "not_covered", null, null, logger, cancellationToken);
+                    continue;
+                }
+
+                bool epochMatches;
+                await using (var epochRead = new NpgsqlCommand(TimescaleSupport.RawRepairEpochMatchesSql(relation), connection))
+                {
+                    var value = await epochRead.ExecuteScalarAsync(cancellationToken);
+                    epochMatches = value is bool b && b;
+                }
+
+                if (!epochMatches)
+                {
+                    logger.LogInformation(
+                        "Raw retention purge for {Relation} did not run this pass — the repair epoch is stale or missing (no repair has finished under the CURRENT postmaster start yet).",
+                        relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "epoch_stale", null, null, logger, cancellationToken);
+                    continue;
+                }
+
+                /* The scan's window is [oldest chunk range_start, now - drop_after], which contains every
+                   whole chunk drop_chunks would actually drop (a chunk drops only once its range_end <=
+                   now - drop_after). Mixing range_start (timestamptz) with now() AT TIME ZONE 'UTC' is safe
+                   here because this connection pins Timezone=UTC, so the subtraction and every later
+                   comparison against it stay in UTC with no local-offset step. */
+                long jobId;
+                DateTime dropFrom;
+                DateTime dropTo;
+                await using (var range = new NpgsqlCommand($@"
+SELECT j.job_id,
+       (SELECT min(c.range_start) FROM timescaledb_information.chunks AS c WHERE c.hypertable_schema = 'collect' AND c.hypertable_name = '{relation}'),
+       now() AT TIME ZONE 'UTC' - (j.config->>'drop_after')::interval
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'", connection))
+                {
+                    await using var reader = await range.ExecuteReaderAsync(cancellationToken);
+                    if (!await reader.ReadAsync(cancellationToken) || await reader.IsDBNullAsync(1, cancellationToken))
+                    {
+                        /* No job row, or raw holds no chunks at all — nothing to drop, nothing to gate. */
+                        logger.LogInformation(
+                            "Raw retention purge for {Relation} did not run this pass — no chunks to evaluate (the job row or the oldest chunk could not be read).",
+                            relation);
+                        await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "no_chunks", null, null, logger, cancellationToken);
+                        continue;
+                    }
+
+                    jobId = reader.GetInt64(0);
+                    dropFrom = DateTime.SpecifyKind(reader.GetDateTime(1), DateTimeKind.Utc);
+                    dropTo = DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc);
+                }
+
+                var holeFree = true;
+                var successorUnresolved = false;
+                foreach (var target in TimescaleSupport.MaterializationHoleTargets)
+                {
+                    if (!string.Equals(target.Source, relation, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, target.View, cancellationToken);
+                    if (materialization is null)
+                    {
+                        /* An unresolvable successor (mid-rebuild, renamed, or dropped) is NOT hole-free — the
+                           gate cannot tell whether the range it should be covering is intact, so it must not
+                           read as clean. Fail closed, same as an Unknown coverage verdict above. */
+                        successorUnresolved = true;
+                        holeFree = false;
+                        break;
+                    }
+
+                    if (!await TimescaleSupport.HoleFreeThroughAsync(
+                        connection, target, materialization.Value, dropFrom, dropTo, emptyDeferred, cancellationToken))
+                    {
+                        holeFree = false;
+                        break;
+                    }
+                }
+
+                if (successorUnresolved)
+                {
+                    logger.LogInformation(
+                        "Raw retention purge for {Relation} did not run this pass — a successor's materialization could not be resolved (mid-rebuild, renamed, or dropped), so coverage cannot be confirmed hole-free.",
+                        relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "gate_unknown", null, null, logger, cancellationToken);
+                    continue;
+                }
+
+                if (!holeFree)
+                {
+                    logger.LogInformation(
+                        "Raw retention purge for {Relation} did not run this pass — a hole was found in the range about to be dropped.",
+                        relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "hole", null, null, logger, cancellationToken);
+                    continue;
+                }
+
+                var runClock = Stopwatch.StartNew();
+                var outcome = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, logger, cancellationToken);
+                runClock.Stop();
+                if (!outcome.Ran)
+                {
+                    logger.LogInformation(
+                        "Raw retention purge for {Relation} did not run this pass — the run itself failed with SqlState {SqlState} (see the warning above naming the timeout or error).",
+                        relation, outcome.SqlState ?? "(none)");
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "run_failed", outcome.SqlState, null, logger, cancellationToken);
+                }
+                else
+                {
+                    logger.LogInformation(
+                        "Raw retention purge for {Relation} ran this pass — covered, epoch matched the current postmaster start, and no hole in the dropped range.",
+                        relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "ran", null, runClock.ElapsedMilliseconds, logger, cancellationToken);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                /* #4391: the trigger's own gate check failing partway through (a timeout or error reading
+                   coverage, the epoch, chunk ranges, or a successor's holes) is not a routine "not covered
+                   this pass" outcome the way the continues above are — it means the gate itself could not
+                   answer, so it is logged at Warning rather than Information, and recorded as gate_error so
+                   the record distinguishes "the gate said no" from "the gate could not run". The record call
+                   is wrapped so a failure recording the outcome never escapes this catch and skips the next
+                   relation in the loop. */
+                logger.LogWarning(
+                    "Raw retention purge for {Relation} did not run this pass — the trigger's own gate check failed: {Message}",
+                    relation, ex.Message);
+
+                try
+                {
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(
+                        connection, relation, "gate_error", (ex as PostgresException)?.SqlState, null, logger, CancellationToken.None);
+                }
+                catch (Exception recordEx) when (recordEx is not OperationCanceledException)
+                {
+                    logger.LogDebug("Could not record the gate_error purge outcome for {Relation}: {Message}", relation, recordEx.Message);
+                }
+            }
         }
     }
 

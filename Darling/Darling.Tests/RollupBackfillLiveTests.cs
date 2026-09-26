@@ -198,15 +198,13 @@ public sealed class RollupBackfillLiveTests
 
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
 
-        var armed = await CountAsync(connection, @"
-SELECT count(*)
-FROM timescaledb_information.jobs AS j
-WHERE j.proc_name = 'policy_retention'
-AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = 'query_stats'
-AND   j.scheduled", ct);
+        /* #4299 (d′): query_stats is a raw relation now — its armed verdict is config->>'darling_armed'
+           through the shipped RawArmedStateSql, never 'scheduled' (which this pass converges to false
+           unconditionally for the three raw jobs). */
+        await using var armedRead = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql("query_stats"), connection);
+        var armedFlag = await armedRead.ExecuteScalarAsync(ct);
 
-        Assert.True(armed == 1, "query_stats' retention policy should have armed itself once the rollup covered it");
+        Assert.True(armedFlag is bool flag && flag, "query_stats' retention policy should have armed itself once the rollup covered it");
 
         /* Same reason as above: no background worker left running against a database about to vanish. */
         await UnscheduleAllJobsAsync(connection, ct);
@@ -767,7 +765,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         /* (3) THE ARMING GATE MUST REFUSE while coverage is partial — the step that turns a hole into data
                loss. Run the REAL policy sweep, not its predicate, and read the job's scheduled flag. */
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
-        Assert.Equal(0L, await CountAsync(connection, ArmedRawPolicySql, ct));
+        Assert.False(await RawArmedAsync(connection, "query_stats", ct));
 
         /* ── THE RESUME: finish the remaining slices from the measured floor. ── */
         foreach (var (from, to) in RollupBackfill.Slices(resumePlan.FromUtc, resumePlan.ToUtc))
@@ -806,7 +804,7 @@ WHERE NOT EXISTS (SELECT 1 FROM collect.{view} AS h WHERE h.bucket = src.b)",
         }
 
         await TimescaleSupport.EnsureRetentionPoliciesAsync(connection, null, ct);
-        Assert.Equal(1L, await CountAsync(connection, ArmedRawPolicySql, ct));
+        Assert.True(await RawArmedAsync(connection, "query_stats", ct));
 
         /* Stand the scheduler down before this scratch database is force-dropped underneath it. */
         await UnscheduleAllJobsAsync(connection, ct);
@@ -1053,15 +1051,15 @@ AND   j.scheduled";
         return await command.ExecuteScalarAsync(cancellationToken) is DateTime instant ? instant : null;
     }
 
-    /// <summary>Is query_stats' raw retention policy ARMED? The gate's real observable, read from the job
-    /// catalog rather than by re-evaluating its predicate.</summary>
-    private const string ArmedRawPolicySql = @"
-SELECT count(*)
-FROM timescaledb_information.jobs AS j
-WHERE j.proc_name = 'policy_retention'
-AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = 'query_stats'
-AND   j.scheduled";
+    /// <summary>#4299 (d′): is query_stats' raw retention policy ARMED? query_stats is a raw relation now —
+    /// its verdict is config->>'darling_armed' through the shipped RawArmedStateSql, never 'scheduled' (which
+    /// this pass converges to false unconditionally for the three raw jobs).</summary>
+    private static async Task<bool> RawArmedAsync(NpgsqlConnection connection, string relation, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(TimescaleSupport.RawArmedStateSql(relation), connection);
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is bool flag && flag;
+    }
 
     /// <summary>
     /// Distinct queries per hourly bucket. <b>MUST stay above 1.</b>

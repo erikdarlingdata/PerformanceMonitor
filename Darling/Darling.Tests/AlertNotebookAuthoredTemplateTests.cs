@@ -63,7 +63,7 @@ public sealed class AlertNotebookAuthoredTemplateTests
     [Fact]
     public void AuthoredTemplate_NonAuthoredMetric_StaysMechanical()
     {
-        var template = AlertNotebookEndpoint.AuthoredTemplate("High CPU");
+        var template = AlertNotebookEndpoint.AuthoredTemplate("tempdb Space");
 
         Assert.Null(template);
     }
@@ -178,8 +178,10 @@ public sealed class AlertNotebookAuthoredTemplateTests
             metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
 
         var panelCells = cells.OfType<JsonObject>().Where(cell => (string?)cell["type"] == "panel").ToArray();
-        Assert.NotEmpty(panelCells);
 
+        /* #4223: the Server Unreachable/Restored and Agent-job families carry no composed trend/timeline
+           panel at all -- get_collection_health/get_collection_log and get_running_jobs are the whole
+           forensic shape for these, so an empty panel set is a valid family shape, not a gap in this test. */
         foreach (var panel in panelCells)
         {
             var (plan, error) = ComposeSpec.TryParsePanel(panel, declaredVariables: Array.Empty<string>());
@@ -212,9 +214,10 @@ public sealed class AlertNotebookAuthoredTemplateTests
 
     /* ═══════════════════════════ budget ═══════════════════════════ */
 
-    /// <summary>Every read cell has an explicit <c>limit</c>, except <c>get_deadlock_trend</c> (a bucketed
-    /// trend read, exempted by name); no read names <c>audit_config</c>/an <c>analyze_*</c> compute read; every
-    /// composed cell's window is <![CDATA[<=]]> 24h.</summary>
+    /// <summary>Every read cell has an explicit <c>limit</c>, except the reads named in
+    /// <see cref="AlertNotebookEndpoint.s_authoredLimitlessTrendReads"/> (chart/trend reads and reads that
+    /// declare no <c>limit</c> param at all); no read names <c>audit_config</c>/an <c>analyze_*</c> compute
+    /// read; every composed cell's window is <![CDATA[<=]]> 24h.</summary>
     [Theory]
     [MemberData(nameof(AllAuthoredMetrics))]
     public void Budget_ReadCellsHaveLimitsExceptTheTrendRead_ComposedWindowsAreAtMost24h(string metric)
@@ -244,6 +247,16 @@ public sealed class AlertNotebookAuthoredTemplateTests
                 if (AlertNotebookEndpoint.s_authoredLimitlessTrendReads.Contains(read))
                 {
                     Assert.False(parameters.ContainsKey("limit"), $"{read} must not carry a limit param");
+                }
+                else if (read == "get_top_queries_by_cpu" || read == "get_top_procedures_by_cpu")
+                {
+                    /* #4223: these two declare no 'limit' param -- they cap with 'top' instead. */
+                    Assert.True(parameters.ContainsKey("top"), $"read cell '{read}' must carry a top param");
+                }
+                else if (read == "get_cpu_scheduler_pressure")
+                {
+                    /* #4223: a newest-snapshot read (DarlingWebEndpoints' own catalog entry) -- no row cap to carry. */
+                    Assert.False(parameters.ContainsKey("limit"), "get_cpu_scheduler_pressure must not carry a limit param");
                 }
                 else
                 {
@@ -286,7 +299,23 @@ public sealed class AlertNotebookAuthoredTemplateTests
             else if (type == "read")
             {
                 var parameters = Assert.IsType<JsonObject>(cell["params"]);
-                Assert.Equal(AsOf, (string)parameters["as_of"]!);
+                var read = (string)cell["read"]!;
+
+                /* get_collection_health / get_running_jobs (#4223) declare no as_of param at all (PServer()
+                   only) -- ServerOnlyReadCell correctly omits it rather than sending a param the catalog
+                   would reject as unknown. Every OTHER authored read does declare as_of and must bind it
+                   to window_end. */
+                var descriptor = DarlingWebEndpoints.CatalogDescriptors[read];
+                var declaresAsOf = descriptor.Params.Any(p => p.Name == "as_of");
+
+                if (declaresAsOf)
+                {
+                    Assert.Equal(AsOf, (string)parameters["as_of"]!);
+                }
+                else
+                {
+                    Assert.Null(parameters["as_of"]);
+                }
             }
         }
     }

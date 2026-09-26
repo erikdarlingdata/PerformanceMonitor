@@ -916,8 +916,11 @@ public sealed class AlertReadFailureSurfaceTests
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
         /* 14th exempt since #4215: EvaluateStoreSettingsAsync's wrapper catch — the store-settings
-           self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. */
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 14),
+           self-alert's report is a parameter, exactly like its StaleMute/WebTls siblings. 15th exempt
+           since #4299: EvaluateRawPurgeOverHorizonAsync's wrapper catch — the raw-purge-over-horizon
+           self-alert's evidence (the readings) is a parameter too, with the read counted in
+           DarlingWorker. */
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 15),
     };
 
     /// <summary>
@@ -1030,6 +1033,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store policy-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Raw-purge-over-horizon self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
         ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the web host's in-memory WebTlsCertificateState publish) as a parameter and performs no store read at all",
         ["Store settings self-alert failed"] = "handed its evidence as a parameter; the one store read behind it (the rejected-verdict names) is isolated in its own COUNTED catch in DarlingWorker (#4215) rather than exempted",
@@ -1226,8 +1230,10 @@ public sealed class AlertReadFailureSurfaceTests
            deadlock read normalizing in the meantime. 30th since #4215: the store-settings
            self-alert's wrapper catch (its report is a parameter, like every sibling standing condition).
            ReadRejectedManagedConfSettingNamesAsync's catch is NOT here: a RejectedValue row is
-           judgeable evidence, so it moved to the counted census above instead. */
-        Assert.Equal(30, totalExempt);
+           judgeable evidence, so it moved to the counted census above instead. 31st since #4299: the
+           Raw Purge Over Horizon self-alert's catch, whose evidence (the readings) is handed in as a
+           parameter, with the read counted in DarlingWorker. */
+        Assert.Equal(31, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
