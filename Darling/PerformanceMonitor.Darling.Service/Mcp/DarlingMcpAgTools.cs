@@ -9,6 +9,7 @@
 using System;
 using System.ComponentModel;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -57,7 +58,8 @@ public sealed class DarlingMcpAgTools
         "with no Availability Groups.")]
     public static async Task<string> GetAgHealth(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name to limit the topology to one monitored server's view. Optional — omit for the whole fleet.")] string? server_name = null)
+        [Description("Server name or display name to limit the topology to one monitored server's view. Optional — omit for the whole fleet.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
         /* Fleet-wide by default: only resolve when a name was actually supplied. The shared resolver auto-selects
            a sole registered server for an omitted name, which is right for a per-server tool and wrong here — it
@@ -66,7 +68,7 @@ public sealed class DarlingMcpAgTools
         string? resolvedName = null;
         if (!string.IsNullOrWhiteSpace(server_name))
         {
-            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+            var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
             if (error != null) return error;
             serverIdFilter = resolved.ServerId;
             resolvedName = resolved.ServerName;
@@ -74,7 +76,7 @@ public sealed class DarlingMcpAgTools
 
         try
         {
-            var result = await DarlingAgReader.GetAgHealthAsync(postgres, serverIdFilter);
+            var result = await DarlingAgReader.GetAgHealthAsync(postgres, serverIdFilter, cancellationToken: cancellationToken);
 
             if (result.AvailabilityGroupCount == 0)
             {
@@ -84,7 +86,7 @@ public sealed class DarlingMcpAgTools
                 if (serverIdFilter is int scopedServerId && resolvedName is not null)
                 {
                     var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, scopedServerId, resolvedName, "ag_replica_states");
+                        postgres, scopedServerId, resolvedName, "ag_replica_states", cancellationToken);
                     if (gated != null)
                     {
                         return gated;
@@ -102,7 +104,7 @@ public sealed class DarlingMcpAgTools
 
             return JsonSerializer.Serialize(result, DarlingAgReader.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_ag_health", ex);
         }

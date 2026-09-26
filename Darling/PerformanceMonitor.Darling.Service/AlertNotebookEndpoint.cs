@@ -194,16 +194,37 @@ internal static class AlertNotebookEndpoint
                 postgres, serverId, fleetLevelStore, metric, anchor, now, statusHistoryRows, matchedRow, logger, context.RequestAborted);
 
             var lookbackHours = FamilyLookbackHours(metric);
-            var sections = DarlingTriageEndpoint.SectionsFor(metric);
-            var cells = new JsonArray
-            {
-                HeaderCell(metric, serverName, matchedIncident, matchedRow),
-                StatusCell(status),
-            };
+            var trimmedMetric = string.IsNullOrWhiteSpace(metric) ? null : metric.Trim();
+            var authored = AuthoredTemplate(trimmedMetric);
 
-            foreach (var section in sections)
+            JsonArray cells;
+            string templateId;
+            int templateVersion;
+
+            if (authored is not null)
             {
-                cells.Add(ReadCell(section, serverName, asOf, lookbackHours));
+                var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
+                cells = authored.Value.BuildCells(
+                    metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status);
+                templateId = authored.Value.Id;
+                templateVersion = authored.Value.Version;
+            }
+            else
+            {
+                var sections = DarlingTriageEndpoint.SectionsFor(metric);
+                cells = new JsonArray
+                {
+                    HeaderCell(metric, serverName, matchedIncident, matchedRow),
+                    StatusCell(status),
+                };
+
+                foreach (var section in sections)
+                {
+                    cells.Add(ReadCell(section, serverName, asOf, lookbackHours));
+                }
+
+                templateId = "mechanical/" + (trimmedMetric ?? "default");
+                templateVersion = MechanicalTemplateVersion;
             }
 
             var body = new JsonObject
@@ -213,8 +234,8 @@ internal static class AlertNotebookEndpoint
                 ["notes"] = notes,
                 ["template"] = new JsonObject
                 {
-                    ["id"] = "mechanical/" + (string.IsNullOrWhiteSpace(metric) ? "default" : metric.Trim()),
-                    ["version"] = MechanicalTemplateVersion,
+                    ["id"] = templateId,
+                    ["version"] = templateVersion,
                 },
                 ["definition"] = new JsonObject
                 {
@@ -324,6 +345,260 @@ internal static class AlertNotebookEndpoint
     /// per-metric tuning <see cref="DarlingTriageEndpoint.SectionsByMetric"/> already carries on most entries
     /// is respected first; this is only the mechanical conversion's own fallback.</summary>
     private static string FamilyLookbackHours(string? metric) => "24";
+
+    /* ═══════════════════════════ authored templates (#4222 slice b) ═══════════════════════════ */
+
+    /// <summary>The authored family lookback (spec §3): 24h for both Blocking and Deadlocks, unless a future
+    /// authored family needs a different one — kept as a per-metric switch, not a shared constant, so that
+    /// day comes without touching this one's callers.</summary>
+    private static TimeSpan AuthoredLookback(string metric) => TimeSpan.FromHours(24);
+
+    /// <summary>One authored template's cell-building delegate plus its id/version — the server-side
+    /// evolution of a mechanical conversion for a metric whose forensic shape (spec §3) is worth composing
+    /// by hand instead of listing reads. <c>BuildCells</c> takes exactly what <see cref="Map"/> already has in
+    /// scope for the mechanical path, so an authored template is a drop-in alternative at the same call
+    /// site.</summary>
+    internal readonly record struct AuthoredTemplateEntry(
+        string Id,
+        int Version,
+        Func<string?, string?, string?, DateTime, DateTime, AlertIncident?, DarlingAlertReader.AlertHistoryReadRow?, string, JsonArray> BuildCells);
+
+    /// <summary>Blocking template version (#4222 slice b). Bumped only if this template's SHAPE changes.</summary>
+    internal const int BlockingTemplateVersion = 1;
+
+    /// <summary>Deadlocks template version (#4222 slice b). Bumped only if this template's SHAPE changes.</summary>
+    internal const int DeadlocksTemplateVersion = 1;
+
+    /// <summary>The authored template for a metric, or null when the metric falls back to the mechanical
+    /// conversion — every metric NOT named here keeps the byte-identical mechanical path. Keyed on the EXACT
+    /// alert-engine <c>MetricName</c> strings (the same literals <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
+    /// keys on), case-insensitively, matching every other metric lookup on this endpoint.
+    /// Made <c>internal</c> (not private) so <see cref="Darling.Tests.AlertNotebookAuthoredTemplateTests"/>
+    /// can call it directly via <c>InternalsVisibleTo</c> instead of reflection — the same visibility
+    /// <see cref="MatchAlert"/> and <see cref="StatusFromHistory"/> already use for their own pins.</summary>
+    internal static AuthoredTemplateEntry? AuthoredTemplate(string? metric)
+    {
+        if (string.IsNullOrWhiteSpace(metric))
+        {
+            return null;
+        }
+
+        if (string.Equals(metric, "Blocking Detected", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(metric, "Blocking Wait Time", StringComparison.OrdinalIgnoreCase))
+        {
+            return new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells);
+        }
+
+        if (string.Equals(metric, "Deadlocks Detected", StringComparison.OrdinalIgnoreCase))
+        {
+            return new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells);
+        }
+
+        return null;
+    }
+
+    /// <summary>Blocking Detected / Blocking Wait Time (spec §3): header, status, <c>get_blocking</c> (limit
+    /// 20), a blocked-process-reports timeline with a deadlock annotation, most-blocked objects / by database
+    /// / lock modes (the <c>blocking-rca</c> panel specs, ported), then <c>get_active_queries
+    /// blocking_only</c>.</summary>
+    private static JsonArray BuildBlockingCells(
+        string? metric, string? serverName, string? asOf, DateTime windowStart, DateTime windowEnd,
+        AlertIncident? incident, DarlingAlertReader.AlertHistoryReadRow? row, string status)
+    {
+        var cells = new JsonArray
+        {
+            HeaderCell(metric, serverName, incident, row),
+            StatusCell(status),
+            AuthoredReadCell("get_blocking", "Blocking chains", serverName, asOf,
+                ("hours", "24"), ("limit", "20")),
+            TimelinePanel(
+                "Blocked-process reports over time", "blocked_process_reports", "bpr_wait_time_ms",
+                windowStart, windowEnd, annotation: "deadlocks", databaseFilter: incident?.Database),
+            RankedPanel(
+                "Most-blocked objects", "blocked_process_reports", "bpr_wait_time_ms",
+                windowStart, windowEnd, "contentious_object", databaseFilter: incident?.Database),
+            RankedPanel(
+                "Blocking by database", "blocked_process_reports", "bpr_wait_time_ms",
+                windowStart, windowEnd, "database_name", databaseFilter: null),
+            RankedPanel(
+                "Lock modes", "blocked_process_reports", "bpr_wait_time_ms",
+                windowStart, windowEnd, "lock_mode", databaseFilter: incident?.Database),
+            AuthoredReadCell("get_active_queries", "Active blocking queries", serverName, asOf,
+                ("hours", "1"), ("blocking_only", "true"), ("limit", "25")),
+        };
+
+        return cells;
+    }
+
+    /// <summary>Deadlocks Detected (spec §3): header, status, <c>get_deadlock_detail</c> (limit 3), a
+    /// deadlocks timeline with a blocking annotation, deadlocks by database (the <c>deadlock-postmortem</c>
+    /// panel specs, ported), then <c>get_deadlock_trend</c> over 24h.</summary>
+    private static JsonArray BuildDeadlockCells(
+        string? metric, string? serverName, string? asOf, DateTime windowStart, DateTime windowEnd,
+        AlertIncident? incident, DarlingAlertReader.AlertHistoryReadRow? row, string status)
+    {
+        var cells = new JsonArray
+        {
+            HeaderCell(metric, serverName, incident, row),
+            StatusCell(status),
+            AuthoredReadCell("get_deadlock_detail", "Deadlock detail", serverName, asOf,
+                ("hours", "24"), ("limit", "3")),
+            TimelinePanel(
+                "Deadlocks over time", "deadlocks", "deadlock_count",
+                windowStart, windowEnd, annotation: "blocked_process_reports", databaseFilter: incident?.Database),
+            RankedPanel(
+                "Deadlocks by database", "deadlocks", "deadlock_count",
+                windowStart, windowEnd, "database_name", databaseFilter: null),
+            AuthoredReadCell("get_deadlock_trend", "Deadlock trend", serverName, asOf,
+                ("hours", "24")),
+        };
+
+        return cells;
+    }
+
+    /// <summary>The reads this endpoint's authored templates call that declare no <c>limit</c> param at all
+    /// (<see cref="DarlingWebEndpoints.BuildReadDispatch"/>'s own catalog) — a chart/trend read whose budget
+    /// is the bucket count, not a row cap (spec §3's own budget rule: "every read cell has an explicit limit,
+    /// OR its trend goes through the chart bucket budget"). <see cref="AuthoredReadCell"/> must not force a
+    /// 'limit' onto one of these, or <c>ValidateReadPanelSpec</c>'s undeclared-param check reds it.</summary>
+    private static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "get_deadlock_trend",
+    };
+
+    /// <summary>An authored template's read cell (spec §1 binding): <c>server</c>, <c>as_of = window_end</c>
+    /// and every fixed param the call declares, PLUS an explicit <c>hours</c> when the call did not, PLUS an
+    /// explicit <c>limit</c> when the call did not AND the read is not one of
+    /// <see cref="s_authoredLimitlessTrendReads"/> (a bucketed trend read has no <c>limit</c> param to
+    /// carry). <c>viz</c> is always "table" — these are drill-down reads, not charts.</summary>
+    private static JsonObject AuthoredReadCell(
+        string read, string title, string? serverName, string? asOf, params (string Key, string Value)[] fixedParams)
+    {
+        var parameters = new JsonObject();
+        if (!string.IsNullOrWhiteSpace(serverName))
+        {
+            parameters["server"] = serverName;
+        }
+
+        if (!string.IsNullOrEmpty(asOf))
+        {
+            parameters["as_of"] = asOf;
+        }
+
+        var hasHours = false;
+        var hasLimit = false;
+        foreach (var (key, value) in fixedParams)
+        {
+            parameters[key] = value;
+            hasHours |= string.Equals(key, "hours", StringComparison.Ordinal);
+            hasLimit |= string.Equals(key, "limit", StringComparison.Ordinal);
+        }
+
+        if (!hasHours)
+        {
+            parameters["hours"] = "24";
+        }
+
+        if (!hasLimit && !s_authoredLimitlessTrendReads.Contains(read))
+        {
+            parameters["limit"] = DefaultMechanicalCellLimit;
+        }
+
+        return new JsonObject
+        {
+            ["type"] = "read",
+            ["read"] = read,
+            ["params"] = parameters,
+            ["viz"] = "table",
+            ["title"] = title,
+        };
+    }
+
+    /// <summary>Ports the <c>blocking-rca</c> / <c>deadlock-postmortem</c> time-series panel spec
+    /// (<c>notebook.js</c>'s <c>tsPanel</c>, <c>aggregate: "count"</c>, a deadlock/blocking annotation) into a
+    /// server-side composed cell (spec §1 binding): an absolute <c>range</c> equal to the computed window, and
+    /// — where the incident carries a database and the source has that dimension — a bound <c>database_name</c>
+    /// filter.</summary>
+    private static JsonObject TimelinePanel(
+        string title, string source, string measure, DateTime windowStart, DateTime windowEnd,
+        string annotation, string? databaseFilter)
+    {
+        var cell = new JsonObject
+        {
+            ["type"] = "panel",
+            ["title"] = title,
+            ["source"] = source,
+            ["measure"] = measure,
+            ["aggregate"] = "count",
+            ["viz"] = "line",
+            ["timeBucket"] = "hour",
+            ["annotations"] = new JsonArray { annotation },
+            ["range"] = new JsonObject
+            {
+                ["windowStart"] = windowStart.ToString("o", CultureInfo.InvariantCulture),
+                ["windowEnd"] = windowEnd.ToString("o", CultureInfo.InvariantCulture),
+            },
+        };
+
+        if (!string.IsNullOrWhiteSpace(databaseFilter))
+        {
+            cell["filters"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["dimension"] = "database_name",
+                    ["op"] = "eq",
+                    ["value"] = databaseFilter,
+                },
+            };
+        }
+
+        return cell;
+    }
+
+    /// <summary>Ports a <c>rankedPanel</c> spec (<c>notebook.js</c>, <c>aggregate: "count"</c>, top 10 unless
+    /// stated, <c>viz: "bar"</c>/<c>"pie"</c>) into a server-side composed cell — same binding rule as
+    /// <see cref="TimelinePanel"/>. Lock modes keep the source template's <c>pie</c>/topN-8 shape; every other
+    /// ranked breakdown here keeps the source template's <c>bar</c>/topN-10.</summary>
+    private static JsonObject RankedPanel(
+        string title, string source, string measure, DateTime windowStart, DateTime windowEnd,
+        string groupBy, string? databaseFilter)
+    {
+        var isLockMode = string.Equals(groupBy, "lock_mode", StringComparison.Ordinal);
+        var cell = new JsonObject
+        {
+            ["type"] = "panel",
+            ["title"] = title,
+            ["source"] = source,
+            ["measure"] = measure,
+            ["aggregate"] = "count",
+            ["viz"] = isLockMode ? "pie" : "bar",
+            ["topN"] = isLockMode ? 8 : 10,
+            ["groupBy"] = new JsonArray { groupBy },
+            ["range"] = new JsonObject
+            {
+                ["windowStart"] = windowStart.ToString("o", CultureInfo.InvariantCulture),
+                ["windowEnd"] = windowEnd.ToString("o", CultureInfo.InvariantCulture),
+            },
+        };
+
+        /* Only bind the database filter when the breakdown ISN'T grouping by database itself -- "Blocking by
+           database" must show every database, not just the incident's one. */
+        if (!string.IsNullOrWhiteSpace(databaseFilter) && !string.Equals(groupBy, "database_name", StringComparison.Ordinal))
+        {
+            cell["filters"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["dimension"] = "database_name",
+                    ["op"] = "eq",
+                    ["value"] = databaseFilter,
+                },
+            };
+        }
+
+        return cell;
+    }
 
     /// <summary>
     /// The four status arms (#4222): a resolution row for this metric after <c>at</c> -&gt; "Resolved at T";
