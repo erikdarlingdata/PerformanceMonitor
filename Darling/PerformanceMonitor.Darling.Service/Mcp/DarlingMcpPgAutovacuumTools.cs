@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -85,9 +86,10 @@ public sealed class DarlingMcpPgAutovacuumTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the dead-tuple growth comparison. Default 24.")] int hours_back = 24,
         [Description("Maximum tables to return, worst first. Default 20. This is what bounds the page - read truncated to know whether more tables had pending work than were returned.")] int limit = 20,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -104,7 +106,7 @@ public sealed class DarlingMcpPgAutovacuumTools
                read a server with exactly `limit` tables behind on vacuum as a cut page and told the caller to
                raise a limit that had nothing more to give. */
             var fetched = await DarlingPgAutovacuumReader.GetPgAutovacuumAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
@@ -113,7 +115,7 @@ public sealed class DarlingMcpPgAutovacuumTools
                    and a fabricated one for a SQL Server target — the collector has never run there. Ask the
                    engine before making the claim (#2532). */
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_autovacuum_stats");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_autovacuum_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -139,7 +141,7 @@ public sealed class DarlingMcpPgAutovacuumTools
             var runs = await DarlingPgLogEventReader.GetAutovacuumRunsAsync(
                 postgres, resolved.ServerId, now.AddHours(-hours_back), now,
                 rows.Select(r => $"{r.SchemaName}.{r.TableName}").Distinct(StringComparer.Ordinal).ToList(),
-                RunsReadPerTable + 1);
+                RunsReadPerTable + 1, cancellationToken);
             var runsByTable = runs
                 .GroupBy(r => (Database: r.DatabaseName, Relation: r.RelationName))
                 .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.OccurredAtUtc).ToList());
@@ -265,7 +267,7 @@ public sealed class DarlingMcpPgAutovacuumTools
                 tables,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_autovacuum_health", ex);
         }

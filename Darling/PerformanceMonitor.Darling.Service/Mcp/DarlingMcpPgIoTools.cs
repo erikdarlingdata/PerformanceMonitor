@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -39,9 +40,10 @@ public sealed class DarlingMcpPgIoTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum (backend_type, object, context) combinations to return, busiest first. Default 20. Bounds the page - read truncated for more; the shares stay of the whole window whatever this is set to.")] int limit = 20,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -56,7 +58,7 @@ public sealed class DarlingMcpPgIoTools
                signal - and the window's reads and read time ride on the same statement, so the shares
                below have denominators the cap cannot shrink. */
             var page = await DarlingPgIoReader.GetPgIoPageAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
 
             if (page.Rows.Count == 0)
             {
@@ -64,7 +66,7 @@ public sealed class DarlingMcpPgIoTools
                    activity" is a statement about a PostgreSQL instance; said about a SQL Server target it
                    is not a weak answer but a false one, and it is the one an agent asking by name gets. */
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_io_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -87,11 +89,11 @@ public sealed class DarlingMcpPgIoTools
                instant" and "nobody is timing it" — are not distinguishable in the counters, and
                track_io_timing is OFF by default, so the zeros are the ordinary case rather than a fault. */
             var timingSetting = await DarlingPgTrendReader.GetIoTimingTrackedAsync(
-                postgres, resolved.ServerId, windowEnd);
+                postgres, resolved.ServerId, windowEnd, cancellationToken);
 
             return BuildIoJson(resolved.ServerName, hours_back, page, limit, timingSetting);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_io_stats", ex);
         }

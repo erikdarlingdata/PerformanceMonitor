@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -142,9 +143,10 @@ public sealed class DarlingMcpPgDatabaseTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum databases to return, most temp bytes first. Default 20. Bounds databases[] only; read truncated to know whether more exist; totals stay of the whole window regardless.")] int limit = 20,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -160,16 +162,16 @@ public sealed class DarlingMcpPgDatabaseTools
                truncation signal - and the window's totals ride on the same statement, so the figures below
                have a scope the cap cannot shrink. */
             var page = await DarlingPgDatabaseReader.GetPgDatabaseStatsPageAsync(
-                postgres, resolved.ServerId, start, end, limit + 1);
+                postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
 
             if (page.Rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, cancellationToken);
             }
 
             return BuildDatabaseStatsJson(resolved.ServerName, hours_back, page, limit);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_database_stats", ex);
         }
@@ -344,17 +346,18 @@ public sealed class DarlingMcpPgDatabaseTools
     /// the next cycle to land.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end)
+        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
+        CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_database_stats");
+            postgres, serverId, serverName, "pg_database_stats", cancellationToken);
         if (gated != null)
         {
             return gated;
         }
 
         var (samplesInWindow, everCollected) = await DarlingPgDatabaseReader.GetCoverageAsync(
-            postgres, serverId, start, end);
+            postgres, serverId, start, end, cancellationToken);
 
         var hints = new
         {
