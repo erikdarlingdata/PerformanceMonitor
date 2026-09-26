@@ -155,4 +155,216 @@ public class XeShredGateSqlTests
         Assert.Contains("event_time,", sql, StringComparison.Ordinal);
         Assert.Contains("deadlock_xml", sql, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// Both collectors' payload INSERT, inside the gated dynamic SQL, excludes any event whose
+    /// event_time already exists in the target table -- so a changed execution_count that triggers a
+    /// full re-shred of the ring buffer does not re-insert events the table already holds. Without this
+    /// predicate a full re-shred (by design, on every counter change) would duplicate every row the
+    /// prior cycle already stored, not just the truly new ones. This assertion pins the predicate's
+    /// presence and its target: <c>collect.blocked_process_xml</c> / <c>collect.deadlock_xml</c>,
+    /// compared on <c>event_time</c>.
+    /// </summary>
+    [Theory]
+    [InlineData("22_collect_blocked_processes.sql", "blocked_process_xml", "bx")]
+    [InlineData("24_collect_deadlock_xml.sql", "deadlock_xml", "dx")]
+    public void CollectorsDedupeReShreddedEventsOnInsert(string fileName, string tableSuffix, string alias)
+    {
+        var sql = CollectorSql(fileName);
+
+        Assert.Contains(
+            $"FROM collect.{tableSuffix} AS {alias}",
+            sql,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $"WHERE {alias}.event_time = evt.value(''(@timestamp)[1]'', ''datetime2(7)'')",
+            sql,
+            StringComparison.Ordinal);
+
+        /* The NOT EXISTS wrapping that WHERE must appear once per platform branch (Azure SQL DB,
+           server-scoped), same as the shred gate itself -- one dedupe check per INSERT, not shared
+           across branches. */
+        var dedupeInstances = System.Text.RegularExpressions.Regex.Matches(
+            sql,
+            $"WHERE {alias}\\.event_time = evt\\.value\\(''\\(@timestamp\\)\\[1\\]'', ''datetime2\\(7\\)''\\)").Count;
+        Assert.Equal(2, dedupeInstances);
+    }
+
+    /// <summary>
+    /// The dynamic SQL strings assembled for <c>sp_executesql</c> are their own scope: a variable
+    /// referenced inside one that is neither DECLAREd inside that same string nor passed in as an
+    /// <c>sp_executesql</c> parameter does not exist at execution time and the batch throws "Must
+    /// declare the scalar variable" straight into the outer CATCH. #4213's own gate hit exactly this --
+    /// <c>@shred_needed</c> was read and SET inside all four dynamic batches (Azure + server-scoped, both
+    /// collectors) but only ever DECLAREd in the OUTER procedure scope, which the dynamic string cannot
+    /// see. This pin parses each <c>N'...'</c> string passed to <c>sp_executesql</c> and asserts that
+    /// every <c>@variable</c> it references is covered by a local DECLARE or a parameter listed in that
+    /// same call's <c>@params</c> definition.
+    ///
+    /// <para>The parser is deliberately simple: it strips <c>/* ... */</c> comments and single-line
+    /// <c>--</c> comments, then walks the T-SQL string literal using its own escaping rule (a doubled
+    /// <c>''</c> is a literal quote, not a terminator) to find the matching close quote. It does not
+    /// understand nested dynamic SQL, does not evaluate control flow, and treats any <c>@name</c> token
+    /// as a variable reference even inside a string literal that happens to contain one (none of the
+    /// four batches here do). It is a source guard against exactly the defect class #4213 shipped with,
+    /// not a T-SQL parser.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("22_collect_blocked_processes.sql")]
+    [InlineData("24_collect_deadlock_xml.sql")]
+    public void DynamicSqlBatchesDeclareOrParameterizeEveryVariableTheyReference(string fileName)
+    {
+        var sql = CollectorSql(fileName);
+        var batches = ExtractSpExecuteSqlBatches(sql);
+
+        Assert.True(batches.Count >= 4, $"expected at least 4 sp_executesql batches in {fileName}, found {batches.Count}");
+
+        foreach (var batch in batches)
+        {
+            var declared = DeclaredVariables(batch.SqlText);
+            var parameterized = ParameterNames(batch.ParamsText);
+            var referenced = ReferencedVariables(batch.SqlText);
+
+            var uncovered = referenced
+                .Where(v => !declared.Contains(v) && !parameterized.Contains(v))
+                .ToList();
+
+            Assert.True(
+                uncovered.Count == 0,
+                $"{fileName}: batch near offset {batch.Offset} references {string.Join(", ", uncovered)} " +
+                "without a local DECLARE or an sp_executesql parameter");
+        }
+    }
+
+    private readonly record struct SpExecuteSqlBatch(int Offset, string SqlText, string ParamsText);
+
+    /// <summary>
+    /// Finds each <c>EXECUTE sys.sp_executesql @sql, N'...params...', ...</c> call, resolves the two
+    /// string literals it needs -- the SQL text built into <c>@sql</c> just above the call, and the
+    /// inline params string passed as the second argument -- and returns both as plain text with
+    /// T-SQL's doubled-quote escaping already collapsed.
+    /// </summary>
+    private static List<SpExecuteSqlBatch> ExtractSpExecuteSqlBatches(string sql)
+    {
+        var stripped = StripComments(sql);
+        var results = new List<SpExecuteSqlBatch>();
+
+        foreach (System.Text.RegularExpressions.Match setMatch in
+            System.Text.RegularExpressions.Regex.Matches(stripped, @"SET\s+@sql\s*=\s*N'"))
+        {
+            var sqlTextStart = setMatch.Index + setMatch.Length;
+            var sqlTextEnd = FindStringLiteralEnd(stripped, sqlTextStart);
+            var sqlText = UnescapeLiteral(stripped.Substring(sqlTextStart, sqlTextEnd - sqlTextStart));
+
+            var execMatch = System.Text.RegularExpressions.Regex.Match(
+                stripped.Substring(sqlTextEnd),
+                @"EXECUTE\s+sys\.sp_executesql\s*@sql\s*,\s*N'");
+
+            if (!execMatch.Success)
+            {
+                continue;
+            }
+
+            var paramsTextStart = sqlTextEnd + execMatch.Index + execMatch.Length;
+            var paramsTextEnd = FindStringLiteralEnd(stripped, paramsTextStart);
+            var paramsText = UnescapeLiteral(stripped.Substring(paramsTextStart, paramsTextEnd - paramsTextStart));
+
+            results.Add(new SpExecuteSqlBatch(setMatch.Index, sqlText, paramsText));
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// From <c>SET @sql = N'...'</c> at <paramref name="start"/> (the position right after the opening
+    /// quote), walks forward respecting T-SQL's doubled single-quote escape (<c>''</c> inside an N'...'
+    /// literal is a literal quote character, not the end of the string) until the true closing quote.
+    /// </summary>
+    private static int FindStringLiteralEnd(string text, int start)
+    {
+        var i = start;
+        while (i < text.Length)
+        {
+            if (text[i] == '\'')
+            {
+                if (i + 1 < text.Length && text[i + 1] == '\'')
+                {
+                    i += 2;
+                    continue;
+                }
+
+                return i;
+            }
+
+            i++;
+        }
+
+        Assert.Fail("unterminated string literal while scanning sp_executesql batch");
+        return -1;
+    }
+
+    private static string UnescapeLiteral(string text) => text.Replace("''", "'", StringComparison.Ordinal);
+
+    private static string StripComments(string sql)
+    {
+        var noBlockComments = System.Text.RegularExpressions.Regex.Replace(
+            sql,
+            @"/\*.*?\*/",
+            string.Empty,
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        return System.Text.RegularExpressions.Regex.Replace(
+            noBlockComments,
+            @"--[^\n]*",
+            string.Empty);
+    }
+
+    private static HashSet<string> DeclaredVariables(string sqlText)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (System.Text.RegularExpressions.Match m in
+            System.Text.RegularExpressions.Regex.Matches(sqlText, @"DECLARE\s+(@\w+)"))
+        {
+            names.Add(m.Groups[1].Value);
+        }
+
+        return names;
+    }
+
+    private static HashSet<string> ParameterNames(string paramsText)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (System.Text.RegularExpressions.Match m in
+            System.Text.RegularExpressions.Regex.Matches(paramsText, @"(@\w+)\s+\w"))
+        {
+            names.Add(m.Groups[1].Value);
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// <c>@name</c> tokens inside the XQuery/XPath string literals these batches build (e.g.
+    /// <c>''(@timestamp)[1]''</c>, <c>event[@name="blocked_process_report"]</c>) are XML attribute
+    /// references, not T-SQL variables, and must not be treated as ones. By the time this runs, the
+    /// doubled <c>''</c> escaping has already been collapsed to plain <c>'</c>, so those XQuery
+    /// fragments are ordinary single-quoted string literals in the batch text -- stripping quoted
+    /// literals before scanning for <c>@</c> tokens removes them along with any other literal text that
+    /// happens to contain an <c>@</c>.
+    /// </summary>
+    private static HashSet<string> ReferencedVariables(string sqlText)
+    {
+        var withoutLiterals = System.Text.RegularExpressions.Regex.Replace(sqlText, @"'[^']*'", string.Empty);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (System.Text.RegularExpressions.Match m in
+            System.Text.RegularExpressions.Regex.Matches(withoutLiterals, @"(@\w+)"))
+        {
+            names.Add(m.Groups[1].Value);
+        }
+
+        return names;
+    }
 }
