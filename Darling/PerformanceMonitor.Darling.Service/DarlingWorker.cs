@@ -7055,6 +7055,7 @@ LIMIT 1";
                     logger.LogInformation(
                         "Raw retention purge for {Relation} did not run this pass — not covered (the coverage sweep just above measured Short or Unknown for it).",
                         relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "not_covered", null, null, logger, cancellationToken);
                     continue;
                 }
 
@@ -7070,6 +7071,7 @@ LIMIT 1";
                     logger.LogInformation(
                         "Raw retention purge for {Relation} did not run this pass — the repair epoch is stale or missing (no repair has finished under the CURRENT postmaster start yet).",
                         relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "epoch_stale", null, null, logger, cancellationToken);
                     continue;
                 }
 
@@ -7092,6 +7094,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                         logger.LogInformation(
                             "Raw retention purge for {Relation} did not run this pass — no chunks to evaluate (the job row or the oldest chunk could not be read).",
                             relation);
+                        await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "no_chunks", null, null, logger, cancellationToken);
                         continue;
                     }
 
@@ -7127,21 +7130,26 @@ AND   j.hypertable_name = '{relation}'", connection))
                     logger.LogInformation(
                         "Raw retention purge for {Relation} did not run this pass — a hole was found in the range about to be dropped.",
                         relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "hole", null, null, logger, cancellationToken);
                     continue;
                 }
 
+                var runClock = Stopwatch.StartNew();
                 var outcome = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, logger, cancellationToken);
+                runClock.Stop();
                 if (!outcome.Ran)
                 {
                     logger.LogInformation(
                         "Raw retention purge for {Relation} did not run this pass — the run itself failed with SqlState {SqlState} (see the warning above naming the timeout or error).",
                         relation, outcome.SqlState ?? "(none)");
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "run_failed", outcome.SqlState, null, logger, cancellationToken);
                 }
                 else
                 {
                     logger.LogInformation(
                         "Raw retention purge for {Relation} ran this pass — covered, epoch matched the current postmaster start, and no hole in the dropped range.",
                         relation);
+                    await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, relation, "ran", null, runClock.ElapsedMilliseconds, logger, cancellationToken);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

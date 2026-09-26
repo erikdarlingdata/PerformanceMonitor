@@ -6101,6 +6101,129 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
+    /// #4299 L3b (M1): the trigger's own record of its last decision for <paramref name="relation"/> — the
+    /// key <c>darling_last_purge</c> under the same job <c>config</c> <see cref="ConvergeRawArmedStateSql"/>
+    /// already merges into, so <c>drop_after</c> and <c>darling_armed</c> survive untouched. <c>$1</c> is the
+    /// whole record as one <c>jsonb</c> object — <c>{"at", "outcome", "sql_state", "elapsed_ms"}</c> — built
+    /// by the caller (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>) so this statement stays a plain
+    /// merge with no knowledge of which outcome it is recording. <c>||</c> merge, same discipline as
+    /// <see cref="ConvergeRawArmedStateSql"/> and <see cref="RawRepairEpochStampSql"/> — an unconditional
+    /// <c>config =</c> would drop every other key already there.
+    /// </summary>
+    public static string SetRawLastPurgeOutcomeSql(string relation)
+        => $@"SELECT alter_job(j.job_id, config => j.config || jsonb_build_object('darling_last_purge', $1::jsonb))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299 L3b (M1): reads <paramref name="relation"/>'s <c>darling_last_purge</c> record back as raw JSON
+    /// text (never parsed store-side — the caller owns the shape), parallel to <see cref="RawArmedStateSql"/>.
+    /// <c>NULL</c> when the key has never been written (a store that has not run a Periodic pass yet, or one
+    /// on a build before this record existed) — the same "absent reads as unmeasured, not innocent" posture
+    /// <see cref="RawArmedReadExpression"/> takes for the armed key, but this projection returns the raw
+    /// value rather than coalescing it, so the caller can tell "never recorded" apart from any real outcome.
+    /// </summary>
+    public static string ReadRawLastPurgeOutcomeSql(string relation)
+        => $@"SELECT j.config->>'darling_last_purge'
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299 L3b: writes <paramref name="relation"/>'s <see cref="SetRawLastPurgeOutcomeSql"/> record. Never
+    /// throws outward — this is a record of what already happened, and a failure to WRITE the record must
+    /// not be confused with a failure of the purge decision itself; the caller logs its own outcome either
+    /// way. <paramref name="outcome"/> is one of <c>not_covered</c>, <c>epoch_stale</c>, <c>hole</c>,
+    /// <c>run_failed</c>, <c>no_chunks</c> or <c>ran</c> — the caller's vocabulary, not validated here.
+    /// </summary>
+    public static async Task RecordRawLastPurgeOutcomeAsync(
+        NpgsqlConnection connection, string relation, string outcome, string? sqlState, long? elapsedMs,
+        ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            var record = $"{{\"at\":\"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\",\"outcome\":\"{outcome}\"" +
+                (sqlState is null ? ",\"sql_state\":null" : $",\"sql_state\":\"{sqlState}\"") +
+                (elapsedMs is long ms ? $",\"elapsed_ms\":{ms}" : ",\"elapsed_ms\":null") +
+                "}";
+
+            await using var write = new NpgsqlCommand(SetRawLastPurgeOutcomeSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+            write.Parameters.AddWithValue(record);
+            await write.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not record the {Outcome} purge outcome for {Relation}: {Message}", outcome, relation, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #4299 L3b: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record back as
+    /// a <see cref="RawLastPurgeRecord"/>, or <c>null</c> when the key has never been written or does not
+    /// parse (fail-closed the same direction <see cref="RawArmedReadExpression"/> takes: an unreadable record
+    /// is unmeasured, not "ran"). Tolerant of a missing job row or a read failure, same posture as
+    /// <see cref="ReadJobCadenceReadingsAsync"/> — never throws outward.
+    /// </summary>
+    public static async Task<RawLastPurgeRecord?> ReadRawLastPurgeOutcomeAsync(
+        NpgsqlConnection connection, string relation, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            await using var read = new NpgsqlCommand(ReadRawLastPurgeOutcomeSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            var value = await read.ExecuteScalarAsync(cancellationToken);
+            if (value is not string json || string.IsNullOrWhiteSpace(json))
+            {
+                return null;
+            }
+
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            var root = document.RootElement;
+
+            DateTime? at = root.TryGetProperty("at", out var atElement) && atElement.ValueKind == System.Text.Json.JsonValueKind.String
+                && DateTime.TryParse(atElement.GetString(), CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var parsedAt)
+                ? parsedAt
+                : null;
+
+            string outcome = root.TryGetProperty("outcome", out var outcomeElement) && outcomeElement.ValueKind == System.Text.Json.JsonValueKind.String
+                ? outcomeElement.GetString() ?? ""
+                : "";
+
+            string? sqlState = root.TryGetProperty("sql_state", out var sqlStateElement) && sqlStateElement.ValueKind == System.Text.Json.JsonValueKind.String
+                ? sqlStateElement.GetString()
+                : null;
+
+            long? elapsedMs = root.TryGetProperty("elapsed_ms", out var elapsedElement) && elapsedElement.ValueKind == System.Text.Json.JsonValueKind.Number
+                ? elapsedElement.GetInt64()
+                : null;
+
+            if (at is null || string.IsNullOrEmpty(outcome))
+            {
+                return null;
+            }
+
+            return new RawLastPurgeRecord(at.Value, outcome, sqlState, elapsedMs);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not read the last-purge record for {Relation}: {Message}", relation, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>
     /// #4299 L2: the current PostgreSQL start time, as the value the repair epoch stamp and its comparison
     /// both read — epoch MICROSECONDS (<c>floor(extract(epoch from pg_postmaster_start_time()) * 1e6)::bigint</c>),
     /// not the ISO-text alternative the ruling also allowed. A bigint compares exactly with no locale or
@@ -10704,7 +10827,7 @@ WHERE j.proc_name LIKE '%compression%'
     /// a SUCCESSFUL last run judges: a failed run's duration is not a cadence signal, and job failures are
     /// their own condition (<c>total_failures</c> rides the V56 telemetry).</para>
     /// </summary>
-    public const string JobCadenceReadSql = @"
+    public static readonly string JobCadenceReadSql = $@"
 SELECT
     j.job_id,
     j.proc_name || coalesce(' ' || j.hypertable_name, ''),
@@ -10716,7 +10839,7 @@ WHERE js.last_run_status = 'Success'
   AND NOT (
       j.hypertable_schema = 'collect'
       AND j.proc_name = 'policy_retention'
-      AND j.hypertable_name = ANY(ARRAY['query_stats', 'procedure_stats', 'query_store_stats'])
+      AND j.hypertable_name = ANY(ARRAY[{string.Join(", ", RawRelations.Select(r => $"'{r}'"))}])
   )";
 
     /// <summary>
@@ -11946,6 +12069,17 @@ public sealed record RetentionHoldReading(
             ? SpanSeconds.Value / (double)HorizonSeconds.Value
             : null;
 }
+
+/// <summary>
+/// #4299 L3b (M1): one raw relation's last recorded purge-trigger outcome, from
+/// <see cref="TimescaleSupport.ReadRawLastPurgeOutcomeAsync"/> — the record
+/// <see cref="TimescaleSupport.RecordRawLastPurgeOutcomeAsync"/> writes at every decision point inside
+/// <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>. <see cref="Outcome"/> is one of <c>not_covered</c>,
+/// <c>epoch_stale</c>, <c>hole</c>, <c>run_failed</c>, <c>no_chunks</c> or <c>ran</c> — named verbatim in the
+/// over-horizon alert's text (the whole point of persisting it: a page that says WHY the purge did not run
+/// instead of the generic Retention Held text, which cannot distinguish these).
+/// </summary>
+public sealed record RawLastPurgeRecord(DateTime At, string Outcome, string? SqlState, long? ElapsedMs);
 
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how
