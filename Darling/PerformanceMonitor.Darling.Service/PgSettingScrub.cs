@@ -308,8 +308,20 @@ AND   t.server_id = $11";
                    should still be caught here rather than stopping every later target). */
                 logger?.LogWarning(
                     "pg_setting_scrub: server {ServerId} failed on {Day:yyyy-MM-dd} with SQLSTATE {SqlState}; skipping this server for the rest of the run, will retry on the next start",
-                    serverId, day, ex.SqlState);
+                    serverId, day, ex.SqlState ?? (ex.InnerException is TimeoutException ? "timeout" : "client"));
                 failedServerIds.Add(serverId);
+
+                /* S2: a timed-out command whose own cancel request also fails can leave the connector
+                   broken. The next server's BeginTransactionAsync would then throw InvalidOperationException,
+                   which is not an NpgsqlException and is not caught here — that would end the whole run
+                   rather than just skipping this one server. Reopen in place so the remaining servers this
+                   run still get attempted; the marker stays withheld regardless. */
+                if (connection.State != System.Data.ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(cancellationToken);
+                }
+
                 continue;
             }
 
@@ -376,8 +388,8 @@ AND   t.server_id = $11";
            inside this transaction. 0 disables the limit entirely for this transaction, which is safe here
            because the literal server_id + day-range predicates confine decompression to ONE target's
            segment in ONE day's chunk (settings × collections that day — ~8k rows hourly, ~500k at a
-           1-minute cadence), not the whole chunk; MaxKeysPerUpdate bounds the key array, not the
-           decompress. */
+           1-minute cadence), not the whole chunk; the literal server_id plus the day range bound the
+           decompress, not MaxKeysPerUpdate, which only bounds the key array passed to one UPDATE. */
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         /* Guarded, not a bare SET LOCAL: a bring-your-own store on TimescaleDB older than 2.14 (the GUC
            arrived in timescale/timescaledb PR #6566) has no such setting. current_setting(name, true)

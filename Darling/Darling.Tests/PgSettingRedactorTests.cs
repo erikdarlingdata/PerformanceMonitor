@@ -17,7 +17,7 @@ public sealed class PgSettingRedactorTests
     [Fact]
     public void RulesVersionIsPinned()
     {
-        Assert.Equal(1, PgSettingRedactor.RulesVersion);
+        Assert.Equal(2, PgSettingRedactor.RulesVersion);
     }
 
     [Fact]
@@ -164,9 +164,10 @@ public sealed class PgSettingRedactorTests
     [InlineData("restore_command",
         "password = S16 host=foo",
         "password=******** host=foo")]
+    // RulesVersion 2 (L2 follow-up): curl -u now masks the part after the colon; see the dedicated cases below.
     [InlineData("restore_command",
         "curl -u admin:S22",
-        "curl -u admin:S22")]
+        "curl -u admin:********")]
     [InlineData("primary_conninfo",
         "password='S5 unterminated",
         "password=********")]
@@ -180,6 +181,51 @@ public sealed class PgSettingRedactorTests
     [InlineData("unix_socket_directories", "passfile=/x/.pgpass", "passfile=********")]
     [InlineData("primary_conninfo", "host=a user=b", "host=a user=b")]
     [InlineData("primary_conninfo", "", "")]
+    // RulesVersion 2 (review round 2's L2): a percent-encoded key name in a URI query — %77 is 'w', so
+    // pass%77ord decodes to "password". The key text itself stays encoded in the output; only the value
+    // is masked. Untouched neighbour: an encoded key that does NOT decode to a password marker is left alone.
+    [InlineData("primary_conninfo",
+        "postgresql://alice@host/db?pass%77ord=hunter2",
+        "postgresql://alice@host/db?pass%77ord=********")]
+    [InlineData("primary_conninfo",
+        "postgresql://alice@host/db?us%65r=x",
+        "postgresql://alice@host/db?us%65r=x")]
+    // RulesVersion 2: a double-quoted "password = x" assignment (quote before the name, spaces around '=').
+    // Untouched neighbour: an adjacent unrelated quoted field stays as it is.
+    [InlineData("custom.json_blob",
+        "{\"password\" = \"hunter2\", \"host\" = \"foo\"}",
+        "{\"password\" = \"********\", \"host\" = \"foo\"}")]
+    // RulesVersion 2: curl -u user:x and --user user:x mask the part after the colon, not the user name.
+    [InlineData("archive_command",
+        "curl -u admin:hunter2 https://x",
+        "curl -u admin:******** https://x")]
+    [InlineData("archive_command",
+        "curl --user admin:hunter2 https://x",
+        "curl --user admin:******** https://x")]
+    // Untouched neighbour: -u with no colon (no password at all) is left alone.
+    [InlineData("archive_command",
+        "curl -u admin https://x",
+        "curl -u admin https://x")]
+    // RulesVersion 2: sshpass -p x.
+    [InlineData("archive_command",
+        "sshpass -p hunter2 ssh user@host",
+        "sshpass -p ******** ssh user@host")]
+    // RulesVersion 2: a SAS or pre-signed URL signature query parameter.
+    [InlineData("primary_conninfo",
+        "https://acct.blob.core.windows.net/c/f?sig=abc123%2Fdef",
+        "https://acct.blob.core.windows.net/c/f?sig=********")]
+    [InlineData("primary_conninfo",
+        "https://b.s3.amazonaws.com/f?X-Amz-Signature=abc123",
+        "https://b.s3.amazonaws.com/f?X-Amz-Signature=********")]
+    [InlineData("primary_conninfo",
+        "https://storage.googleapis.com/b/f?X-Goog-Signature=abc123",
+        "https://storage.googleapis.com/b/f?X-Goog-Signature=********")]
+    // Untouched neighbour: an adjacent, unrelated query parameter next to a signature stays as it is.
+    [InlineData("primary_conninfo",
+        "https://acct.blob.core.windows.net/c/f?sv=2024&sig=abc123",
+        "https://acct.blob.core.windows.net/c/f?sv=2024&sig=********")]
+    // Allowlist check against the new rules: an allowlisted policy name stays untouched by every new regex.
+    [InlineData("rds.accepted_password_auth_method", "md5+password", "md5+password")]
     public void RedactsPerTheRuling_AndIsIdempotent(string name, string value, string expected)
     {
         var actual = PgSettingRedactor.Redact(name, value);
