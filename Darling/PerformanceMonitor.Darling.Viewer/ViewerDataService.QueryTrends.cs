@@ -475,6 +475,21 @@ public sealed partial class ViewerDataService
     }
 
     /// <summary>
+    /// #4310 site 3's own minimum window (ruling issuecomment-5836972848 item 5's pattern, restated per-site as
+    /// <see cref="PerformanceMonitor.Darling.Service.Mcp.DarlingDataReader.QueryStoreTopMinWindow"/> already
+    /// does): below this window the table's own gate round trips (a second connection, a transaction, the
+    /// coverage/floor probes) cost more than they save, so the read stays raw regardless of coverage. Does NOT
+    /// share <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> (the grid's 12h) — this site's query shape
+    /// measured differently. 48 hours (lane 4310s3t, rig port 55485, NULL-free 15-day seed at a field store's
+    /// rate, end-to-end through <see cref="GetQueryStoreDurationTrendAsync"/>, gate-routed, 1 cold + 5 warm):
+    /// at 24h the table lost (279 ms raw vs. 370 ms table, lane 4310s3f); at 48h the table won (median of 5,
+    /// raw 423.0 ms vs. table 361.4 ms); at 72h the table also won (raw 515.0 ms vs. table 380.5 ms). Raw vs.
+    /// table point equality was exact at 48h (46 of 46 points) on the NULL-free seed. 48h is the lower of the
+    /// two measured wins, so it is the threshold — the exact crossover between 24h and 48h was not bisected.
+    /// </summary>
+    public static readonly TimeSpan QueryStoreDurationTrendMinWindow = TimeSpan.FromHours(48);
+
+    /// <summary>
     /// Query Store duration trend over the window — routed through the corrected rollup where the store has
     /// one (#2736; see <see cref="QueryStoreDurationTrendRollupSql"/>). The raw-only read is kept unchanged
     /// as the fallback for stores without a materialized rollup, where it is affordable.
@@ -486,7 +501,7 @@ public sealed partial class ViewerDataService
     /// PR left out because its routing is a watermark and not the tier ladder. The MCP tool has disclosed
     /// this floor as <c>routing.unserved_before</c> since #2736; the chart now reads the same rule.</para>
     /// </summary>
-    /// <para>#4310 site 3: below <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> the read stays exactly
+    /// <para>#4310 site 3: below <see cref="QueryStoreDurationTrendMinWindow"/> the read stays exactly
     /// as it was (the rollup route above, or raw). At or above it, and only when the store's schema is V145 or
     /// later, <see cref="QueryStoreIntervalWide.ReadsTableAsync"/> gets ONE chance to route the RAW arm (never
     /// the rollup route, which stays untouched — this is #2736's own fallback path, the pattern site 3 mirrors
@@ -510,7 +525,7 @@ public sealed partial class ViewerDataService
         else
         {
             points = null!;
-            if (endUtc - startUtc >= QueryStoreIntervalWide.GridWideMinWindow)
+            if (endUtc - startUtc >= QueryStoreDurationTrendMinWindow)
             {
                 var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
                 if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
@@ -551,7 +566,7 @@ public sealed partial class ViewerDataService
             }
 
             var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
-                connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
+                connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreDurationTrendMinWindow,
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
             if (!useTable)
             {

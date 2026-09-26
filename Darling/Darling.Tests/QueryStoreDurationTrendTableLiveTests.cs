@@ -78,6 +78,16 @@ public sealed class QueryStoreDurationTrendTableLiveTests
         var shortWindowSeries = await viewer.GetQueryStoreDurationTrendAsync(ServerId, WindowStart, shortWindowEnd);
         Assert.Equal(shortRawPoints.Select(p => (p.CollectionTime, p.Value, p.ExecutionCount)).ToList(),
             shortWindowSeries.Points.Select(p => (p.CollectionTime, p.Value, p.ExecutionCount)).ToList());
+
+        /* #4310 site 3's OWN threshold is 48h, not the grid's 12h: a 24h window (above 12h, below 48h) must
+           still return exactly raw's own points, unrouted, because it is below QueryStoreDurationTrendMinWindow.
+           This pin is RED against the pre-fix code, which routed any window >= 12h (GridWideMinWindow) to the
+           table — a 24h window there would have hit the table instead of staying raw. */
+        var midWindowEnd = WindowStart.AddHours(24);
+        var midRawPoints = await ReadPointsAsync(postgres, ViewerDataService.QueryStoreDurationTrendSql, WindowStart, midWindowEnd, ct);
+        var midWindowSeries = await viewer.GetQueryStoreDurationTrendAsync(ServerId, WindowStart, midWindowEnd);
+        Assert.Equal(midRawPoints.Select(p => (p.CollectionTime, p.Value, p.ExecutionCount)).ToList(),
+            midWindowSeries.Points.Select(p => (p.CollectionTime, p.Value, p.ExecutionCount)).ToList());
     }
 
     /// <summary>
