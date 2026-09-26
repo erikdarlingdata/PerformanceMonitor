@@ -7012,7 +7012,17 @@ LIMIT 1";
     /// <c>MaterializationHoleRepairSummary</c> to carry the deferred ranges or have the trigger run its own
     /// fresh <see cref="TimescaleSupport.CapMaterializationHoleRepairs"/>-shaped probe instead of reusing empty.</para>
     /// </summary>
-    private async Task TriggerRawPurgeAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    private Task TriggerRawPurgeAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+        => TriggerRawPurgeCoreAsync(connection, _logger, cancellationToken);
+
+    /// <summary>
+    /// #4299 L2c seam: the exact body of <see cref="TriggerRawPurgeAsync"/>, extracted as an internal static
+    /// method so <c>Darling.Tests</c> (already reachable via this project's <c>InternalsVisibleTo</c>) can
+    /// drive it directly against a live store without standing up a whole <see cref="DarlingWorker"/>. No
+    /// behaviour change: the instance method above is now a one-line forward to this, with <c>_logger</c>
+    /// threaded through as the <paramref name="logger"/> parameter.
+    /// </summary>
+    internal static async Task TriggerRawPurgeCoreAsync(NpgsqlConnection connection, ILogger logger, CancellationToken cancellationToken)
     {
         var emptyDeferred = Array.Empty<(DateTime Start, DateTime End)>();
 
@@ -7029,7 +7039,7 @@ LIMIT 1";
 
                 if (!armed)
                 {
-                    _logger.LogInformation(
+                    logger.LogInformation(
                         "Raw retention purge for {Relation} did not run this pass — not covered (the coverage sweep just above measured Short or Unknown for it).",
                         relation);
                     continue;
@@ -7044,7 +7054,7 @@ LIMIT 1";
 
                 if (!epochMatches)
                 {
-                    _logger.LogInformation(
+                    logger.LogInformation(
                         "Raw retention purge for {Relation} did not run this pass — the repair epoch is stale or missing (no repair has finished under the CURRENT postmaster start yet).",
                         relation);
                     continue;
@@ -7066,7 +7076,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     if (!await reader.ReadAsync(cancellationToken) || await reader.IsDBNullAsync(1, cancellationToken))
                     {
                         /* No job row, or raw holds no chunks at all — nothing to drop, nothing to gate. */
-                        _logger.LogInformation(
+                        logger.LogInformation(
                             "Raw retention purge for {Relation} did not run this pass — no chunks to evaluate (the job row or the oldest chunk could not be read).",
                             relation);
                         continue;
@@ -7101,29 +7111,29 @@ AND   j.hypertable_name = '{relation}'", connection))
 
                 if (!holeFree)
                 {
-                    _logger.LogInformation(
+                    logger.LogInformation(
                         "Raw retention purge for {Relation} did not run this pass — a hole was found in the range about to be dropped.",
                         relation);
                     continue;
                 }
 
-                var ran = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, _logger, cancellationToken);
+                var ran = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, logger, cancellationToken);
                 if (!ran)
                 {
-                    _logger.LogInformation(
+                    logger.LogInformation(
                         "Raw retention purge for {Relation} did not run this pass — the run itself failed (see the warning above naming the timeout or error).",
                         relation);
                 }
                 else
                 {
-                    _logger.LogInformation(
+                    logger.LogInformation(
                         "Raw retention purge for {Relation} ran this pass — covered, epoch matched the current postmaster start, and no hole in the dropped range.",
                         relation);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogInformation(
+                logger.LogInformation(
                     "Raw retention purge for {Relation} did not run this pass — the trigger's own gate check failed: {Message}",
                     relation, ex.Message);
             }
