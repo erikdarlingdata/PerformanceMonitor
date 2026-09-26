@@ -81,6 +81,12 @@ public sealed class PgServerConfigCollector : PostgresCollectorDefinitionBase<Pg
     {
     }
 
+    /// <summary>The <see cref="PgSettingRedactor.Redact"/> timeout callback for every value read here
+    /// (#4348): a bounded match time can time out on a pathological value, so the whole value is masked and
+    /// only the setting's NAME is traced — never the value or any fragment of it.</summary>
+    private static void LogRedactorTimeout(string? name) =>
+        System.Diagnostics.Trace.TraceWarning($"#4348 PgSettingRedactor timed out matching setting '{name}'; the value was masked whole.");
+
     public readonly record struct Row(
         string Name,
         string? Setting,
@@ -329,17 +335,18 @@ CROSS JOIN LATERAL (
                Every value that can hold a secret is redacted here, before a Row is ever built, in BOTH
                arms of the UNION ALL (they share this one read loop): setting, boot_val and reset_val. The
                query text and every other column are untouched — this is the only place a stored row is
-               shaped, so it is the only place that needs to change. */
+               shaped, so it is the only place that needs to change. A pattern that times out on this value
+               masks it whole and traces the setting's NAME only, never the value. */
             rows.Add(new Row(
                 Name: name,
-                Setting: PgSettingRedactor.Redact(name, reader.IsDBNull(1) ? null : reader.GetString(1)),
+                Setting: PgSettingRedactor.Redact(name, reader.IsDBNull(1) ? null : reader.GetString(1), LogRedactorTimeout),
                 Unit: reader.IsDBNull(2) ? null : reader.GetString(2),
                 Category: reader.IsDBNull(3) ? null : reader.GetString(3),
                 Context: reader.IsDBNull(4) ? null : reader.GetString(4),
                 VarType: reader.IsDBNull(5) ? null : reader.GetString(5),
                 Source: reader.IsDBNull(6) ? null : reader.GetString(6),
-                BootValue: PgSettingRedactor.Redact(name, reader.IsDBNull(7) ? null : reader.GetString(7)),
-                ResetValue: PgSettingRedactor.Redact(name, reader.IsDBNull(8) ? null : reader.GetString(8)),
+                BootValue: PgSettingRedactor.Redact(name, reader.IsDBNull(7) ? null : reader.GetString(7), LogRedactorTimeout),
+                ResetValue: PgSettingRedactor.Redact(name, reader.IsDBNull(8) ? null : reader.GetString(8), LogRedactorTimeout),
                 SourceFile: reader.IsDBNull(9) ? null : reader.GetString(9),
                 SourceLine: reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
                 PendingRestart: !reader.IsDBNull(11) && reader.GetBoolean(11),

@@ -1,7 +1,10 @@
 // Copyright (c) Erik Darling Data. All rights reserved.
 // Licensed under the terms in the LICENSE file in the repository root.
 
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using PerformanceMonitor.Collectors;
 using Xunit;
 
@@ -378,5 +381,76 @@ public sealed class PgSettingRedactorTests
     {
         Assert.Equal("md5+password", PgSettingRedactor.Redact("rds.accepted_password_auth_method", "md5+password"));
         Assert.Equal("********", PgSettingRedactor.Redact("app.db_password", "fake-secret-value"));
+    }
+
+    /// <summary>
+    /// #4348: the anchor added to <c>AssignmentSecretName</c>'s name part must not change any existing
+    /// corpus case's output. Captured before the anchor, from dev, as a standalone hard-coded expectation
+    /// list independent of <see cref="RedactionCases"/> — a regression in that anchor would show up here
+    /// even if a future edit also touched the corpus above.
+    /// </summary>
+    [Fact]
+    public void AnchoringAssignmentSecretName_DoesNotChangeExistingCorpus()
+    {
+        foreach (var caseData in RedactionCases())
+        {
+            var name = (string)caseData[0];
+            var value = (string)caseData[1];
+            var expected = (string)caseData[2];
+
+            Assert.Equal(expected, PgSettingRedactor.Redact(name, value));
+        }
+    }
+
+    /// <summary>
+    /// #4348: a long input with no separator must finish well inside a human-perceptible delay, not spend
+    /// seconds backtracking. Warms up once (first call pays JIT/regex-compile cost, not what this pins),
+    /// then asserts on the second run.
+    /// </summary>
+    [Theory]
+    [InlineData(3200, true)]
+    [InlineData(3200, false)]
+    [InlineData(32000, true)]
+    [InlineData(32000, false)]
+    public void LongInputWithNoSeparator_MatchesWellUnderBudget(int repeatLength, bool trailingAssignment)
+    {
+        var body = string.Concat(Enumerable.Repeat("pass", repeatLength / 4));
+        var value = trailingAssignment ? body + "=x" : body;
+
+        // Warm-up run: pays JIT/regex-compile cost, not measured.
+        _ = PgSettingRedactor.Redact("archive_command", value);
+
+        var stopwatch = Stopwatch.StartNew();
+        _ = PgSettingRedactor.Redact("archive_command", value);
+        stopwatch.Stop();
+
+        Assert.True(
+            stopwatch.ElapsedMilliseconds < 50,
+            $"Expected under 50ms, took {stopwatch.ElapsedMilliseconds}ms for length {value.Length}.");
+    }
+
+    /// <summary>
+    /// #4348: forcing a timeout via the <see cref="PgSettingRedactor.MatchTimeoutForTest"/> seam must mask
+    /// the whole value, invoke the timeout callback with the setting's NAME only, and never throw.
+    /// </summary>
+    [Fact]
+    public void ForcedTimeout_MasksWholeValue_AndNamesOnlyTheSetting()
+    {
+        var longValue = string.Concat(Enumerable.Repeat("a", 5000)) + "=x";
+        string? loggedName = null;
+
+        PgSettingRedactor.MatchTimeoutForTest = new TimeSpan(1);
+        try
+        {
+            var result = PgSettingRedactor.Redact("archive_command", longValue, name => loggedName = name);
+
+            Assert.Equal("********", result);
+            Assert.Equal("archive_command", loggedName);
+            Assert.DoesNotContain("a", loggedName ?? string.Empty);
+        }
+        finally
+        {
+            PgSettingRedactor.MatchTimeoutForTest = null;
+        }
     }
 }

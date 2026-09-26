@@ -65,6 +65,48 @@ public static class PgSettingRedactor
 
     private const string Mask = "********";
 
+    /// <summary>
+    /// A per-regex match-time bound (#4348): a pathological value (a long run with no separator, feeding one
+    /// of the lookaround-heavy patterns below) could otherwise pin the engine backtracking well past the
+    /// scrub's own budget. Every pattern that has no lookaround, backreference, atomic group or conditional
+    /// runs under <see cref="System.Text.RegularExpressions.RegexOptions.NonBacktracking"/> instead, since
+    /// that option accepts none of those constructs and needs no timeout of its own — its match time is
+    /// already linear in the input length.
+    /// </summary>
+    private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// A test seam (#4348): overridden by a test to force <see cref="System.Text.RegularExpressions.RegexMatchTimeoutException"/>
+    /// on a normal-shaped input without needing an input large enough to actually run past
+    /// <see cref="MatchTimeout"/>. Null (the default, and what production always leaves it at) means every
+    /// timeout-bearing pattern below runs under its own compiled-in <see cref="MatchTimeout"/>; a non-null
+    /// value overrides all of them for the duration of the test, at the cost of building an uncompiled
+    /// throwaway <see cref="Regex"/> per call — acceptable only because this path is test-only.
+    /// </summary>
+    internal static TimeSpan? MatchTimeoutForTest;
+
+    /// <summary>Wraps one lookaround-bearing pattern so it always runs under a match timeout, while still
+    /// letting a test force a much shorter one via <see cref="MatchTimeoutForTest"/> without rebuilding
+    /// every call on the production path.</summary>
+    private sealed class TimeBoundPattern
+    {
+        private readonly string _pattern;
+        private readonly RegexOptions _options;
+        private readonly Regex _default;
+
+        public TimeBoundPattern(string pattern, RegexOptions options)
+        {
+            _pattern = pattern;
+            _options = options;
+            _default = new Regex(pattern, options, MatchTimeout);
+        }
+
+        public string Replace(string input, MatchEvaluator evaluator) =>
+            (MatchTimeoutForTest is TimeSpan overrideTimeout
+                ? new Regex(_pattern, _options, overrideTimeout)
+                : _default).Replace(input, evaluator);
+    }
+
     /// <summary>Names whose value is masked in full when the setting is extension-scoped (#4348), or when a
     /// marker sits in ANY dot-separated segment of the name, not only the last (review round 1, M5/L1).</summary>
     private static readonly string[] WholeValueNameMarkers =
@@ -90,7 +132,7 @@ public static class PgSettingRedactor
     /// value when the closing quote never arrives — round 1's L2), plus whatever non-whitespace immediately
     /// follows the closing quote (round 1's M4: a quoted value glued to a trailing <c>;</c> or another token
     /// with no space), or an unquoted run of non-whitespace.</summary>
-    private static readonly Regex LibpqPasswordKeyword = new(
+    private static readonly TimeBoundPattern LibpqPasswordKeyword = new(
         @"(?<=^|\s)(?<kw>sslpassword|password)\s*=\s*(?:'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -103,13 +145,13 @@ public static class PgSettingRedactor
     /// whitespace.</summary>
     private static readonly Regex UriUserInfoPassword = new(
         @"://(?<user>[^:@/\s\u00A0]*):[^@/]*@",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.NonBacktracking | RegexOptions.CultureInvariant);
 
     /// <summary>A <c>password</c> query parameter in a URI's query string. A quoted value
     /// (<c>?password="a b"</c>) is masked in full — quotes and all — via the same quote-aware value
     /// alternation the other rules use, rather than stopping at the first quote character and leaving the
     /// rest of the value readable.</summary>
-    private static readonly Regex UriQueryPassword = new(
+    private static readonly TimeBoundPattern UriQueryPassword = new(
         @"(?<=[?&])(?<key>password)=(?:[""'][^""'&#]*(?:[""']|$)|[^&#\s'""]*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -125,8 +167,8 @@ public static class PgSettingRedactor
     /// non-whitespace immediately follows the closing quote (round 1's M4), so a quoted value with an
     /// <c>=</c>, space, or trailing punctuation inside or after it is not mistaken for the start of the next
     /// token.</summary>
-    private static readonly Regex AssignmentSecretName = new(
-        @"(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)=(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
+    private static readonly TimeBoundPattern AssignmentSecretName = new(
+        @"(?<![\w.-])(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)=(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>A space-separated option whose name contains PASS, SECRET, TOKEN, CREDENTIAL, PWD, or a
@@ -137,7 +179,7 @@ public static class PgSettingRedactor
     /// <c>--password hunter2</c> and <c>--secret-access-key hunter2</c> have no <c>=</c> at all, so
     /// <see cref="AssignmentSecretName"/> never fires on them). <c>(?!-)</c> keeps a value-less flag such as
     /// <c>--no-password -h x</c> from swallowing the next option as its value.</summary>
-    private static readonly Regex OptionSecretSpaced = new(
+    private static readonly TimeBoundPattern OptionSecretSpaced = new(
         @"(?<=^|\s)(?<opt>--?[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)\s+(?!-)(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -146,7 +188,7 @@ public static class PgSettingRedactor
     /// tested against <see cref="QueryKeySecretMarkers"/>, so an encoded variant of any letter in the key
     /// still matches; the RAW (still-encoded) key text is kept in the output, only the value is masked. A
     /// quoted value (<c>?pass%77ord="x"</c>) is masked in full — quotes and all.</summary>
-    private static readonly Regex UriQueryKeyAnyEncoding = new(
+    private static readonly TimeBoundPattern UriQueryKeyAnyEncoding = new(
         @"(?<=[?&])(?<key>(?:%[0-9A-Fa-f]{2}|[\w.-])+)=(?:[""'][^""'&#]*(?:[""']|$)|[^&#\s'""]*)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -154,7 +196,7 @@ public static class PgSettingRedactor
     /// <c>X-Amz-Signature</c> (AWS presigned) or <c>X-Goog-Signature</c> (GCS presigned). These are
     /// capability tokens, not passwords by name, so they need their own key list rather than riding
     /// <see cref="WholeValueNameMarkers"/>'s substring test (none of those markers appear in "sig").</summary>
-    private static readonly Regex UriQuerySignature = new(
+    private static readonly TimeBoundPattern UriQuerySignature = new(
         @"(?<=[?&])(?<key>sig|X-Amz-Signature|X-Goog-Signature)=[^&#\s'""]*",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -170,7 +212,7 @@ public static class PgSettingRedactor
     /// the value's end is <c>\k&lt;q&gt;</c>, not a quote of its own). Only the value half is masked; the
     /// quotes and the name are kept as they were. The value's own quote character does not have to match the
     /// name's.</summary>
-    private static readonly Regex QuotedSpacedAssignment = new(
+    private static readonly TimeBoundPattern QuotedSpacedAssignment = new(
         @"(?<q>[""'])(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)(?<nameq>[""']?)\s*=\s*(?:(?<valq>[""'])(?<val>[^""']*)\k<valq>|(?<val>[^""']*)\k<q>)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -185,7 +227,7 @@ public static class PgSettingRedactor
     /// consumes a run of quoted segments glued to bare characters (<c>u:"a b"</c>), not just the first
     /// non-space run, so nothing after an embedded-space quoted chunk stays unmasked. A bare <c>-u user</c> with no
     /// colon (no password at all) does not match.</summary>
-    private static readonly Regex CurlUserColon = new(
+    private static readonly TimeBoundPattern CurlUserColon = new(
         @"(?<=^|\s)(?:(?<flag>-u|--user|-U|--proxy-user)[\s=]*""(?<user>[^:""]+):(?<val>(?:\\.|[^""\\])*)""|(?<flag>-u|--user|-U|--proxy-user)[\s=]*'(?<user>[^:']+):(?<val>[^']*)'|(?<flag>-u|--user|-U|--proxy-user)[\s=]*(?<user>[^:\s]+):(?<val>(?:""[^""]*""|'[^']*'|\S)+))",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -201,7 +243,7 @@ public static class PgSettingRedactor
     /// text instead of the real <c>-p</c> value that follows it (<c>sshpass -P prompt -p s3</c> masks
     /// <c>s3</c>, not <c>prompt</c>). A quoted value with an embedded space is masked whole via the
     /// quote-aware value alternation.</summary>
-    private static readonly Regex SshpassOption = new(
+    private static readonly TimeBoundPattern SshpassOption = new(
         @"(?<prefix>(?:^|(?<=/|\s))sshpass(?:\s+\S+)*?\s+)(?-i:-p)\s*(?:""(?<val>[^""]*)""|'(?<val>[^']*)'|(?<val>\S+))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
@@ -244,8 +286,16 @@ public static class PgSettingRedactor
     /// Masks the secret out of <paramref name="value"/> per the rules on this type, given the setting's
     /// <paramref name="name"/>. Never throws. <see langword="null"/> in, <see langword="null"/> out; an empty
     /// string is returned unchanged, since there is nothing in it to mask.
+    ///
+    /// <para>Every pattern below runs under a bounded match time (#4348): the lookaround-bearing ones under
+    /// <see cref="MatchTimeout"/>, the rest under <see cref="RegexOptions.NonBacktracking"/>, whose match
+    /// time is linear in the input and needs no timeout of its own. If ANY pattern still times out, the
+    /// whole value is masked rather than partially redacted or left as-is — a value the redactor could not
+    /// finish examining in time is treated the same as one it decided outright needed a full mask — and
+    /// <paramref name="onMatchTimeout"/>, if given, is invoked with only the setting's NAME: never the value
+    /// or any fragment of it.</para>
     /// </summary>
-    public static string? Redact(string? name, string? value)
+    public static string? Redact(string? name, string? value, Action<string?>? onMatchTimeout = null)
     {
         if (string.IsNullOrEmpty(value))
         {
@@ -257,32 +307,40 @@ public static class PgSettingRedactor
             return Mask;
         }
 
-        var redacted = LibpqPasswordKeyword.Replace(value, static m => m.Groups["kw"].Value + "=" + Mask);
-        redacted = UriUserInfoPassword.Replace(redacted, static m => "://" + m.Groups["user"].Value + ":" + Mask + "@");
-        redacted = UriQueryPassword.Replace(redacted, static m => m.Groups["key"].Value + "=" + Mask);
-        redacted = UriQueryKeyAnyEncoding.Replace(redacted, static m => IsQueryKeySecret(m.Groups["key"].Value)
-            ? m.Groups["key"].Value + "=" + Mask
-            : m.Value);
-        redacted = UriQuerySignature.Replace(redacted, static m => m.Groups["key"].Value + "=" + Mask);
-        redacted = QuotedSpacedAssignment.Replace(redacted, static m =>
+        try
         {
-            var head = m.Groups["q"].Value + m.Groups["name"].Value + m.Groups["nameq"].Value + " = ";
+            var redacted = LibpqPasswordKeyword.Replace(value, static m => m.Groups["kw"].Value + "=" + Mask);
+            redacted = UriUserInfoPassword.Replace(redacted, static m => "://" + m.Groups["user"].Value + ":" + Mask + "@");
+            redacted = UriQueryPassword.Replace(redacted, static m => m.Groups["key"].Value + "=" + Mask);
+            redacted = UriQueryKeyAnyEncoding.Replace(redacted, static m => IsQueryKeySecret(m.Groups["key"].Value)
+                ? m.Groups["key"].Value + "=" + Mask
+                : m.Value);
+            redacted = UriQuerySignature.Replace(redacted, static m => m.Groups["key"].Value + "=" + Mask);
+            redacted = QuotedSpacedAssignment.Replace(redacted, static m =>
+            {
+                var head = m.Groups["q"].Value + m.Groups["name"].Value + m.Groups["nameq"].Value + " = ";
 
-            // The value is either separately quoted ("password" = "hunter2", valq matched — the value
-            // carries its own opening and closing quote pair, kept around the mask), or it is bare and the
-            // whole "name = value" assignment shares ONE quote pair, so the value's only closing quote is
-            // the outer q coming back around via \k<q> ("password = hunter2" — only a trailing quote, no
-            // separate opening one, goes after the mask).
-            return m.Groups["valq"].Success
-                ? head + m.Groups["valq"].Value + Mask + m.Groups["valq"].Value
-                : head + Mask + m.Groups["q"].Value;
-        });
-        redacted = AssignmentSecretName.Replace(redacted, static m => m.Groups["name"].Value + "=" + Mask);
-        redacted = OptionSecretSpaced.Replace(redacted, static m => m.Groups["opt"].Value + " " + Mask);
-        redacted = CurlUserColon.Replace(redacted, static m => m.Groups["flag"].Value + " " + m.Groups["user"].Value + ":" + Mask);
-        redacted = SshpassOption.Replace(redacted, static m => m.Groups["prefix"].Value + "-p " + Mask);
+                // The value is either separately quoted ("password" = "hunter2", valq matched — the value
+                // carries its own opening and closing quote pair, kept around the mask), or it is bare and the
+                // whole "name = value" assignment shares ONE quote pair, so the value's only closing quote is
+                // the outer q coming back around via \k<q> ("password = hunter2" — only a trailing quote, no
+                // separate opening one, goes after the mask).
+                return m.Groups["valq"].Success
+                    ? head + m.Groups["valq"].Value + Mask + m.Groups["valq"].Value
+                    : head + Mask + m.Groups["q"].Value;
+            });
+            redacted = AssignmentSecretName.Replace(redacted, static m => m.Groups["name"].Value + "=" + Mask);
+            redacted = OptionSecretSpaced.Replace(redacted, static m => m.Groups["opt"].Value + " " + Mask);
+            redacted = CurlUserColon.Replace(redacted, static m => m.Groups["flag"].Value + " " + m.Groups["user"].Value + ":" + Mask);
+            redacted = SshpassOption.Replace(redacted, static m => m.Groups["prefix"].Value + "-p " + Mask);
 
-        return redacted;
+            return redacted;
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            onMatchTimeout?.Invoke(name);
+            return Mask;
+        }
     }
 
     /// <summary>Names that would otherwise trip <see cref="WholeValueNameMarkers"/>'s dotted-name test but
