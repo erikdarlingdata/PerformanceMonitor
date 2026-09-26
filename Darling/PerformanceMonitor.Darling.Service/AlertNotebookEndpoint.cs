@@ -61,6 +61,13 @@ internal static partial class AlertNotebookEndpoint
     /// versions.</summary>
     internal const int MechanicalTemplateVersion = 1;
 
+    /// <summary>Test-only seam (#4425): counts every call into <see cref="PrefetchAsync"/>, so a unit test can
+    /// pin "a no-context family makes zero pre-fetch calls" against the SAME <see cref="ShouldPrefetch"/> gate
+    /// <see cref="BuildCellsAsync"/> and <see cref="Map"/> use, instead of only asserting the gate function's
+    /// return value in isolation. Never read or reset by production code; a test that reads it must snapshot
+    /// the count before and after and diff, since the counter is process-wide and not reset between tests.</summary>
+    internal static int s_prefetchCallsForTest;
+
     /// <summary>Maps <c>GET /api/alert-notebook</c>. Called once from <see cref="DarlingWebEndpoints.MapAll"/>,
     /// after the auth middleware like every sibling route.</summary>
     public static void Map(WebApplication app, NpgsqlDataSource postgres, DarlingAnalysisService analysis, ILogger logger)
@@ -197,42 +204,9 @@ internal static partial class AlertNotebookEndpoint
                 postgres, serverId, fleetLevelStore, metric, anchor, now, statusHistoryRows, matchedRow, logger, context.RequestAborted);
 
             var lookbackHours = FamilyLookbackHours(metric);
-            var trimmedMetric = string.IsNullOrWhiteSpace(metric) ? null : metric.Trim();
-            var resolvedAuthored = ResolveAuthored(trimmedMetric);
-
-            JsonArray cells;
-            string templateId;
-            int templateVersion;
-
-            if (resolvedAuthored is not null)
-            {
-                var (authored, kind) = resolvedAuthored.Value;
-                var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
-                var authoredContext = ShouldPrefetch(authored, kind)
-                    ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, context.RequestAborted, logger, notes)
-                    : AuthoredContext.Empty;
-                cells = authored.Invoke(
-                    metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status, authoredContext);
-                templateId = authored.Id;
-                templateVersion = authored.Version;
-            }
-            else
-            {
-                var sections = DarlingTriageEndpoint.SectionsFor(metric);
-                cells = new JsonArray
-                {
-                    HeaderCell(metric, serverName, matchedIncident, matchedRow),
-                    StatusCell(status),
-                };
-
-                foreach (var section in sections)
-                {
-                    cells.Add(ReadCell(section, serverName, asOf, lookbackHours));
-                }
-
-                templateId = "mechanical/" + (trimmedMetric ?? "default");
-                templateVersion = MechanicalTemplateVersion;
-            }
+            var (cells, templateId, templateVersion) = await BuildCellsAsync(
+                metric, serverName, asOf, windowEnd, serverId, anchor, postgres, analysis, context.RequestAborted,
+                logger, notes, matchedIncident, matchedRow, status, lookbackHours);
 
             var body = new JsonObject
             {
@@ -253,6 +227,49 @@ internal static partial class AlertNotebookEndpoint
 
             return Results.Text(body.ToJsonString(), "application/json");
         });
+    }
+
+    /// <summary>The decide-and-build step <see cref="Map"/>'s handler delegates to (extracted for #4425 so a
+    /// unit test can drive the exact same routing + pre-fetch-gate + builder-invoke path <c>Map</c> uses,
+    /// without standing up a full <see cref="WebApplication"/>). Resolves the authored template for
+    /// <paramref name="metric"/>, applies <see cref="ShouldPrefetch"/>'s gate, and returns the cells plus the
+    /// template id/version — the SAME three values <c>Map</c>'s handler assembles the response body from.
+    /// Falls back to the mechanical per-metric read list when no authored template matches, unchanged from
+    /// before this extraction.</summary>
+    internal static async Task<(JsonArray Cells, string TemplateId, int TemplateVersion)> BuildCellsAsync(
+        string? metric, string? serverName, string? asOf, DateTime windowEnd, int? serverId, DateTime anchor,
+        NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct,
+        ILogger? logger, JsonArray? notes, AlertIncident? matchedIncident,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow, string status, string lookbackHours)
+    {
+        var trimmedMetric = string.IsNullOrWhiteSpace(metric) ? null : metric.Trim();
+        var resolvedAuthored = ResolveAuthored(trimmedMetric);
+
+        if (resolvedAuthored is not null)
+        {
+            var (authored, kind) = resolvedAuthored.Value;
+            var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
+            var authoredContext = ShouldPrefetch(authored, kind)
+                ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, ct, logger, notes)
+                : AuthoredContext.Empty;
+            var authoredCells = authored.Invoke(
+                metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status, authoredContext);
+            return (authoredCells, authored.Id, authored.Version);
+        }
+
+        var sections = DarlingTriageEndpoint.SectionsFor(metric);
+        var mechanicalCells = new JsonArray
+        {
+            HeaderCell(metric, serverName, matchedIncident, matchedRow),
+            StatusCell(status),
+        };
+
+        foreach (var section in sections)
+        {
+            mechanicalCells.Add(ReadCell(section, serverName, asOf, lookbackHours));
+        }
+
+        return (mechanicalCells, "mechanical/" + (trimmedMetric ?? "default"), MechanicalTemplateVersion);
     }
 
     /// <summary>The header cell every mechanical template opens with: a markdown-shaped read-only summary of
@@ -548,6 +565,8 @@ internal static partial class AlertNotebookEndpoint
         NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct,
         ILogger? logger, JsonArray? notes)
     {
+        Interlocked.Increment(ref s_prefetchCallsForTest);
+
         switch (kind)
         {
             case AuthoredContextKind.None:

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -88,6 +89,45 @@ public sealed class AlertNotebookAuthoredContextTests
             var oneSet = (entry.BuildCells is null) != (entry.BuildCellsWithContext is null);
             Assert.True(oneSet, $"entry for {string.Join(",", metrics)} must set exactly one builder");
         }
+    }
+
+    /// <summary>#4425's mutation run found that <see cref="RegistrationTable_EveryEntry_HasExactlyOneBuilder"/>
+    /// above can't fail on its own -- every real row already has exactly one builder, so removing the
+    /// constructor's guard doesn't touch a single row that fact walks. This proves that fact's assertion
+    /// (<c>(BuildCells is null) != (BuildCellsWithContext is null)</c>) DOES catch a bad row, by building one
+    /// that bypasses the guarded constructor entirely -- <see cref="RuntimeHelpers.GetUninitializedObject"/>
+    /// on the record struct's type, then both builder backing fields set by reflection -- so this fact is
+    /// independent of whether the constructor's own guard is in place.</summary>
+    [Fact]
+    public void RegistrationTableAssertion_CatchesAnEntryWithBothBuildersSet_BuiltOutsideTheConstructor()
+    {
+        JsonArray Plain(string? m, string? s, string? a, DateTime ws, DateTime we, AlertIncident? i,
+            PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader.AlertHistoryReadRow? r, string st) => new();
+        JsonArray WithContext(string? m, string? s, string? a, DateTime ws, DateTime we, AlertIncident? i,
+            PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader.AlertHistoryReadRow? r, string st,
+            AlertNotebookEndpoint.AuthoredContext c) => new();
+
+        var entryType = typeof(AlertNotebookEndpoint.AuthoredTemplateEntry);
+        var boxedEntry = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(entryType);
+
+        var buildCellsField = entryType.GetField("<BuildCells>k__BackingField",
+            BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var buildCellsWithContextField = entryType.GetField("<BuildCellsWithContext>k__BackingField",
+            BindingFlags.NonPublic | BindingFlags.Instance)!;
+
+        buildCellsField.SetValue(boxedEntry, (Func<string?, string?, string?, DateTime, DateTime, AlertIncident?,
+            PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader.AlertHistoryReadRow?, string, JsonArray>)Plain);
+        buildCellsWithContextField.SetValue(boxedEntry, (Func<string?, string?, string?, DateTime, DateTime,
+            AlertIncident?, PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader.AlertHistoryReadRow?, string,
+            AlertNotebookEndpoint.AuthoredContext, JsonArray>)WithContext);
+
+        var invalidEntry = (AlertNotebookEndpoint.AuthoredTemplateEntry)boxedEntry;
+
+        Assert.NotNull(invalidEntry.BuildCells);
+        Assert.NotNull(invalidEntry.BuildCellsWithContext);
+
+        var oneSet = (invalidEntry.BuildCells is null) != (invalidEntry.BuildCellsWithContext is null);
+        Assert.False(oneSet, "the bypass-built entry has BOTH builders set, so the direct assertion must read false here");
     }
 
     /* ═══════════════════════════ Invoke ═══════════════════════════ */
@@ -387,6 +427,47 @@ public sealed class AlertNotebookAuthoredContextTests
 
         Assert.Null(AlertNotebookEndpoint.PickFindingByHash(findings, "abcd9999"));
     }
+
+    /* ═══════════════════════ zero pre-fetch for a no-context family (#4425) ═══════════════════════ */
+
+    /// <summary>Drives the SAME decide-and-build step <see cref="AlertNotebookEndpoint.Map"/>'s handler calls
+    /// -- <see cref="AlertNotebookEndpoint.BuildCellsAsync"/> -- for "Blocking Detected", a registered
+    /// no-context family (<c>BuildCellsWithContext</c> is null, per
+    /// <see cref="NoContextFamily_HasNoContextBuilder_SoTheEndpointNeverCallsPrefetch"/> above), and asserts
+    /// <see cref="AlertNotebookEndpoint.PrefetchAsync"/> was called zero times via the process-wide
+    /// <see cref="AlertNotebookEndpoint.s_prefetchCallsForTest"/> counter. Removing the
+    /// <see cref="AlertNotebookEndpoint.ShouldPrefetch"/> gate at the call site (always pre-fetching) turns
+    /// this RED without touching any other pin in this file -- the gap the previous mutation run found.
+    /// Serialized against the counter's other reader in this class via a static lock, since the counter is
+    /// process-wide and xUnit may run facts in this class in parallel.</summary>
+    [Fact]
+    public async Task BuildCellsAsync_NoContextFamily_MakesZeroPrefetchCalls()
+    {
+        int before, after;
+        await using var postgres = NpgsqlDataSource.Create(
+            "Host=203.0.113.1;Port=1;Username=x;Password=x;Database=x;Timeout=1");
+        var analysis = new DarlingAnalysisService(postgres);
+
+        lock (PrefetchCounterLock)
+        {
+            before = AlertNotebookEndpoint.s_prefetchCallsForTest;
+        }
+
+        await AlertNotebookEndpoint.BuildCellsAsync(
+            metric: "Blocking Detected", serverName: "srv", asOf: AsOf, windowEnd: WindowEnd,
+            serverId: null, anchor: WindowEnd, postgres: postgres, analysis: analysis,
+            ct: CancellationToken.None, logger: null, notes: null, matchedIncident: null, matchedRow: null,
+            status: "Unknown", lookbackHours: "24");
+
+        lock (PrefetchCounterLock)
+        {
+            after = AlertNotebookEndpoint.s_prefetchCallsForTest;
+        }
+
+        Assert.Equal(before, after);
+    }
+
+    private static readonly object PrefetchCounterLock = new();
 
     [Fact]
     public async Task PrefetchAsync_AnalysisFinding_DeletedFinding_ReadsMissing_NoThrow()
