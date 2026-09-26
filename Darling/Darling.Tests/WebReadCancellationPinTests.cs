@@ -84,7 +84,12 @@ public sealed class WebReadCancellationPinTests
     [MemberData(nameof(ConvertedDispatchEntries))]
     public async Task AConvertedReadEndpoint_ObservesCancellation_InsteadOfDialingTheStore(string name)
     {
-        var dispatch = DarlingWebEndpoints.BuildReadDispatch();
+        /* #4203 get_store_host: BuildReadDispatch's postgresConfig defaults to null for a bare caller (this
+           test's own doc comment on BuildReadDispatch), and the tool short-circuits to an "unavailable"
+           envelope before touching the store when that happens — never reaching the cancellation check this
+           theory proves. A non-null PostgresConfig here reaches past that guard into the real gather path,
+           the same way the rest of this theory's entries reach their own store call. */
+        var dispatch = DarlingWebEndpoints.BuildReadDispatch(postgresConfig: new PostgresConfig { ConnectionString = "Host=127.0.0.1;Port=1;Username=none;Password=none;Database=none;Timeout=2" });
         await using var store = DeadStore();
         var analysis = new DarlingAnalysisService(store);
         var context = CancelledRequest();

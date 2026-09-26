@@ -71,6 +71,12 @@ public sealed class StoreHostProfileCache : IDisposable
             return (fresh.Profile, fresh.GatheredAtUtc);
         }
 
+        /* #4203: an explicit check ahead of the gate, not left to SemaphoreSlim.WaitAsync's own cancellation
+           path — the semaphore throws TaskCanceledException, a subclass callers checking the exact
+           OperationCanceledException type (WebReadCancellationPinTests' ratchet) would not match, where
+           ThrowIfCancellationRequested throws the base type directly. */
+        cancellationToken.ThrowIfCancellationRequested();
+
         await _gate.WaitAsync(cancellationToken);
         try
         {
