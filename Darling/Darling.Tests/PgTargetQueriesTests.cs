@@ -68,26 +68,33 @@ public sealed class PgTargetQueriesTests
     private const long NewcomerQueryId = 9_001L;
     private const string HeavyText = "SELECT o.id, o.total FROM orders AS o WHERE o.customer_id = $1 AND o.placed_at >= $2 ORDER BY o.placed_at DESC LIMIT $3";
 
-    private static Fact BadActor(long queryId, double share, double busy = 0.2, double tempBlocks = 0) => new()
+    private static Fact BadActor(long queryId, double share, double busy = 0.2, double tempBlocks = 0, double? peakMemBytes = null)
     {
-        Source = PgTargetSources.QueriesSource,
-        Key = PgTargetFactKeys.BadActorKey(queryId),
-        Value = share,
-        ServerId = 1,
-        Metadata =
+        var fact = new Fact
         {
-            ["share_of_window_time"] = share,
-            ["window_total_exec_ms"] = 1_000_000,
-            ["window_busy_fraction"] = busy,
-            ["calls"] = 2640,
-            ["total_exec_ms"] = share * 1_000_000,
-            ["mean_exec_ms"] = 227.36,
-            ["max_exec_ms"] = 900.5,
-            ["calls_per_sec"] = 0.1833,
-            ["temp_blks_written"] = tempBlocks,
-            ["database_count"] = 2,
-        },
-    };
+            Source = PgTargetSources.QueriesSource,
+            Key = PgTargetFactKeys.BadActorKey(queryId),
+            Value = share,
+            ServerId = 1,
+            Metadata =
+            {
+                ["share_of_window_time"] = share,
+                ["window_total_exec_ms"] = 1_000_000,
+                ["window_busy_fraction"] = busy,
+                ["calls"] = 2640,
+                ["total_exec_ms"] = share * 1_000_000,
+                ["mean_exec_ms"] = 227.36,
+                ["max_exec_ms"] = 900.5,
+                ["calls_per_sec"] = 0.1833,
+                ["temp_blks_written"] = tempBlocks,
+                ["database_count"] = 2,
+            },
+        };
+        /* #3691: Aurora-only, present here only when the caller supplies it — the same absent-not-zero
+           shape as mean_exec_ms above. */
+        if (peakMemBytes is { } bytes) fact.Metadata["max_exec_peakmem_bytes"] = bytes;
+        return fact;
+    }
 
     /// <summary>The anomaly fact as <c>PgTargetAnomalyDetector.Queries.cs</c> emits it for a statement whose own
     /// bucket is <paramref name="mean"/> ± <paramref name="stddev"/> (Full tier, 48 samples over 4 days) and whose
@@ -476,6 +483,30 @@ public sealed class PgTargetQueriesTests
         Assert.EndsWith(" — 22.5σ beyond its own normal for this hour", alsoBeyond.Headline, StringComparison.Ordinal);
     }
 
+    /// <summary>#3691: <c>max_exec_peakmem_bytes</c> is a CONTEXT fact carried the same way <c>max_exec_ms</c>
+    /// is — present with its value on Aurora, absent (never 0) off Aurora — and it does not move the headline's
+    /// share, the ordering, or anything the scorer grades. FAILS ON OLD CODE: the old
+    /// <c>ComposeQueries</c> has no <c>hasPeakMem</c> branch at all, so the Aurora sentence never appears and the
+    /// absent case has nothing to assert against (both would need this method to exist first).</summary>
+    [Fact]
+    public void ComposeQueries_CarriesAuroraPeakMemAsContext_AbsentOffAurora_NeverChangesTheGrade()
+    {
+        var key = PgTargetFactKeys.BadActorKey(HeavyQueryId);
+
+        var aurora = BadActor(HeavyQueryId, 0.6002, peakMemBytes: 8_388_608);
+        var withPeakMem = PgTargetAdvice.Compose(key, Lookup(aurora))!;
+        Assert.Contains("Peak executor memory for a single execution reached 8.0 MB (Aurora only, context, not a threshold).", withPeakMem.Investigation, StringComparison.Ordinal);
+
+        var stock = BadActor(HeavyQueryId, 0.6002);
+        Assert.False(stock.Metadata.ContainsKey("max_exec_peakmem_bytes"));
+        var withoutPeakMem = PgTargetAdvice.Compose(key, Lookup(stock))!;
+        Assert.DoesNotContain("Peak executor memory", withoutPeakMem.Investigation, StringComparison.Ordinal);
+
+        /* Same headline, same share, same order-relevant value — the fact never moves the grade. */
+        Assert.Equal(withoutPeakMem.Headline, withPeakMem.Headline);
+        Assert.Equal(aurora.Value, stock.Value);
+    }
+
     [Fact]
     public void ComposeQueries_OmitsWhatTheFactDoesNotCarry_AndTheStaticBlockClaimsNoFigure()
     {
@@ -795,7 +826,10 @@ public sealed class PgTargetQueriesTests
             {
                 var at = windowStart.AddMinutes(snapshot * 5);
                 heavyCalls += 50; heavyMs += 12_500; heavyTemp += 40;
-                await PlantStatementAsync(connection, at, HeavyQueryId, 16384, heavyCalls, heavyMs, 50, 12_500, 300, heavyTemp, ct);
+                /* #3691: the heavy series is the Aurora fixture — max_exec_peakmem_bytes populated on every
+                   snapshot, MAX'd by the read the same way max_exec_time_ms is. The medium series below plants
+                   no value at all (the stock-PostgreSQL fixture), so its fact must carry NULL, never 0. */
+                await PlantStatementAsync(connection, at, HeavyQueryId, 16384, heavyCalls, heavyMs, 50, 12_500, 300, heavyTemp, ct, maxExecPeakmemBytes: 8_388_608);
                 await PlantStatementAsync(connection, at, HeavyQueryId, 16385, snapshot, snapshot, 1, 1, 300, 0, ct);
                 mediumCalls += 250; mediumMs += 6_250;
                 await PlantStatementAsync(connection, at, MediumQueryId, 16384, mediumCalls, mediumMs, 250, 6_250, 300, 0, ct);
@@ -839,11 +873,18 @@ public sealed class PgTargetQueriesTests
             Assert.Equal(1_880, heavy.Metadata["temp_blks_written"]);
             Assert.Equal(2, heavy.Metadata["database_count"]);
             Assert.False(heavy.Metadata.ContainsKey("queryid"));
+            /* #3691: Aurora fixture — every snapshot planted 8,388,608, MAX'd the same way max_exec_ms is. */
+            Assert.Equal(8_388_608, heavy.Metadata["max_exec_peakmem_bytes"]);
 
             var medium = badActors[1];
             Assert.Equal(PgTargetFactKeys.BadActorKey(MediumQueryId), medium.Key);
             Assert.Equal(0.30, medium.Value, precision: 3);
             Assert.Equal(1, medium.Metadata["database_count"]);
+            /* #3691: stock-PostgreSQL fixture — no value was ever planted, so the fact carries no key at all
+               (absent, never 0). FAILS ON OLD CODE: the old collector never reads max_exec_peakmem_bytes, so
+               heavy's assertion above fails first (no such key), and this one would pass for the wrong reason
+               until that read exists. */
+            Assert.False(medium.Metadata.ContainsKey("max_exec_peakmem_bytes"));
 
             /* The pre-V128 shape: no stored interval, so the span is the LAG over its 48 snapshots — 47 known
                five-minute gaps, and the first snapshot's calls are excluded from the rate with it. */
@@ -975,14 +1016,16 @@ public sealed class PgTargetQueriesTests
     /// deltas it computed at the write, and the interval those deltas accrued over (NULL = a pre-V128 row).</summary>
     private static async Task PlantStatementAsync(
         NpgsqlConnection connection, DateTime at, long queryId, long databaseId, long calls, long totalMs,
-        long deltaCalls, long deltaMs, int? intervalSeconds, long tempBlocksWritten, CancellationToken ct)
+        long deltaCalls, long deltaMs, int? intervalSeconds, long tempBlocksWritten, CancellationToken ct,
+        long? maxExecPeakmemBytes = null)
     {
         using var command = new NpgsqlCommand(@"
 INSERT INTO pg_statement_stats
     (collection_id, collection_time, server_id, server_name, queryid, database_id, user_id, toplevel,
      calls, total_exec_time_ms, max_exec_time_ms, rows_returned, shared_blks_hit, shared_blks_read,
-     temp_blks_read, temp_blks_written, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows, sample_interval_seconds)
-VALUES ($1, $2, $3, $4, $5, $6, 10, TRUE, $7, $8, 900.5, 100, 10, 5, 0, $9, 0, $10, $11, 10, $12)", connection);
+     temp_blks_read, temp_blks_written, wal_bytes, delta_calls, delta_total_exec_time_ms, delta_rows, sample_interval_seconds,
+     max_exec_peakmem_bytes)
+VALUES ($1, $2, $3, $4, $5, $6, 10, TRUE, $7, $8, 900.5, 100, 10, 5, 0, $9, 0, $10, $11, 10, $12, $13)", connection);
         command.Parameters.AddWithValue(CollectionIdGenerator.Next());
         command.Parameters.AddWithValue(at);
         command.Parameters.AddWithValue(ServerId);
@@ -995,6 +1038,8 @@ VALUES ($1, $2, $3, $4, $5, $6, 10, TRUE, $7, $8, 900.5, 100, 10, 5, 0, $9, 0, $
         command.Parameters.AddWithValue(deltaCalls);
         command.Parameters.AddWithValue(deltaMs);
         command.Parameters.Add(new NpgsqlParameter { Value = intervalSeconds.HasValue ? intervalSeconds.Value : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer });
+        /* #3691: NULL by default — the stock-PostgreSQL shape. Only a caller planting an Aurora fixture supplies it. */
+        command.Parameters.Add(new NpgsqlParameter { Value = maxExecPeakmemBytes.HasValue ? maxExecPeakmemBytes.Value : DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint });
         await command.ExecuteNonQueryAsync(ct);
     }
 
