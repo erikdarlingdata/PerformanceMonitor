@@ -5688,6 +5688,18 @@ internal sealed class DarlingSelfAlertEvaluator
                job instead. */
             if (!job.Scheduled)
             {
+                /* #4299 L3a: one of the three raw retention jobs (TimescaleSupport.RawRelations) is
+                   permanently unscheduled by DESIGN, not by the #1680/#1877 coverage gate — its verdict
+                   lives in config->>'darling_armed', not in j.scheduled, so reaching here for one of them
+                   every hourly pass is expected, not a detector defect. */
+                if (!string.IsNullOrEmpty(job.HypertableName) && TimescaleSupport.RawRelations.Contains(job.HypertableName))
+                {
+                    _logger?.LogWarning(
+                        "TimescaleDB {Label} was reported as stuck while NOT scheduled — this is one of the three raw retention jobs, permanently unscheduled by design (#4299), not a #1680/#1877 coverage hold. Nothing re-armed, nothing alerted; no action needed",
+                        label);
+                    continue;
+                }
+
                 _logger?.LogWarning(
                     "TimescaleDB {Label} was reported as stuck while NOT scheduled — a paused policy is a HELD one, not an abandoned job, and re-arming it would drop history the #1680/#1877 coverage gate is protecting. Nothing re-armed, nothing alerted; this is a detector defect worth reporting (#3816)",
                     label);

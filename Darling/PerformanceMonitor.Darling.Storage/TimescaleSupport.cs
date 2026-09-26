@@ -10712,7 +10712,12 @@ SELECT
     (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint
 FROM timescaledb_information.job_stats AS js
 JOIN timescaledb_information.jobs AS j USING (job_id)
-WHERE js.last_run_status = 'Success'";
+WHERE js.last_run_status = 'Success'
+  AND NOT (
+      j.hypertable_schema = 'collect'
+      AND j.proc_name = 'policy_retention'
+      AND j.hypertable_name = ANY(ARRAY['query_stats', 'procedure_stats', 'query_store_stats'])
+  )";
 
     /// <summary>
     /// Every background job's last-run duration against its own schedule interval (#2136) — the readings the
@@ -11109,7 +11114,8 @@ SELECT
     CASE
         WHEN (j.config->>'drop_after') IS NULL THEN NULL
         ELSE EXTRACT(EPOCH FROM (j.config->>'drop_after')::interval)::bigint
-    END
+    END,
+    COALESCE((j.config->>'darling_armed')::boolean, false)
 FROM timescaledb_information.jobs AS j
 LEFT JOIN LATERAL (
     SELECT
@@ -11167,10 +11173,20 @@ WHERE j.proc_name = 'policy_retention'
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var hypertableName = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                var scheduled = !reader.IsDBNull(2) && reader.GetBoolean(2);
+                var darlingArmed = !reader.IsDBNull(7) && reader.GetBoolean(7);
+
+                /* #4299 L3a: a raw relation's permanent scheduled=false is not a hold — its verdict is
+                   darling_armed, read through the same expression RawArmedStateSql projects (see the
+                   isRawRelation split in EnsureRetentionPoliciesAsync). Every other relation keeps reading
+                   j.scheduled unchanged. */
+                var armed = RawRelations.Contains(hypertableName) ? darlingArmed : scheduled;
+
                 readings.Add(new RetentionHoldReading(
                     Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
-                    reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    !reader.IsDBNull(2) && reader.GetBoolean(2),
+                    hypertableName,
+                    armed,
                     reader.IsDBNull(3) ? "" : reader.GetString(3),
                     reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
                     reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5), CultureInfo.InvariantCulture),
@@ -11896,8 +11912,13 @@ public sealed class RefreshCeilingStalenessWatch
 /// One retention policy's armed state and the consequence of it being held (#2813), from
 /// <see cref="TimescaleSupport.ReadRetentionHoldReadingsAsync"/>.
 ///
-/// <para><see cref="Armed"/> is <c>timescaledb_information.jobs.scheduled</c> — false means the #1680/#1877
-/// coverage gate is holding this policy so it cannot drop history a consumer has never materialized.
+/// <para><see cref="Armed"/> is <c>timescaledb_information.jobs.scheduled</c> for every non-raw policy —
+/// false means the #1680/#1877 coverage gate is holding this policy so it cannot drop history a consumer
+/// has never materialized. For one of the three raw relations (#4299, <see
+/// cref="TimescaleSupport.RawRelations"/>) <c>scheduled</c> is permanently false by design, so
+/// <see cref="Armed"/> instead reads <c>config-&gt;&gt;'darling_armed'</c> — the same verdict
+/// <see cref="TimescaleSupport.RawArmedReadExpression"/> computes — through
+/// <see cref="TimescaleSupport.ReadRetentionHoldReadingsAsync"/>'s per-row branch.</para>
 /// <see cref="SpanSeconds"/> is now minus the OLDEST chunk's start (null when the hypertable has no chunks
 /// yet) and <see cref="HorizonSeconds"/> is the policy's own <c>drop_after</c>, so
 /// <see cref="OverHorizonRatio"/> is how many times its intended depth the tier is actually holding. That
