@@ -589,10 +589,25 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
     /// <summary>
     /// #4262 round 1 finding 1, measured rather than only unit-asserted: seeds a synthetic table large
     /// enough to genuinely inflate DuckDB's buffer pool, reads it wide-open (the shape of the hazard —
-    /// "one full-width read" in the review), records process memory, forces one trim cycle, and records it
-    /// again. Not the review's 1,049 MB repro store (out of budget to build one here) — scaled down, real
-    /// data, real measurement. The number goes in the PR body, not asserted tightly (process memory is
-    /// noisy), but the direction is: <c>Assert.True(afterBytes &lt; beforeBytes)</c>.
+    /// "one full-width read" in the review), and asserts on DuckDB's OWN memory accounting
+    /// (<see cref="DuckDbInitializer.ReadSentinelMemoryUsageBytes"/>, the same <c>duckdb_memory()</c> sum
+    /// the trim cycle itself reads) rather than the process-wide <c>WorkingSet64</c> this test used before.
+    ///
+    /// <para><b>Why the swap:</b> <c>WorkingSet64</c> is an OS-level, whole-process metric that also
+    /// reflects the GC heap, the CLR/JIT, and every other native allocation in the process — nightly CI hit
+    /// exactly this: before=1433563136, after=1433567232 (one 4KB page HIGHER, not lower), a pass/fail
+    /// margin of literally nothing on a metric with no relationship to what the trim actually touches. The
+    /// trim only ever does one thing (<see cref="DuckDbInitializer.RunMemoryTrimCycle"/>): cycles
+    /// <c>memory_limit</c> down and back up so DuckDB's own buffer manager releases cached pages.
+    /// <c>duckdb_memory()</c> is that buffer manager's own ledger, so it isolates the assertion from every
+    /// other allocator in the process.</para>
+    ///
+    /// <para><b>Threshold, justified by measurement (macOS, net10.0, DuckDB.NET 1.5.5, 3 runs, the same
+    /// 2,000,000-row/200-byte-payload seed and trim-cycle steps as below, outside this test project):
+    /// before=97.75/97.75/99.50 MB, after=0.75/0.75/0.75 MB every time — a >99% reduction, not a marginal
+    /// one.</b> A do-nothing trim leaves this at ratio 1.0; requiring the after-reading to drop to 50% or
+    /// less of the before-reading is nowhere near that measured ~99% floor, so it rejects a no-op trim with
+    /// a wide margin on either side.</para>
     /// </summary>
     [Fact]
     public async Task RunMemoryTrimCycle_AfterWideRead_ReducesProcessMemory()
@@ -603,7 +618,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         using (var seed = initializer.CreateConnection())
         {
             await seed.OpenAsync();
-            await ExecAsync(seed, "CREATE TABLE trim_probe AS SELECT i AS id, repeat('x', 200) AS payload FROM range(2000000) t(i)");
+            /* md5-derived payload, not repeat('x', ...): DuckDB's storage layer dictionary/RLE-compresses
+               a low-cardinality repeated literal down to a few hundred KB in its own buffer manager
+               (measured), which starves this test's own signal before the trim ever runs. The md5 chain
+               defeats that compression the same way real Query Store plan XML would. */
+            await ExecAsync(seed, "CREATE TABLE trim_probe AS SELECT i AS id, md5(i::VARCHAR) || md5((i + 1)::VARCHAR) || md5((i + 2)::VARCHAR) AS payload FROM range(2000000) t(i)");
         }
 
         using (var connection = initializer.CreateConnection())
@@ -614,9 +633,14 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
             await cmd.ExecuteScalarAsync();
         }
 
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        var beforeBytes = Process.GetCurrentProcess().WorkingSet64;
+        double? beforeBytes;
+        using (var measure = initializer.CreateConnection())
+        {
+            await measure.OpenAsync();
+            beforeBytes = initializer.ReadSentinelMemoryUsageBytes(measure);
+        }
+
+        Assert.NotNull(beforeBytes);
 
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
         DuckDbInitializer.TrimThresholdBytes = 1;
@@ -629,14 +653,19 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
             DuckDbInitializer.TrimThresholdBytes = originalThreshold;
         }
 
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        var afterBytes = Process.GetCurrentProcess().WorkingSet64;
+        double? afterBytes;
+        using (var measure = initializer.CreateConnection())
+        {
+            await measure.OpenAsync();
+            afterBytes = initializer.ReadSentinelMemoryUsageBytes(measure);
+        }
+
+        Assert.NotNull(afterBytes);
 
         initializer.Dispose();
 
-        Console.WriteLine($"#4262 round 1 trim measurement: before={beforeBytes / (1024.0 * 1024.0):F1} MB, after={afterBytes / (1024.0 * 1024.0):F1} MB");
-        Assert.True(afterBytes < beforeBytes,
-            $"Expected trim to reduce working set: before={beforeBytes}, after={afterBytes}");
+        Console.WriteLine($"#4262 round 1 trim measurement (duckdb_memory): before={beforeBytes / (1024.0 * 1024.0):F1} MB, after={afterBytes / (1024.0 * 1024.0):F1} MB");
+        Assert.True(afterBytes <= beforeBytes / 2.0,
+            $"Expected the trim to release at least half of DuckDB's own reported buffer usage: before={beforeBytes}, after={afterBytes}");
     }
 }
