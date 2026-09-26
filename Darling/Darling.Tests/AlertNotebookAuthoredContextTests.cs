@@ -28,6 +28,7 @@ namespace Darling.Tests;
 /// the async pre-fetch (custom rule by id, analysis finding by 8-character hash) that runs ONLY for context
 /// entries.
 /// </summary>
+[Collection("live-postgres")]
 public sealed class AlertNotebookAuthoredContextTests
 {
     private static readonly DateTime WindowEnd = new(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc);
