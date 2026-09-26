@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -35,9 +36,10 @@ public sealed class DarlingMcpPvsTools
     public static async Task<string> GetPvsStats(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Hours of size-trend history for the top-5 databases; 0 (default) returns the latest snapshot only.")] int trend_hours_back = 0)
+        [Description("Hours of size-trend history for the top-5 databases; 0 (default) returns the latest snapshot only.")] int trend_hours_back = 0,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         if (trend_hours_back != 0)
@@ -48,10 +50,10 @@ public sealed class DarlingMcpPvsTools
 
         try
         {
-            var rows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId);
+            var rows = await DarlingPvsReader.GetPvsStatsLatestAsync(postgres, resolved.ServerId, cancellationToken);
             if (rows.Count == 0)
             {
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "pvs_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "pvs_stats", cancellationToken)
                     ?? McpHelpers.Status("empty",
                         "No PVS data collected for this server. The collector reads sys.dm_tran_persistent_version_store_stats " +
                         "(SQL Server 2019+); a server with no rows either predates ADR or has not completed a pvs_stats cycle yet.");
@@ -94,7 +96,7 @@ public sealed class DarlingMcpPvsTools
             if (trend_hours_back > 0)
             {
                 var points = await DarlingPvsReader.GetPvsTrendAsync(
-                    postgres, resolved.ServerId, DateTime.UtcNow.AddHours(-trend_hours_back));
+                    postgres, resolved.ServerId, DateTime.UtcNow.AddHours(-trend_hours_back), cancellationToken);
                 trend = points
                     .GroupBy(p => p.DatabaseName)
                     .Select(g => new
@@ -122,7 +124,7 @@ public sealed class DarlingMcpPvsTools
                 trend,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pvs_stats", ex);
         }

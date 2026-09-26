@@ -100,16 +100,18 @@ public sealed class DarlingMcpTrendTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetMemoryTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.MemoryMaxPoints));
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetMemoryTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.MemoryMaxPoints), cancellationToken);
 
     /// <summary>get_memory_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own, the
     /// web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>. The memory samples and the memory-grant
     /// snapshots are bucketed at the same width and joined on the bucket (<see cref="TrendPayloads.MemoryTrend"/>).</summary>
     internal static async Task<string> GetMemoryTrend(
-        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -121,7 +123,7 @@ public sealed class DarlingMcpTrendTools
         try
         {
             var now = windowEnd;
-            var points = await DarlingTrendReader.GetMemoryBucketsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, bucketMinutes);
+            var points = await DarlingTrendReader.GetMemoryBucketsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, bucketMinutes, cancellationToken);
             if (points.Count == 0)
             {
                 /*
@@ -131,13 +133,13 @@ public sealed class DarlingMcpTrendTools
                     collection, and widening will never fill it. Probed only here, on the path that already
                     found nothing, against the SAME source the trend read.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
                 }
 
-                return await DarlingTrendReader.HasAnyMemoryStatAsync(postgres, resolved.ServerId)
+                return await DarlingTrendReader.HasAnyMemoryStatAsync(postgres, resolved.ServerId, cancellationToken)
                     ? McpHelpers.Status(
                         "empty",
                         $"No memory samples recorded for {resolved.ServerName} in the last {hours_back} hour(s). This server HAS collected memory stats before, so this window is genuinely quiet rather than broken — widen hours_back to find the most recent samples.")
@@ -151,14 +153,14 @@ public sealed class DarlingMcpTrendTools
                bucket (#3960), where it used to be the nearest snapshot within 30 seconds of each memory sample. A
                bucket no grant snapshot fell into publishes null, never a fabricated 0 (#3529); a genuine 0.0 still
                appears where snapshots exist with nothing granted. Lite's tool builds the same payload. */
-            var grants = await DarlingTrendReader.GetGrantBucketsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, bucketMinutes);
-            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var grants = await DarlingTrendReader.GetGrantBucketsAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, bucketMinutes, cancellationToken);
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
             return TrendPayloads.MemoryTrend(
                 resolved.ServerName, hours_back, points, grants, bucketMinutes, bucket_minutes is not null,
                 budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_memory_trend", ex);
         }
