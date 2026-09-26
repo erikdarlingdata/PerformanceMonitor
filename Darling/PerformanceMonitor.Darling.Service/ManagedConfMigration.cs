@@ -131,6 +131,7 @@ internal static class ManagedConfMigration
         DarlingManagedPostgres.ConfMarkerV13,
         DarlingManagedPostgres.ConfMarkerV14,
         DarlingManagedPostgres.ConfMarkerV15,
+        DarlingManagedPostgres.ConfMarkerV16,
     ];
 
     /// <summary>
@@ -290,6 +291,8 @@ internal static class ManagedConfMigration
                 FormattableString.Invariant($"maintenance_work_mem = {DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB")),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV15 => ClassifyFixedLine(
                 key, text, "wal_compression", "wal_compression = lz4"),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV16 => ClassifyFixedLine(
+                key, text, "checkpoint_timeout", "checkpoint_timeout = 15min"),
             _ => (false, HandEditReason.FormMismatch),
         };
 

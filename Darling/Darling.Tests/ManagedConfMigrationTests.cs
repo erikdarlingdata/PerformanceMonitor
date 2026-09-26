@@ -47,6 +47,17 @@ public sealed class ManagedConfMigrationTests
     }
 
     [Fact]
+    public void ClassifyLines_UntouchedV16Block_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildCheckpointIntervalConfAppend();
+        var lines = ClassifyLines(conf);
+
+        var checkpoint = FindByText(lines, "checkpoint_timeout");
+        Assert.Equal(ConfLineClassification.Ours, checkpoint.Classification);
+        Assert.Equal(DarlingManagedPostgres.ConfMarkerV16, checkpoint.BlockMarker);
+    }
+
+    [Fact]
     public void ClassifyLines_UntouchedV13PreloadLine_IsOurs()
     {
         var conf = DarlingManagedPostgres.BuildStatementStatisticsConfAppend(effectivePreloadList: null);

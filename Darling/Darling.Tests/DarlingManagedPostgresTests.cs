@@ -427,8 +427,9 @@ public sealed class DarlingManagedPostgresTests
            assertion below vacuously true, and a reflection filter that stopped matching is exactly the
            silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing);
            thirteen as of #3899 (v13 statement statistics); fourteen as of #3909 (v14 PostgreSQL 17
-           maintenance_work_mem limit); fifteen as of #4246 (v15 WAL compression). */
-        Assert.Equal(15, markers.Length);
+           maintenance_work_mem limit); fifteen as of #4246 (v15 WAL compression); sixteen as of #4246 (v16
+           checkpoint interval). */
+        Assert.Equal(16, markers.Length);
 
         Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
 
@@ -2260,6 +2261,75 @@ public sealed class DarlingManagedPostgresTests
             var second = File.ReadAllText(confPath);
             Assert.Equal(1, CountOccurrences(second, DarlingManagedPostgres.ConfMarkerV15));
             Assert.Equal("lz4", LastSettingValue(second, "wal_compression"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /* ===================== v16 checkpoint interval (#4246) ===================== */
+
+    /// <summary>
+    /// The v16 block (#4246): <c>checkpoint_timeout = 15min</c> only. See
+    /// <see cref="DarlingManagedPostgres.ConfMarkerV16"/> for the trial and the sync-bar risk, and why the
+    /// block deliberately says nothing about <c>max_wal_size</c>.
+    /// </summary>
+    [Fact]
+    public void CheckpointIntervalConfAppend_PinsV16Marker_AndSetsCheckpointTimeout()
+    {
+        var block = DarlingManagedPostgres.BuildCheckpointIntervalConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV16, block, StringComparison.Ordinal);
+        Assert.Equal("15min", LastSettingValue(block, "checkpoint_timeout"));
+
+        /* No fingerprint or stamp line, or the v8/v12 staleness checks would misread what they scan. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfWalSizingStampPrefix, block, StringComparison.Ordinal);
+
+        /* v12 (#3802) is still the only thing that ever sets these: this block leaves the disk-derived
+           ceiling exactly where it is. */
+        Assert.Null(LastSettingValue(block, "max_wal_size"));
+        Assert.Null(LastSettingValue(block, "min_wal_size"));
+        Assert.Null(LastSettingValue(block, "checkpoint_completion_target"));
+    }
+
+    /// <summary>The generic per-setting source scan (#4214) walks every marker in this list; a block absent
+    /// from it would be invisible to that scan even though it is live.</summary>
+    [Fact]
+    public void ConfMarkerV16_IsInAllManagedConfMarkers()
+        => Assert.Contains(DarlingManagedPostgres.ConfMarkerV16, DarlingManagedPostgres.AllManagedConfMarkers);
+
+    /// <summary>
+    /// The heal on real files (#4246): a cluster whose conf carries every earlier marker but not v16 gains
+    /// exactly one v16 block, with <c>checkpoint_timeout</c> live in the file, and a second start appends
+    /// nothing more -- the same once-only shape v9-v11, v13 and v15 prove elsewhere (<see
+    /// cref="EnsureConfAppended_AppendsV15Once_AndNotAgainOnANextStart"/>), exercised here through the real
+    /// <see cref="DarlingManagedPostgres.EnsureConfAppended"/> rather than string concatenation.
+    /// </summary>
+    [Fact]
+    public void EnsureConfAppended_AppendsV16Once_AndNotAgainOnANextStart()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v16-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, DarlingManagedPostgres.BuildConfAppend(5994));
+
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5994, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+            var first = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(first, DarlingManagedPostgres.ConfMarkerV16));
+            Assert.Equal("15min", LastSettingValue(first, "checkpoint_timeout"));
+
+            pg.EnsureConfAppended(dataDirectory);
+            var second = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(second, DarlingManagedPostgres.ConfMarkerV16));
+            Assert.Equal("15min", LastSettingValue(second, "checkpoint_timeout"));
         }
         finally
         {

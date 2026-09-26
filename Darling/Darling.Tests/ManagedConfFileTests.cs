@@ -323,6 +323,160 @@ public sealed class ManagedConfFileTests
         Assert.False(ManagedConfFile.IsHandEdited(rendered));
     }
 
+    /// <summary>#4246: v16's checkpoint interval is one of the builders <see cref="ManagedConfFile.RenderBody"/>
+    /// calls, so the managed body itself carries <c>checkpoint_timeout</c> — not just the legacy v1-v16
+    /// appenders <c>EnsureConfAppended</c> runs against a self-hosted conf.</summary>
+    [Fact]
+    public void RenderBody_ContainsCheckpointTimeout()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        Assert.Contains("checkpoint_timeout = '15min'", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4246 (claude-desktop's parity pin, 14:47Z): for EVERY marker in
+    /// <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/>, every key that marker's OWN legacy builder
+    /// emits must show up in <see cref="ManagedConfFile.RenderBody"/>'s output too. The expected keys are DERIVED
+    /// by parsing each builder's actual output (<see cref="DarlingManagedPostgres.ParseConfText"/>) rather than
+    /// hand-typed here, so a future vN whose marker is added to <c>AllManagedConfMarkers</c> and whose builder is
+    /// written, but whose builder call is never added to <c>RenderBody</c> (exactly this PR's own bug, for v16),
+    /// fails this test on its own keys — with no hand roster to forget to update alongside it.
+    ///
+    /// <para>v14 (the legacy <c>maintenance_work_mem</c> cap) is the one documented skip. <c>RenderBody</c>
+    /// decides v14 purely from its own inputs: it reduces the blocks above v14,
+    /// reads whatever <c>maintenance_work_mem</c> is in force from that reduction, and calls the SAME
+    /// <see cref="DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap"/> predicate
+    /// <c>EnsureConfAppended</c>'s own heal uses. The skip is arithmetic, not a missing input: every
+    /// <c>maintenance_work_mem</c> value this fixture's memory-sizing builders can ever produce is
+    /// <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>'s own value, which is capped at
+    /// <see cref="DarlingManagedPostgres.MaintenanceWorkMemCapMb"/> (2047 MB = 2,096,128 kB) for ANY RAM size —
+    /// the cap is a MIN in the formula, so raising RAM without bound never raises the derived value past it. That
+    /// cap sits 1,023 kB UNDER <see cref="DarlingManagedPostgres.LegacyMaintenanceWorkMemMaxKb"/> (2,097,151 kB) —
+    /// deliberately, so a fresh derivation never crosses the very limit v14 exists to cap. So no RAM figure this
+    /// fixture could supply (there is no upper bound to check: the derivation's cap makes every RAM equally
+    /// incapable) ever drives <c>RenderBody</c> to append v14 on its own. v14 only fires for a value ALREADY on
+    /// disk from before this cap existed (a pre-#3909 store) or set directly by <c>ALTER SYSTEM</c> — inputs
+    /// <c>RenderBody</c>'s formula-only inputs cannot produce. It is exercised directly by
+    /// <c>NeedsLegacyMaintenanceWorkMemCap_OnlyForAnOverLimitValueOnPostgres17OrEarlier</c> in
+    /// <c>DarlingManagedPostgresTests</c>, not here.</para>
+    /// </summary>
+    [Fact]
+    public void RenderBody_CarriesEveryManagedConfMarkersOwnedKeys()
+    {
+        var inputs = SampleInputs();
+        var body = ManagedConfFile.RenderBody(inputs);
+        var (_, bodyValues) = ExtractValues(body);
+
+        foreach (var marker in DarlingManagedPostgres.AllManagedConfMarkers)
+        {
+            var representativeBlock = BuildRepresentativeBlockOrNull(marker, inputs);
+            if (representativeBlock is null)
+            {
+                continue; // v14: documented skip above, exercised elsewhere.
+            }
+
+            foreach (var (_, key, _) in DarlingManagedPostgres.ParseConfText(representativeBlock))
+            {
+                Assert.True(
+                    bodyValues.ContainsKey(key),
+                    $"marker '{marker}' owns key '{key}' (from its own builder's output) but RenderBody's rendered body does not carry it.");
+            }
+        }
+    }
+
+    /// <summary>Maps one <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> entry to its OWN legacy
+    /// builder's output, called with inputs this fixture's <paramref name="inputs"/> can drive (RAM/disk
+    /// authoritative, PostgreSQL 18) — the keys asserted against <c>RenderBody</c> are parsed back out of this
+    /// text, never hand-typed. Throws for a marker with no entry here, so a marker added to
+    /// <c>AllManagedConfMarkers</c> without a corresponding line here fails loudly instead of being silently
+    /// skipped.</summary>
+    private static string? BuildRepresentativeBlockOrNull(string marker, ManagedConfFile.RenderInputs inputs)
+    {
+        if (marker == DarlingManagedPostgres.ConfMarker)
+        {
+            return DarlingManagedPostgres.BuildConfAppend(inputs.Port);
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV2)
+        {
+            return DarlingManagedPostgres.BuildWorkerSizingConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV3)
+        {
+            return DarlingManagedPostgres.BuildMemorySizingConfAppend(inputs.RamBytes);
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV4)
+        {
+            return DarlingManagedPostgres.BuildWriteThroughputConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV5)
+        {
+            return DarlingManagedPostgres.BuildColocatedSizingConfAppend(inputs.RamBytes);
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV6)
+        {
+            return DarlingManagedPostgres.BuildLogRotationConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV7)
+        {
+            return DarlingManagedPostgres.BuildCompressionMemoryConfAppend(inputs.RamBytes);
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV8)
+        {
+            return DarlingManagedPostgres.BuildHardwareSizingConfAppend(inputs.RamBytes, inputs.HypertableCount);
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV9)
+        {
+            return DarlingManagedPostgres.BuildTimeZoneConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV10)
+        {
+            return DarlingManagedPostgres.BuildMessageLocaleConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV11)
+        {
+            return DarlingManagedPostgres.BuildJobExecutionLoggingConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV12)
+        {
+            return DarlingManagedPostgres.BuildWalSizingConfAppend(inputs.DataVolumeFreeBytes, inputs.DataVolumeTotalBytes, inputs.PostgresMajor);
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV13)
+        {
+            return DarlingManagedPostgres.BuildStatementStatisticsConfAppend(inputs.EffectivePreloadList);
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV14)
+        {
+            return null; // documented skip -- no RAM ever drives RenderBody's own inputs past the cap; see the class doc comment on RenderBody_CarriesEveryManagedConfMarkersOwnedKeys
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV15)
+        {
+            return DarlingManagedPostgres.BuildWalVolumeConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV16)
+        {
+            return DarlingManagedPostgres.BuildCheckpointIntervalConfAppend();
+        }
+
+        throw new InvalidOperationException(
+            $"marker '{marker}' is in AllManagedConfMarkers but has no representative-block mapping in this parity test -- add one.");
+    }
+
     private static (List<string> Order, Dictionary<string, string> Values) ExtractValues(string body)
     {
         var order = new List<string>();
