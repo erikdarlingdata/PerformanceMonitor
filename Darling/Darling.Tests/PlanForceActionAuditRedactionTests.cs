@@ -377,6 +377,50 @@ public sealed class PlanForceActionAuditRedactionTests
         return explicitCtor + targetTyped;
     }
 
+    /// <summary>
+    /// #4346/#4377's exemption contract: the ONE named raw reader (<c>PlanForceActionDetailScrub.RunAsync</c>)
+    /// must return no <c>detail</c> text to its caller — its public <c>Summary</c> carries counts only — and
+    /// its write path must be built from <c>SanitizeDetailForAudit</c>'s output, not from the raw value it
+    /// read. Reads the scrub's own source text (same technique as the census scan above) rather than
+    /// trusting a comment, so a later change that widens the exemption's surface fails this pin directly.
+    /// </summary>
+    [Fact]
+    public void PlanForceActionDetailScrub_ExemptedMethod_ReturnsNoDetailText()
+    {
+        var source = StripComments(ReadScrubSource().ReplaceLineEndings("\n"));
+
+        /* Summary's public surface is counts only: no string-typed property. A `string` or `string?`
+           property on the public Summary class would be the exemption smuggling detail text back out. */
+        var summaryStart = source.IndexOf("public sealed class Summary", StringComparison.Ordinal);
+        Assert.True(summaryStart >= 0, "could not find PlanForceActionDetailScrub.Summary to check its public surface.");
+        var summaryEnd = source.IndexOf("\n}", summaryStart, StringComparison.Ordinal);
+        Assert.True(summaryEnd >= 0, "could not find the end of Summary's body.");
+        var summaryWindow = source[summaryStart..summaryEnd];
+        Assert.DoesNotContain("public string", summaryWindow, StringComparison.Ordinal);
+
+        /* RunAsync's return type is Task<Summary> — not a string, not a string-bearing tuple. */
+        Assert.Contains("public static async Task<Summary> RunAsync(", source, StringComparison.Ordinal);
+
+        /* The write path calls SanitizeDetailForAudit and stores exactly that result (the `sanitized`
+           local), never the raw `detail` local it read, into the list that becomes the UPDATE payload. */
+        Assert.Contains("PgPlanForceActionStore.SanitizeDetailForAudit(detail)", source, StringComparison.Ordinal);
+        Assert.Contains("toUpdateDetails.Add(sanitized)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("toUpdateDetails.Add(detail)", source, StringComparison.Ordinal);
+    }
+
+    private static string ReadScrubSource([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+    {
+        var dir = System.IO.Path.GetDirectoryName(thisFile)!;
+        var relative = System.IO.Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "PlanForceActionDetailScrub.cs");
+        while (dir is not null && !System.IO.File.Exists(System.IO.Path.Combine(dir, relative)))
+        {
+            dir = System.IO.Path.GetDirectoryName(dir);
+        }
+
+        Assert.NotNull(dir);
+        return System.IO.File.ReadAllText(System.IO.Path.Combine(dir!, relative));
+    }
+
     /// <summary>Derives the detail column's ordinal from ReadRecord's own
     /// <c>IsDBNull(N) ? null : reader.GetString(N)</c> pair on the <c>Detail:</c> line, rather than
     /// hard-coding it.</summary>
@@ -454,10 +498,15 @@ public sealed class PlanForceActionAuditRedactionTests
         Assert.Empty(RawDetailReadersIn(StripComments(insertOnlyMention)));
     }
 
-    /// <summary>At most ONE entry, reserved for a future one-time audit-detail scrub (#4346). Empty
-    /// today: the scrub doesn't exist yet, so any new raw reader must be named here explicitly before
-    /// it can pass — nothing is grandfathered in silently.</summary>
-    private static readonly string[] RawDetailReaderExemptions = Array.Empty<string>();
+    /// <summary>The ONE named exemption (#4346): <c>PlanForceActionDetailScrub.RunAsync</c>'s own SELECT,
+    /// which must read <c>detail</c> raw because every other reader already sanitizes it on the way out
+    /// (see <see cref="PlanForceActionDetailScrub_ExemptedMethod_ReturnsNoDetailText"/> for the exemption's
+    /// own contract pin: it returns no <c>detail</c> text, and writes back only sanitizer output). Any
+    /// OTHER raw reader added later still fails this pin — nothing else is grandfathered in silently.</summary>
+    private static readonly string[] RawDetailReaderExemptions =
+    [
+        "PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.RunAsync",
+    ];
 
     /// <summary>The two readers that feed <c>ReadRecord</c> — the sanitizer's own choke point — are
     /// allowed to mention the <c>detail</c> column in their SQL text; they never touch it in C# code

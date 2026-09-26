@@ -1826,6 +1826,11 @@ public sealed class DarlingWorker : BackgroundService
            reason about. Drained with the other background startup work below. */
         var settingScrub = RunPgSettingScrubAsync(postgres, stoppingToken);
 
+        /* #4346: the one-time scrub of the legacy plan_force_actions.detail state_unavailable line
+           #4326/#4363/#4376 stop new rows from ever carrying. Same launch shape as settingScrub above —
+           its own connection, its own catch, drained with the other background startup work below. */
+        var planForceDetailScrub = RunPlanForceActionDetailScrubAsync(postgres, stoppingToken);
+
         /* #4214 ruling 9: the once-per-start store host/settings profile log — host facts, pg_settings and
            the managed conf files only, never the store-size/chunk-total reads --check-settings and the MCP
            read own. Its own short deadline and its own catch: a bad conf file, a permission problem or a
@@ -3097,6 +3102,16 @@ public sealed class DarlingWorker : BackgroundService
             /* Expected on shutdown. */
         }
 
+        /* And the plan-force-actions detail scrub (#4346), for the same reason. */
+        try
+        {
+            await planForceDetailScrub;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
 
@@ -3467,6 +3482,42 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogWarning(
                 "Postgres setting scrub (#4348) could not run — any row an older collector build stored unredacted stays as it is until the next start retries: {Message}",
+                ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="PlanForceActionDetailScrub.RunAsync"/> once (#4346), concurrently with the rest of
+    /// startup. Its own connection and its own catch, the same isolation as
+    /// <see cref="RunPgSettingScrubAsync"/>: a store this cannot reach keeps whatever legacy text it
+    /// already had, never a service that did not start.
+    /// </summary>
+    private async Task RunPlanForceActionDetailScrubAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await PlanForceActionDetailScrub.RunAsync(postgres, _logger, stoppingToken);
+            if (summary.AlreadyDone)
+            {
+                _logger.LogInformation("Plan-force-action detail scrub (#4346): already scrubbed — nothing to do.");
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Plan-force-action detail scrub (#4346): {Candidates} candidate row(s) read, {Updated} row(s) redacted.",
+                    summary.CandidatesRead, summary.RowsUpdated);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation(
+                "Plan-force-action detail scrub (#4346) was cancelled before it could report — at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Plan-force-action detail scrub (#4346) could not run — any legacy row stays as it is until the next start retries: {Message}",
                 ex.Message);
         }
     }
