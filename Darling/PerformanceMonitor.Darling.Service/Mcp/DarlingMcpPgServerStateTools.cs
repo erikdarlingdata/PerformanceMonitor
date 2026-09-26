@@ -616,7 +616,7 @@ public sealed class DarlingMcpPgServerStateTools
         }
     }
 
-    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings: value, default, source, restart-or-reload need. LATEST IS A TIME: the newest stored snapshot, not a window or the live server; captured_at is when it was taken (collector runs hourly). Non-default settings list FIRST; pass include_defaults for the rest. pending_restart=true means the file and server disagree, with no other symptom. Bounded by limit (truncated says if more existed); non_default_count is the snapshot's, not the page's. database_overrides (present only if any exist) is what sessions actually run with. <<GUIDE>> Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident. THE PAGE IS BOUNDED BY limit: settings_returned is how many rows you got, truncated says the population you asked for (the non-default settings, or every setting when include_defaults is true) held more, and the rows are the chosen ones first. COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE: non_default_count is how many settings in the whole snapshot differ from their default, computed in the same statement as the rows before the cap, so it is the same number at any limit; non_default_returned is how many of those are on this page, and the gap between the two is what the cap left out. PER-DATABASE AND PER-ROLE OVERRIDES ARE A SEPARATE SECTION: the settings list is the SERVER's configuration, and database_overrides - present only when the cluster has any - carries the values one database or one role was given with ALTER DATABASE/ROLE SET, which are what sessions there actually run with rather than the server-wide value beside them. A setting marked pending_restart is kept in the non-default view whatever its source, because it is the row that says the file and the server disagree.")]
+    [McpServerTool(Name = "get_pg_server_config"), Description("Gets the PostgreSQL server's configuration from pg_settings: value, default, source, restart-or-reload need. LATEST IS A TIME: the newest stored snapshot, not a window or the live server; captured_at is when it was taken (collector runs hourly). Non-default settings list FIRST; pass include_defaults for the rest. pending_restart=true means the file and server disagree, with no other symptom. Bounded by limit (truncated says if more existed); non_default_count is the snapshot's, not the page's. database_overrides (present only if any exist) is what sessions actually run with. <<GUIDE>> Gets the PostgreSQL server's configuration from pg_settings - what each parameter is set to, whether it differs from the compiled-in default, where the value came from (configuration file, command line, ALTER SYSTEM, per-database or per-role), and whether changing it needs a restart or only a reload. Non-default settings are listed FIRST, because a server has several hundred parameters and only the ones somebody chose are an answer. Reports pending_restart loudly: that means postgresql.conf was edited and reloaded but the running server is still using the old value, so the file and the server disagree with no symptom until the next restart. Where pg_file_settings is read, true can also mean the file holds a value PostgreSQL rejected, which would stop the next start; the server log names the rejected setting. Session-scoped rows are excluded - pg_settings is a per-connection view and its client-source rows describe the monitoring connection, not the server. LATEST IS A TIME: this is the newest stored snapshot, not a window and not the live server - captured_at is the instant it was taken. The collector runs hourly, so a value here is 'as of' that stamp: a setting changed since (ALTER SYSTEM, a reload, a parameter-group edit) is not reflected until the next collection, and on a server whose collector has stalled the stamp is the only thing that says how stale the answer is. Compare captured_at against get_collection_log before trusting a value in an incident. THE PAGE IS BOUNDED BY limit: settings_returned is how many rows you got, truncated says the population you asked for (the non-default settings, or every setting when include_defaults is true) held more, and the rows are the chosen ones first. COUNTS ARE OF THE SNAPSHOT, NOT OF THE PAGE: non_default_count is how many settings in the whole snapshot differ from their default, computed in the same statement as the rows before the cap, so it is the same number at any limit; non_default_returned is how many of those are on this page, and the gap between the two is what the cap left out. PER-DATABASE AND PER-ROLE OVERRIDES ARE A SEPARATE SECTION: the settings list is the SERVER's configuration, and database_overrides - present only when the cluster has any - carries the values one database or one role was given with ALTER DATABASE/ROLE SET, which are what sessions there actually run with rather than the server-wide value beside them. A setting marked pending_restart is kept in the non-default view whatever its source, because it is the row that says the file and the server disagree.")]
     public static async Task<string> GetPgServerConfig(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -668,6 +668,20 @@ public sealed class DarlingMcpPgServerStateTools
                measured population is zero - and a truncated override list is worse than none, because the
                question it answers is "is my value overridden anywhere" and a cap turns a No into a maybe. */
             var overrides = await DarlingPgServerConfigReader.GetOverridesAsync(postgres, resolved.ServerId);
+
+            /* #4251: attached like database_overrides below, from the collector's own cached verdict (no
+               store read - PgFileSettingsCapability is process-wide and this Darling process is the same one
+               that ran the collector). TryGetCachedVerdict returns false with fileSettingsReadable/
+               fileSettingsIsWindows unset for a target never checked (collector has not run yet, or is SQL
+               Server), which correctly shows no caveat rather than a false one - "readable" is not claimed,
+               only "known unreadable" is. #4251 round-1 review, H1(a): also gated on Windows - the grants
+               this caveat asks for fix nothing on a non-Windows target, where pending_restart is already
+               correct off pg_settings alone, so an unreadable verdict there is not worth a caveat. */
+            var fileSettingsUnreadable =
+                PgFileSettingsCapability.TryGetCachedVerdict(
+                    resolved.ServerName, out var fileSettingsReadable, out var fileSettingsIsWindows)
+                && fileSettingsIsWindows
+                && !fileSettingsReadable;
 
             var configPage = new
             {
@@ -730,33 +744,45 @@ public sealed class DarlingMcpPgServerStateTools
                to tell which one a session actually gets — and every count above (settings_returned,
                non_default_count, non_default_returned) is a count of the server-wide population, which is what
                those names have always promised. The overrides sit beside them, not among them. */
-            if (overrides.Count == 0)
+            if (overrides.Count == 0 && !fileSettingsUnreadable)
             {
                 return JsonSerializer.Serialize(configPage, McpHelpers.JsonOptions);
             }
 
             var node = JsonSerializer.SerializeToNode(configPage, McpHelpers.JsonOptions)?.AsObject()
                 ?? throw new InvalidOperationException("the server-config page did not serialize to a JSON object");
-            node["database_overrides"] = JsonSerializer.SerializeToNode(overrides.Select(o => new
+
+            if (overrides.Count > 0)
             {
-                /* NULL means "not scoped to one": a database with no role is ALTER DATABASE ... SET, a role with no
-                   database is ALTER ROLE ... SET (that role in every database), and both is ALTER ROLE ... IN
-                   DATABASE ... SET. Neither-NULL cannot appear here — that is a server-wide row, and the read
-                   excludes it. */
-                database_name = o.DatabaseName,
-                role_name = o.RoleName,
-                name = o.Name,
-                setting = o.Setting,
-            }).ToList(), McpHelpers.JsonOptions);
-            node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
-                + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
-                + "database, or as that role, runs with the override rather than with the server-wide "
-                + "value listed above - so a setting that appears in both places has TWO answers and "
-                + "which one applies depends on who is connecting. The stored text is what was SET, "
-                + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
-                + "connection at connect time, and the catalog records only the instruction. No unit, "
-                + "default or context is carried on these rows because the catalog does not hold them "
-                + "- read those off the server-wide row for the same setting name.";
+                node["database_overrides"] = JsonSerializer.SerializeToNode(overrides.Select(o => new
+                {
+                    /* NULL means "not scoped to one": a database with no role is ALTER DATABASE ... SET, a role with no
+                       database is ALTER ROLE ... SET (that role in every database), and both is ALTER ROLE ... IN
+                       DATABASE ... SET. Neither-NULL cannot appear here — that is a server-wide row, and the read
+                       excludes it. */
+                    database_name = o.DatabaseName,
+                    role_name = o.RoleName,
+                    name = o.Name,
+                    setting = o.Setting,
+                }).ToList(), McpHelpers.JsonOptions);
+                node["database_overrides_note"] = "database_overrides are values one DATABASE or one ROLE was given with ALTER DATABASE "
+                    + "/ ALTER ROLE ... SET, read from pg_db_role_setting. A session connecting to that "
+                    + "database, or as that role, runs with the override rather than with the server-wide "
+                    + "value listed above - so a setting that appears in both places has TWO answers and "
+                    + "which one applies depends on who is connecting. The stored text is what was SET, "
+                    + "not a resolved value: PostgreSQL resolves database, role and session scopes per "
+                    + "connection at connect time, and the catalog records only the instruction. No unit, "
+                    + "default or context is carried on these rows because the catalog does not hold them "
+                    + "- read those off the server-wide row for the same setting name.";
+            }
+
+            /* #4251: ATTACHED like database_overrides_note just above, and for the same reason — present only
+               when it applies, so every other snapshot's JSON is untouched. */
+            if (fileSettingsUnreadable)
+            {
+                node["pending_restart_caveat"] = PgFileSettingsCapability.UnreadableCaveat;
+            }
+
             return node.ToJsonString(McpHelpers.JsonOptions);
         }
         catch (Exception ex)
