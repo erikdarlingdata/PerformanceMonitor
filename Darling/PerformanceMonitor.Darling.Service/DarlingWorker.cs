@@ -612,6 +612,19 @@ public sealed class DarlingWorker : BackgroundService
     internal static bool ShouldRunCollection(bool paused) => !paused;
 
     /// <summary>
+    /// #4299 L2 (two-service pin): the relaunch decision, extracted pure so a second service's own read can be
+    /// asserted directly rather than re-driving the whole Periodic pass. Launch a materialization-hole repair
+    /// only when BOTH independent guards agree: this process is not already running one
+    /// (<paramref name="repairRunningInThisProcess"/>, the in-memory <c>_materializationHoleRepairRunning</c>
+    /// flag) AND the store's own repair-epoch stamp is stale under the current postmaster start
+    /// (<paramref name="epochCurrentInStore"/> false, read via <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/>).
+    /// Either guard alone is not enough — two processes each with the in-memory flag clear would otherwise both
+    /// launch — so this method states the AND explicitly rather than leaving it implicit in the call site.
+    /// </summary>
+    internal static bool ShouldLaunchMaterializationHoleRepair(bool repairRunningInThisProcess, bool epochCurrentInStore)
+        => !repairRunningInThisProcess && !epochCurrentInStore;
+
+    /// <summary>
     /// The network-endpoint startup warnings the worker emits AFTER <see cref="DarlingConfig.Validate"/>
     /// passes (darling-network-endpoints) — NEVER inside Validate(), which is all-fatal, so an optional,
     /// default-off endpoint note can never abort collection (D-BYO / D-validate):
@@ -6945,7 +6958,7 @@ LIMIT 1";
                     epochCurrent = value is bool b && b;
                 }
 
-                if (!epochCurrent && _postgres is not null)
+                if (ShouldLaunchMaterializationHoleRepair(_materializationHoleRepairRunning, epochCurrent) && _postgres is not null)
                 {
                     _logger.LogInformation(
                         "Retention re-evaluation: the repair epoch is stale under the current postmaster start and no repair is running in this process — launching one now (Periodic pass only).");

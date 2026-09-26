@@ -393,4 +393,124 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
             await connection.DisposeAsync();
         }
     }
+
+    /// <summary>#4299 L2 (two-service pin): two INDEPENDENT <see cref="NpgsqlDataSource"/>s against the SAME
+    /// scratch store, standing in for two service processes. Service A stamps the current postmaster epoch;
+    /// Service B's own relaunch-decision read (<see cref="DarlingWorker.ShouldLaunchMaterializationHoleRepair"/>,
+    /// fed by a fresh <see cref="TimescaleSupport.RawRepairEpochMatchesSql"/> read on B's OWN connection) must
+    /// see the stamp A wrote and answer "don't launch" — the store-side guard
+    /// (<see cref="TimescaleSupport.RawRepairEpochStampSql"/>'s <c>IS DISTINCT FROM</c>) is what stops a SECOND
+    /// SERVICE from repeating A's repair, independent of either process's own in-memory flag. B then re-stamping
+    /// the identical value touches 0 rows (the same guard, proven from the write side). Finally A and B both call
+    /// <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/> in turn on state (a): the chunk count drops once, on
+    /// A's call, and B's later call — same relation, chunk already gone — drops nothing further and throws
+    /// nothing, proving the purge itself is naturally idempotent once the chunks are already dropped. RED on
+    /// <c>d70358a5b</c>: neither <c>TriggerRawPurgeCoreAsync</c> nor <c>ShouldLaunchMaterializationHoleRepair</c>
+    /// existed to call.</summary>
+    [Fact]
+    public async Task TwoServices_RelaunchGuardHolds_PurgeRunsOnceOnly()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 L2 two-service pin.");
+
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
+        var bodySucceeded = false;
+
+        var connectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString) { MaxAutoPrepare = 0 }.ConnectionString;
+
+        await using var serviceA = NpgsqlDataSource.Create(connectionString);
+        await using var serviceB = NpgsqlDataSource.Create(connectionString);
+
+        try
+        {
+            await using var connectionA = await serviceA.OpenConnectionAsync();
+            await PgMigrations.MigrateAsync(connectionA, default);
+
+            var enabled = await TimescaleSupport.TryEnableAsync(connectionA, null, default);
+            Assert.SkipWhen(!enabled, "The live #4299 L2 two-service pin needs TimescaleDB.");
+            await TimescaleSupport.ConvertToHypertablesAsync(connectionA, null, default);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connectionA, null, default);
+
+            await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connectionA) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await stop.ExecuteNonQueryAsync();
+            }
+
+            await using var connectionB = await serviceB.OpenConnectionAsync();
+
+            await ArmRawJobAsync(connectionA, Raw);
+            await SeedRawAsync(connectionA);
+
+            var dropFrom = TimescaleSupport.AlignDown(DateTime.UtcNow.AddDays(-11), TimeSpan.FromHours(1));
+            var dropTo = TimescaleSupport.AlignDown(DateTime.UtcNow, TimeSpan.FromHours(1));
+            await RefreshSuccessorsAsync(connectionA, dropFrom, dropTo);
+
+            var periodic = await TimescaleSupport.EnsureRetentionPoliciesAsync(connectionA, null, TimescaleSupport.RetentionSweepPass.Periodic, default);
+            Assert.True(periodic.Armed >= 1, "the seeded and fully-refreshed raw relation must read Covered this pass");
+
+            /* Service A stamps the epoch. */
+            await StampCurrentEpochAsync(connectionA, Raw);
+
+            /* Service B's relaunch decision, on B's OWN connection: the epoch B reads must match (A's stamp
+               is visible across the two independent connections/data sources against the same store), so the
+               pure decision method must answer "don't launch" regardless of B's own in-memory flag state. */
+            bool epochCurrentForB;
+            await using (var epochCheck = new NpgsqlCommand(TimescaleSupport.RawRepairEpochMatchesSql(Raw), connectionB) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                var value = await epochCheck.ExecuteScalarAsync();
+                epochCurrentForB = value is bool b && b;
+            }
+            Assert.True(epochCurrentForB, "Service B must see Service A's epoch stamp as current, or this pin proves nothing");
+
+            Assert.False(
+                DarlingWorker.ShouldLaunchMaterializationHoleRepair(repairRunningInThisProcess: false, epochCurrentInStore: epochCurrentForB),
+                "Service B must NOT decide to launch a repair when the store's epoch stamp already matches the current postmaster start");
+
+            /* Service B re-stamping the SAME value touches 0 rows (the store-side IS DISTINCT FROM guard). */
+            /* RawRepairEpochStampSql is a SELECT (its IS DISTINCT FROM guard lives in the WHERE clause), so
+               ExecuteNonQueryAsync's RecordsAffected is always -1 for it — the row count that matters here is
+               how many rows the SELECT itself returned, read the same way StampCurrentEpochAsync's own SELECT
+               is consumed. Zero rows returned means the guard's IS DISTINCT FROM excluded every job row, which
+               is exactly the "already stamped this value" no-op the guard exists for. */
+            var epoch = await ReadPostmasterEpochAsync(connectionB);
+            var restampRowsReturned = 0;
+            await using (var restamp = new NpgsqlCommand(TimescaleSupport.RawRepairEpochStampSql(Raw), connectionB) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                restamp.Parameters.AddWithValue(epoch);
+                await using var reader = await restamp.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                {
+                    restampRowsReturned++;
+                }
+            }
+            Assert.Equal(0, restampRowsReturned);
+
+            /* Then the purge: A and B both call TriggerRawPurgeCoreAsync in turn on state (a). */
+            var before = await ChunkCountAsync(connectionA);
+            Assert.True(before > 0, "the seed must have produced at least one raw chunk, or this pin proves nothing");
+
+            var loggerA = new CapturingTestLogger();
+            await DarlingWorker.TriggerRawPurgeCoreAsync(connectionA, loggerA, default);
+
+            var afterA = await ChunkCountAsync(connectionA);
+            Assert.True(afterA < before, $"Service A's purge call must drop chunks (before={before}, after={afterA}); log: {loggerA.Joined}");
+
+            var loggerB = new CapturingTestLogger();
+            await DarlingWorker.TriggerRawPurgeCoreAsync(connectionB, loggerB, default);
+
+            var afterB = await ChunkCountAsync(connectionA);
+            Assert.Equal(afterA, afterB);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
+            });
+        }
+    }
 }
