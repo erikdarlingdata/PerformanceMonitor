@@ -139,7 +139,6 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         "get_pg_index_bloat",
         "get_pg_log_events",
         "get_pg_logging_audit",
-        "get_store_host",
     };
 
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>
@@ -3178,8 +3177,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #4214 part 2: postgresConfig rides by closure (this method's own doc comment), the same way
                logger does for get_sweep_reports two screens up. StoreHostProfileCache.Shared as a direct
                static reference, not a new BuildReadDispatch parameter (round-1 review, Medium 2) — unlike
-               postgresConfig, the cache instance never varies by caller, so no threading is needed. */
-            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared),
+               postgresConfig, the cache instance never varies by caller, so no threading is needed. #4203:
+               c.RequestAborted now reaches the gather via GetOrGatherAsync's linked token. */
+            ["get_store_host"] = (c, pg, an) => DarlingMcpStoreHostTools.GetStoreHost(pg, postgresConfig, StoreHostProfileCache.Shared, c.RequestAborted),
             ["get_collector_cost"] = (c, pg, an) => DarlingMcpCollectorCostTools.GetCollectorCost(pg, QueryInt(c, "days_back", null, 7), Str(c, "collector_name"), c.RequestAborted),
             ["get_collector_stall_probes"] = (c, pg, an) => DarlingMcpStallProbeTools.GetCollectorStallProbes(pg, Server(c), QueryInt(c, "days_back", null, 7), Rows(c, "limit", DarlingMcpStallProbeTools.DefaultLimit), c.RequestAborted),
             ["get_oversized_plan_backlog"] = (c, pg, an) => DarlingMcpOversizedPlanBacklogTools.GetOversizedPlanBacklog(pg, Server(c), QueryBool(c, "include_rows", false), Rows(c, "limit", DarlingMcpOversizedPlanBacklogTools.DefaultLimit), c.RequestAborted),
