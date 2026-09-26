@@ -27,19 +27,23 @@ namespace PerformanceMonitor.Collectors;
 /// quoting and <c>\\</c> / <c>\'</c> escapes;</item>
 /// <item>the password in a URI's user info (<c>scheme://user:secret@host</c>), and a <c>password</c> query
 /// parameter;</item>
-/// <item>the value of an assignment or option whose name contains <c>PASSWORD</c>, <c>PASSWD</c>, <c>SECRET</c>
-/// or <c>TOKEN</c> (case-insensitive), such as <c>PGPASSWORD=...</c> or <c>--password=...</c>.</item>
+/// <item>the value of an assignment or option whose name contains <c>PASS</c>, <c>SECRET</c>, <c>TOKEN</c>,
+/// <c>CREDENTIAL</c>, <c>PWD</c>, or a standalone <c>KEY</c> segment (case-insensitive), such as
+/// <c>PGPASSWORD=...</c>, <c>--password=...</c>, <c>--passphrase ...</c> or <c>--encryption-key ...</c> — the
+/// same name part on both the <c>=</c>-assignment path and the space-separated option path.</item>
 /// </list>
 /// Host, port, user, dbname and application_name are never touched.</item>
 /// <item><c>ssl_passphrase_command</c> has its whole value masked (an empty value stays empty — there is
 /// nothing to mask).</item>
 /// <item>An extension setting — a name with a dot, such as <c>anon.salt</c> — has its whole value masked when
-/// the part of the name AFTER THE LAST DOT contains (as a substring, case-insensitive) <c>password</c>,
-/// <c>passwd</c>, <c>passphrase</c>, <c>secret</c>, <c>salt</c>, <c>token</c> or <c>key</c>. This is a plain
-/// substring test, not a whole-word one: <c>myext.api_key</c> matches (ends in <c>key</c>) and so would a name
-/// that merely happens to contain those letters together, such as <c>myext.turkey_interval</c> — the false
-/// positive it can produce only over-masks, never leaks, and <c>myext.keep_alive</c> is the negative case that
-/// proves it (no marker word is a substring of <c>keep_alive</c>).</item>
+/// ANY dot-separated segment of the name contains (as a substring, case-insensitive) <c>password</c>,
+/// <c>passwd</c>, <c>passphrase</c>, <c>secret</c>, <c>salt</c>, <c>token</c>, <c>key</c>, <c>credential</c> or
+/// <c>pwd</c> — not only the last segment (round 1's L1: <c>vault.secret.value</c> matches on the middle
+/// segment). This is a plain substring test, not a whole-word one: <c>myext.api_key</c> matches (ends in
+/// <c>key</c>) and so would a name that merely happens to contain those letters together, such as
+/// <c>myext.turkey_interval</c> — the false positive it can produce only over-masks, never leaks, and
+/// <c>myext.keep_alive</c> is the negative case that proves it (no marker word is a substring of
+/// <c>keep_alive</c>).</item>
 /// <item>Nothing else changes: a core setting whose name merely contains one of those words, such as
 /// <c>password_encryption</c>, keeps its value — only the DOTTED, extension-scoped form triggers a whole-value
 /// mask by name.</item>
@@ -78,11 +82,14 @@ public static class PgSettingRedactor
 
     /// <summary>A libpq <c>password</c>/<c>sslpassword</c> keyword inside a conninfo-shaped value. The keyword
     /// must sit at the start of the string or after whitespace, exactly like every other libpq keyword=value
-    /// pair, so it does not fire on an unrelated keyword such as <c>passfile</c>. The value is either a
-    /// libpq-quoted string (backslash escapes <c>\\</c> and <c>\'</c>, closing on the first unescaped <c>'</c>,
-    /// or running to the end of the value when the closing quote never arrives — round 1's L2), plus whatever
-    /// non-whitespace immediately follows the closing quote (round 1's M4: a quoted value glued to a trailing
-    /// <c>;</c> or another token with no space), or an unquoted run of non-whitespace.</summary>
+    /// pair, so THIS regex does not fire on an unrelated keyword such as <c>passfile</c> — but
+    /// <see cref="AssignmentSecretName"/>'s broader name part (round 2's M1) treats <c>PASS</c> as a
+    /// substring, so <c>passfile=/x/.pgpass</c> is still masked whole, by that regex, not this one; it is an
+    /// over-mask the ruling accepts, never a leak. The value is either a libpq-quoted string (backslash
+    /// escapes <c>\\</c> and <c>\'</c>, closing on the first unescaped <c>'</c>, or running to the end of the
+    /// value when the closing quote never arrives — round 1's L2), plus whatever non-whitespace immediately
+    /// follows the closing quote (round 1's M4: a quoted value glued to a trailing <c>;</c> or another token
+    /// with no space), or an unquoted run of non-whitespace.</summary>
     private static readonly Regex LibpqPasswordKeyword = new(
         @"(?<=^|\s)(?<kw>sslpassword|password)\s*=\s*(?:'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);

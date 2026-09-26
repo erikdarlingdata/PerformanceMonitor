@@ -39,18 +39,21 @@ namespace PerformanceMonitor.Darling.Service;
 /// previously-unmasked value differently — is a version bump the marker compares against, and the scrub runs
 /// again rather than trusting a stale "done".</para>
 ///
-/// <para><b>Batches are grouped by calendar day, and every UPDATE carries that day as a literal range
-/// predicate — measured, not assumed (#4348 issue comment).</b> <c>collect.pg_server_config</c> compresses
-/// with <c>compress_segmentby = server_id</c> on 1-day chunks. An UPDATE that reaches a compressed chunk only
-/// through a JOIN against an unnested key array, with no CONSTANT <c>collection_time</c> predicate the
-/// planner can evaluate at plan time, cannot exclude any chunk — confirmed live: a 2-row batch shaped that
-/// way decompressed 8,846,250 of about 9.2M tuples and tripped TimescaleDB's
-/// <c>timescaledb.max_tuples_decompressed_per_dml_transaction</c> safety limit (default 100,000, error
-/// 53400) almost immediately. Adding the day's literal <c>&gt;= / &lt;</c> range alongside the join — redundant
-/// with the join equality, but load-bearing — lets TimescaleDB exclude every other chunk, and the same shape
-/// of batch then succeeds at once. A day's candidates rarely near <see cref="MaxKeysPerUpdate"/> (a target
-/// with 350 settings has at most 350 candidates on its worst day), but a day is still sub-batched past that
-/// cap, so one target's answer never determines the batch size.</para>
+/// <para><b>Batches are grouped by (server, day), and every UPDATE carries both as literal predicates —
+/// measured, not assumed (#4348 issue comment; the server predicate is round 2's H1 fix).</b>
+/// <c>collect.pg_server_config</c> compresses with <c>compress_segmentby = server_id</c> on 1-day chunks. An
+/// UPDATE that reaches a compressed chunk only through a JOIN against an unnested key array, with no CONSTANT
+/// <c>collection_time</c>/<c>server_id</c> predicate the planner can evaluate at plan time, cannot exclude any
+/// chunk or segment — confirmed live: a 2-row batch shaped that way decompressed 8,846,250 of about 9.2M
+/// tuples and tripped TimescaleDB's <c>timescaledb.max_tuples_decompressed_per_dml_transaction</c> safety
+/// limit (default 100,000, error 53400) almost immediately; day-only grouping repeated the same failure once
+/// a fleet passed about 11 targets, because every target's rows for that day still shared the chunk. Adding
+/// the day's literal <c>&gt;= / &lt;</c> range AND a constant <c>server_id</c> predicate alongside the join —
+/// redundant with the join equality, but load-bearing — lets TimescaleDB exclude every other chunk and every
+/// other server's segment, and the same shape of batch then succeeds at once. A target's candidates rarely
+/// near <see cref="MaxKeysPerUpdate"/> (a target with 350 settings has at most 350 candidates on its worst
+/// day), but one (server, day) group is still sub-batched past that cap, so one target's answer never
+/// determines the batch size.</para>
 ///
 /// <para><b>No explicit recompress step, and the touched chunk stays partly compressed until the standing
 /// compression policy next runs.</b> Measured live on TimescaleDB 2.30.1: after an UPDATE scoped by the
@@ -59,7 +62,7 @@ namespace PerformanceMonitor.Darling.Service;
 /// into that chunk's uncompressed heap and stay there, growing the store, until the compression policy's
 /// next run recompresses them. A manual <c>compress_chunk</c> right after each batch would avoid that window,
 /// but the scrub deliberately leaves it to the standing policy rather than adding its own compression step —
-/// see the release note below for the space and retention consequence.</para>
+/// see the CHANGELOG entry for #4351 for the space and retention consequence.</para>
 ///
 /// <para><b>Failure is isolated and retried, never fatal.</b> Any exception — the connection, the candidate
 /// read, a batch — is caught, logged once at WARNING, and the marker is left unwritten, so the next service
@@ -136,8 +139,8 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// The coarse filter: a superset of every row <see cref="PgSettingRedactor.Redact"/> could possibly
     /// change, cheap enough to run over a compressed hypertable (ILIKE substring tests, no regex). See the
     /// type remarks and <c>PgSettingRedactor</c>'s own remarks for the rule this mirrors rule-for-rule:
-    /// a libpq/URI password or an assignment naming PASSWORD/PASSWD/SECRET/TOKEN anywhere in a value;
-    /// <c>ssl_passphrase_command</c> by name; a dotted extension setting whose name contains one of the
+    /// a libpq/URI password or an assignment/option naming PASS/SECRET/TOKEN/CREDENTIAL/PWD/KEY anywhere in a
+    /// value; <c>ssl_passphrase_command</c> by name; a dotted extension setting whose name contains one of the
     /// whole-value markers. Over-inclusive on purpose — the fine-grained decision is
     /// <see cref="PgSettingRedactor.Redact"/>, run per candidate row below.
     /// </summary>
