@@ -3019,7 +3019,7 @@ public sealed class DarlingSelfAlertTests
             Reading(new[]
             {
                 new StuckPolicyJob(
-                    9100, "query_store_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    9100, "wait_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
                     Family: TimescaleSupport.StorePolicyJobFamily.Retention,
                     Scheduled: false,
                     Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
@@ -3036,6 +3036,73 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("HELD", warned.Message, StringComparison.Ordinal);
         Assert.Contains("#1680/#1877", warned.Message, StringComparison.Ordinal);
         Assert.Contains("retention job 9100", warned.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4299 L3a, the M4 pin: a raw job (<see cref="TimescaleSupport.RawRelations"/>) that looks "stuck" by
+    /// the old test is NEVER re-armed — the same second gate the previous pin proves for a non-raw held
+    /// policy, exercised for one of the three raw relations specifically, because the census (#4299 L3) found
+    /// the gate already structurally skips every <c>!Scheduled</c> row regardless of WHY it is unscheduled.
+    /// GREEN on both the pre-fix and post-fix commit — the redirect this lane makes is to the WARNING text
+    /// (see the next pin), not to this gate, and the brief calls for saying so rather than claiming a RED this
+    /// pin never had.
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_ARawJobReportedAsStuck_IsNeverRearmed_M4()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            Reading(new[]
+            {
+                new StuckPolicyJob(
+                    9200, "query_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    Family: TimescaleSupport.StorePolicyJobFamily.Retention,
+                    Scheduled: false,
+                    Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+            }),
+            rearm.Delegate, Ct);
+
+        Assert.Empty(rearm.Calls);
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// #4299 L3a: the not-scheduled WARNING for one of the three raw relations must say it is unscheduled by
+    /// design (#4299), not the #1680/#1877 coverage-gate text a non-raw held policy gets — the census (#4299
+    /// L3, row #12) found the OLD text logs a false "detector defect" WARNING for every raw job, every hourly
+    /// pass, forever. RED before this lane's redirect (the branch on <see
+    /// cref="TimescaleSupport.RawRelations"/> did not exist, so a raw job's WARNING read exactly like the
+    /// non-raw text the pin above asserts — "#1680/#1877", not "#4299").
+    /// </summary>
+    [Fact]
+    public async Task PolicyJobs_ARawJobReportedAsStuck_WarnsUnscheduledByDesign_NotACoverageHold()
+    {
+        var h = new Harness();
+        var e = h.Build();
+        var rearm = new RearmRecorder();
+
+        await e.ApplyPolicyJobsStuckAsync(
+            Reading(new[]
+            {
+                new StuckPolicyJob(
+                    9201, "procedure_stats", TimescaleSupport.NextStartNegativeInfinityPermanentReason,
+                    Family: TimescaleSupport.StorePolicyJobFamily.Retention,
+                    Scheduled: false,
+                    Arm: StuckPolicyJobArm.NextStartNegativeInfinity),
+            }),
+            rearm.Delegate, Ct);
+
+        var warned = Assert.Single(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
+        Assert.Contains("#4299", warned.Message, StringComparison.Ordinal);
+        Assert.Contains("unscheduled by design", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("detector defect", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("drop history", warned.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
