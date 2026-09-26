@@ -29,18 +29,21 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="ConfLineClassification.HandEdit"/> (left in place, never migrated as ours) until this
 /// classifier covers that block version too.</para>
 ///
-/// <para><b>Coverage today: v4, v6, v9, v10, v11, v13, v14, v15</b> (<see cref="CoveredMarkers"/>). Each
-/// of these writes only FIXED constants with no derivation input at all — a block appended once with
-/// the same bytes on every store, so the rebuild test is a plain string comparison (v14, v15, and v13's
-/// <c>track_utility</c> line), or a round trip through a pure parse/format pair the codebase already has
-/// (v13's preload-library merge). v1 is NOT covered despite writing mostly-fixed text, because its
-/// <c>port = &lt;port&gt;</c> line depends on the store's configured port, an input this classifier is
-/// never given (it takes only the conf text) — rebuilding it would require guessing or threading a new
-/// parameter through every caller, which the design does not ask for. v2, v3, v5, v7, v8 and v12 are
-/// RAM- or disk-derived and need more per-version rebuild machinery — v8 and v12 carry a
-/// fingerprint/stamp that records their derivation inputs, v2/v3/v5/v7 only have a "within the formula's
-/// range" test available — and are left for a follow-up lane; their marker and content lines classify as
-/// <see cref="ConfLineClassification.Unclassified"/> here, never as ours.</para>
+/// <para><b>Coverage today: v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15</b>
+/// (<see cref="CoveredMarkers"/>). v4, v6, v9, v10, v11, v13, v14, v15 write only FIXED constants with no
+/// derivation input at all — a block appended once with the same bytes on every store, so the rebuild test
+/// is a plain string comparison (v14, v15, and v13's <c>track_utility</c> line), or a round trip through a
+/// pure parse/format pair the codebase already has (v13's preload-library merge). v1 is NOT covered
+/// despite writing mostly-fixed text, because its <c>port = &lt;port&gt;</c> line depends on the store's
+/// configured port, an input this classifier is never given (it takes only the conf text) — rebuilding it
+/// would require guessing or threading a new parameter through every caller, which the design does not ask
+/// for. v2, v3, v5, v7, v8 and v12 are RAM- or disk-derived; v8 and v12 carry a fingerprint/stamp that
+/// records their derivation inputs, while v2/v3/v5/v7 are classified by exact formula-image membership over
+/// every generation that ever wrote that block (#4336 lanes c2b/c2c) rather than a fingerprint, since none
+/// of them stamp their inputs into the block text. Their marker and content lines classify as
+/// <see cref="ConfLineClassification.Ours"/> only when in-image, in-form, and (for v5/v7) introduced by a
+/// generation reachable from the block's own introduction commit onward — never a generation that predates
+/// the block, since a block cannot be older than its own introduction.</para>
 ///
 /// <para><b>The "older store" case (review M6).</b> A store built before v9-v15 existed has no line for
 /// those keys at all, inside a block or outside one — there is nothing to misclassify, and this class does
@@ -104,17 +107,18 @@ internal static class ManagedConfMigration
         HandEditReason Reason,
         string? Note = null);
 
-    /// <summary>The markers whose blocks this classifier can rule OURS on, in file-append order. Any other
-    /// marker in <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> — v5 and v7 — is not yet
-    /// covered; its marker line and its content classify as
-    /// <see cref="ConfLineClassification.Unclassified"/>.</summary>
+    /// <summary>The markers whose blocks this classifier can rule OURS on, in file-append order. Every
+    /// marker in <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> is covered as of #4336 lane
+    /// c2c (v5, v7).</summary>
     internal static readonly string[] CoveredMarkers =
     [
         DarlingManagedPostgres.ConfMarker,
         DarlingManagedPostgres.ConfMarkerV2,
         DarlingManagedPostgres.ConfMarkerV3,
         DarlingManagedPostgres.ConfMarkerV4,
+        DarlingManagedPostgres.ConfMarkerV5,
         DarlingManagedPostgres.ConfMarkerV6,
+        DarlingManagedPostgres.ConfMarkerV7,
         DarlingManagedPostgres.ConfMarkerV8,
         DarlingManagedPostgres.ConfMarkerV9,
         DarlingManagedPostgres.ConfMarkerV10,
@@ -242,6 +246,24 @@ internal static class ManagedConfMigration
                 lineNumber, text, v3IsOurs ? ConfLineClassification.Ours : ConfLineClassification.HandEdit, span.Marker, key,
                 v3IsOurs ? HandEditReason.None : v3Reason,
                 v3IsOurs ? FormattableString.Invariant($"legacy v3 {key}={value}: classified as product-derived (formula image); if you set this by hand, re-apply it with ALTER SYSTEM") : null);
+        }
+
+        if (span.Marker == DarlingManagedPostgres.ConfMarkerV5)
+        {
+            var (v5IsOurs, v5Reason) = ClassifyV5Line(key, value);
+            return new ClassifiedConfLine(
+                lineNumber, text, v5IsOurs ? ConfLineClassification.Ours : ConfLineClassification.HandEdit, span.Marker, key,
+                v5IsOurs ? HandEditReason.None : v5Reason,
+                v5IsOurs ? FormattableString.Invariant($"legacy v5 {key}={value}: classified as product-derived (formula image); if you set this by hand, re-apply it with ALTER SYSTEM") : null);
+        }
+
+        if (span.Marker == DarlingManagedPostgres.ConfMarkerV7)
+        {
+            var (v7IsOurs, v7Reason) = ClassifyV7Line(key, value);
+            return new ClassifiedConfLine(
+                lineNumber, text, v7IsOurs ? ConfLineClassification.Ours : ConfLineClassification.HandEdit, span.Marker, key,
+                v7IsOurs ? HandEditReason.None : v7Reason,
+                v7IsOurs ? FormattableString.Invariant($"legacy v7 {key}={value}: classified as product-derived (formula image); if you set this by hand, re-apply it with ALTER SYSTEM") : null);
         }
 
         var (isOurs, reason) = span.Marker switch
@@ -421,6 +443,57 @@ internal static class ManagedConfMigration
         }
 
         return (false, HandEditReason.FormMismatch);
+    }
+
+    /// <summary>
+    /// v5's block (co-located sizing override, introduced <c>2b67bedeb</c>) (#4336 lane c2c, ruling
+    /// 2026-09-26 03:19Z): re-states ONLY <c>shared_buffers</c>, and is never rewritten once appended
+    /// (<see cref="DarlingManagedPostgres.EnsureConfAppended"/> only appends it if the marker is absent), so
+    /// the image is every generation's <c>shared_buffers</c> formula FROM <c>2b67bedeb</c> onward — unlike
+    /// v3, this EXCLUDES the pre-<c>2b67bedeb</c> <c>min(ram/4, 8GB)</c> shape, since no generation before
+    /// v5 existed could have written a v5 block at all. A single generation ever wrote this block
+    /// (<c>min(ram/4, 1GB)</c>; no later commit re-derives <c>shared_buffers</c> — the #2845 v8 notes say it
+    /// is deliberately NOT re-derived there), so the image is exactly <see cref="IsInMinRamQuarterImage"/>
+    /// at the 1 GB cap, never the 8 GB cap.
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV5Line(string key, string value)
+    {
+        if (!string.Equals(key, "shared_buffers", StringComparison.OrdinalIgnoreCase))
+        {
+            return (false, HandEditReason.FormMismatch);
+        }
+
+        if (!TryParseWholeMb(value, out var valueMb))
+        {
+            return (false, HandEditReason.FormMismatch);
+        }
+
+        return IsInMinRamQuarterImage(valueMb, 1024L) ? (true, HandEditReason.None) : (false, HandEditReason.RebuildMismatch);
+    }
+
+    /// <summary>
+    /// v7's block (compression-memory override, introduced <c>f4c86ffa3</c> #1777) (#4336 lane c2c, ruling
+    /// 2026-09-26 03:19Z): re-states ONLY <c>maintenance_work_mem</c>, never rewritten once appended, so the
+    /// image is every generation's <c>maintenance_work_mem</c> formula FROM <c>f4c86ffa3</c> onward — this
+    /// EXCLUDES the pre-#1777 <c>min(ram/20, 1GB)</c> shape (no generation before v7 existed could have
+    /// written a v7 block), unlike v3's union which does include it. Two generations wrote this block:
+    /// <c>f4c86ffa3</c> itself (cap 2048 MB) and <c>e507aa2d1</c> #3909 (cap 2047 MB,
+    /// <see cref="DarlingManagedPostgres.MaintenanceWorkMemCapMb"/>, today's formula) — both are in-image.
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV7Line(string key, string value)
+    {
+        if (!string.Equals(key, "maintenance_work_mem", StringComparison.OrdinalIgnoreCase))
+        {
+            return (false, HandEditReason.FormMismatch);
+        }
+
+        if (!TryParseWholeMb(value, out var valueMb))
+        {
+            return (false, HandEditReason.FormMismatch);
+        }
+
+        var inImage = IsInPostFloorMaintenanceImage(valueMb, 2048L) || IsInPostFloorMaintenanceImage(valueMb, 2047L);
+        return inImage ? (true, HandEditReason.None) : (false, HandEditReason.RebuildMismatch);
     }
 
     /// <summary>The RAM domain every v3 generation's formula was defined over (#4336 lane c2b, per the brief's

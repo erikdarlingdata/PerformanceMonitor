@@ -540,6 +540,141 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(HandEditReason.FormMismatch, sharedBuffers.Reason);
     }
 
+    /// <summary>An untouched v5 block (co-located sizing, introduced <c>2b67bedeb</c>) at today's generation is
+    /// Ours (#4336 lane c2c).</summary>
+    [Fact]
+    public void ClassifyLines_UntouchedV5Block_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildColocatedSizingConfAppend(16L * 1024 * 1024 * 1024);
+
+        var lines = ClassifyLines(conf);
+        var sharedBuffers = FindByText(lines, "shared_buffers");
+
+        Assert.Equal(ConfLineClassification.Ours, sharedBuffers.Classification);
+        Assert.Contains("legacy v5 shared_buffers=1024MB", sharedBuffers.Note);
+        Assert.Contains("re-apply it with ALTER SYSTEM", sharedBuffers.Note);
+    }
+
+    /// <summary>A v5 block cannot legitimately carry a PRE-<c>2b67bedeb</c> value (the 8 GB cap) since no
+    /// generation before v5 existed could have written a v5 block at all — unlike v3's union rule, v5's image
+    /// EXCLUDES the older shape (#4336 lane c2c, ruling 2026-09-26 03:19Z).</summary>
+    [Fact]
+    public void ClassifyLines_V5Block_AtPreIntroductionSharedBuffersEightGb_IsHandEdit_RebuildMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV5 + "\n" +
+            "shared_buffers = 8192MB\n";
+
+        var lines = ClassifyLines(conf);
+        var sharedBuffers = FindByText(lines, "shared_buffers");
+
+        Assert.Equal(ConfLineClassification.HandEdit, sharedBuffers.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, sharedBuffers.Reason);
+    }
+
+    /// <summary>A value no v5 generation's formula could ever produce is a hand edit (#4336 lane c2c).</summary>
+    [Fact]
+    public void ClassifyLines_V5OffImageSharedBuffers_IsHandEdit_RebuildMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV5 + "\n" +
+            "shared_buffers = 777MB\n";
+
+        var lines = ClassifyLines(conf);
+        var sharedBuffers = FindByText(lines, "shared_buffers");
+
+        Assert.Equal(ConfLineClassification.HandEdit, sharedBuffers.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, sharedBuffers.Reason);
+    }
+
+    /// <summary>A unit-form variant no v5 builder ever wrote is a hand edit even though the value is in-image
+    /// (#4336 lane c2c, same form rule as v3).</summary>
+    [Fact]
+    public void ClassifyLines_V5UnitFormVariant_IsHandEdit_FormMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV5 + "\n" +
+            "shared_buffers = 1GB\n";
+
+        var lines = ClassifyLines(conf);
+        var sharedBuffers = FindByText(lines, "shared_buffers");
+
+        Assert.Equal(ConfLineClassification.HandEdit, sharedBuffers.Classification);
+        Assert.Equal(HandEditReason.FormMismatch, sharedBuffers.Reason);
+    }
+
+    /// <summary>An untouched v7 block (compression memory, introduced <c>f4c86ffa3</c> #1777) at today's
+    /// generation (cap 2047 MB) is Ours (#4336 lane c2c).</summary>
+    [Fact]
+    public void ClassifyLines_UntouchedV7Block_AtCurrentGeneration_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildCompressionMemoryConfAppend(16L * 1024 * 1024 * 1024);
+
+        var lines = ClassifyLines(conf);
+        var maintenance = FindByText(lines, "maintenance_work_mem");
+
+        Assert.Equal(ConfLineClassification.Ours, maintenance.Classification);
+        Assert.Contains("re-apply it with ALTER SYSTEM", maintenance.Note);
+    }
+
+    /// <summary>A v7 block written under the ORIGINAL <c>f4c86ffa3</c> generation (cap 2048 MB, before #3909
+    /// dropped it to 2047) is STILL Ours — both generations that ever wrote a v7 block are in-image, unlike v5
+    /// which has only ever had one generation (#4336 lane c2c).</summary>
+    [Fact]
+    public void ClassifyLines_V7Block_AtIntroductionGeneration_Cap2048_IsStillOurs()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV7 + "\n" +
+            "maintenance_work_mem = 2048MB\n";
+
+        var lines = ClassifyLines(conf);
+        var maintenance = FindByText(lines, "maintenance_work_mem");
+
+        Assert.Equal(ConfLineClassification.Ours, maintenance.Classification);
+    }
+
+    /// <summary>A v7 block cannot legitimately carry a PRE-#1777 value (the old <c>min(ram/20, 1GB)</c> shape,
+    /// e.g. 500 MB under the 1536 MB floor) since no generation before v7 existed could have written a v7 block
+    /// — unlike v3's union, v7's image excludes the older shape (#4336 lane c2c, ruling 2026-09-26 03:19Z).</summary>
+    [Fact]
+    public void ClassifyLines_V7Block_AtPreIntroductionValue_IsHandEdit_RebuildMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV7 + "\n" +
+            "maintenance_work_mem = 500MB\n";
+
+        var lines = ClassifyLines(conf);
+        var maintenance = FindByText(lines, "maintenance_work_mem");
+
+        Assert.Equal(ConfLineClassification.HandEdit, maintenance.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, maintenance.Reason);
+    }
+
+    /// <summary>A value no v7 generation's formula could ever produce (above either cap) is a hand edit
+    /// (#4336 lane c2c).</summary>
+    [Fact]
+    public void ClassifyLines_V7OffImageMaintenanceWorkMem_IsHandEdit_RebuildMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV7 + "\n" +
+            "maintenance_work_mem = 3000MB\n";
+
+        var lines = ClassifyLines(conf);
+        var maintenance = FindByText(lines, "maintenance_work_mem");
+
+        Assert.Equal(ConfLineClassification.HandEdit, maintenance.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, maintenance.Reason);
+    }
+
+    /// <summary>A unit-form variant no v7 builder ever wrote is a hand edit even though the value is in-image
+    /// (#4336 lane c2c, same form rule as v3/v5).</summary>
+    [Fact]
+    public void ClassifyLines_V7UnitFormVariant_IsHandEdit_FormMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV7 + "\n" +
+            "maintenance_work_mem = 2GB\n";
+
+        var lines = ClassifyLines(conf);
+        var maintenance = FindByText(lines, "maintenance_work_mem");
+
+        Assert.Equal(ConfLineClassification.HandEdit, maintenance.Classification);
+        Assert.Equal(HandEditReason.FormMismatch, maintenance.Reason);
+    }
+
     [Fact]
     public void ClassifyLines_CrlfFile_ClassifiesSameAsLf()
     {
