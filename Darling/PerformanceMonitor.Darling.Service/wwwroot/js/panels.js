@@ -59,18 +59,30 @@ export function setPanelSignal(signal) {
  * Build a panel node. It returns immediately with a loading strip and fills itself once the fetch resolves,
  * mapping the API response kinds (data / empty envelope / error / aborted / auth) to the right UI.
  */
-export function renderPanel(desc) {
+export function renderPanel(desc, onSettled) {
   const signal = panelSignal;
   const body = el("div", { class: "panel-body" }, [loadingStrip()]);
   const panel = el("div", { class: "panel card" + (desc.span === 2 ? " span-2" : "") }, [
     el("h3", {}, [desc.title, desc.subtitle ? el("span", { class: "panel-sub", text: " " + desc.subtitle }) : null]),
     body,
   ]);
-  loadPanel(desc, body, signal);
+  loadPanel(desc, body, signal, onSettled);
   return panel;
 }
 
-async function loadPanel(desc, body, signal) {
+/* `onSettled` (#4222) is an optional completion callback fired exactly once when this panel's load reaches a
+   terminal state (data, empty, error, aborted, or auth) — every renderPanel caller today omits it (a no-op), but
+   it is what lets a caller with its OWN concurrency budget (the alert-notebook doc's max-3 in-flight cell loader,
+   views.js) know when a slot frees, since renderPanel itself returns synchronously with the fetch still in flight. */
+async function loadPanel(desc, body, signal, onSettled) {
+  try {
+    await loadPanelBody(desc, body, signal);
+  } finally {
+    if (onSettled) onSettled();
+  }
+}
+
+async function loadPanelBody(desc, body, signal) {
   const res = desc.read
     ? await readTool(desc.read, desc.params, signal)
     : await apiGet(desc.path + buildQuery(desc.params), signal);
