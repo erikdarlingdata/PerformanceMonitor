@@ -60,85 +60,127 @@ public sealed class ManagedConfFileLiveTests
     private static string RejectSharedBuffers(string rendered)
         => Regex.Replace(rendered, @"(?m)^shared_buffers = '.*'$", "shared_buffers = 'bogus'");
 
+    /// <summary>Names <see cref="DarlingManagedPostgres.LastManagedConfVerification"/>,
+    /// <see cref="ManagedConfMigrationState.Classify"/> and the data directory's file names, so a migration-path
+    /// assertion failure shows which of the four <see cref="ManagedConfMigrationState.Kind"/> states this start
+    /// actually landed in rather than just the assertion's own value.</summary>
+    private static string MigrationDiagnostics(DarlingManagedPostgres owner, string dataDirectory)
+        => $"LastManagedConfVerification={owner.LastManagedConfVerification} | " +
+           $"Classify(dataDir)={ManagedConfMigrationState.Classify(dataDirectory)} | " +
+           $"files=[{string.Join(",", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
+
     [Fact]
-    public async Task FirstStart_WritesManagedConf_IncludedOnce_SourcefileNamesIt_Gated()
+    public async Task FirstStartMigrates_SecondStartSourcesFromManagedConf_Gated()
     {
         var runtimeRoot = SkipUnlessRuntimeAvailable();
         var root = Directory.CreateTempSubdirectory("darling-managedconf-");
         var dataDirectory = Path.Combine(root.FullName, "pg");
         var config = new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory };
-        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+
+            /* First start: the data directory is brand new, so ManagedConfMigrationState.Classify reads it
+               as Legacy. The server boots on the legacy v-marker blocks appended into postgresql.conf, and
+               ONLY AFTER that start does MigrateManagedConfAsync run Step A -- it rewrites postgresql.conf
+               down to the one include line and writes darling-managed.conf with the effective values, but
+               deliberately never reloads, so pg_settings still attributes everything to postgresql.conf until
+               the NEXT start (see #4215's design decision (a)). */
+            var first = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await first.EnsureRunningAsync(timeout.Token);
+            Assert.True(first.StartedByThisProcess);
+
+            Assert.Equal(
+                ManagedConfVerificationStatus.Verified,
+                first.LastManagedConfVerification?.Status);
+            Assert.Equal(ManagedConfMigrationState.Kind.Verified, ManagedConfMigrationState.Classify(dataDirectory));
+            Assert.True(File.Exists(managedPath), MigrationDiagnostics(first, dataDirectory));
+
+            var postgresqlConfAfterFirst = File.ReadAllText(Path.Combine(dataDirectory, "postgresql.conf"));
+            Assert.Equal(
+                1,
+                CountOccurrences(postgresqlConfAfterFirst, ManagedConfFile.IncludeLine));
+
+            await first.StopIfStartedByThisProcessAsync();
+
+            /* Second start: the same data directory now classifies Verified, so A1's pre-start write
+               (EnsureManagedConfReadyAsync -> WriteManagedConfFile) runs and the server boots directly on
+               darling-managed.conf. This is the start pg_settings.sourcefile can actually be checked against. */
+            var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             var connectionString = await owner.EnsureRunningAsync(timeout.Token);
-            Assert.True(owner.StartedByThisProcess);
-
-            var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
-            Assert.True(File.Exists(managedPath));
-
-            var postgresqlConf = File.ReadAllText(Path.Combine(dataDirectory, "postgresql.conf"));
-            Assert.Equal(1, CountOccurrences(postgresqlConf, ManagedConfFile.IncludeLine));
-            Assert.True(ManagedConfFile.HasManagedInclude(postgresqlConf));
-
-            var managedBody = ManagedConfFile.ParseExisting(File.ReadAllText(managedPath)).Body;
-            var keys = DarlingManagedPostgres.ParseConfText(managedBody).Select(entry => entry.Name).Distinct().ToList();
-            Assert.NotEmpty(keys);
-
-            /* port and listen_addresses always ride pg_ctl's "-o" runtime override
-               (StartServerAsync/BuildServerRuntimeOptions, unconditionally, loopback or not) -- a
-               command-line-set GUC reports a NULL sourcefile no matter what any config file also says.
-               darling-managed.conf still carries both for an operator reading the rendered file, but they are
-               exactly the "later override" this assertion's own wording carves out. timezone/log_timezone and
-               every timescaledb.* extension GUC are excluded on the same evidence, confirmed empirically on
-               this rig (see the PR body for the full first run's dump): PostgreSQL never records a
-               sourcefile/sourceline for them even though the config file (here, darling-managed.conf) is what
-               set the value actually in force -- current_setting still reports the darling-managed.conf value
-               correctly; only the attribution column is blank. */
-            var keysWithoutReliableSourcefile = new HashSet<string>(StringComparer.Ordinal)
+            try
             {
-                "port", "listen_addresses", "timezone", "log_timezone",
-            };
+                Assert.True(owner.StartedByThisProcess);
 
-            await using var connection = new NpgsqlConnection(connectionString);
-            await connection.OpenAsync(timeout.Token);
-            var checkedKeys = keys.Where(key => !keysWithoutReliableSourcefile.Contains(key) && !key.StartsWith("timescaledb.", StringComparison.Ordinal)).ToList();
-            Assert.NotEmpty(checkedKeys);
+                var postgresqlConf = File.ReadAllText(Path.Combine(dataDirectory, "postgresql.conf"));
+                Assert.Equal(1, CountOccurrences(postgresqlConf, ManagedConfFile.IncludeLine));
+                Assert.True(ManagedConfFile.HasManagedInclude(postgresqlConf));
 
-            using var command = new NpgsqlCommand("SELECT name, sourcefile FROM pg_settings WHERE name = ANY(@names)", connection);
-            command.Parameters.AddWithValue("names", checkedKeys.ToArray());
-            using var reader = await command.ExecuteReaderAsync(timeout.Token);
-            var sourcefiles = new Dictionary<string, string?>(StringComparer.Ordinal);
-            while (await reader.ReadAsync(timeout.Token))
-            {
-                sourcefiles[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
-            }
+                var managedBody = ManagedConfFile.ParseExisting(File.ReadAllText(managedPath)).Body;
+                var keys = DarlingManagedPostgres.ParseConfText(managedBody).Select(entry => entry.Name).Distinct().ToList();
+                Assert.NotEmpty(keys);
 
-            var mismatches = new List<string>();
-            foreach (var key in checkedKeys)
-            {
-                sourcefiles.TryGetValue(key, out var sourcefile);
-
-                /* A key ALSO set in postgresql.auto.conf (ALTER SYSTEM) sources from there instead -- read
-                   after the whole postgresql.conf include chain finishes, so it always wins. Nothing writes
-                   auto.conf on a fresh managed store, but the brief's own wording carries this caveat, so this
-                   honors it rather than assumes it away. */
-                if (sourcefile is not null && string.Equals(Path.GetFileName(sourcefile), "postgresql.auto.conf", StringComparison.OrdinalIgnoreCase))
+                /* port and listen_addresses always ride pg_ctl's "-o" runtime override
+                   (StartServerAsync/BuildServerRuntimeOptions, unconditionally, loopback or not) -- a
+                   command-line-set GUC reports a NULL sourcefile no matter what any config file also says.
+                   darling-managed.conf still carries both for an operator reading the rendered file, but they are
+                   exactly the "later override" this assertion's own wording carves out. timezone/log_timezone and
+                   every timescaledb.* extension GUC are excluded on the same evidence, confirmed empirically on
+                   this rig (see the PR body for the full first run's dump): PostgreSQL never records a
+                   sourcefile/sourceline for them even though the config file (here, darling-managed.conf) is what
+                   set the value actually in force -- current_setting still reports the darling-managed.conf value
+                   correctly; only the attribution column is blank. */
+                var keysWithoutReliableSourcefile = new HashSet<string>(StringComparer.Ordinal)
                 {
-                    continue;
+                    "port", "listen_addresses", "timezone", "log_timezone",
+                };
+
+                await using var connection = new NpgsqlConnection(connectionString);
+                await connection.OpenAsync(timeout.Token);
+                var checkedKeys = keys.Where(key => !keysWithoutReliableSourcefile.Contains(key) && !key.StartsWith("timescaledb.", StringComparison.Ordinal)).ToList();
+                Assert.NotEmpty(checkedKeys);
+
+                using var command = new NpgsqlCommand("SELECT name, sourcefile FROM pg_settings WHERE name = ANY(@names)", connection);
+                command.Parameters.AddWithValue("names", checkedKeys.ToArray());
+                using var reader = await command.ExecuteReaderAsync(timeout.Token);
+                var sourcefiles = new Dictionary<string, string?>(StringComparer.Ordinal);
+                while (await reader.ReadAsync(timeout.Token))
+                {
+                    sourcefiles[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
                 }
 
-                if (sourcefile is null || !string.Equals(Path.GetFileName(sourcefile), ManagedConfFile.FileName, StringComparison.Ordinal))
+                var mismatches = new List<string>();
+                foreach (var key in checkedKeys)
                 {
-                    mismatches.Add($"{key}: sourcefile={sourcefile ?? "(null)"}");
-                }
-            }
+                    sourcefiles.TryGetValue(key, out var sourcefile);
 
-            Assert.True(mismatches.Count == 0, string.Join(" | ", mismatches));
+                    /* A key ALSO set in postgresql.auto.conf (ALTER SYSTEM) sources from there instead -- read
+                       after the whole postgresql.conf include chain finishes, so it always wins. Nothing writes
+                       auto.conf on a fresh managed store, but the brief's own wording carries this caveat, so this
+                       honors it rather than assumes it away. */
+                    if (sourcefile is not null && string.Equals(Path.GetFileName(sourcefile), "postgresql.auto.conf", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (sourcefile is null || !string.Equals(Path.GetFileName(sourcefile), ManagedConfFile.FileName, StringComparison.Ordinal))
+                    {
+                        mismatches.Add($"{key}: sourcefile={sourcefile ?? "(null)"}");
+                    }
+                }
+
+                Assert.True(
+                    mismatches.Count == 0,
+                    string.Join(" | ", mismatches) + " | " + MigrationDiagnostics(owner, dataDirectory));
+            }
+            finally
+            {
+                await owner.StopIfStartedByThisProcessAsync();
+            }
         }
         finally
         {
-            await owner.StopIfStartedByThisProcessAsync();
             DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
         }
     }
@@ -207,33 +249,70 @@ public sealed class ManagedConfFileLiveTests
         var root = Directory.CreateTempSubdirectory("darling-managedconf-");
         var dataDirectory = Path.Combine(root.FullName, "pg");
         var config = new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory };
-        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
 
-            DarlingManagedPostgres.TestOnlyRenderOverride.Value = RejectSharedBuffers;
-            InvalidOperationException thrown;
+            /* A brand-new data directory classifies Legacy on its first start (EnsureManagedConfReadyAsync
+               never runs on Legacy -- the render-override seam it consults is inert until the conf reaches
+               Verified), so a plain first start is needed just to drive this data directory to Verified
+               before the render override can be reached at all. */
+            var first = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await first.EnsureRunningAsync(timeout.Token);
+            await first.StopIfStartedByThisProcessAsync();
+
+            Assert.Equal(
+                ManagedConfMigrationState.Kind.Verified,
+                ManagedConfMigrationState.Classify(dataDirectory));
+
+            /* That same first start's own SaveLastGoodManagedConf call (right after its successful start) is
+               what would otherwise make "no last good" impossible on this data directory -- delete the copy
+               it left so the second start below has nothing to fall back to. */
+            var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+            if (File.Exists(lastGoodPath))
+            {
+                File.Delete(lastGoodPath);
+            }
+
+            Assert.False(File.Exists(lastGoodPath));
+
+            var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             try
             {
-                thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => owner.EnsureRunningAsync(timeout.Token));
+                DarlingManagedPostgres.TestOnlyRenderOverride.Value = RejectSharedBuffers;
+                InvalidOperationException thrown;
+                try
+                {
+                    thrown = await Assert.ThrowsAsync<InvalidOperationException>(() => owner.EnsureRunningAsync(timeout.Token));
+                }
+                finally
+                {
+                    DarlingManagedPostgres.TestOnlyRenderOverride.Value = null;
+                }
+
+                Assert.Contains(
+                    "was rejected by postgres -C",
+                    thrown.Message,
+                    StringComparison.Ordinal);
+                Assert.Contains(
+                    "ALTER SYSTEM",
+                    thrown.Message,
+                    StringComparison.Ordinal);
+
+                /* EnsureManagedConfReadyAsync throws BEFORE StartServerAsync ever runs -- no ownership grab, no
+                   postmaster left behind. */
+                Assert.False(owner.StartedByThisProcess, MigrationDiagnostics(owner, dataDirectory));
+                Assert.False(
+                    File.Exists(Path.Combine(dataDirectory, "postmaster.pid")),
+                    MigrationDiagnostics(owner, dataDirectory));
             }
             finally
             {
-                DarlingManagedPostgres.TestOnlyRenderOverride.Value = null;
+                await owner.StopIfStartedByThisProcessAsync();
             }
-
-            Assert.Contains("was rejected by postgres -C", thrown.Message, StringComparison.Ordinal);
-            Assert.Contains("ALTER SYSTEM", thrown.Message, StringComparison.Ordinal);
-
-            /* EnsureManagedConfReadyAsync throws BEFORE StartServerAsync ever runs -- no ownership grab, no
-               postmaster left behind. */
-            Assert.False(owner.StartedByThisProcess);
-            Assert.False(File.Exists(Path.Combine(dataDirectory, "postmaster.pid")));
         }
         finally
         {
-            await owner.StopIfStartedByThisProcessAsync();
             DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
         }
     }
