@@ -116,9 +116,16 @@ public sealed class TopQueriesHourlyRoutingLiveTests
                 await purge.ExecuteNonQueryAsync(ct);
             }
 
-            /* ── call 2: raw no longer covers the window — must route to hourly. ── */
+            /* ── call 2: raw no longer covers the window — must route to hourly. A FRESH data source, not
+               the one call 1 used: #4231 3a finding — ComposeStoreAvailability caches coverage per
+               NpgsqlDataSource instance for ReprobeInterval (5 minutes), unconditionally, including the null
+               hourly floor call 1's probe measured before RefreshAsync ran above. Reusing dataSource here
+               replays that stale null floor and the router's ReachesFurtherBack fallback lands back on Raw —
+               not a router bug, a cache-freshness gap in the composer that a real 5-minute-old probe would
+               also hit on a production store the instant a backfill finishes. See PR body Deviations. ── */
+            await using var hourlyDataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
             var hourlyResult = await DarlingDataReader.GetTopQueriesByCpuRoutedAsync(
-                dataSource, ServerId, WindowStart, windowEnd, top: 10, databaseName: null, cancellationToken: ct);
+                hourlyDataSource, ServerId, WindowStart, windowEnd, top: 10, databaseName: null, cancellationToken: ct);
             Assert.Equal(RetentionTier.Hourly, hourlyResult.Tier);
             Assert.NotEmpty(hourlyResult.Rows);
 
@@ -197,8 +204,13 @@ public sealed class TopQueriesHourlyRoutingLiveTests
         var bodySucceeded = false;
         try
         {
-            await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600);
-            await PlantAsync(connection, ct, WindowStart.AddHours(2), "0xTOPQ2", "usp_HostA", 200_000L, 180_000L, 5L, 3600);
+            /* maxDop: 2 on both seed rows — the min_dop=2 filter in TopQueriesSql/TopQueriesByHostObjectSql is a
+               HAVING COALESCE(MAX(max_dop), 0) >= $6 over the group; a row with max_dop left NULL (the
+               original seed here) fails that floor and the raw call returns zero rows, which returns the
+               "empty" status payload with no tier_used/precision_note field at all — a seed bug in this new
+               pin, not a router or cache problem (#4231 3a finding). */
+            await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
+            await PlantAsync(connection, ct, WindowStart.AddHours(2), "0xTOPQ2", "usp_HostA", 200_000L, 180_000L, 5L, 3600, maxDop: 2);
 
             await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
 
@@ -225,9 +237,13 @@ public sealed class TopQueriesHourlyRoutingLiveTests
                 await purge.ExecuteNonQueryAsync(ct);
             }
 
-            /* ── hourly-routed payload with min_dop set — must carry a precision_note (rollup ignores min_dop). ── */
+            /* ── hourly-routed payload with min_dop set — must carry a precision_note (rollup ignores min_dop).
+               A FRESH data source: the #4231 3a cache-freshness finding above (ComposeStoreAvailability caches
+               coverage per NpgsqlDataSource for 5 minutes; reusing dataSource here would replay the null
+               hourly floor the raw call's probe measured before RefreshAsync ran). ── */
+            await using var hourlyDataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
             var hourlyDopJson = await DarlingMcpDataTools.GetTopQueriesByCpu(
-                dataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 2, as_of: asOf);
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 2, as_of: asOf);
             using var hourlyDopDoc = System.Text.Json.JsonDocument.Parse(hourlyDopJson);
             Assert.True(hourlyDopDoc.RootElement.TryGetProperty("tier_used", out var hourlyDopTier));
             Assert.Equal("hourly", hourlyDopTier.GetString());
@@ -238,7 +254,7 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             /* ── hourly-routed payload with group_by=host_object — must also carry a precision_note (rollup has
                no host_object_name to roll up by). ── */
             var hourlyRollUpJson = await DarlingMcpDataTools.GetTopQueriesByCpu(
-                dataSource, ServerName, hours_back: hoursBack, top: 10, group_by: "host_object", as_of: asOf);
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, group_by: "host_object", as_of: asOf);
             using var hourlyRollUpDoc = System.Text.Json.JsonDocument.Parse(hourlyRollUpJson);
             Assert.True(hourlyRollUpDoc.RootElement.TryGetProperty("tier_used", out var hourlyRollUpTier));
             Assert.Equal("hourly", hourlyRollUpTier.GetString());
@@ -274,13 +290,14 @@ public sealed class TopQueriesHourlyRoutingLiveTests
 
     private static async Task PlantAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime at, string queryHash, string hostObjectName,
-        long cpuUs, long elapsedUs, long executions, int intervalSeconds)
+        long cpuUs, long elapsedUs, long executions, int intervalSeconds, int maxDop = 0)
     {
         await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.query_stats
     (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
-     host_object_name, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection);
+     host_object_name, delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds,
+     min_dop, max_dop)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)", connection);
         insert.Parameters.AddWithValue(CollectionIdGenerator.Next());
         insert.Parameters.AddWithValue(DarlingMcpTestData.TruncateToSeconds(at));
         insert.Parameters.AddWithValue(ServerId);
@@ -293,6 +310,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", connection);
         insert.Parameters.AddWithValue(elapsedUs);
         insert.Parameters.AddWithValue(executions);
         insert.Parameters.AddWithValue(intervalSeconds);
+        insert.Parameters.AddWithValue((long)maxDop);
         await insert.ExecuteNonQueryAsync(ct);
     }
 
