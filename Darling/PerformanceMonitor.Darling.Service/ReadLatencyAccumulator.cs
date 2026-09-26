@@ -10,6 +10,10 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Npgsql;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -155,5 +159,69 @@ public sealed class ReadLatencyAccumulator
         }
 
         return rows;
+    }
+
+    /// <summary>Rows older than this are pruned by the flush's own bounded DELETE — the same 90 days
+    /// <see cref="CollectorCostAccumulator.RetentionDays"/> uses.</summary>
+    public const int RetentionDays = 90;
+
+    public const int FlushTimeoutSeconds = 120;
+
+    /* One flush: drain the buckets and write an hourly aggregate row per (surface, route, outcome), then
+       prune. ON CONFLICT adds counts, totals and per-bucket counts element-wise and takes the greater of
+       the two max_ms values — the shape a SECOND flush landing in the same hour needs (this accumulator
+       flushes on the same worker tick as collector_cost, so ordinarily there is one flush per hour, but a
+       restart mid-hour can produce two partial ones for the same key and neither may be dropped). Draining
+       (TryRemove) resets the window, so an hour with no reads writes no row rather than a zero.
+
+       One statement PER DRAINED KEY, not collector_cost's single unnest bulk insert: Npgsql's array binding
+       refuses a jagged bigint[][] parameter ("use a multidimensional array instead"), and every drained
+       key's own bucket_counts is a single flat bigint[], which binds cleanly as its own parameter. The row
+       count here is bounded by (surface × route × outcome) actually hit in the hour — at most a few hundred,
+       never one per read — so a handful of round trips is the right shape for this table's real size. */
+    private const string InsertSql = @"
+INSERT INTO collect.read_latency
+(
+    metric_time, surface, route, outcome,
+    run_count, total_ms, max_ms, bucket_counts
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (metric_time, surface, route, outcome) DO UPDATE SET
+    run_count = collect.read_latency.run_count + EXCLUDED.run_count,
+    total_ms = collect.read_latency.total_ms + EXCLUDED.total_ms,
+    max_ms = GREATEST(collect.read_latency.max_ms, EXCLUDED.max_ms),
+    bucket_counts = (
+        SELECT array_agg(a + b ORDER BY ord)
+        FROM unnest(collect.read_latency.bucket_counts) WITH ORDINALITY AS x(a, ord)
+        JOIN unnest(EXCLUDED.bucket_counts) WITH ORDINALITY AS y(b, ord2) ON ord = ord2
+    )";
+
+    private const string RetentionDeleteSql = @"
+DELETE FROM collect.read_latency
+WHERE metric_time < $1";
+
+    public async Task FlushAsync(NpgsqlConnection connection, DateTime metricTimeUtc, ILogger? logger, CancellationToken cancellationToken)
+    {
+        var drained = Drain();
+
+        foreach (var row in drained)
+        {
+            await using var insert = new NpgsqlCommand(InsertSql, connection) { CommandTimeout = FlushTimeoutSeconds };
+            insert.Parameters.AddWithValue(metricTimeUtc);
+            insert.Parameters.AddWithValue(row.Surface.ToString().ToLowerInvariant());
+            insert.Parameters.AddWithValue(row.Route);
+            insert.Parameters.AddWithValue(row.Outcome.ToString().ToLowerInvariant());
+            insert.Parameters.AddWithValue((int)Math.Min(row.Count, int.MaxValue));
+            insert.Parameters.AddWithValue(row.TotalMs);
+            insert.Parameters.AddWithValue(row.MaxMs);
+            insert.Parameters.AddWithValue(row.BucketCounts);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var retention = new NpgsqlCommand(RetentionDeleteSql, connection) { CommandTimeout = FlushTimeoutSeconds };
+        retention.Parameters.AddWithValue(metricTimeUtc.AddDays(-RetentionDays));
+        await retention.ExecuteNonQueryAsync(cancellationToken);
+
+        logger?.LogDebug("read_latency flush wrote {Rows} surface+route+outcome rows", drained.Count);
     }
 }

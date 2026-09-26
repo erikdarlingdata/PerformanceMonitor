@@ -41,7 +41,8 @@ public sealed class ScheduledPurgeLaunchTests
         new MonitoredServerRegistryState(),
         new CollectorRuntimeState(),
         new WebTlsCertificateState(),
-        new BaselineCache());
+        new BaselineCache(),
+        new ReadLatencyAccumulator());
 
     [Fact]
     public void ReturnsImmediately_WithoutAwaitingThePurge()
