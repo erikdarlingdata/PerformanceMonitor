@@ -139,6 +139,18 @@ internal static class ManagedConfMigrationRunner
             }
         }
 
+        /* #4336/nightly-473: a carried maintenance_work_mem goes through the SAME cap ManagedConfFile.RenderBody's
+           v14 block uses for a freshly derived value — NeedsLegacyMaintenanceWorkMemCap over this running major,
+           MaintenanceWorkMemCapMb as the ceiling — so a pre-#3909 2048MB BEFORE snapshot lands in
+           darling-managed.conf capped, not carried verbatim into a value PostgreSQL 17 and earlier reject. */
+        var postgresMajorForCap = inputs.PostgresMajor > 0 ? inputs.PostgresMajor : (int?)null;
+        if (beforeValues.TryGetValue(DarlingManagedPostgres.MaintenanceWorkMemSetting, out var maintenanceWorkMemBefore)
+            && DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap(postgresMajorForCap, maintenanceWorkMemBefore))
+        {
+            beforeValues[DarlingManagedPostgres.MaintenanceWorkMemSetting] =
+                FormattableString.Invariant($"{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB");
+        }
+
         var postgresqlConfText = File.ReadAllText(postgresqlConfPath);
         var rewrite = ManagedConfMigration.Rewrite(postgresqlConfText, derived, port);
 
