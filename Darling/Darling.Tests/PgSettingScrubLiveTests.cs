@@ -23,7 +23,7 @@ namespace Darling.Tests;
 /// <summary>
 /// Live, end-to-end proof of the #4348 S1b one-time scrub against a REAL compressed TimescaleDB chunk.
 ///
-/// <para><b>#4348 own-store</b> — mints its own scratch database (<see cref="ScratchPostgres"/>) rather than
+/// <para><b>#1776 own-store</b> — mints its own scratch database (<see cref="ScratchPostgres"/>) rather than
 /// sharing the live fixture, so it is deliberately NOT in the <c>live-postgres</c> collection: it creates its
 /// own hypertable/compression shape on <c>collect.pg_server_config</c>, which the shared fixture must never
 /// inherit from a test.</para>
