@@ -1466,14 +1466,24 @@ public sealed class DarlingCollectorRunner
     /// live SQL Server target (RunCoreAsync collects from one before it ever reaches this point). Pure
     /// move — the SQL strings and the eligibility/seed/read logic are byte-identical to what RunCoreAsync
     /// inlined before this refactor.
+    ///
+    /// <para><b>The #2797 gate is called IN HERE</b>, not passed in as a precomputed bool: this is the body
+    /// that actually reaches <see cref="GetLastCollectedTimeAsync"/>/<see cref="GetLastCollectedTimeWithFrameAsync"/>,
+    /// so <see cref="ServerWatermarkDispatchGateTests"/>' invariant — every body that performs the
+    /// server-scoped read also calls the gate — holds with a single call site rather than a caller/callee
+    /// split that the IL walk would otherwise have to bridge by name. <paramref name="dispatchProbe"/> is the
+    /// probe context <see cref="RunCoreAsync"/> already builds for the SAME question; the discarded flag
+    /// comes back in the tuple because <c>RunCoreAsync</c> still needs it for <c>hasCollectedBefore</c>.</para>
     /// </summary>
-    internal async Task<(DateTime? Watermark, bool WatermarkFromUtcColumn, long? NumericWatermark, long ServerWatermarkMs, bool WatermarkCacheEligible)> ResolveServerWatermarkAsync<TRow>(
+    internal async Task<(DateTime? Watermark, bool WatermarkFromUtcColumn, long? NumericWatermark, long ServerWatermarkMs, bool WatermarkCacheEligible, bool ServerWatermarkDiscarded)> ResolveServerWatermarkAsync<TRow>(
         ServerRuntime server,
         ICollectorDefinition<TRow> definition,
-        bool serverWatermarkDiscarded,
+        CollectorContext dispatchProbe,
         DateTime? serverReadFloor,
         CancellationToken cancellationToken)
     {
+        var serverWatermarkDiscarded = ServerWatermarkIsDiscarded(definition, dispatchProbe);
+
         var watermarkCacheEligible = definition.WatermarkColumn is not null
             && !serverWatermarkDiscarded
             && definition.WatermarkValueAccessor is not null;
@@ -1549,7 +1559,7 @@ public sealed class DarlingCollectorRunner
             }
         }
 
-        return (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible);
+        return (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible, serverWatermarkDiscarded);
     }
 
     /// <summary>
@@ -1677,8 +1687,6 @@ public sealed class DarlingCollectorRunner
                builders actually read", not "everything that changes the probe's answer". */
             DatabaseScope = databaseScope,
         };
-        var serverWatermarkDiscarded = ServerWatermarkIsDiscarded(definition, dispatchProbe);
-
         /* #2851: timed because this is a STORE round trip that the server-scoped path's sql: stopwatch does
            not cover — it runs before that stopwatch starts. #2796 measured a sibling store read at 50s cold
            on a bounded-only-by-luck predicate, so "the watermark read is free" is an assumption worth
@@ -1688,9 +1696,12 @@ public sealed class DarlingCollectorRunner
         /* #4197 part b: the cache hit/miss/seed block, extracted verbatim into its own method (step 1 of
            the measure lane's brief) so a live-Postgres-only test can call it directly — RunCoreAsync itself
            needs a live SQL Server target to reach this point, which the live-PG rig this lane runs on
-           cannot provide. Behaviour and SQL strings are unchanged; this is a pure move. */
-        var (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible) =
-            await ResolveServerWatermarkAsync(server, definition, serverWatermarkDiscarded, serverReadFloor, cancellationToken);
+           cannot provide. Behaviour and SQL strings are unchanged; this is a pure move. The #2797 gate call
+           now lives INSIDE the seam (ServerWatermarkDispatchGateTests' invariant needs the gate in the same
+           body as the read it guards), so RunCoreAsync passes the probe context and gets the discarded flag
+           back rather than computing it here and passing a bool in. */
+        var (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible, serverWatermarkDiscarded) =
+            await ResolveServerWatermarkAsync(server, definition, dispatchProbe, serverReadFloor, cancellationToken);
 
         /* Only when the watermark came back null: tell a TRUE first run from a store merely emptied by
            retention, so default_trace_events uses a bounded window instead of re-scanning all .trc history

@@ -53,14 +53,15 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
         EngineEdition = 3,
     };
 
-    private static async Task<(DateTime? Watermark, bool WatermarkFromUtcColumn, long? NumericWatermark, long ServerWatermarkMs, bool WatermarkCacheEligible)> ResolveAsync<TRow>(
+    private static async Task<(DateTime? Watermark, bool WatermarkFromUtcColumn, long? NumericWatermark, long ServerWatermarkMs, bool WatermarkCacheEligible, bool ServerWatermarkDiscarded)> ResolveAsync<TRow>(
         DarlingCollectorRunner runner, ServerRuntime server, ICollectorDefinition<TRow> definition, CancellationToken ct)
     {
+        var probe = MakeContext(server, DateTime.UtcNow);
         var task = (Task)ResolveMethod.MakeGenericMethod(typeof(TRow)).Invoke(
-            runner, new object?[] { server, definition, false, null, ct })!;
+            runner, new object?[] { server, definition, probe, null, ct })!;
         await task;
         var resultProperty = task.GetType().GetProperty("Result")!;
-        return ((DateTime?, bool, long?, long, bool))resultProperty.GetValue(task)!;
+        return ((DateTime?, bool, long?, long, bool, bool))resultProperty.GetValue(task)!;
     }
 
     private static void Advance<TRow>(
@@ -175,7 +176,7 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             Assert.True(written3 > 0);
             Advance(runner, server, definition, batch3, fromUtc: false);
 
-            var (cachedValue, _, cachedNumeric, _, eligible) = await ResolveAsync(runner, server, definition, ct);
+            var (cachedValue, _, cachedNumeric, _, eligible, _) = await ResolveAsync(runner, server, definition, ct);
             Assert.True(eligible, "job_history declares a WatermarkValueAccessor and must be cache-eligible");
 
             var freshValue = await runner.GetLastCollectedTimeAsync(server.ServerId, "job_history", "run_datetime", ct);
@@ -252,7 +253,7 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             await WriteBatchAsync(runner, connection, definition, batch3, server, context3.CollectionTime, context3, ct);
             Advance(runner, server, definition, batch3, fromUtc: false);
 
-            var (cachedValue, _, _, _, eligible) = await ResolveAsync(runner, server, definition, ct);
+            var (cachedValue, _, _, _, eligible, _) = await ResolveAsync(runner, server, definition, ct);
             Assert.True(eligible);
 
             var freshValue = await runner.GetLastCollectedTimeAsync(server.ServerId, "default_trace_events", "event_time", ct);

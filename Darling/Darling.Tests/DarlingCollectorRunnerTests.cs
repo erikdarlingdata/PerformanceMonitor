@@ -1156,13 +1156,6 @@ public class ServerWatermarkDispatchGateTests
         const string Read = nameof(DarlingCollectorRunner.GetLastCollectedTimeAsync);
         const string PairRead = nameof(DarlingCollectorRunner.GetLastCollectedTimeWithFrameAsync);
         const string Gate = nameof(DarlingCollectorRunner.ServerWatermarkIsDiscarded);
-        /* #4197 part b moved the read pair behind a one-hop indirection: RunCoreAsync computes the gate
-           and calls ResolveServerWatermarkAsync, which is the body that actually calls Read/PairRead.
-           A body that calls ResolveServerWatermarkAsync therefore reaches the read TRANSITIVELY, one call
-           deep, and must be treated as a reader for this pin's purpose — the gate still has to sit in
-           THAT body, since Resolve's own body takes the already-computed bool as a parameter rather than
-           calling the gate itself. */
-        const string ResolveSeam = nameof(DarlingCollectorRunner.ResolveServerWatermarkAsync);
 
         var assemblyPath = typeof(DarlingCollectorRunner).Assembly.Location;
         Assert.True(File.Exists(assemblyPath), $"Service assembly not found at '{assemblyPath}'.");
@@ -1171,25 +1164,16 @@ public class ServerWatermarkDispatchGateTests
            right the hard way are now properties of the scanner: MethodSpec resolution, without which the
            generic gate read as never called, and no cursor skip. Grouped by METHOD TOKEN rather than by name,
            so two overloads cannot be merged into one apparent body. */
-        var byBody = IlCallSiteScanner.FindCalls(assemblyPath, [Read, PairRead, Gate, ResolveSeam])
+        var byBody = IlCallSiteScanner.FindCalls(assemblyPath, [Read, PairRead, Gate])
             .GroupBy(c => c.MethodToken);
 
         var readerBodies = 0;
         var pairReaderBodies = 0;
         var gatedBodies = 0;
         var totalGateCalls = 0;
-        /* #4197 part b split what used to be one body into two: ResolveServerWatermarkAsync now makes the
-           Read/PairRead calls directly, and its caller (RunCoreAsync) computes the gate and passes the
-           already-decided bool in — it reaches Read/PairRead ONE HOP away, through the seam, rather than
-           directly. Both halves of that split are asserted: the seam's own body still makes both calls
-           (pairReaderBodies, below), and every body that reaches the read — directly OR through the seam —
-           must ALSO call the gate, which is the "gatedBodies == readerBodies" contract's actual claim. */
-        var seamCallsRead = false;
-        var seamCallsPairRead = false;
 
         foreach (var bodyCalls in byBody)
         {
-            var isResolveSeamBody = bodyCalls.Any(c => c.MethodName == ResolveSeam);
             var callsRead = false;
             var callsPairRead = false;
             var callsGate = false;
@@ -1206,26 +1190,10 @@ public class ServerWatermarkDispatchGateTests
                     callsRead = true;
                     callsPairRead = true;
                 }
-                else if (call.CalleeName == ResolveSeam)
-                {
-                    /* A caller of Resolve reaches Read/PairRead one hop away, and must still be gated. */
-                    callsRead = true;
-                }
                 else
                 {
                     callsRead = true;
                 }
-            }
-
-            if (isResolveSeamBody)
-            {
-                /* The seam's own body is not itself required to call the gate (its caller already decided
-                   and passed the bool in) — tracked separately so the pair-read assertion below still holds
-                   without folding the seam into the gated/reader tally, which would need the gate INSIDE
-                   the seam to pass and defeat the whole point of the extraction. */
-                seamCallsRead = seamCallsRead || callsRead;
-                seamCallsPairRead = seamCallsPairRead || callsPairRead;
-                continue;
             }
 
             if (callsRead)
@@ -1243,18 +1211,15 @@ public class ServerWatermarkDispatchGateTests
             }
         }
 
-        Assert.True(seamCallsRead,
+        Assert.True(readerBodies > 0,
             $"No method body in the service assembly calls {Read} — either the read moved or the IL walk "
             + "resolved nothing. Either way this test can say nothing about the gate.");
-        Assert.True(seamCallsPairRead,
+        Assert.True(pairReaderBodies > 0,
             $"No method body in the service assembly calls {PairRead} — the #3778 frame-aware read is declared "
             + "and consulted by nothing, so the CPU collector's watermark is back on the local stamp alone.");
         Assert.True(totalGateCalls > 0,
             $"{Gate} is never called anywhere in the service assembly. The gate exists but nothing consults "
             + "it, so the server-scoped watermark read is unguarded and #2797 is not fixed.");
-        Assert.True(readerBodies > 0,
-            $"No caller of {ResolveSeam} (or direct caller of {Read}/{PairRead}, if one now exists outside "
-            + "the seam) was found — either the seam is unreferenced or the IL walk resolved nothing.");
         Assert.Equal(readerBodies, gatedBodies);
     }
 }
