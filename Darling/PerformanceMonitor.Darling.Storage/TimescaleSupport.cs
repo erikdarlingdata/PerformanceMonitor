@@ -6050,6 +6050,416 @@ AND   j.hypertable_name = '{relation}'
 AND   (j.config->>'drop_after')::interval IS DISTINCT FROM $1::interval";
 
     /// <summary>
+    /// #4299: the three raw retention jobs (<see cref="RawTierCoverage"/> — <c>query_stats</c>,
+    /// <c>procedure_stats</c>, <c>query_store_stats</c>) are NEVER scheduled by TimescaleDB's own job
+    /// runner. Every evaluation of this statement forces <c>scheduled = false</c> unconditionally (not
+    /// converged, not conditional — the job simply never runs on the scheduler's own clock again) and
+    /// records the coverage gate's verdict in <c>config-&gt;&gt;'darling_armed'</c> instead, so the service
+    /// can decide when to trigger the purge itself via <c>CALL run_job(id)</c> from the hourly Periodic pass
+    /// (never Startup).
+    ///
+    /// <para><b>Why <c>config =&gt; j.config || jsonb_build_object(...)</c> and not <c>config =</c>.</b> The
+    /// job's config already carries <c>drop_after</c> (set by <see cref="AddRetentionPolicySql"/> and moved
+    /// by <see cref="ConvergeRetentionHorizonSql"/>) and may carry other keys a future feature adds. Using
+    /// <c>||</c> merges <c>darling_armed</c> in without touching anything else already there — the same
+    /// discipline <see cref="ConvergeRetentionHorizonSql"/> already follows with <c>jsonb_set</c>. A bare
+    /// <c>config =</c> assignment would replace the whole object and silently drop <c>drop_after</c>.</para>
+    ///
+    /// <para><c>$1</c> is the armed verdict as a boolean (<c>true</c> = the coverage gate says covered,
+    /// <c>false</c> = held). This statement does not itself decide the verdict — the caller measures
+    /// coverage the same way <see cref="ArmRetentionPolicySql"/>'s caller does and passes the result in.</para>
+    /// </summary>
+    public static string ConvergeRawArmedStateSql(string relation)
+        => $@"SELECT alter_job(j.job_id, scheduled => false, config => j.config || jsonb_build_object('darling_armed', $1::boolean))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   (j.scheduled OR (j.config->>'darling_armed')::boolean IS DISTINCT FROM $1::boolean)";
+
+    /// <summary>
+    /// #4299: the shared read for a raw job's armed verdict under the never-scheduled design — a
+    /// missing <c>darling_armed</c> key (a store that has not converged yet, or a job TimescaleDB just
+    /// created with none of this project's keys) reads as HELD, never armed. <c>COALESCE</c> over a
+    /// boolean cast is fail-closed by construction: a key that is present but not parseable as boolean
+    /// would raise rather than silently reading armed, and a key that is simply absent reads
+    /// <c>false</c> — the same fail-closed posture <see cref="MeasureRetentionCoverageAsync"/> already
+    /// takes for an indeterminate coverage probe.
+    /// </summary>
+    public const string RawArmedReadExpression = "COALESCE((j.config->>'darling_armed')::boolean, false)";
+
+    /// <summary>
+    /// Reads <paramref name="relation"/>'s raw-job armed verdict through <see cref="RawArmedReadExpression"/>
+    /// — the query the service's Periodic trigger uses to decide whether a run of <c>CALL run_job(id)</c> is
+    /// due. Zero rows when the policy does not exist, same convention as
+    /// <see cref="RetentionPolicyScheduledSql"/>.
+    /// </summary>
+    public static string RawArmedStateSql(string relation)
+        => $@"SELECT {RawArmedReadExpression}
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299/#4391: the trigger's own record of its last decision for <paramref name="relation"/> —
+    /// the key <c>darling_last_purge</c> under the same job <c>config</c> <see cref="ConvergeRawArmedStateSql"/>
+    /// already merges into, so <c>drop_after</c> and <c>darling_armed</c> survive untouched. The record is built
+    /// SERVER-SIDE with <c>jsonb_build_object('at', now(), 'outcome', $1, 'sql_state', $2, 'elapsed_ms', $3)</c> —
+    /// the same four keys the C#-interpolated record used before #4391 (<c>at</c>, <c>outcome</c>, <c>sql_state</c>,
+    /// <c>elapsed_ms</c>) — rather than string-interpolated in the caller
+    /// (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>), so nothing this statement writes ever passes
+    /// through a hand-built JSON string. <c>||</c> merge, same discipline as <see cref="ConvergeRawArmedStateSql"/>
+    /// and <see cref="RawRepairEpochStampSql"/> — an unconditional <c>config =</c> would drop every other key
+    /// already there.
+    /// </summary>
+    public static string SetRawLastPurgeOutcomeSql(string relation)
+        => $@"SELECT alter_job(j.job_id, config => j.config || jsonb_build_object('darling_last_purge', jsonb_build_object('at', now(), 'outcome', $1::text, 'sql_state', $2::text, 'elapsed_ms', $3::bigint)))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299: reads <paramref name="relation"/>'s <c>darling_last_purge</c> record back as raw JSON
+    /// text (never parsed store-side — the caller owns the shape), parallel to <see cref="RawArmedStateSql"/>.
+    /// <c>NULL</c> when the key has never been written (a store that has not run a Periodic pass yet, or one
+    /// on a build before this record existed) — the same "absent reads as unmeasured, not innocent" posture
+    /// <see cref="RawArmedReadExpression"/> takes for the armed key, but this projection returns the raw
+    /// value rather than coalescing it, so the caller can tell "never recorded" apart from any real outcome.
+    /// </summary>
+    public static string ReadRawLastPurgeOutcomeSql(string relation)
+        => $@"SELECT j.config->>'darling_last_purge'
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299: writes <paramref name="relation"/>'s <see cref="SetRawLastPurgeOutcomeSql"/> record. Never
+    /// throws outward — this is a record of what already happened, and a failure to WRITE the record must
+    /// not be confused with a failure of the purge decision itself; the caller logs its own outcome either
+    /// way. <paramref name="outcome"/> is one of <c>not_covered</c>, <c>epoch_stale</c>, <c>hole</c>,
+    /// <c>run_failed</c>, <c>no_chunks</c> or <c>ran</c> — the caller's vocabulary, not validated here.
+    /// </summary>
+    public static async Task RecordRawLastPurgeOutcomeAsync(
+        NpgsqlConnection connection, string relation, string outcome, string? sqlState, long? elapsedMs,
+        ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            await using var write = new NpgsqlCommand(SetRawLastPurgeOutcomeSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+            write.Parameters.AddWithValue(outcome);
+            write.Parameters.AddWithValue((object?)sqlState ?? DBNull.Value);
+            write.Parameters.AddWithValue((object?)elapsedMs ?? DBNull.Value);
+            await write.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not record the {Outcome} purge outcome for {Relation}: {Message}", outcome, relation, ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// #4299/#4391: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record back
+    /// as a <see cref="RawLastPurgeRecord"/>, or <c>null</c> when the key has never been written or does not
+    /// parse. Kept for the existing callers that only need the record; see
+    /// <see cref="ReadRawLastPurgeStateAsync"/> for the tri-state read that tells "never written" apart from
+    /// "could not be read".
+    /// </summary>
+    public static async Task<RawLastPurgeRecord?> ReadRawLastPurgeOutcomeAsync(
+        NpgsqlConnection connection, string relation, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        var (_, record) = await ReadRawLastPurgeStateAsync(connection, relation, logger, cancellationToken);
+        return record;
+    }
+
+    /// <summary>
+    /// #4299/#4391: which of the three states <paramref name="relation"/>'s last-purge record is in.
+    /// <see cref="NeverWritten"/> means no purge-trigger pass has recorded an outcome for it yet (the key is
+    /// missing or blank). <see cref="ReadFailed"/> means a value exists but could not be read — the read
+    /// threw, or the value failed to parse — which is a DIFFERENT state from never having been written: an
+    /// unreadable record must not be reported as "never covered".
+    /// </summary>
+    public enum RawLastPurgeReadState
+    {
+        Present,
+        NeverWritten,
+        ReadFailed,
+    }
+
+    /// <summary>
+    /// #4299/#4391: reads <paramref name="relation"/>'s <see cref="ReadRawLastPurgeOutcomeSql"/> record and
+    /// reports which of <see cref="RawLastPurgeReadState"/> applies, alongside the record when it parsed.
+    /// Tolerant of a missing job row or a read failure, same posture as <see cref="ReadJobCadenceReadingsAsync"/>
+    /// — never throws outward.
+    /// </summary>
+    public static async Task<(RawLastPurgeReadState State, RawLastPurgeRecord? Record)> ReadRawLastPurgeStateAsync(
+        NpgsqlConnection connection, string relation, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        try
+        {
+            await using var read = new NpgsqlCommand(ReadRawLastPurgeOutcomeSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+            var value = await read.ExecuteScalarAsync(cancellationToken);
+            if (value is not string json || string.IsNullOrWhiteSpace(json))
+            {
+                return (RawLastPurgeReadState.NeverWritten, null);
+            }
+
+            using var document = System.Text.Json.JsonDocument.Parse(json);
+            var root = document.RootElement;
+
+            DateTime? at = root.TryGetProperty("at", out var atElement) && atElement.ValueKind == System.Text.Json.JsonValueKind.String
+                && DateTime.TryParse(atElement.GetString(), CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var parsedAt)
+                ? parsedAt
+                : null;
+
+            string outcome = root.TryGetProperty("outcome", out var outcomeElement) && outcomeElement.ValueKind == System.Text.Json.JsonValueKind.String
+                ? outcomeElement.GetString() ?? ""
+                : "";
+
+            string? sqlState = root.TryGetProperty("sql_state", out var sqlStateElement) && sqlStateElement.ValueKind == System.Text.Json.JsonValueKind.String
+                ? sqlStateElement.GetString()
+                : null;
+
+            long? elapsedMs = root.TryGetProperty("elapsed_ms", out var elapsedElement) && elapsedElement.ValueKind == System.Text.Json.JsonValueKind.Number
+                ? elapsedElement.GetInt64()
+                : null;
+
+            if (at is null || string.IsNullOrEmpty(outcome))
+            {
+                return (RawLastPurgeReadState.ReadFailed, null);
+            }
+
+            return (RawLastPurgeReadState.Present, new RawLastPurgeRecord(at.Value, outcome, sqlState, elapsedMs));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Could not read the last-purge record for {Relation}: {Message}", relation, ex.Message);
+            return (RawLastPurgeReadState.ReadFailed, null);
+        }
+    }
+
+    /// <summary>
+    /// #4299: the current PostgreSQL start time, as the value the repair epoch stamp and its comparison
+    /// both read — epoch MICROSECONDS (<c>floor(extract(epoch from pg_postmaster_start_time()) * 1e6)::bigint</c>),
+    /// not the ISO-text alternative. A bigint compares exactly with no locale or
+    /// timezone formatting step on either side of the round trip, and Postgres's own <c>timestamptz</c> already
+    /// carries microsecond resolution internally, so multiplying by 1e6 and flooring loses nothing the
+    /// to-the-microsecond comparison needs. Read BEFORE the repair starts (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>)
+    /// so the value stamped afterward is the postmaster start the repair actually ran under, not whatever it is
+    /// by the time the repair finishes.
+    /// </summary>
+    public const string PostmasterStartEpochMicrosecondsSql =
+        "SELECT floor(extract(epoch FROM pg_postmaster_start_time()) * 1e6)::bigint";
+
+    /// <summary>
+    /// #4299: stamps <paramref name="relation"/>'s raw retention job with the repair epoch that just
+    /// finished — <c>$1</c> is the <see cref="PostmasterStartEpochMicrosecondsSql"/> value read BEFORE that
+    /// repair started. Reached ONLY from a completion that did not throw and was not cancelled
+    /// (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>): a repair cut short by shutdown or a failure
+    /// isolated per aggregate has not shown the store a clean pass, so it must not make the trigger's epoch
+    /// check pass either. Guarded with <c>IS DISTINCT FROM</c> rather than an
+    /// unconditional write, for the same reason <see cref="ConvergeRawArmedStateSql"/> merges via <c>||</c>
+    /// instead of restating the whole config: a repeat stamp of the SAME value must not write a row every
+    /// pass it is already true, which is what lets a second service's own re-stamp (were one ever added) stay
+    /// a no-op rather than a race. <c>||</c> merge, same discipline as <see cref="ConvergeRawArmedStateSql"/> —
+    /// <c>drop_after</c> and <c>darling_armed</c> already live in the same config object and must survive
+    /// this write untouched.
+    /// </summary>
+    public static string RawRepairEpochStampSql(string relation)
+        => $@"SELECT alter_job(j.job_id, config => j.config || jsonb_build_object('darling_repair_epoch', $1::bigint))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   (j.config->>'darling_repair_epoch')::bigint IS DISTINCT FROM $1::bigint";
+
+    /// <summary>
+    /// #4299: the trigger's epoch check — does <paramref name="relation"/>'s raw job carry a
+    /// <c>darling_repair_epoch</c> stamp equal, to the microsecond, to the CURRENT <c>pg_postmaster_start_time()</c>?
+    /// A missing key, a missing job row, or a stamp from an earlier postmaster start all read <c>false</c>
+    /// (fail-closed, the same posture <see cref="RawArmedReadExpression"/> takes for the armed key) —
+    /// only a repair that finished clean UNDER THE CURRENT START answers yes.
+    /// </summary>
+    public static string RawRepairEpochMatchesSql(string relation)
+        => $@"SELECT (j.config->>'darling_repair_epoch')::bigint = ({PostmasterStartEpochMicrosecondsSql})
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   j.config->>'darling_repair_epoch' IS NOT NULL";
+
+    /// <summary>
+    /// #4299: <c>lock_timeout</c> for the service's OWN <c>CALL run_job(id)</c> against a raw retention
+    /// job — the trigger that replaces the scheduler's own run, since the three raw jobs
+    /// are never scheduled. Bounded, not generous, ON PURPOSE: <c>run_job</c> executes
+    /// <c>policy_retention</c>, whose <c>drop_chunks</c> takes <c>ACCESS EXCLUSIVE</c> on the hypertable and
+    /// every chunk it touches, so an un-bounded run queued behind a live reader would hold up every LATER
+    /// reader of the table for as long as <see cref="RunRetentionPurgeJobTimeoutSeconds"/> allows — same
+    /// hazard <see cref="PgTableTuning.DropLockTimeoutSeconds"/> (a private constant in that file, same
+    /// number) guards for its own guarded <c>DROP INDEX</c>. Proven live on the rig (#4299): a
+    /// blocked run raises <c>55P03 lock_not_available</c> at this bound, not at
+    /// <see cref="RunRetentionPurgeJobTimeoutSeconds"/> — the next hourly Periodic pass retries it, so a
+    /// timeout here costs one skipped pass, never a stuck one. <c>SET LOCAL</c> so it cannot outlive the
+    /// statement's own transaction either way.
+    /// </summary>
+    private const string RunRetentionPurgeJobLockTimeout = "5s";
+
+    /// <summary>
+    /// <c>CommandTimeout</c> for <see cref="RunRetentionPurgeJobSql"/> itself — the ceiling the CALL's own
+    /// work (not the lock wait, which <see cref="RunRetentionPurgeJobLockTimeout"/> already bounds far
+    /// tighter) is allowed to run once it has the lock. <c>drop_chunks</c> on a bounded number of expired
+    /// chunks is metadata work, not a scan of their contents, so this reuses <see cref="SetupTimeoutSeconds"/>
+    /// rather than inventing a second unmeasured number: the same 300s budget the first TimescaleDB
+    /// conversion and every other setup-shaped statement in this file already carry.
+    /// </summary>
+    private const int RunRetentionPurgeJobTimeoutSeconds = SetupTimeoutSeconds;
+
+    /// <summary>
+    /// #4299: the SET LOCAL statement alone, run as the first statement inside the explicit
+    /// transaction opened by <see cref="RunRetentionPurgeJobAsync"/>, which the following paragraph
+    /// explains applies the SAME <see cref="RunRetentionPurgeJobLockTimeout"/> bound the rig proved (#4299
+    /// #4299) works INSIDE <c>run_job</c>, not just around it: a blocked run raises
+    /// <c>55P03 lock_not_available</c> at this bound, aborting the transaction before <c>COMMIT</c> (same
+    /// shape <see cref="PgTableTuning.GuardedDrop"/> documents for its guarded DROP), so
+    /// <see cref="RunRetentionPurgeJobAsync"/> issues a best-effort <c>ROLLBACK</c> on every caught failure
+    /// — proven on the rig: the connection recovers and the next statement on it succeeds. Split out from the CALL because
+    /// Npgsql's default (extended-protocol, positional-parameter) command mode rejects more than one
+    /// statement in a single <see cref="NpgsqlCommand"/> with <c>42601 "cannot insert multiple commands
+    /// into a prepared statement"</c> — proven on the rig (#4299): the original one-command
+    /// <c>BEGIN; SET LOCAL ...; CALL run_job($1::integer); COMMIT;</c> shape never once executed the CALL;
+    /// <see cref="RunRetentionPurgeJobAsync"/> caught the 42601 every time and returned <c>false</c>, so the
+    /// service-triggered raw purge could never succeed and the existing lock-timeout pin passed on the wrong
+    /// exception. <c>SET LOCAL</c> (not session-level <c>SET</c>) so the timeout cannot outlive this
+    /// method's own <see cref="NpgsqlTransaction"/> even if the CALL throws before COMMIT.
+    /// </summary>
+    private const string RunRetentionPurgeJobSetLocalSql = "SET LOCAL lock_timeout = '" + RunRetentionPurgeJobLockTimeout + "'";
+
+    /// <summary>
+    /// #4299: the CALL alone, as its own <see cref="NpgsqlCommand"/> — see
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/> for why this had to split out of the original combined
+    /// text. <c>$1</c> is still the job's own <c>job_id</c> (<see cref="RawArmedStateSql"/>'s caller already
+    /// has it from the same catalog read).
+    /// </summary>
+    public const string RunRetentionPurgeJobSql = "CALL run_job($1::integer)";
+
+    /// <summary>
+    /// #4299: why the CALL did not fail — <see cref="RunRetentionPurgeJobAsync"/>'s success
+    /// case — carries no reason, but the FAILURE case needs one so a pin can tell a lock timeout
+    /// (<c>55P03 lock_not_available</c>, the safe, expected, retry-next-pass case this design bounds for)
+    /// apart from anything else going wrong, including a regression back to the 42601 the original shape
+    /// always raised. <paramref name="SqlState"/> is PostgreSQL's own five-character SQLSTATE
+    /// (<see cref="PostgresException.SqlState"/>) when the failure was a <see cref="PostgresException"/>,
+    /// and <c>null</c> for anything else (a cancellation is never reached here; anything else is Npgsql's
+    /// own plumbing, not the server's).
+    /// </summary>
+    public sealed record RetentionPurgeOutcome(bool Ran, string? SqlState);
+
+    /// <summary>
+    /// Runs <see cref="RunRetentionPurgeJobSql"/> for <paramref name="jobId"/> — the service triggering ITS
+    /// OWN raw purge, from the hourly Periodic pass only. A timeout or any other failure
+    /// is logged at Warning and swallowed, never thrown: the caller's contract is "try once, report the
+    /// outcome", and the NEXT hourly pass is the retry — there is no reason to crash a pass over one purge
+    /// that can wait an hour. Returns <see cref="RetentionPurgeOutcome.Ran"/> true only when the CALL
+    /// completed inside both bounds.
+    ///
+    /// <para><b>#4299: an explicit <see cref="NpgsqlTransaction"/>, not the one-command SQL
+    /// text this used to be.</b> Proven on the rig with psql, unblocked, before this change: <c>BEGIN; SET
+    /// LOCAL lock_timeout = '5s'; CALL run_job(&lt;id&gt;); COMMIT;</c> succeeds and drops the target chunk —
+    /// a procedure invoked through <c>CALL</c> whose own internal <c>COMMIT</c> is fine inside an ordinary
+    /// transaction block (a procedure that COMMITs internally only errors with "invalid transaction
+    /// termination" when called INSIDE an already-open multi-statement block started by something other
+    /// than a plain top-level <c>CALL</c> — not this shape). Npgsql's positional-parameter mode just cannot
+    /// send <c>BEGIN; SET LOCAL; CALL; COMMIT;</c> as ONE command (42601, see
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/>), so this method opens the SAME three statements as an
+    /// <see cref="NpgsqlTransaction"/> instead: <see cref="NpgsqlConnection.BeginTransactionAsync"/>, then
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/> as its own parameterless command, then
+    /// <see cref="RunRetentionPurgeJobSql"/> with <paramref name="jobId"/> bound, then
+    /// <c>CommitAsync</c>.</para>
+    ///
+    /// <para>Returns a <see cref="RetentionPurgeOutcome"/> rather than a bare bool (#4299) so
+    /// the caller can log WHY a run did not happen — in particular so a pin can assert the lock-timeout case
+    /// really is <c>55P03 lock_not_available</c> and not any other failure, including a regression back to
+    /// the 42601 the original one-command shape always raised.</para>
+    /// </summary>
+    public static async Task<RetentionPurgeOutcome> RunRetentionPurgeJobAsync(
+        NpgsqlConnection connection, long jobId, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        NpgsqlTransaction? transaction = null;
+        try
+        {
+            transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            using (var setLocal = new NpgsqlCommand(RunRetentionPurgeJobSetLocalSql, connection, transaction) { CommandTimeout = RunRetentionPurgeJobTimeoutSeconds })
+            {
+                await setLocal.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            using (var call = new NpgsqlCommand(RunRetentionPurgeJobSql, connection, transaction) { CommandTimeout = RunRetentionPurgeJobTimeoutSeconds })
+            {
+                call.Parameters.AddWithValue(jobId);
+                await call.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return new RetentionPurgeOutcome(Ran: true, SqlState: null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var sqlState = (ex as PostgresException)?.SqlState;
+
+            logger?.LogWarning(
+                "Raw retention purge job {JobId} did not complete (lock_timeout={LockTimeout}, CommandTimeout={CommandTimeout}s, SqlState={SqlState}) — the next hourly pass retries it: {Message}",
+                jobId, RunRetentionPurgeJobLockTimeout, RunRetentionPurgeJobTimeoutSeconds, sqlState ?? "(none)", ex.Message);
+
+            try
+            {
+                if (transaction is not null)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                }
+                else
+                {
+                    using var rollback = new NpgsqlCommand("ROLLBACK", connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await rollback.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+            catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
+            {
+                /* Best-effort: PgTableTuning.ApplyAsync's ROLLBACK-after-every-failure is the same discipline,
+                   for the same reason — a connection left "in failed transaction" would take the NEXT
+                   statement run on it down too, and this connection is shared across the rest of the sweep. */
+                logger?.LogWarning("ROLLBACK after a failed raw retention purge job {JobId} also failed: {Message}", jobId, rollbackEx.Message);
+            }
+
+            return new RetentionPurgeOutcome(Ran: false, SqlState: sqlState);
+        }
+        finally
+        {
+            if (transaction is not null)
+            {
+                await transaction.DisposeAsync();
+            }
+        }
+    }
+
+    /// <summary>
     /// Re-holds a retention policy that is ALREADY ARMED (#1877). The mirror of
     /// <see cref="ArmRetentionPolicySql"/>, and the statement that closes the arm-only gap: a policy created
     /// paused stays paused by itself, but <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a
@@ -6175,6 +6585,22 @@ AND   j.hypertable_name = '{relation}'";
     /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude
     /// first-pass rows the successors themselves never materialize — without this, a single 0-interval row
     /// older than any successor bucket holds the gate open permanently even after the stitch fix.</para>
+    ///
+    /// <para><b>The raw purge never runs by itself (#4299, variant d′).</b> A Covered verdict from this SQL
+    /// no longer arms TimescaleDB's own scheduler for the three raw jobs (<see cref="RawRelations"/>) —
+    /// they stay permanently unscheduled (<see cref="ConvergeRawArmedStateSql"/>) and the verdict is recorded
+    /// in <c>config-&gt;&gt;'darling_armed'</c> instead. The purge only actually runs
+    /// (<see cref="RunRetentionPurgeJobAsync"/>, <c>CALL run_job(id)</c>) when the service itself triggers
+    /// it from the hourly Periodic pass, gated on a FRESH Covered verdict from this probe AND a repair
+    /// (<see cref="RepairMaterializationHolesAsync"/>) already finished under the CURRENT
+    /// <c>pg_postmaster_start_time()</c> — never on the Startup pass, so PostgreSQL's own start-time run of
+    /// an overdue job (the #4299 pre-existing hazard this whole design exists to remove) cannot race the
+    /// repair. Two things bypass the service's own gate on purpose and are named here rather than treated as
+    /// a leak: the FIRST start after the upgrade still runs whichever raw job the OLD scheduled-based code
+    /// already armed, once (3.8.0 parity for that one run only), and a DBA's own
+    /// <c>alter_job</c>/<c>run_job</c> against a raw job's <c>job_id</c> always executes immediately, exactly
+    /// as it does for every other job in the catalog — this gate governs the SERVICE's own trigger, not the
+    /// database's ordinary admin surface.</para>
     /// </summary>
     public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations)
     {
@@ -6283,6 +6709,15 @@ AND   j.hypertable_name = '{relation}'";
            below go on refreshing, so their coverage is still named directly. */
         ("query_store_stats", "collection_time", new[] { QueryStoreStatsHourlyView, QueryStoreStatsIntervalHourlyView }),
     };
+
+    /// <summary>
+    /// #4299: the raw relation names, straight off <see cref="RawTierCoverage"/> — the set the sweep
+    /// checks a policy against to decide whether it is one of the three raw jobs that never run on
+    /// TimescaleDB's own scheduler (<see cref="ConvergeRawArmedStateSql"/>, <see cref="RawArmedReadExpression"/>)
+    /// rather than one of the fourteen others that keep today's <c>scheduled</c> semantics unchanged.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RawRelations =
+        RawTierCoverage.Select(t => t.Relation).ToArray();
 
     /// <summary>
     /// EVERY retention policy this store attaches, each naming the tier(s) that must already cover it before
@@ -6730,23 +7165,60 @@ AND   j.hypertable_name = '{relation}'";
                     }
                 }
 
-                /* #3812: the job's scheduled flag BEFORE the gate's flip, so the tally below can tell a transition
-                   from a re-assertion. Read here, after the converge, because the converge names only config and
-                   cannot move it (RetentionHorizonConvergeCannotArmTests) — this is the freshest the flag can be
-                   before the one statement that may change it. Null when no job row answers, which the flip
-                   statements below would also match nothing on. */
+                /* #4299: the three raw relations never use the scheduled-flag verdict — they converge
+                   onto scheduled = false unconditionally, every pass, and carry the armed verdict in
+                   config->>'darling_armed' instead (ConvergeRawArmedStateSql, RawArmedReadExpression). This is
+                   the hourly converge, which runs every pass: it reverts a DBA's alter_job(scheduled => true) within
+                   the hour (and at every start), restoring the armed key to whatever this pass measures. */
+                var isRawRelation = RawRelations.Contains(relation);
+
+                /* #3812: the job's PRIOR armed verdict BEFORE the gate's flip, so the tally below can tell a
+                   transition from a re-assertion. Read here, after the horizon converge (which names only
+                   config and cannot move either flag — RetentionHorizonConvergeCannotArmTests), and BEFORE the
+                   raw/non-raw flip below — this is the freshest the verdict can be before the one statement
+                   that may change it. A raw relation reads its prior state off config->>'darling_armed'
+                   (RawArmedReadExpression); every other relation keeps reading the scheduled flag
+                   (RetentionPolicyScheduledSql). Null when no job row answers, which the flip statements below
+                   would also match nothing on. */
                 bool? wasScheduled;
-                using (var scheduledRead = new NpgsqlCommand(RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds })
+                using (var scheduledRead = new NpgsqlCommand(isRawRelation ? RawArmedStateSql(relation) : RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds })
                 {
                     var flag = await scheduledRead.ExecuteScalarAsync(cancellationToken);
                     wasScheduled = flag is bool b ? b : null;
                 }
 
+                /* #4299/#4391: for a raw relation wasScheduled above carries darling_armed, NOT the schedule
+                   flag, so it is the wrong signal for detecting a DBA's alter_job(scheduled => true) - that is
+                   a converge event, not a re-hold, and gets its own line here rather than reusing the
+                   armed/re-held lines below, which never fire for a raw relation's schedule flag at all. */
+                bool rawWasScheduled = false;
+                if (isRawRelation)
+                {
+                    using var rawSchedulePriorRead = new NpgsqlCommand(RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+                    var rawSchedulePriorFlag = await rawSchedulePriorRead.ExecuteScalarAsync(cancellationToken);
+                    rawWasScheduled = rawSchedulePriorFlag is true;
+                    if (rawWasScheduled)
+                    {
+                        logger?.LogInformation(
+                            "Raw retention job for {Relation} was scheduled outside the service (alter_job scheduled => true); set back to unscheduled. The service runs raw purges itself (#4299); re-arming the job does not change coverage (#3812).",
+                            relation);
+                    }
+                }
+
                 var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
                 if (verdict == RetentionCoverage.Covered)
                 {
-                    using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await arm.ExecuteNonQueryAsync(cancellationToken);
+                    if (isRawRelation)
+                    {
+                        using var armRaw = new NpgsqlCommand(ConvergeRawArmedStateSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        armRaw.Parameters.AddWithValue(true);
+                        await armRaw.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await arm.ExecuteNonQueryAsync(cancellationToken);
+                    }
 
                     if (wasScheduled == false)
                     {
@@ -6787,8 +7259,17 @@ AND   j.hypertable_name = '{relation}'";
                        a timeout, a permission blip, or a relation that is mid-rebuild. And the release is the
                        existing arming path, unchanged: the next sweep measures Covered and arms it, with no
                        manual step, exactly as a first-time hold releases. */
-                    using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await hold.ExecuteNonQueryAsync(cancellationToken);
+                    if (isRawRelation)
+                    {
+                        using var holdRaw = new NpgsqlCommand(ConvergeRawArmedStateSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        holdRaw.Parameters.AddWithValue(false);
+                        await holdRaw.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await hold.ExecuteNonQueryAsync(cancellationToken);
+                    }
                     held++;
 
                     if (wasScheduled == true)
@@ -6819,13 +7300,30 @@ AND   j.hypertable_name = '{relation}'";
                 else
                 {
                     /* Coverage could not be MEASURED, which is not the same as measuring a shortfall. Leave the
-                       policy in whatever state it is already in: a new one is paused (fail-closed, as always),
-                       and one this store already armed keeps running. Disarming here instead would let a single
-                       bad probe stop purging across every tier at once and grow disk without bound — the
-                       failure mode that kept #1877 unfixed rather than fixed badly. Counted as UNCHANGED in the
-                       tally (it is), and as indeterminate beside it so the summary can say how many verdicts
-                       were never reached. Stays a WARNING on both passes: a probe that cannot answer is a store
-                       fault, not a steady state an operator has already been told about. */
+                       ARMED VERDICT in whatever state it is already in: a new one is paused (fail-closed, as
+                       always), and one this store already armed keeps running. Disarming here instead would let
+                       a single bad probe stop purging across every tier at once and grow disk without bound —
+                       the failure mode that kept #1877 unfixed rather than fixed badly.
+
+                       For a raw relation, though, the SCHEDULED flag still converges to false on this pass
+                       (the hourly converge runs every pass, unconditionally) — it is the
+                       darling_armed key alone that an indeterminate probe must not touch, so a DBA's
+                       alter_job(scheduled => true) is reverted here too, even on a pass that could not judge
+                       coverage. */
+                    if (isRawRelation && rawWasScheduled)
+                    {
+                        /* Guarded the same way ConvergeRawArmedStateSql is: an indeterminate pass must still
+                           revert a DBA's alter_job(scheduled => true), but writing scheduled => false to a job
+                           that is ALREADY false every hour is catalog churn with nothing to show for it.
+                           rawWasScheduled (read above, before the verdict) already answered that. */
+                        using var rawScheduleOnly = new NpgsqlCommand(SetRetentionScheduleSql(relation, scheduled: false), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await rawScheduleOnly.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    /* Counted as UNCHANGED in the tally (it is), and as indeterminate beside it so the summary
+                       can say how many verdicts were never reached. Stays a WARNING on both passes: a probe
+                       that cannot answer is a store fault, not a steady state an operator has already been
+                       told about. */
                     indeterminate++;
                     unchanged++;
                     logger?.LogWarning(
@@ -10407,7 +10905,7 @@ WHERE j.proc_name LIKE '%compression%'
     /// a SUCCESSFUL last run judges: a failed run's duration is not a cadence signal, and job failures are
     /// their own condition (<c>total_failures</c> rides the V56 telemetry).</para>
     /// </summary>
-    public const string JobCadenceReadSql = @"
+    public static readonly string JobCadenceReadSql = $@"
 SELECT
     j.job_id,
     j.proc_name || coalesce(' ' || j.hypertable_name, ''),
@@ -10415,7 +10913,12 @@ SELECT
     (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint
 FROM timescaledb_information.job_stats AS js
 JOIN timescaledb_information.jobs AS j USING (job_id)
-WHERE js.last_run_status = 'Success'";
+WHERE js.last_run_status = 'Success'
+  AND NOT (
+      j.hypertable_schema = 'collect'
+      AND j.proc_name = 'policy_retention'
+      AND j.hypertable_name = ANY(ARRAY[{string.Join(", ", RawRelations.Select(r => $"'{r}'"))}])
+  )";
 
     /// <summary>
     /// Every background job's last-run duration against its own schedule interval (#2136) — the readings the
@@ -10812,7 +11315,8 @@ SELECT
     CASE
         WHEN (j.config->>'drop_after') IS NULL THEN NULL
         ELSE EXTRACT(EPOCH FROM (j.config->>'drop_after')::interval)::bigint
-    END
+    END,
+    COALESCE((j.config->>'darling_armed')::boolean, false)
 FROM timescaledb_information.jobs AS j
 LEFT JOIN LATERAL (
     SELECT
@@ -10870,10 +11374,20 @@ WHERE j.proc_name = 'policy_retention'
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var hypertableName = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                var scheduled = !reader.IsDBNull(2) && reader.GetBoolean(2);
+                var darlingArmed = !reader.IsDBNull(7) && reader.GetBoolean(7);
+
+                /* #4299: a raw relation's permanent scheduled=false is not a hold — its verdict is
+                   darling_armed, read through the same expression RawArmedStateSql projects (see the
+                   isRawRelation split in EnsureRetentionPoliciesAsync). Every other relation keeps reading
+                   j.scheduled unchanged. */
+                var armed = RawRelations.Contains(hypertableName) ? darlingArmed : scheduled;
+
                 readings.Add(new RetentionHoldReading(
                     Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
-                    reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    !reader.IsDBNull(2) && reader.GetBoolean(2),
+                    hypertableName,
+                    armed,
                     reader.IsDBNull(3) ? "" : reader.GetString(3),
                     reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture),
                     reader.IsDBNull(5) ? null : Convert.ToInt64(reader.GetValue(5), CultureInfo.InvariantCulture),
@@ -10883,6 +11397,38 @@ WHERE j.proc_name = 'policy_retention'
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogDebug("Retention-hold check: could not read retention policy state: {Message}", ex.Message);
+        }
+
+        return readings;
+    }
+
+    /// <summary>
+    /// #4299: the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/>
+    /// judges — each of the three raw relations' <see cref="RetentionHoldReading.OverHorizonRatio"/> (already
+    /// present in <paramref name="holdReadings"/>, the SAME list <see cref="EvaluateRetentionHoldsAsync"/>
+    /// reads this pass) paired with that relation's <see cref="ReadRawLastPurgeOutcomeAsync"/> record. Filters
+    /// <paramref name="holdReadings"/> down to raw relations only — a second read of the same catalog would
+    /// duplicate <see cref="RetentionHoldReadSql"/>'s work; this reuses the pass's own reading instead.
+    /// </summary>
+    public static async Task<IReadOnlyList<RawPurgeOverHorizonReading>> ReadRawPurgeOverHorizonReadingsAsync(
+        NpgsqlConnection connection, IReadOnlyList<RetentionHoldReading> holdReadings, ILogger? logger,
+        CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var readings = new List<RawPurgeOverHorizonReading>();
+        foreach (var hold in holdReadings)
+        {
+            if (!RawRelations.Contains(hold.HypertableName))
+            {
+                continue;
+            }
+
+            var (state, lastPurge) = await ReadRawLastPurgeStateAsync(connection, hold.HypertableName, logger, cancellationToken);
+            readings.Add(new RawPurgeOverHorizonReading(hold.JobId, hold.HypertableName, hold.DropAfter, hold.OverHorizonRatio, lastPurge, state == RawLastPurgeReadState.ReadFailed));
         }
 
         return readings;
@@ -11599,8 +12145,13 @@ public sealed class RefreshCeilingStalenessWatch
 /// One retention policy's armed state and the consequence of it being held (#2813), from
 /// <see cref="TimescaleSupport.ReadRetentionHoldReadingsAsync"/>.
 ///
-/// <para><see cref="Armed"/> is <c>timescaledb_information.jobs.scheduled</c> — false means the #1680/#1877
-/// coverage gate is holding this policy so it cannot drop history a consumer has never materialized.
+/// <para><see cref="Armed"/> is <c>timescaledb_information.jobs.scheduled</c> for every non-raw policy —
+/// false means the #1680/#1877 coverage gate is holding this policy so it cannot drop history a consumer
+/// has never materialized. For one of the three raw relations (#4299, <see
+/// cref="TimescaleSupport.RawRelations"/>) <c>scheduled</c> is permanently false by design, so
+/// <see cref="Armed"/> instead reads <c>config-&gt;&gt;'darling_armed'</c> — the same verdict
+/// <see cref="TimescaleSupport.RawArmedReadExpression"/> computes — through
+/// <see cref="TimescaleSupport.ReadRetentionHoldReadingsAsync"/>'s per-row branch.</para>
 /// <see cref="SpanSeconds"/> is now minus the OLDEST chunk's start (null when the hypertable has no chunks
 /// yet) and <see cref="HorizonSeconds"/> is the policy's own <c>drop_after</c>, so
 /// <see cref="OverHorizonRatio"/> is how many times its intended depth the tier is actually holding. That
@@ -11628,6 +12179,28 @@ public sealed record RetentionHoldReading(
             ? SpanSeconds.Value / (double)HorizonSeconds.Value
             : null;
 }
+
+/// <summary>
+/// #4299: one raw relation's last recorded purge-trigger outcome, from
+/// <see cref="TimescaleSupport.ReadRawLastPurgeOutcomeAsync"/> — the record
+/// <see cref="TimescaleSupport.RecordRawLastPurgeOutcomeAsync"/> writes at every decision point inside
+/// <see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>. <see cref="Outcome"/> is one of <c>not_covered</c>,
+/// <c>epoch_stale</c>, <c>hole</c>, <c>run_failed</c>, <c>no_chunks</c> or <c>ran</c> — named verbatim in the
+/// over-horizon alert's text (the whole point of persisting it: a page that says WHY the purge did not run
+/// instead of the generic Retention Held text, which cannot distinguish these).
+/// </summary>
+public sealed record RawLastPurgeRecord(DateTime At, string Outcome, string? SqlState, long? ElapsedMs);
+
+/// <summary>
+/// #4299: one raw relation's over-horizon measure PLUS its last recorded purge-trigger outcome —
+/// the combined reading <see cref="DarlingSelfAlertEvaluator.ApplyRawPurgeOverHorizonAsync"/> judges. Built
+/// from a <see cref="RetentionHoldReading"/> for a raw relation (<see cref="TimescaleSupport.RawRelations"/>)
+/// plus that same relation's <see cref="TimescaleSupport.ReadRawLastPurgeOutcomeAsync"/> result, by
+/// <see cref="TimescaleSupport.ReadRawPurgeOverHorizonReadingsAsync"/>.
+/// </summary>
+public sealed record RawPurgeOverHorizonReading(
+    long JobId, string HypertableName, string DropAfter, double? OverHorizonRatio, RawLastPurgeRecord? LastPurge,
+    bool LastPurgeReadFailed = false);
 
 /// <summary>
 /// One hypertable's compression-policy activity (#1778): whether a run is in progress, when it started, how

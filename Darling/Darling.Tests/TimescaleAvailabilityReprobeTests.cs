@@ -270,9 +270,9 @@ public sealed class TimescaleAvailabilityReprobeTests
     /// Information line on EVERY outcome and would otherwise put one in the log an hour for the life of the
     /// service.</para>
     ///
-    /// <para>The three issue numbers in the recovery line are checked against the health check they name
-    /// rather than trusted: the method the latch gates calls exactly three self-alert evaluators, so a fourth
-    /// arriving (#3816 widens this family) makes the line an undercount and reds here.</para>
+    /// <para>The issue numbers in the recovery line are checked against the health check they name rather
+    /// than trusted: the method the latch gates calls exactly four self-alert evaluators (#4299 added the
+    /// fourth), so a fifth arriving makes the line an undercount and reds here.</para>
     /// </summary>
     [Fact]
     public void TheRecoveryIsInformation_TheUnchangedPassIsDebug_AndTheLineNamesWhatItRestores()
@@ -302,14 +302,15 @@ public sealed class TimescaleAvailabilityReprobeTests
         Assert.Contains("TryEnableAsync(connection, null,", body, StringComparison.Ordinal);
 
         /* The line's claim about WHAT comes back, checked against the method that comes back. Counted by
-           enumerating the self-alert evaluator calls in the gated method's own body - three today - and the
-           line has to name one issue per evaluator. */
+           enumerating the self-alert evaluator calls in the gated method's own body - four today (#4299 added
+           the raw-purge-over-horizon evaluator to this same gated check) - and the line has to name one issue
+           per evaluator. */
         var gated = MethodBody(CSharpSourceWalker.StripCommentsAndStrings(worker), "private async Task EvaluateCompressionJobHealthAsync(CancellationToken cancellationToken)");
         Assert.False(string.IsNullOrEmpty(gated));
         var evaluators = CountOf(gated, "_selfAlerts!.Evaluate");
         var named = Regex.Matches(rawBody[rawBody.IndexOf(Recovery, StringComparison.Ordinal)..], @"\(#\d{4}\)").Count;
         Assert.True(
-            evaluators == 3 && named == evaluators + 2,
+            evaluators == 4 && named == evaluators + 2,
             $"the health check the latch gates runs {evaluators} self-alert evaluators and the recovery line "
           + $"names {named - 2} of them beside its own issue number and the convergence tenant's. The line tells "
           + "an operator what has been off since the start; a check that gained an evaluator without the line "
