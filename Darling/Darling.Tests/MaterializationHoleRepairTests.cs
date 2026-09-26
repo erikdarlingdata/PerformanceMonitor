@@ -342,6 +342,62 @@ public sealed class MaterializationHoleRepairTests
     }
 
     /// <summary>
+    /// #4301 (H2): a legacy-interior gap — a hole BELOW the legacy's last bucket, inside its own frozen span,
+    /// from an outage that predates this store ever taking the freeze — gets a THIRD window, distinct from
+    /// both the seam window and the ordinary window, emitted FIRST (oldest of the three). RED on the pre-#4301
+    /// signature: <c>MaterializationHoleScanWindows</c> had no parameter through which a legacy-interior span
+    /// could ever reach this method at all, so it returned at most the seam window and the ordinary window —
+    /// never anything anchored below <c>l.mx</c> — exactly the H2 regression this pins.
+    /// </summary>
+    [Fact]
+    public void ScanWindows_LegacyInterior_GivesAThirdWindow_EmittedFirst()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+        var floor = Hour.AddHours(200);
+        var horizon = Hour.AddHours(190);
+        var seamFloor = Hour.AddHours(195);
+        var ceiling = Hour.AddHours(250);
+        var legacyInteriorFrom = Hour.AddHours(20);
+        var legacyInteriorTo = Hour.AddHours(180);
+
+        var windows = TimescaleSupport.MaterializationHoleScanWindows(
+            floor, ceiling, horizon, seamFloor, width, legacyInteriorFrom, legacyInteriorTo);
+
+        Assert.Equal(3, windows.Count);
+        Assert.Equal((legacyInteriorFrom, legacyInteriorTo), windows[0]);
+        Assert.Equal((seamFloor, floor.AddHours(-1)), windows[1]);
+        Assert.Equal((floor, ceiling), windows[2]);
+
+        /* The legacy-interior window is unclamped by the horizon — same reasoning as the seam window: the
+           outage that opened it left the source with no rows there, not purged, so it can sit however far
+           below the horizon it needs to. */
+        Assert.True(windows[0].From < horizon);
+    }
+
+    /// <summary>
+    /// #4301: no legacy-interior span (both bounds null, the ordinary case once a store has run a while, or
+    /// any relation without a frozen legacy) yields exactly the same two windows #4186 already produced —
+    /// the new parameter is purely additive and does not disturb the seam/ordinary shape when it is absent.
+    /// An inverted or empty span (from after to) is also omitted, the same rule the seam window already uses.
+    /// </summary>
+    [Fact]
+    public void ScanWindows_NoLegacyInterior_LeavesTheExistingTwoWindowsUnchanged()
+    {
+        var width = TimescaleSupport.HourlyBucket;
+        var floor = Hour.AddHours(10);
+        var horizon = Hour.AddHours(2);
+        var seamFloor = Hour.AddHours(4);
+        var ceiling = Hour.AddHours(50);
+
+        var windows = TimescaleSupport.MaterializationHoleScanWindows(floor, ceiling, horizon, seamFloor, width);
+        Assert.Equal(new[] { (seamFloor, floor.AddHours(-1)), (floor, ceiling) }, windows);
+
+        var invertedInteriorWindows = TimescaleSupport.MaterializationHoleScanWindows(
+            floor, ceiling, horizon, seamFloor, width, legacyInteriorFrom: Hour.AddHours(5), legacyInteriorTo: Hour.AddHours(1));
+        Assert.Equal(windows, invertedInteriorWindows);
+    }
+
+    /// <summary>
     /// The start path: launched (not awaited) right after the ensure, on its own connection, inside the
     /// TimescaleDB block, before the compression and retention ensures; drained at shutdown beside the baseline
     /// backfill. Source-order pins, the RetiredBaselineAggregateTests shape.

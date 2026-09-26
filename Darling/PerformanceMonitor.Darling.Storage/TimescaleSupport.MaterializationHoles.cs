@@ -404,9 +404,29 @@ ORDER BY c.bucket";
     /// below the horizon it reaches, while the ordinary window stays exactly <c>[max(floor, horizon), ceiling]</c>
     /// — the successor's own span below the horizon is the source retention's business, not this repair's, and
     /// widening it was never the fix.</para>
+    ///
+    /// <para><b>A third window, INSIDE the frozen legacy's own span (#4301, H2).</b> The seam window only
+    /// reaches down to the legacy's last bucket — it repairs the outage AFTER the freeze. #4186 left the
+    /// legacy's OWN materialized span (below its last bucket) unchecked entirely: an outage BEFORE this store
+    /// ever took the freeze can leave a hole inside history the legacy claims to hold, and nothing ever
+    /// re-scans it because the six frozen views are excluded from <see cref="MaterializationHoleTargets"/>
+    /// (repairing a frozen view is the one thing the freeze forbids — see that member's own note). This window,
+    /// <paramref name="legacyInteriorFrom"/> through <paramref name="legacyInteriorTo"/> (typically
+    /// <c>[time_bucket(source's oldest admitted row), legacy.max(bucket)]</c>), is scanned against BOTH the
+    /// legacy's and the successor's own materializations — a bucket either one already holds is not a hole —
+    /// and its caller must never refresh the legacy for what it finds, only the successor
+    /// (<see cref="RepairMaterializationHolesAsync"/>'s legacy-interior branch). It is OPTIONAL (both bounds
+    /// null, or an empty/inverted span) for every relation without a frozen legacy, and for one whose raw
+    /// floor no longer reaches back into the legacy's span at all — the ordinary case once the store has run a
+    /// while. Emitted FIRST (oldest), ahead of the seam: repairing it can never move the successor's own floor
+    /// (<see cref="RetentionArmSafetySql"/>'s stitch only reads <c>s.mn</c>, never a legacy-interior bucket), so
+    /// it is capped and walked oldest-first exactly like the ordinary window — see
+    /// <see cref="RepairMaterializationHolesAsync"/> for why it shares that pool rather than the seam's
+    /// newest-first one.</para>
     /// </summary>
     public static IReadOnlyList<(DateTime From, DateTime To)> MaterializationHoleScanWindows(
-        DateTime floor, DateTime ceiling, DateTime horizon, DateTime seamFloor, TimeSpan bucketWidth)
+        DateTime floor, DateTime ceiling, DateTime horizon, DateTime seamFloor, TimeSpan bucketWidth,
+        DateTime? legacyInteriorFrom = null, DateTime? legacyInteriorTo = null)
     {
         if (bucketWidth <= TimeSpan.Zero)
         {
@@ -414,6 +434,11 @@ ORDER BY c.bucket";
         }
 
         var windows = new List<(DateTime From, DateTime To)>();
+
+        if (legacyInteriorFrom is { } interiorFrom && legacyInteriorTo is { } interiorTo && interiorFrom <= interiorTo)
+        {
+            windows.Add((interiorFrom, interiorTo));
+        }
 
         if (seamFloor < floor)
         {
