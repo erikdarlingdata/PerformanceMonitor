@@ -1336,13 +1336,21 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
-    /// PIN (#4301, filter parity): the gate's hole probe (<see cref="TimescaleSupport.RetentionArmSafetySql"/>,
-    /// via <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/>) and the repair walk
-    /// (<see cref="TimescaleSupport.MaterializationHoleSourceFilterFor"/> over the successor's own CREATE)
-    /// must read the SAME source filter for every <see cref="TimescaleSupport.SupersededHourlyRollups"/>
-    /// successor — the gate and the walk disagreeing about which raw rows count would let the gate call a
-    /// bucket Short (or Covered) that the walk judges by different rules, breaking the "never disagree about
-    /// what a hole is" invariant <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/>'s own doc states.
+    /// PIN (#4301, filter parity — RED before the fix, because the gate passed the bare
+    /// <see cref="TimescaleSupport.IntervalHonestSourceFilter"/> constant to every stitched slot's hole probe
+    /// regardless of the successor's own CREATE). The gate's hole probe
+    /// (<see cref="TimescaleSupport.RetentionArmSafetySql"/>, via
+    /// <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/>) must carry the SAME source filter the repair
+    /// walk reads off the successor's own CREATE (<see cref="TimescaleSupport.MaterializationHoleSourceFilterFor"/>)
+    /// for every <see cref="TimescaleSupport.SupersededHourlyRollups"/> successor — the gate and the walk
+    /// disagreeing about which raw rows count would let the gate call a bucket Short (or Covered) that the walk
+    /// judges by different rules, breaking the "never disagree about what a hole is" invariant
+    /// <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/>'s own doc states. Exercises the ACTUAL
+    /// generated SQL rather than comparing two constants, so a regression that restores the bare constant fails
+    /// this pin even when <see cref="TimescaleSupport.IntervalHonestSourceFilter"/> itself is untouched — the
+    /// case that matters for <see cref="TimescaleSupport.QueryStatsDbIntervalHourlyView"/>, whose own filter
+    /// (<c>delta_worker_time IS NOT NULL AND sample_interval_seconds IS DISTINCT FROM 0</c>) is strictly wider
+    /// than the bare constant.
     /// </summary>
     [Fact]
     public void LegacySuccessorHoleProbe_UsesSameFilterAsTheRepairWalk_ForEverySupersededSuccessor()
@@ -1351,8 +1359,12 @@ public sealed class TimescaleContinuousAggregateTests
         {
             var successorCreateSql = TimescaleSupport.HourlyAggregates.Single(a => a.View == successor).CreateSql;
             var walkFilter = TimescaleSupport.MaterializationHoleSourceFilterFor(successorCreateSql);
+            Assert.False(string.IsNullOrEmpty(walkFilter), $"{successor}'s CREATE has no WHERE for the walk to read a filter from.");
 
-            Assert.Equal(TimescaleSupport.IntervalHonestSourceFilter, walkFilter);
+            var coverageEntry = TimescaleSupport.RawTierCoverage.Single(t => t.Coverage.Contains(successor));
+            var sql = TimescaleSupport.RetentionArmSafetySql(coverageEntry.Relation, coverageEntry.TimeColumn, new[] { successor });
+
+            Assert.Contains(walkFilter, sql, StringComparison.Ordinal);
         }
     }
 

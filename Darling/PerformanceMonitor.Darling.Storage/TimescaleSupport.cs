@@ -6224,12 +6224,16 @@ AND   j.hypertable_name = '{relation}'";
         var columns = coverageRelations.Select((c, i) =>
         {
             var legacy = LegacyOf(c);
+            var successorFilter = legacy is not null
+                ? MaterializationHoleSourceFilterFor(HourlyAggregates.Single(a => a.View == c).CreateSql)
+                : string.Empty;
+            var successorFloorWhere = successorFilter.Length == 0 ? string.Empty : $" WHERE {successorFilter}";
             var subquery = legacy is not null
                 ? $"(SELECT CASE{Environment.NewLine}"
                 + $"                WHEN l.mx IS NULL THEN LEAST(l.mn, s.mn){Environment.NewLine}"
                 + $"                WHEN {LegacySuccessorHoleExistsSql(
-                        relation, sourceTimeColumn, IntervalHonestSourceFilter, legacy, c,
-                        fromExpr: $"time_bucket(INTERVAL '1 hour', (SELECT min(src.{sourceTimeColumn}) FROM collect.{relation} AS src WHERE {IntervalHonestSourceFilter}))",
+                        relation, sourceTimeColumn, successorFilter, legacy, c,
+                        fromExpr: $"time_bucket(INTERVAL '1 hour', (SELECT min(src.{sourceTimeColumn}) FROM collect.{relation} AS src{successorFloorWhere}))",
                         toExpr: $"COALESCE((SELECT min(sa.bucket) FROM collect.{c} AS sa WHERE sa.bucket > l.mx), time_bucket(INTERVAL '1 hour', now()::timestamp)) - INTERVAL '1 hour'",
                         bucketWidthLiteral: "INTERVAL '1 hour'")}{Environment.NewLine}"
                 + $"                THEN NULL{Environment.NewLine}"
