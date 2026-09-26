@@ -130,6 +130,19 @@ public sealed class QueryStoreIntervalWideGridLiveTests
     /// catalog is the only seam that tells "no statement ran" apart from "a statement ran and returned
     /// nothing". Ungated at <c>a7fdde9f</c> (pre-fix): fails RED there because every grid read, short window or
     /// not, always ran the gate's own round trips including the floor scan.
+    ///
+    /// <para><b>Flushed, not merely cleared (2026-09-26 de-flake).</b> This test's earlier shape captured
+    /// <c>pg_stat_user_tables.seq_scan</c> immediately before and after the read under test, on the test's own
+    /// backend. PostgreSQL throttles a backend's cumulative-stats report to at most once per second
+    /// (<c>PGSTAT_MIN_INTERVAL</c>); the seed's own scans against <c>query_store_interval_wide</c>, issued
+    /// moments earlier over the runner's pooled data source, can still be sitting PENDING on that other backend
+    /// when the "before" snapshot is taken, then land AFTER it — <c>Expected (0, 9), Actual (1, 9)</c> with
+    /// nothing wrong in the code under test. <c>pg_stat_force_next_flush()</c> only forces the CALLING
+    /// backend's own pending counters to report immediately, so it is issued here on the SAME two connections
+    /// that did the seeding and the coverage force (the runner's pooled data source and this test's own
+    /// connection) before the "before" snapshot, and again before the "after" snapshot so a real regression
+    /// (the mutation below) still shows up rather than sitting pending itself. Ungated on the SAME product code:
+    /// this is purely about when the counter becomes visible, not what it counts.</para>
     /// </summary>
     [Fact]
     public async Task ShortWindowRead_IssuesNoRoundTripAgainstTheWideTable()
@@ -159,6 +172,15 @@ public sealed class QueryStoreIntervalWideGridLiveTests
             return (reader.GetInt64(0), reader.GetInt64(1));
         }
 
+        /* Force EVERY backend that touched the wide table during setup to report its pending stats now,
+           rather than waiting on the once-per-second throttle, so "before" reflects setup's scans and not a
+           partial, still-pending view of them. */
+        await ForceStatsFlushAsync(connection, ct);
+        await using (var setupFlush = await postgres.OpenConnectionAsync(ct))
+        {
+            await ForceStatsFlushAsync(setupFlush, ct);
+        }
+
         var shortWindowEnd = WindowStart.AddHours(6);
         var before = await ScanCountsAsync();
 
@@ -172,6 +194,14 @@ public sealed class QueryStoreIntervalWideGridLiveTests
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
         await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, shortWindowEnd);
 
+        /* The viewer reads through its OWN pooled NpgsqlDataSource, a backend this test cannot call
+           pg_stat_force_next_flush() on directly, so a short settle stands in for it here (the same fallback wait
+           used when a backend's pending statistics cannot be flushed directly) — long enough to clear PostgreSQL's once-per-second pending-stats throttle
+           (PGSTAT_MIN_INTERVAL) so a real regression (the mutation below) is visible in THIS read rather than
+           sitting pending on that backend. Then force THIS test's own backend's stats to report before
+           re-reading. */
+        await Task.Delay(TimeSpan.FromSeconds(1.1), ct);
+        await ForceStatsFlushAsync(connection, ct);
         var after = await ScanCountsAsync();
         Assert.Equal(before, after);
     }
@@ -464,6 +494,15 @@ AND   hypertable_name = 'query_store_stats';";
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
         return connection;
+    }
+
+    /// <summary>Forces THIS connection's own pending cumulative-stats counters to report immediately
+    /// (<c>pg_stat_force_next_flush()</c>, PostgreSQL 15+), rather than waiting on the once-per-second
+    /// throttle every backend is otherwise subject to. Part of the round-trip-count de-flake above.</summary>
+    private static async Task ForceStatsFlushAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("SELECT pg_stat_force_next_flush()", connection);
+        await command.ExecuteScalarAsync(ct);
     }
 
     private static async Task ForceFilledSinceAsync(NpgsqlConnection connection, DateTime value, CancellationToken ct)
