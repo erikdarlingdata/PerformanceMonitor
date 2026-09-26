@@ -217,4 +217,25 @@ public sealed class PgSettingRedactorTests
 
         Assert.Equal("password=********", result);
     }
+
+    // L3, round 2: these three names are password POLICY settings, not secrets — the allowlist keeps them
+    // unmasked even though "password" sits in the dotted name.
+    [Theory]
+    [InlineData("rds.accepted_password_auth_method", "md5+password")]
+    [InlineData("RDS.ACCEPTED_PASSWORD_AUTH_METHOD", "md5+password")]
+    [InlineData("rds.restrict_password_commands", "on")]
+    [InlineData("passwordcheck.min_password_length", "8")]
+    public void AllowlistedPolicyNames_AreNotMasked(string name, string value)
+    {
+        Assert.Equal(value, PgSettingRedactor.Redact(name, value));
+    }
+
+    // L3 negative: a REAL secret next to an allowlisted name in the same batch is still masked — the
+    // allowlist is name-exact, not a blanket "don't touch anything dotted with .password. in it" escape.
+    [Fact]
+    public void AllowlistedPolicyName_DoesNotShieldARealSecretElsewhere()
+    {
+        Assert.Equal("md5+password", PgSettingRedactor.Redact("rds.accepted_password_auth_method", "md5+password"));
+        Assert.Equal("********", PgSettingRedactor.Redact("app.db_password", "fake-secret-value"));
+    }
 }

@@ -164,6 +164,18 @@ public static class PgSettingRedactor
         return redacted;
     }
 
+    /// <summary>Names that would otherwise trip <see cref="WholeValueNameMarkers"/>'s dotted-name test but
+    /// carry no secret — a password POLICY setting, not a password (review round 2's L3). Exact match,
+    /// case-insensitive; anything ELSE with a marker in a dot-separated segment is still masked whole,
+    /// including a real secret sitting in the same batch as one of these (the negative case the pin
+    /// covers).</summary>
+    private static readonly string[] NonSecretAllowlist =
+    {
+        "rds.accepted_password_auth_method",
+        "rds.restrict_password_commands",
+        "passwordcheck.min_password_length",
+    };
+
     private static bool IsWholeValueMasked(string? name)
     {
         if (string.IsNullOrEmpty(name))
@@ -174,6 +186,14 @@ public static class PgSettingRedactor
         if (string.Equals(name, "ssl_passphrase_command", StringComparison.OrdinalIgnoreCase))
         {
             return true;
+        }
+
+        foreach (var allowed in NonSecretAllowlist)
+        {
+            if (string.Equals(name, allowed, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
         }
 
         // Extension-scoped settings only: a bare core GUC such as password_encryption never matches here,

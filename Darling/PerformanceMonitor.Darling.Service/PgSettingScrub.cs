@@ -247,8 +247,26 @@ AND   t.server_id = $11";
         var rowsUpdated = 0;
         var changedRowCount = 0;
         var daysTouched = new HashSet<DateTime>();
+        var failedServerIds = new SortedSet<int>();
+        int? currentServerId = null;
+        var currentServerFailed = false;
         foreach (var ((serverId, day), dayCandidates) in byServerDay)
         {
+            /* M3 (b): catch per server and continue — see the type remarks. Once this server's batch has
+               failed, skip its remaining days this run (they share the same failure mode) and move on to the
+               next server; the marker withheld below (rowsUpdated < changedRowCount) makes the WHOLE run
+               retry every server, including ones that already succeeded, on the next start — cheap and
+               correct, since a server whose rows are already redacted contributes nothing on a re-run. */
+            if (serverId != currentServerId)
+            {
+                currentServerId = serverId;
+                currentServerFailed = false;
+            }
+            else if (currentServerFailed)
+            {
+                continue;
+            }
+
             var changed = new List<CandidateRow>();
             var newSettings = new List<string?>();
             var newBootVals = new List<string?>();
@@ -276,19 +294,44 @@ AND   t.server_id = $11";
                 continue;
             }
 
-            daysTouched.Add(day);
             changedRowCount += changed.Count;
-            for (var i = 0; i < changed.Count; i += MaxKeysPerUpdate)
+            var dayUpdated = 0;
+            try
             {
-                var take = Math.Min(MaxKeysPerUpdate, changed.Count - i);
-                rowsUpdated += await RunBatchAsync(
-                    connection, changed, newSettings, newBootVals, newResetVals, i, take, day, serverId, cancellationToken);
+                for (var i = 0; i < changed.Count; i += MaxKeysPerUpdate)
+                {
+                    var take = Math.Min(MaxKeysPerUpdate, changed.Count - i);
+                    dayUpdated += await RunBatchAsync(
+                        connection, changed, newSettings, newBootVals, newResetVals, i, take, day, serverId, cancellationToken);
+                }
             }
+            catch (NpgsqlException ex)
+            {
+                /* Never the exception TEXT (it can carry the value that tripped it) — just the server id and
+                   the SQLSTATE, e.g. 53400 when a target's day still exceeds the decompress limit even under
+                   SET LOCAL = 0 (which cannot happen on its own, but a future change to the limit's floor
+                   should still be caught here rather than stopping every later target). */
+                logger?.LogWarning(
+                    "pg_setting_scrub: server {ServerId} failed on {Day:yyyy-MM-dd} with SQLSTATE {SqlState}; skipping this server for the rest of the run, will retry on the next start",
+                    serverId, day, ex.SqlState);
+                currentServerFailed = true;
+                failedServerIds.Add(serverId);
+                continue;
+            }
+
+            daysTouched.Add(day);
+            rowsUpdated += dayUpdated;
         }
 
-        if (rowsUpdated == changedRowCount)
+        if (rowsUpdated == changedRowCount && failedServerIds.Count == 0)
         {
             await WriteMarkerAsync(connection, currentVersion, cancellationToken);
+        }
+        else if (failedServerIds.Count > 0)
+        {
+            logger?.LogWarning(
+                "pg_setting_scrub: {FailedCount} server(s) failed this run ({FailedServerIds}); leaving the marker unwritten so the next start retries them",
+                failedServerIds.Count, string.Join(",", failedServerIds));
         }
         else
         {
@@ -329,7 +372,25 @@ AND   t.server_id = $11";
             resetVals[j] = newResetVals[offset + j];
         }
 
-        await using var update = new NpgsqlCommand(BatchUpdateSql, connection) { CommandTimeout = UpdateBatchTimeoutSeconds };
+        /* M3 (a): SET LOCAL, not a batch-per-collection_time split — it keeps H1's shape (one literal target
+           filter, one literal day range, per UPDATE) instead of adding a third grouping key. The GUC's
+           pg_settings context is `user`, so the store's own non-superuser role may set it (confirmed live
+           against TimescaleDB 2.30.1 on docker: SET SESSION AUTHORIZATION to an ordinary LOGIN role, then
+           SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0 succeeds and reads back as
+           0). Scoped to this one batch's transaction only — LOCAL means it reverts at COMMIT/ROLLBACK, so it
+           never leaks into any other batch, any other server, or the marker read/write, which do not run
+           inside this transaction. 0 disables the limit entirely for this transaction, which is safe here
+           because MaxKeysPerUpdate already bounds how many rows a single batch's chunk segment can touch —
+           the risk the GUC guards against (an unbounded decompress) cannot occur at this batch size. */
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var setLocal = new NpgsqlCommand(
+            "SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0", connection, transaction)
+            { CommandTimeout = UpdateBatchTimeoutSeconds })
+        {
+            await setLocal.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var update = new NpgsqlCommand(BatchUpdateSql, connection, transaction) { CommandTimeout = UpdateBatchTimeoutSeconds };
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = times });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = names });
@@ -346,7 +407,9 @@ AND   t.server_id = $11";
            this day's chunk — see the H1 fix note above RunAsync's grouping. */
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
 
-        return await update.ExecuteNonQueryAsync(cancellationToken);
+        var updated = await update.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return updated;
     }
 
     private static async Task<string?> ReadMarkerAsync(NpgsqlConnection connection, CancellationToken cancellationToken)

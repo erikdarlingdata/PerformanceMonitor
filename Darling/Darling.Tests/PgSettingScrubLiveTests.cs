@@ -92,6 +92,141 @@ public sealed class PgSettingScrubLiveTests
         Assert.False(await ContainsSecretAsync(verifyConnection, ct), "the raw password survived the scrub under a tight decompress cap");
     }
 
+    /// <summary>
+    /// M3 (a): a single target's single day exceeds the decompress limit on its own — no cross-server
+    /// sharing needed. 200 secret-bearing rows for ONE server on ONE day, capped at
+    /// <c>max_tuples_decompressed_per_dml_transaction=50</c> (well under 200, and also under
+    /// <see cref="PgSettingScrub.MaxKeysPerUpdate"/> so the cap alone is what would fail without the SET
+    /// LOCAL override). Before the fix this trips 53400 on the very first batch of its own day; after the
+    /// fix, SET LOCAL = 0 inside each batch's transaction lets it complete regardless of the cap.
+    /// </summary>
+    [Fact]
+    public async Task TheScrubCompletes_WhenOneTargetsOneDayExceedsTheDecompressLimit()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4351 M3(a) decompress-limit pin (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        const int serverId = -444447;
+        const int rowCount = 200;
+
+        await using (var setupConnection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setupConnection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setupConnection, ct);
+
+            Assert.True(await TimescaleSupport.TryEnableAsync(setupConnection, null, ct),
+                "the dev fixture is expected to have TimescaleDB installed");
+            await ExecAsync(setupConnection, "SELECT create_hypertable('collect.pg_server_config', by_range('collection_time', INTERVAL '1 days'), if_not_exists => true)", ct);
+            await ExecAsync(setupConnection, "ALTER TABLE collect.pg_server_config SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
+
+            for (var i = 0; i < rowCount; i++)
+            {
+                await InsertRowAsync(setupConnection, serverId, OldTime, $"custom.setting_{i}", Secret, databaseName: null, roleName: null, ct);
+            }
+
+            await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_server_config') c", ct);
+
+            Assert.True(await ContainsSecretAsync(setupConnection, ct), "seeding failed to plant the secret this test exists to catch");
+        }
+
+        var cappedConnectionString = new NpgsqlConnectionStringBuilder(scratch.ConnectionString)
+        {
+            Options = "-c timescaledb.max_tuples_decompressed_per_dml_transaction=50",
+        }.ConnectionString;
+
+        await using var postgres = NpgsqlDataSource.Create(cappedConnectionString);
+
+        var summary = await PgSettingScrub.RunAsync(postgres, logger: null, ct);
+
+        Assert.False(summary.AlreadyDone);
+        Assert.Equal(rowCount, summary.RowsUpdated);
+
+        await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await verifyConnection.OpenAsync(ct);
+        Assert.False(await ContainsSecretAsync(verifyConnection, ct), "the raw password survived the scrub under a tight decompress cap on a single target's single day");
+    }
+
+    /// <summary>
+    /// M3 (b): a forced failure on one target leaves the OTHER targets scrubbed and the marker unset; after
+    /// the cause is removed, the next run completes and sets it. The failure is injected through a real
+    /// database error the scrub's own UPDATE would hit — a CHECK constraint that rejects only
+    /// <c>badServer</c>'s redacted value, so the scrub's catch-per-server path sees an honest 23514 from
+    /// Postgres, not a mocked exception. Dropping the constraint after the first run is "the cause removed";
+    /// the second run then completes badServer too and sets the marker.
+    /// </summary>
+    [Fact]
+    public async Task TheScrub_IsolatesAFailingServer_AndRetriesOnTheNextRun()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4351 M3(b) per-server isolation pin (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        const int goodServer = -444448;
+        const int badServer = -444449;
+
+        await using var setupConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await setupConnection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(setupConnection, ct);
+
+        Assert.True(await TimescaleSupport.TryEnableAsync(setupConnection, null, ct),
+            "the dev fixture is expected to have TimescaleDB installed");
+        await ExecAsync(setupConnection, "SELECT create_hypertable('collect.pg_server_config', by_range('collection_time', INTERVAL '1 days'), if_not_exists => true)", ct);
+
+        /* Rejects only badServer's post-redaction row — an honest constraint violation (23514) the scrub's
+           batch UPDATE actually hits, standing in for any real per-row failure without touching the
+           product's own logic. */
+        await ExecAsync(setupConnection,
+            $"ALTER TABLE collect.pg_server_config ADD CONSTRAINT chk_4351_forced_failure CHECK (server_id <> {badServer} OR setting LIKE '%hunter2%')", ct);
+
+        await ExecAsync(setupConnection, "ALTER TABLE collect.pg_server_config SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
+
+        await InsertRowAsync(setupConnection, goodServer, OldTime, "primary_conninfo", Secret, databaseName: null, roleName: null, ct);
+        await InsertRowAsync(setupConnection, badServer, OldTime, "primary_conninfo", Secret, databaseName: null, roleName: null, ct);
+
+        await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_server_config') c", ct);
+        Assert.True(await ContainsSecretAsync(setupConnection, ct), "seeding failed to plant the secret this test exists to catch");
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var first = await PgSettingScrub.RunAsync(postgres, logger: null, ct);
+        Assert.False(first.AlreadyDone);
+
+        // goodServer's row is scrubbed even though badServer's failed; the marker is withheld.
+        var goodValue = await ScalarTextAsync(setupConnection,
+            "SELECT setting FROM collect.pg_server_config WHERE server_id = $1 AND collection_time = $2 AND name = 'primary_conninfo'",
+            goodServer, OldTime, ct);
+        Assert.NotNull(goodValue);
+        Assert.DoesNotContain("hunter2", goodValue);
+
+        var markerValue = await ScalarTextAsync(setupConnection,
+            "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",
+            0, DateTime.MinValue, ct);
+        Assert.Null(markerValue);
+
+        var stillSecretBad = await ScalarTextAsync(setupConnection,
+            "SELECT setting FROM collect.pg_server_config WHERE server_id = $1 AND collection_time = $2 AND name = 'primary_conninfo'",
+            badServer, OldTime, ct);
+        Assert.Contains("hunter2", stillSecretBad);
+
+        // Remove the cause, then the next run completes badServer too and sets the marker.
+        await ExecAsync(setupConnection, "ALTER TABLE collect.pg_server_config DROP CONSTRAINT chk_4351_forced_failure", ct);
+
+        var second = await PgSettingScrub.RunAsync(postgres, logger: null, ct);
+        Assert.False(second.AlreadyDone);
+        Assert.False(await ContainsSecretAsync(setupConnection, ct), "the raw password survived the retried run");
+    }
+
+    private const string Mask = "********";
+
     private const int ServerId = -444444;
     private const string ServerName = "darling-setting-scrub-e2e";
     private const string Secret = "host=replica1.internal port=5432 user=replicator password=hunter2 sslmode=require";
