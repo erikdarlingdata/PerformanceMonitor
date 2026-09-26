@@ -32,6 +32,7 @@ public sealed class PgStatementTextScrubLiveTests
     private const int ServerA = -444501;
     private const int ServerB = -444502;
     private static readonly DateTime Day = DateTime.SpecifyKind(new DateTime(2026, 1, 1, 0, 0, 0), DateTimeKind.Unspecified);
+    private static readonly DateTime OtherDay = DateTime.SpecifyKind(new DateTime(2026, 1, 2, 0, 0, 0), DateTimeKind.Unspecified);
 
     private const string Secret = "ALTER ROLE app PASSWORD 'secret-x'";
     private const string Neighbor = "SELECT * FROM t WHERE password_changed_at > $1";
@@ -63,11 +64,14 @@ public sealed class PgStatementTextScrubLiveTests
             await InsertStatementTextAsync(setupConnection, ServerB, 2001, Secret, ct);
             await InsertStatementTextAsync(setupConnection, ServerB, 2002, Neighbor, ct);
 
-            /* collect.pg_blocking_edges — matching + neighbor row, for two servers, same day, same chunk. */
+            /* collect.pg_blocking_edges — matching + neighbor row, for two servers across two days (two
+               chunks), so the per-(server, day) candidate read is exercised on more than one group. */
             await InsertBlockingEdgeAsync(setupConnection, ServerA, Day, 1, Secret, Neighbor, ct);
             await InsertBlockingEdgeAsync(setupConnection, ServerA, Day, 2, Neighbor, Neighbor, ct);
             await InsertBlockingEdgeAsync(setupConnection, ServerB, Day, 3, Secret, Neighbor, ct);
             await InsertBlockingEdgeAsync(setupConnection, ServerB, Day, 4, Neighbor, Neighbor, ct);
+            await InsertBlockingEdgeAsync(setupConnection, ServerA, OtherDay, 5, Secret, Neighbor, ct);
+            await InsertBlockingEdgeAsync(setupConnection, ServerB, OtherDay, 6, Secret, Neighbor, ct);
 
             await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_blocking_edges') c", ct);
 
@@ -79,7 +83,7 @@ public sealed class PgStatementTextScrubLiveTests
         var first = await PgStatementTextScrub.RunAsync(postgres, logger: null, ct);
         Assert.False(first.AlreadyDone);
         Assert.Equal(2, first.StatementTextRowsUpdated);
-        Assert.Equal(2, first.BlockingEdgesRowsUpdated);
+        Assert.Equal(4, first.BlockingEdgesRowsUpdated);
 
         await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
         await verifyConnection.OpenAsync(ct);
@@ -95,6 +99,10 @@ public sealed class PgStatementTextScrubLiveTests
             await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerA, 1, ct));
         Assert.Equal(PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText,
             await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerB, 3, ct));
+        Assert.Equal(PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText,
+            await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerA, 5, ct));
+        Assert.Equal(PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText,
+            await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerB, 6, ct));
 
         /* Neighbor rows are byte-identical. */
         Assert.Equal(Neighbor,

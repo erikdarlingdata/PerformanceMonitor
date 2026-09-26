@@ -43,7 +43,10 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>compress_segmentby = server_id</c> by <c>TimescaleSupport.ConvertToHypertablesAsync</c>/
 /// <c>ApplyCompressionPolicyAsync</c> — the same shape <c>collect.pg_server_config</c> gets. So its scrub
 /// reuses <see cref="PgSettingScrub"/>'s (server, day) literal-bounds batching and the guarded
-/// decompress-limit <c>set_config</c> line, for the identical H1/M3 reasons documented there.</para>
+/// decompress-limit <c>set_config</c> line, for the identical reasons documented there — and the CANDIDATE
+/// read itself is scoped to one (server, day) at a time (a cheap distinct-pairs scan finds the groups
+/// first), not one unbounded scan of the whole hypertable, so the same chunk/segment exclusion applies to
+/// the read as well as the write, and one slow or failing server's group cannot hold up any other server's.</para>
 ///
 /// <para><b>The marker is its own row</b>, in <c>collect.collector_state</c> under the fleet sentinel
 /// <see cref="DarlingObservability.FleetServerId"/>, with an owner name (<see cref="StateCollectorName"/>)
@@ -138,19 +141,31 @@ SET query_text = $1
 WHERE server_id = $2
 AND   queryid = ANY($3::bigint[])";
 
+    /// <summary>The distinct (server, day) pairs the scrub needs to visit — a cheap two-column scan, so the
+    /// candidate read below (which the marked-sensitive filter and the doubled quoting both make more
+    /// expensive) never runs over the whole hypertable at once. See the type remarks.</summary>
+    private const string DistinctServerDaysSql = @"
+SELECT DISTINCT server_id, date_trunc('day', collection_time)::date AS day
+FROM collect.pg_blocking_edges
+ORDER BY server_id, day";
+
     /* new_blocked_query/new_blocking_query are computed IN SQL, the same CASE WHEN ... ~* ... THEN
        placeholder ELSE column END shape PgBlockingCollector's own SensitiveTextCase applies going
-       forward, so the .NET side never re-implements PostgreSQL's ~* match against the POSIX-ARE pattern
-       (which .NET Regex cannot parse) to decide which of the two columns on a row actually matched. */
+       forward (built here by the same PgSensitiveStatementFilter.SqlPredicate both use), so the .NET side
+       never re-implements PostgreSQL's ~* match against the POSIX-ARE pattern (which .NET Regex cannot
+       parse) to decide which of the two columns on a row actually matched. Scoped to one (server, day) —
+       literal server_id and collection_time bounds — matching the UPDATE batch's own predicates, so the
+       read itself, not just the write, excludes every other server's segment and every other chunk.*/
     private static readonly string BlockingEdgesCandidateSql = @"
 SELECT
-    server_id, collection_time, collection_id,
-    CASE WHEN blocked_query ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"' THEN '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"' ELSE blocked_query END AS new_blocked_query,
-    CASE WHEN blocking_query ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"' THEN '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"' ELSE blocking_query END AS new_blocking_query
+    collection_time, collection_id,
+    " + PgSensitiveStatementFilter.SqlPredicate("blocked_query") + @" AS new_blocked_query,
+    " + PgSensitiveStatementFilter.SqlPredicate("blocking_query") + @" AS new_blocking_query
 FROM collect.pg_blocking_edges
-WHERE
-    (blocked_query ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"' AND blocked_query <> '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"')
- OR (blocking_query ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"' AND blocking_query <> '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"')";
+WHERE server_id = $1
+AND   collection_time >= $2 AND collection_time < $3
+AND ((blocked_query ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"' AND blocked_query <> '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"')
+ OR (blocking_query ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"' AND blocking_query <> '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"'))";
 
     private const string BlockingEdgesUpdateSql = @"
 WITH batch AS (
@@ -164,7 +179,7 @@ AND   t.collection_time >= $4 AND t.collection_time < $5
 AND   t.server_id = $6";
 
     private sealed record BlockingEdgeRow(
-        int ServerId, DateTime CollectionTime, long CollectionId, string? NewBlockedQuery, string? NewBlockingQuery);
+        DateTime CollectionTime, long CollectionId, string? NewBlockedQuery, string? NewBlockingQuery);
 
     /// <summary>
     /// Runs the scrub once against <paramref name="postgres"/>, or returns <see cref="Summary.NoOp"/> at
@@ -204,44 +219,35 @@ AND   t.server_id = $6";
         }
 
         var blockingEdgesRowsUpdated = 0;
-        if (failedServerIds.Count == 0)
+        var serverDays = await ReadDistinctServerDaysAsync(connection, cancellationToken);
+        foreach (var (serverId, day) in serverDays)
         {
-            var blockingCandidates = await ReadBlockingEdgesCandidatesAsync(connection, cancellationToken);
-            var byServerDay = new SortedDictionary<(int ServerId, DateTime Day), List<BlockingEdgeRow>>();
-            foreach (var c in blockingCandidates)
+            if (failedServerIds.Contains(serverId))
             {
-                var key = (c.ServerId, c.CollectionTime.Date);
-                if (!byServerDay.TryGetValue(key, out var list))
-                {
-                    list = new List<BlockingEdgeRow>();
-                    byServerDay[key] = list;
-                }
-                list.Add(c);
+                continue;
             }
 
-            foreach (var ((serverId, day), dayCandidates) in byServerDay)
+            try
             {
-                if (failedServerIds.Contains(serverId))
+                var dayCandidates = await ReadBlockingEdgesCandidatesAsync(connection, serverId, day, cancellationToken);
+                if (dayCandidates.Count == 0)
                 {
                     continue;
                 }
 
-                try
+                for (var i = 0; i < dayCandidates.Count; i += MaxKeysPerUpdate)
                 {
-                    for (var i = 0; i < dayCandidates.Count; i += MaxKeysPerUpdate)
-                    {
-                        var take = Math.Min(MaxKeysPerUpdate, dayCandidates.Count - i);
-                        blockingEdgesRowsUpdated += await RunBlockingEdgesBatchAsync(
-                            connection, dayCandidates, i, take, day, serverId, cancellationToken);
-                    }
+                    var take = Math.Min(MaxKeysPerUpdate, dayCandidates.Count - i);
+                    blockingEdgesRowsUpdated += await RunBlockingEdgesBatchAsync(
+                        connection, dayCandidates, i, take, day, serverId, cancellationToken);
                 }
-                catch (NpgsqlException ex)
-                {
-                    logger?.LogWarning(
-                        "pg_statement_text_scrub: server {ServerId} failed on {Day:yyyy-MM-dd} scrubbing pg_blocking_edges with SQLSTATE {SqlState}; skipping this server for the rest of the run, will retry on the next start",
-                        serverId, day, ex.SqlState);
-                    failedServerIds.Add(serverId);
-                }
+            }
+            catch (NpgsqlException ex)
+            {
+                logger?.LogWarning(
+                    "pg_statement_text_scrub: server {ServerId} failed on {Day:yyyy-MM-dd} scrubbing pg_blocking_edges with SQLSTATE {SqlState}; skipping this server for the rest of the run, will retry on the next start",
+                    serverId, day, ex.SqlState);
+                failedServerIds.Add(serverId);
             }
         }
 
@@ -305,20 +311,37 @@ AND   t.server_id = $6";
         return totalUpdated;
     }
 
-    private static async Task<List<BlockingEdgeRow>> ReadBlockingEdgesCandidatesAsync(
+    private static async Task<List<(int ServerId, DateTime Day)>> ReadDistinctServerDaysAsync(
         NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var pairs = new List<(int ServerId, DateTime Day)>();
+        await using var read = new NpgsqlCommand(DistinctServerDaysSql, connection) { CommandTimeout = CandidateReadTimeoutSeconds };
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            pairs.Add((reader.GetInt32(0), reader.GetDateTime(1)));
+        }
+
+        return pairs;
+    }
+
+    private static async Task<List<BlockingEdgeRow>> ReadBlockingEdgesCandidatesAsync(
+        NpgsqlConnection connection, int serverId, DateTime day, CancellationToken cancellationToken)
     {
         var rows = new List<BlockingEdgeRow>();
         await using var read = new NpgsqlCommand(BlockingEdgesCandidateSql, connection) { CommandTimeout = CandidateReadTimeoutSeconds };
+        read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+        read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day });
+        read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(1) });
+
         await using var reader = await read.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             rows.Add(new BlockingEdgeRow(
-                reader.GetInt32(0),
-                reader.GetDateTime(1),
-                reader.GetInt64(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4)));
+                reader.GetDateTime(0),
+                reader.GetInt64(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
 
         return rows;
