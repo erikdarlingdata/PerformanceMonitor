@@ -24,4 +24,25 @@ public static class TrendBucketSql
     /// differently.
     /// </summary>
     public const string OriginSql = "TIMESTAMP '2000-01-01 00:00:00'";
+
+    /// <summary>
+    /// The memory-grant series' shared per-collection read (#3548, #4349): total granted MB across all pools per
+    /// grants collection over the window, SUM CAST to double precision. The MCP <c>get_memory_trend</c> tool
+    /// (<c>DarlingTrendReader.MemoryGrantTrendSql</c>) reads this AS ITS OWN trend — unbucketed, one row per
+    /// collection — then wraps it in its own <c>date_bin</c> (<c>MemoryGrantTrendBucketedSql</c>) to align onto
+    /// the memory series' buckets. The viewer's Overview overlay (<c>ViewerDataService.MemoryGrantTrendSql</c>)
+    /// wraps the SAME per-collection CTE in a second, independent bucketing outer select for its own chart. Both
+    /// wrappers bucket this text; this text itself must never bucket, or MCP's caller would bucket twice. $1
+    /// server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string MemoryGrantPerCollectionSql = """
+        SELECT
+            collection_time,
+            CAST(SUM(granted_memory_mb) AS double precision) AS total_granted_mb
+        FROM v_memory_grant_stats
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        AND   collection_time <= $3
+        GROUP BY collection_time
+        """;
 }

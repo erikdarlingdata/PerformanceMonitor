@@ -145,17 +145,16 @@ public sealed partial class ViewerDataService
     /// bucket (a gauge, not an accumulating counter — no #3540 rated split applies). Lite selected four
     /// dummy 0-columns to reuse its <c>MemoryTrendPoint</c> shape; the viewer reads only the two fields it
     /// plots. $1 server_id, $2 window start, $3 window end (naive UTC), $4 bucket width minutes.
+    /// <para>#3548/#4349: the <c>per_collection</c> CTE body is <see cref="TrendBucketSql.MemoryGrantPerCollectionSql"/>,
+    /// byte-for-byte the same text the MCP tool's unbucketed <c>DarlingTrendReader.MemoryGrantTrendSql</c>
+    /// reads — the one shared per-collection read #3548 requires. This outer bucketing select is the
+    /// viewer's OWN wrapper on top of it; MCP wraps the same shared text in its own separate
+    /// <c>date_bin</c> (<c>MemoryGrantTrendBucketedSql</c>) rather than this one, so neither SKU buckets
+    /// twice.</para>
     /// </summary>
     public const string MemoryGrantTrendSql = $$"""
         WITH per_collection AS (
-            SELECT
-                collection_time,
-                CAST(SUM(granted_memory_mb) AS double precision) AS total_granted_mb
-            FROM v_memory_grant_stats
-            WHERE server_id = $1
-            AND   collection_time >= $2
-            AND   collection_time <= $3
-            GROUP BY collection_time
+            {{TrendBucketSql.MemoryGrantPerCollectionSql}}
         )
         SELECT
             GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
