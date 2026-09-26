@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -25,6 +26,7 @@ using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Notifications;
 using Xunit;
 
 namespace Darling.Tests;
@@ -101,7 +103,7 @@ public sealed class AlertNotebookEndpointTests
             .Build();
 
     private static Task<HttpContext> Send(
-        TestServer server, string path, IPAddress remote, string? token = null, string host = "192.168.1.205")
+        TestServer server, string path, IPAddress remote, string? token = null, string host = "192.168.1.205", string? cookie = null)
     {
         var target = token is null ? path : $"{path}{(path.Contains('?') ? "&" : "?")}token={Uri.EscapeDataString(token)}";
         return server.SendAsync(ctx =>
@@ -111,7 +113,30 @@ public sealed class AlertNotebookEndpointTests
             ctx.Request.QueryString = target.Contains('?') ? new QueryString(target[target.IndexOf('?')..]) : QueryString.Empty;
             ctx.Request.Headers.Host = host;
             ctx.Connection.RemoteIpAddress = remote;
+            if (cookie is not null)
+            {
+                ctx.Request.Headers["Cookie"] = cookie;
+            }
         });
+    }
+
+    /// <summary>The CI finding (pm-pr): the earlier "authenticated" pins presented <c>?token=</c> but never
+    /// followed the token->cookie exchange, so they hit <see cref="WebRequestAction.SetCookieAndRedirect"/>
+    /// (302) instead of the route handler and proved nothing. This performs the SAME two-step exchange
+    /// <see cref="DarlingWebHostGateLiveTests.NetworkMode_ValidToken_InCidr_SetsCookieAndRedirects"/> proves
+    /// the gate does: present <c>?token=</c> once to mint a session cookie from the <c>Set-Cookie</c> response
+    /// header, then re-send the real request with that cookie attached, which is what reaches
+    /// <c>WebAuthAction.Allow</c> and therefore the endpoint's own lambda.</summary>
+    private static async Task<HttpContext> SendAuthenticated(
+        TestServer server, string path, IPAddress remote, string host = "192.168.1.205")
+    {
+        var exchange = await Send(server, "/", remote, token: "correct-token-value", host: host);
+        Assert.Equal(StatusCodes.Status302Found, exchange.Response.StatusCode);
+        var setCookie = exchange.Response.Headers.SetCookie.ToString();
+        Assert.False(string.IsNullOrEmpty(setCookie), "token exchange did not mint a session cookie");
+        var cookiePair = setCookie.Split(';')[0];
+
+        return await Send(server, path, remote, host: host, cookie: cookiePair);
     }
 
     /// <summary>THE security pin: an unauthenticated <c>GET /api/alert-notebook</c> issues ZERO store
@@ -184,12 +209,12 @@ public sealed class AlertNotebookEndpointTests
             _ => "server=probe&metric=" + Uri.EscapeDataString(value),
         };
 
-        var ctx = await Send(server, "/api/alert-notebook?" + query, IPAddress.Parse("192.168.1.50"), token: "correct-token-value");
+        var ctx = await SendAuthenticated(server, "/api/alert-notebook?" + query, IPAddress.Parse("192.168.1.50"));
 
         Assert.NotEqual(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
         Assert.True(
             ctx.Response.StatusCode is StatusCodes.Status200OK or StatusCodes.Status400BadRequest,
-            $"expected 200 (degrade) or 400, got {ctx.Response.StatusCode}");
+            $"expected 200 (degrade) or 400, got {ctx.Response.StatusCode} -- a 302 here means the request never reached the handler at all");
 
         using var reader = new StreamReader(ctx.Response.Body);
         var body = await reader.ReadToEndAsync();
@@ -208,9 +233,9 @@ public sealed class AlertNotebookEndpointTests
         await using var deadStore = DeadStore();
         using var server = await BuildServer(deadStore);
 
-        var ctx = await Send(
+        var ctx = await SendAuthenticated(
             server, "/api/alert-notebook?server=probe&metric=cpu_pressure&at=9999-12-31T23:59:59Z",
-            IPAddress.Parse("192.168.1.50"), token: "correct-token-value");
+            IPAddress.Parse("192.168.1.50"));
 
         Assert.NotEqual(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
     }
@@ -427,10 +452,56 @@ public sealed class AlertNotebookEndpointTests
         // metric given is unmapped, SectionsFor's DefaultSections fallback applies and no server resolution
         // is skipped by fleet-level detection, so this also exercises the resolve-server failure -> note path;
         // both outcomes are within the 200/400 contract already proven above.
-        var ctx = await Send(
+        var ctx = await SendAuthenticated(
             server, "/api/alert-notebook?server=&metric=&dedup=stale-link-that-never-matches",
-            IPAddress.Parse("192.168.1.50"), token: "correct-token-value");
+            IPAddress.Parse("192.168.1.50"));
 
-        Assert.NotEqual(StatusCodes.Status500InternalServerError, ctx.Response.StatusCode);
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+    }
+
+    /* ═══════════════════════════ live shape: the #4368 contract ═══════════════════════════ */
+
+    /// <summary>F4's missing live-pipeline round trip: an authenticated request against the dead-store
+    /// fixture (no server resolves, so <c>status</c> takes the unresolved-server arm F2 added) still answers
+    /// the exact JSON shape the review documents and #4368's SPA consumes — the cell types, the template id,
+    /// and every read cell's required params.</summary>
+    [Fact]
+    public async Task AuthenticatedRequest_ReturnsTheDocumentedNotebookShape()
+    {
+        await using var deadStore = DeadStore();
+        using var server = await BuildServer(deadStore);
+
+        var ctx = await SendAuthenticated(
+            server, "/api/alert-notebook?server=probe&metric=" + Uri.EscapeDataString("High CPU"),
+            IPAddress.Parse("192.168.1.50"));
+
+        Assert.Equal(StatusCodes.Status200OK, ctx.Response.StatusCode);
+        using var reader = new StreamReader(ctx.Response.Body);
+        var body = await reader.ReadToEndAsync();
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+
+        var status = root.GetProperty("status").GetString();
+        Assert.StartsWith("Unknown (not collected since ", status, StringComparison.Ordinal);
+
+        var definition = root.GetProperty("definition");
+        Assert.Equal("notebook", definition.GetProperty("kind").GetString());
+
+        var cells = definition.GetProperty("cells");
+        Assert.True(cells.GetArrayLength() >= 2);
+        Assert.Equal("header", cells[0].GetProperty("type").GetString());
+        Assert.Equal("status", cells[1].GetProperty("type").GetString());
+
+        for (var i = 2; i < cells.GetArrayLength(); i++)
+        {
+            var cell = cells[i];
+            Assert.Equal("read", cell.GetProperty("type").GetString());
+            var cellParams = cell.GetProperty("params");
+            Assert.True(cellParams.TryGetProperty("limit", out _), "every mechanical read cell must carry a limit param");
+            Assert.True(cellParams.TryGetProperty("hours", out _), "every mechanical read cell must carry an hours param");
+        }
+
+        Assert.Equal("mechanical/High CPU", root.GetProperty("template").GetProperty("id").GetString());
     }
 }
