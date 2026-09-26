@@ -153,7 +153,10 @@ public sealed class ViewerMemorySqlTests
         }
 
         /* The four activity count SUMs CAST to bigint (integer→bigint / bigint→numeric both land on
-           GetInt64). */
+           GetInt64). grantee_count/waiter_count are gauges: SUMMED per collection, then AVERAGED per
+           bucket (rounded back to bigint). timeout_error_count_delta/forced_grant_count_delta are TRUE
+           accumulating deltas: SUMMED per collection AND summed again across the bucket's collections
+           (#4364) — averaging an event count across collections silently drops real events. */
         foreach (var col in new[]
         {
             "grantee_count", "waiter_count", "timeout_error_count_delta", "forced_grant_count_delta",
@@ -161,6 +164,14 @@ public sealed class ViewerMemorySqlTests
         {
             Assert.Contains($"CAST(SUM({col}) AS bigint)", sql, StringComparison.Ordinal);
         }
+
+        /* #4364: the outer bucket must SUM the two rated deltas (CAST to bigint), never AVG them — a
+           bucket holding two collections with deltas 3 and 4 must report 7, not AVG(3,4)=3.5 rounded
+           to a confident-but-wrong 4. */
+        Assert.Contains("CAST(SUM(rated_timeout_error_count_delta) AS bigint)", sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_forced_grant_count_delta) AS bigint)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AVG(rated_timeout_error_count_delta)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AVG(rated_forced_grant_count_delta)", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -448,6 +459,9 @@ public sealed class ViewerMemoryLivePostgresTests
 
     private const int GrantChartServerId = -930004;
     private const string GrantChartServerName = "viewer-memory-grantchart-e2e";
+
+    private const int GrantChartMergedServerId = -930009;
+    private const string GrantChartMergedServerName = "viewer-memory-grantchart-merged-e2e";
 
     private const int PressureServerId = -930005;
     private const string PressureServerName = "viewer-memory-pressure-e2e";
@@ -826,6 +840,64 @@ public sealed class ViewerMemoryLivePostgresTests
         {
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, "memory_grant_stats", GrantChartServerId, cleanupCt));
+        }
+    }
+
+    /// <summary>#4364: two DISTINCT collections that the outer date_bin bucket merges together (a wide
+    /// enough window forces the auto-bucket width past the 10-minute gap between them). The sizing MB is a
+    /// GAUGE — the bucket AVERAGES the two collections' totals. The activity-count deltas are TRUE
+    /// accumulating counters — the bucket must SUM them, or two real timeout/forced-grant events silently
+    /// vanish into a rounded average. Before #4364 this bucket reported AVG(3,4)=3.5 -> CAST to bigint = 4;
+    /// after, it reports the true 7.</summary>
+    [Fact]
+    public async Task MemoryGrantChart_MergedBucket_SumsDeltas_AveragesGauges_AgainstDevPostgres()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live grant-chart merged-bucket test.");
+
+        using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(TestContext.Current.CancellationToken);
+        await PgMigrations.MigrateAsync(connection, TestContext.Current.CancellationToken);
+        await DeleteRowsAsync(connection, "memory_grant_stats", GrantChartMergedServerId, TestContext.Current.CancellationToken);
+
+        await using var viewer = new ViewerDataService(connectionString!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Far enough apart (7 days) that TrendBuckets.AutoMinutes widens the auto bucket past both
+               collections’ gap, so a window spanning them lands them in the SAME bucket. */
+            var t1 = TruncateToSeconds(DateTime.UtcNow.AddDays(-7));
+            var t2 = t1.AddDays(6);
+
+            await InsertMemoryGrantAsync(connection, GrantChartMergedServerId, GrantChartMergedServerName, t1, poolId: 1,
+                availMb: 10.00m, grantedMb: 10.00m, usedMb: 10.00m, grantee: 1, waiter: 0, timeoutDelta: 3, forcedDelta: 3);
+            await InsertMemoryGrantAsync(connection, GrantChartMergedServerId, GrantChartMergedServerName, t2, poolId: 1,
+                availMb: 20.00m, grantedMb: 20.00m, usedMb: 20.00m, grantee: 1, waiter: 0, timeoutDelta: 4, forcedDelta: 4);
+
+            var rows = await viewer.GetMemoryGrantChartDataAsync(GrantChartMergedServerId, t1.AddMinutes(-1), t2.AddMinutes(1));
+
+            /* Both collections merge into ONE bucket for pool 1. */
+            var merged = Assert.Single(rows);
+            Assert.Equal(1, merged.PoolId);
+
+            /* Gauges: AVERAGED across the merged bucket's two collections. */
+            Assert.Equal(15.00, merged.GrantedMemoryMb, precision: 2);
+            Assert.Equal(15.00, merged.AvailableMemoryMb, precision: 2);
+            Assert.Equal(15.00, merged.UsedMemoryMb, precision: 2);
+
+            /* True deltas: SUMMED across the merged bucket's two collections — 3 + 4 = 7, never
+               AVG(3, 4) = 3.5 rounded to a confident-but-wrong 4. */
+            Assert.Equal(7L, merged.TimeoutErrorCountDelta);
+            Assert.Equal(7L, merged.ForcedGrantCountDelta);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, "memory_grant_stats", GrantChartMergedServerId, cleanupCt));
         }
     }
 

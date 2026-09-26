@@ -255,8 +255,8 @@ public sealed partial class ViewerDataService
                    0 only when EVERY row was unknowable (a restart) becomes NULL, exactly like every other
                    derived interval_seconds alias on this tree; NULL (pre-V128 rows) stays NULL. */
                 NULLIF(MAX(sample_interval_seconds), 0) AS interval_seconds,
-                SUM(timeout_error_count_delta) AS timeout_error_count_delta,
-                SUM(forced_grant_count_delta) AS forced_grant_count_delta
+                CAST(SUM(timeout_error_count_delta) AS bigint) AS timeout_error_count_delta,
+                CAST(SUM(forced_grant_count_delta) AS bigint) AS forced_grant_count_delta
             FROM v_memory_grant_stats
             WHERE server_id = $1
             AND   collection_time >= $2
@@ -286,8 +286,8 @@ public sealed partial class ViewerDataService
             AVG(used_memory_mb) AS used_memory_mb,
             CAST(ROUND(AVG(grantee_count)) AS bigint) AS grantee_count,
             CAST(ROUND(AVG(waiter_count)) AS bigint) AS waiter_count,
-            SUM(rated_timeout_error_count_delta) AS timeout_error_count_delta,
-            SUM(rated_forced_grant_count_delta) AS forced_grant_count_delta,
+            CAST(SUM(rated_timeout_error_count_delta) AS bigint) AS timeout_error_count_delta,
+            CAST(SUM(rated_forced_grant_count_delta) AS bigint) AS forced_grant_count_delta,
             AVG(target_memory_mb) AS target_memory_mb,
             AVG(max_target_memory_mb) AS max_target_memory_mb,
             MIN(collection_time) AS first_collection_time,
