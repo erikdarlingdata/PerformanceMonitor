@@ -22,8 +22,9 @@ namespace Darling.Tests;
 /// #4394 part B2 live pin: the Viewer's raw <c>v_query_stats</c> FinOps sums must not count a plan's
 /// first-collection (zero-interval) row, the same rule the hourly successors already bake into their CREATE
 /// (<see cref="TimescaleSupport.IntervalHonestSourceFilter"/>). Before this change raw and hourly disagreed
-/// on the same window, and the zero-interval row's cumulative CPU inflated the raw totals by an unbounded
-/// amount. Seeds one ordinary row plus one zero-interval row with a deliberately large CPU value, then
+/// on the same window whenever a zero-interval row carried a nonzero delta. The collector doesn't write
+/// that shape (a zero interval comes with zero deltas), but planting one is what makes the filter
+/// observable. Seeds one ordinary row plus one zero-interval row with a deliberately large CPU value, then
 /// asserts the large value is absent from every affected reader's totals.
 /// #1776 own-store: this test seeds and cleans up its own server_id row set only.
 /// </summary>
@@ -58,7 +59,9 @@ public sealed class ViewerFinOpsIntervalHonestLiveTests
             await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
             var at = DarlingMcpTestData.Naive(DateTime.UtcNow).AddHours(-1);
 
-            /* The zero-interval row: a plan's first collection, cumulative CPU since plan creation, huge. */
+            /* A planted zero-interval row with a nonzero delta. The collector doesn't write this shape
+               (a zero interval comes with zero deltas), but planting it is what makes the filter
+               observable: without the filter, raw would count it and hourly would not. */
             await PlantQueryAsync(connection, ct, at, sampleIntervalSeconds: 0, cpuUs: ZeroIntervalCpuUs, execCount: 1L);
             /* An ordinary row: normal delta over a real 60s sample interval. */
             await PlantQueryAsync(connection, ct, at, sampleIntervalSeconds: 60, cpuUs: OrdinaryCpuUs, execCount: 10L);
