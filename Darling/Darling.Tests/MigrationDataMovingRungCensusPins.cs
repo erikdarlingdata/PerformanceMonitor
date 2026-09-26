@@ -164,6 +164,13 @@ public sealed class MigrationDataMovingRungCensusPins
             + "PgTableTuning's ForcePlanFailuresIndexName finding measured the same property). A store many "
             + "times today's size would still build in low seconds, nowhere near a MigrationCommandTimeoutSeconds "
             + "window, so this rung does not move the multiple"),
+        new(
+            147,
+            SetsTheFloor: false,
+            "ALTER COLUMN ... SET DEFAULT plus a narrow-predicate UPDATE on config.config_service (#4442) - "
+            + "V62's and V137's shape on the same control-plane singleton (id = 1, CHECK (id = 1)), so the "
+            + "UPDATE's WHERE compose_statement_timeout_seconds = 15 touches at most one row and spends none "
+            + "of the budget"),
     ];
 
     /// <summary>

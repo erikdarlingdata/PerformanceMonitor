@@ -338,12 +338,14 @@ public sealed class McpReadCommandTimeoutTests
     /// <see cref="McpCommandDeadlines.ReadSeconds"/>.
     ///
     /// <para>Short form. The FLOOR is the managed store's own server-side ceiling: the <c>mcp</c> role's
-    /// default <c>statement_timeout</c> is 15 s, and it fires on this surface in production, so a client
-    /// deadline at or under it would pre-empt a bound that already works and already names its cause
-    /// (<c>57014</c>) instead of rendering as a stream fault. That floor dominates the measured one by more
-    /// than an order of magnitude — the family's verified reads are sub-second. The CEILING is the 30 s it
-    /// replaces, asserted relationally against the sibling half of the same surface so this project's reads
-    /// can never be the looser of the two.</para>
+    /// default <c>statement_timeout</c> is 60 s (15 s before #4442), and it fires on this surface in
+    /// production, so a client deadline at or under it would pre-empt a bound that already works and already
+    /// names its cause (<c>57014</c>) instead of rendering as a stream fault. That floor dominates the
+    /// measured one by more than an order of magnitude — the family's verified reads are sub-second. The
+    /// relation to <see cref="StorageCommandDeadlines.McpReadSeconds"/> is now the OPPOSITE of what it used
+    /// to be: this composed web/MCP path sits strictly ABOVE the 60 s ceiling, while the <c>.Storage</c>
+    /// half deliberately stays under its own #3004 band, so this project's reads must be the LOOSER of the
+    /// two, not the tighter.</para>
     /// </summary>
     [Fact]
     public void TheReadDeadline_StaysInsideItsJustifiedBand()
@@ -357,22 +359,17 @@ public sealed class McpReadCommandTimeoutTests
             + "server-side setting rather than backstop them");
 
         Assert.True(
-            seconds > 15,
-            $"read deadline {seconds}s is at or under the mcp role's 15s default statement_timeout, so on a managed "
+            seconds > 60,
+            $"read deadline {seconds}s is at or under the mcp role's 60s default statement_timeout, so on a managed "
             + "store it would fire FIRST and replace a 57014 that names its cause with Npgsql's "
             + "'Exception while reading from stream', which is the misdiagnosis #2826 exists to prevent");
 
         Assert.True(
-            seconds < 30,
-            $"read deadline {seconds}s is not meaningfully under the inherited Npgsql default it replaces. These "
-            + "reads have NO enclosing budget, no MCP tool method takes a CancellationToken, and nothing restarts "
-            + "them — so an abandoned tool call leaves the query running and a pooled postgres.exe backend held");
-
-        Assert.True(
-            seconds <= StorageCommandDeadlines.McpReadSeconds,
-            $"read deadline {seconds}s exceeds the {StorageCommandDeadlines.McpReadSeconds}s the .Storage half of "
+            seconds >= StorageCommandDeadlines.McpReadSeconds,
+            $"read deadline {seconds}s is under the {StorageCommandDeadlines.McpReadSeconds}s the .Storage half of "
             + "this SAME surface runs under (the DarlingPg*Reader family, served by the same 136 tools on the same "
-            + "pool) — one tool call must not get a looser ceiling depending on which project holds the reader");
+            + "pool) — the composed web/MCP path must sit strictly above the server ceiling, which the storage "
+            + "readers deliberately do not, so this side can never be the tighter of the two");
     }
 
     /// <summary>

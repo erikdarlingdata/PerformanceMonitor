@@ -115,11 +115,12 @@ public sealed class DarlingConfig
     /// what was last successfully written to the roles on the paths above, but a failed re-assertion leaves
     /// the roles behind until the next reload or start converges them.</para>
     ///
-    /// <para>15 preserves the constant it replaces. It is a judgement about store size and disk speed, which
-    /// this product cannot make for someone else's deployment — a fleet-wide aggregate over a wide window on a
-    /// large store can exceed 15s with nothing wrong.</para>
+    /// <para>60 preserves the constant it replaces (raised from a shipped 15 by #4442, whose migration rung
+    /// moves an existing store's shipped-15 value to 60 too). It is a judgement about store size and disk
+    /// speed, which this product cannot make for someone else's deployment — a fleet-wide aggregate over a
+    /// wide window on a large store can exceed 60s with nothing wrong.</para>
     /// </summary>
-    public int ComposeStatementTimeoutSeconds { get; set; } = 15;
+    public int ComposeStatementTimeoutSeconds { get; set; } = 60;
 
     /// <summary>
     /// The plan-XML storage codec (#2171). Store-backed (config_service, V62), normalized to 'gzip' or

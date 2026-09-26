@@ -38,7 +38,7 @@ public sealed class ComposeStatementTimeoutReloadTests
     /// reimplemented: a retyped copy would prove the transcription works, which is not the claim.
     /// </summary>
     [Theory]
-    [InlineData(15)]
+    [InlineData(60)]
     [InlineData(120)]
     [InlineData(600)]
     public void TheProvisioningBatch_EmbedsTheSharedRenderer_Verbatim(int seconds)
@@ -60,15 +60,17 @@ public sealed class ComposeStatementTimeoutReloadTests
     /// #3899, through #3904's review: the slow-statement line is a THIRD of the clamped ceiling, rendered by the
     /// same function the reload re-asserts, so a ceiling lowered to 5 s moves the line to 1666 ms instead of
     /// leaving a fixed 5 s line that could never fire (the statement is cancelled at the line, and a cancel logs
-    /// no duration). admin gets no line.
+    /// no duration). CAPPED at 5000 ms (#4442) so raising the 60 s server ceiling does not also push the
+    /// slow-statement line past the tail this ceiling raise exists to let through. admin gets no line.
     /// </summary>
     [Theory]
+    [InlineData(60, "5000ms")]
     [InlineData(15, "5000ms")]
     [InlineData(5, "1666ms")]
     [InlineData(1, "1666ms")]
     [InlineData(0, "5000ms")]
-    [InlineData(600, "200000ms")]
-    [InlineData(99999, "200000ms")]
+    [InlineData(600, "5000ms")]
+    [InlineData(99999, "5000ms")]
     public void TheRenderer_SetsTheSlowStatementLineAtAThirdOfTheClampedCeiling(int seconds, string expected)
     {
         var sql = DarlingManagedRoles.BuildComposeStatementTimeoutSql(seconds);
@@ -101,8 +103,8 @@ public sealed class ComposeStatementTimeoutReloadTests
     /// PostgreSQL, which is the single outcome the backstop exists to prevent.
     /// </summary>
     [Theory]
-    [InlineData(0, "15s")]
-    [InlineData(-1, "15s")]
+    [InlineData(0, "60s")]
+    [InlineData(-1, "60s")]
     [InlineData(1, "5s")]
     [InlineData(5, "5s")]
     [InlineData(600, "600s")]
@@ -123,13 +125,13 @@ public sealed class ComposeStatementTimeoutReloadTests
     /// </summary>
     [Theory]
     // store, applied, managed, windows, expected
-    [InlineData(120, 15, true, true, true)]    // operator raised it -> apply
-    [InlineData(15, 120, true, true, true)]    // and lowering it is the case the backstop exists for
-    [InlineData(15, 15, true, true, false)]    // unchanged -> no catalog write
+    [InlineData(120, 60, true, true, true)]    // operator raised it -> apply
+    [InlineData(60, 120, true, true, true)]    // and lowering it is the case the backstop exists for
+    [InlineData(60, 60, true, true, false)]    // unchanged -> no catalog write
     [InlineData(120, -1, true, true, true)]    // baseline unknown -> apply
-    [InlineData(120, 15, false, true, false)]  // BYO: roles are the operator's, named by them
-    [InlineData(120, 15, true, false, false)]  // off-Windows: provisioning never created these roles
-    [InlineData(15, 15, false, false, false)]
+    [InlineData(120, 60, false, true, false)]  // BYO: roles are the operator's, named by them
+    [InlineData(120, 60, true, false, false)]  // off-Windows: provisioning never created these roles
+    [InlineData(60, 60, false, false, false)]
     public void TheReloadGate_FiresOnlyOnARealChange_InManagedModeOnWindows(
         int store, int applied, bool managed, bool windows, bool expected)
     {
@@ -149,7 +151,7 @@ public sealed class ComposeStatementTimeoutReloadTests
     {
         /* Models the call site's success/failure handling; ReassertComposeStatementTimeoutAsync returns the
            bool this stands in for, and is non-throwing by contract. */
-        var applied = 15;
+        var applied = 60;
         const int stored = 120;
 
         static bool Attempt(bool succeeds) => succeeds;
@@ -161,7 +163,7 @@ public sealed class ComposeStatementTimeoutReloadTests
             applied = stored;
         }
 
-        Assert.Equal(15, applied);
+        Assert.Equal(60, applied);
 
         /* Reload 2 — still eligible, because the failure was not recorded as applied. */
         Assert.True(DarlingManagedRoles.ShouldReassertComposeStatementTimeout(stored, applied, true, true));
@@ -179,9 +181,9 @@ public sealed class ComposeStatementTimeoutReloadTests
     /// <summary>
     /// <b>The first-run ordering trap.</b> Role provisioning runs BEFORE
     /// <c>StoreConfigProvider.SeedIfEmptyAsync</c>, so on a brand-new managed store there is no
-    /// <c>config_service</c> row to read: the roles are written with the 15 s default, and only then does
+    /// <c>config_service</c> row to read: the roles are written with the 60 s default, and only then does
     /// the seed insert <c>darling.json</c>'s value. An operator who set the knob up front on a large store
-    /// therefore has roles at 15 s and a store saying 30.
+    /// therefore has roles at 60 s and a store saying 30.
     ///
     /// <para>Seeding the reload baseline from the post-seed store view records 30 as applied when the roles
     /// never received it — and because the gate fires only on a difference, that mismatch is <b>permanent</b>
@@ -197,7 +199,7 @@ public sealed class ComposeStatementTimeoutReloadTests
     [Fact]
     public void AFreshStore_SeedsTheBaselineFromWhatTheRolesGot_NotFromThePostSeedView()
     {
-        const int provisioningWroteToTheRoles = 15;  // no config_service row existed yet
+        const int provisioningWroteToTheRoles = 60;  // no config_service row existed yet
         const int storeAfterSeeding = 30;            // darling.json's value, inserted by the seed
 
         /* The bug: baseline from the post-seed view. The gate sees no difference and never corrects it. */
@@ -254,8 +256,8 @@ public sealed class ComposeStatementTimeoutReloadTests
     /// next reload would re-assert a no-op it believed was a change.
     /// </summary>
     [Theory]
-    [InlineData(0, 15)]
-    [InlineData(-5, 15)]
+    [InlineData(0, 60)]
+    [InlineData(-5, 60)]
     [InlineData(1, 5)]
     [InlineData(30, 30)]
     [InlineData(99999, 600)]

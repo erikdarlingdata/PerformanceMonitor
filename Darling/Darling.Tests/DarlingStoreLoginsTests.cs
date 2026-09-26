@@ -679,7 +679,7 @@ public sealed class DarlingStoreLoginsTests
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp);
         var explicitManaged = DarlingManagedRoles.BuildProvisioningSql(
             ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
-            15, PasswordReassert.All, ProvisioningTarget.Managed);
+            McpCommandDeadlines.ComposedQueryFallbackSeconds, PasswordReassert.All, ProvisioningTarget.Managed);
 
         Assert.Equal(byDefault, explicitManaged);
         Assert.Contains("REVOKE ALL ON DATABASE darling FROM PUBLIC;", byDefault, StringComparison.Ordinal);

@@ -101,6 +101,16 @@ public static class ViewerCommandDeadlines
     /// <see cref="FanOutReadSeconds"/>, derived from that concurrent measurement, and the two are the
     /// same number for any width the pool can serve without contention worth pricing.</para>
     ///
+    /// <para><b>UNDER the managed store's shipped server-side ceiling, deliberately, since #4442.</b> A
+    /// locked-down Viewer seat (<c>postgres.connectAs = "viewer"</c>) runs these same reads under the
+    /// <c>viewer</c> role's <c>statement_timeout</c>, now shipped at 60 s. #4442's own rule — a paired
+    /// client deadline sits strictly above the server ceiling, so the store's <c>57014</c> is what a user
+    /// sees rather than a client-side stream fault — does not extend to this constant: the permit
+    /// argument above (a single control can hold every one of a ten-connection managed pool's permits) is
+    /// the tighter and prior bound, measured in #3004, and it does not move because the ceiling did. A
+    /// user on this surface still sees a client-side timeout at 15 s, not the server's <c>57014</c>; #4442
+    /// files a follow-up to revisit the viewer's own band with fresh latency data before raising it.</para>
+    ///
     /// <para>The asymmetry, worked out for this surface rather than assumed: too short and one panel
     /// shows an error the user can retry — and the auto-refresh timer retries it within 30 s anyway,
     /// unprompted. Too long and the user watches a spinner while a pooled connection is held, which is
