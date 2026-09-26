@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -128,55 +129,7 @@ internal static class AlertNotebookEndpoint
                 historyRows = await DarlingAlertReader.GetAlertHistoryAsync(
                     postgres, anchor - DarlingTriageEndpoint.AlertMatchLookback, windowEnd, serverId, 200, context.RequestAborted);
 
-                var sameMetric = new List<DarlingAlertReader.AlertHistoryReadRow>();
-                foreach (var row in historyRows)
-                {
-                    if (string.IsNullOrWhiteSpace(metric)
-                        || string.Equals(row.MetricName, metric.Trim(), StringComparison.OrdinalIgnoreCase))
-                    {
-                        sameMetric.Add(row);
-                    }
-                }
-
-                /* Dedup wins over nearest-in-time: scan every same-metric row's incidents for the link's key
-                   before falling back to the nearest row. */
-                if (!string.IsNullOrWhiteSpace(dedup))
-                {
-                    foreach (var row in sameMetric)
-                    {
-                        if (!AlertContextSerializer.TryDeserialize(row.ContextJson, out var ctx)
-                            || ctx.Incidents is not { Count: > 0 })
-                        {
-                            continue;
-                        }
-
-                        foreach (var incident in ctx.Incidents)
-                        {
-                            if (string.Equals(incident.DedupKey, dedup.Trim(), StringComparison.Ordinal))
-                            {
-                                matchedRow = row;
-                                matchedIncident = incident;
-                                break;
-                            }
-                        }
-
-                        if (matchedRow is not null)
-                        {
-                            break;
-                        }
-                    }
-                }
-
-                if (matchedRow is null && sameMetric.Count > 0)
-                {
-                    sameMetric.Sort((a, b) =>
-                        Math.Abs((a.AlertTime - anchor).Ticks).CompareTo(Math.Abs((b.AlertTime - anchor).Ticks)));
-                    matchedRow = sameMetric[0];
-                    if (AlertContextSerializer.TryDeserialize(matchedRow.ContextJson, out var ctx) && ctx.Incidents is { Count: > 0 })
-                    {
-                        matchedIncident = ctx.Incidents[0];
-                    }
-                }
+                (matchedRow, matchedIncident) = MatchAlert(historyRows, metric, dedup, anchor);
 
                 if (matchedRow is not null)
                 {
@@ -196,8 +149,49 @@ internal static class AlertNotebookEndpoint
                 notes.Add((JsonNode)"Alert-history lookup failed. The service log names what failed.");
             }
 
+            /* F1 (#4366 review): the match window above ends at anchor+15m, so a resolution or re-fire that
+               lands later than that is invisible to the status arms below unless they see a second, wider
+               read. This one runs [anchor, min(anchor + AlertMatchLookback, now)] -- forward-looking, where
+               the match read above is centered on `anchor` and mostly backward-looking -- bounded by the SAME
+               row cap and cancellable the SAME way. */
+            List<DarlingAlertReader.AlertHistoryReadRow> statusRows = new();
+            try
+            {
+                var statusUntil = anchor + DarlingTriageEndpoint.AlertMatchLookback;
+                if (statusUntil > now)
+                {
+                    statusUntil = now;
+                }
+
+                statusRows = anchor < statusUntil
+                    ? await DarlingAlertReader.GetAlertHistoryAsync(
+                        postgres, anchor, statusUntil, serverId, 200, context.RequestAborted)
+                    : new();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                DarlingWebFailureLog.Report(logger, "/api/alert-notebook:status-history", 0, ex);
+                notes.Add((JsonNode)"Status lookup failed. The service log names what failed.");
+            }
+
+            List<DarlingAlertReader.AlertHistoryReadRow> statusHistoryRows;
+            if (historyRows.Count == 0)
+            {
+                statusHistoryRows = statusRows;
+            }
+            else if (statusRows.Count == 0)
+            {
+                statusHistoryRows = historyRows;
+            }
+            else
+            {
+                statusHistoryRows = new List<DarlingAlertReader.AlertHistoryReadRow>(historyRows.Count + statusRows.Count);
+                statusHistoryRows.AddRange(historyRows);
+                statusHistoryRows.AddRange(statusRows);
+            }
+
             var status = await ResolveStatusAsync(
-                postgres, serverId, metric, anchor, now, historyRows, matchedRow, logger, context.RequestAborted);
+                postgres, serverId, fleetLevelStore, metric, anchor, now, statusHistoryRows, matchedRow, logger, context.RequestAborted);
 
             var lookbackHours = FamilyLookbackHours(metric);
             var sections = DarlingTriageEndpoint.SectionsFor(metric);
@@ -338,7 +332,7 @@ internal static class AlertNotebookEndpoint
     /// absence of rows is not evidence while the instrument is down.
     /// </summary>
     private static async Task<string> ResolveStatusAsync(
-        NpgsqlDataSource postgres, int? serverId, string? metric, DateTime anchor, DateTime now,
+        NpgsqlDataSource postgres, int? serverId, bool fleetLevelStore, string? metric, DateTime anchor, DateTime now,
         List<DarlingAlertReader.AlertHistoryReadRow> historyRows,
         DarlingAlertReader.AlertHistoryReadRow? matchedRow, ILogger logger, System.Threading.CancellationToken cancellationToken)
     {
@@ -347,60 +341,10 @@ internal static class AlertNotebookEndpoint
             return "Unknown (not collected since " + anchor.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) + ")";
         }
 
-        var trimmedMetric = metric.Trim();
-
-        /* Arm 1: a resolution row for THIS metric after `at`. ResolutionAliases maps a resolution TITLE to
-           its firing metric; a resolution row's own metric_name is the alias, not the canonical name, so the
-           search is over every alias that folds onto this metric plus the metric's own resolved-title
-           siblings the alert engine may write directly. */
-        DateTime? resolvedAt = null;
-        foreach (var row in historyRows)
+        var arm12 = StatusFromHistory(historyRows, metric, anchor, matchedRow, serverId, fleetLevelStore);
+        if (arm12 is not null)
         {
-            if (row.AlertTime <= anchor)
-            {
-                continue;
-            }
-
-            foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
-            {
-                if (string.Equals(canonical, trimmedMetric, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(row.MetricName, alias, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (resolvedAt is null || row.AlertTime < resolvedAt)
-                    {
-                        resolvedAt = row.AlertTime;
-                    }
-                }
-            }
-        }
-
-        if (resolvedAt is DateTime resolved)
-        {
-            return "Resolved at " + resolved.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
-        }
-
-        /* Arm 2: a later same-metric firing. */
-        DateTime? refiredAt = null;
-        foreach (var row in historyRows)
-        {
-            if (row.AlertTime <= anchor)
-            {
-                continue;
-            }
-
-            if (string.Equals(row.MetricName, trimmedMetric, StringComparison.OrdinalIgnoreCase)
-                && (matchedRow is null || row.AlertTime != matchedRow.AlertTime))
-            {
-                if (refiredAt is null || row.AlertTime < refiredAt)
-                {
-                    refiredAt = row.AlertTime;
-                }
-            }
-        }
-
-        if (refiredAt is DateTime refired)
-        {
-            return "Fired again at " + refired.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+            return arm12;
         }
 
         /* Arms 3/4: collector freshness since `at`. get_collection_log's own store (v_collection_log) is read
@@ -430,6 +374,162 @@ internal static class AlertNotebookEndpoint
         }
 
         return "Unknown (not collected since " + anchorStamp + ")";
+    }
+
+    /// <summary>The endpoint's dedup-first / nearest-in-time alert match (#4222), extracted as a pure seam
+    /// (#4366 review F4) so <see cref="AlertNotebookEndpointTests"/> can pin it directly against real
+    /// <see cref="DarlingAlertReader.AlertHistoryReadRow"/> values instead of copying the rule into the test.
+    ///
+    /// <para><b>F3 fix.</b> Rows arrive newest-first, and a dedup key identifies the INCIDENT, not a single
+    /// row — so a same-key re-fire inside the match window used to win by being first in iteration order
+    /// (effectively "newest", since the caller's rows are DESC). That let a re-fire masquerade as the
+    /// original firing and hide itself from the status arms' "later same-metric firing" check. This picks the
+    /// NEAREST dedup match to <paramref name="anchor"/> instead, ties broken toward the earlier
+    /// (closer-to-firing) row, matching the nearest-in-time fallback's own tie behaviour below.</para></summary>
+    internal static (DarlingAlertReader.AlertHistoryReadRow? Row, AlertIncident? Incident) MatchAlert(
+        IReadOnlyList<DarlingAlertReader.AlertHistoryReadRow> rows, string? metric, string? dedup, DateTime anchor)
+    {
+        var sameMetric = new List<DarlingAlertReader.AlertHistoryReadRow>();
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrWhiteSpace(metric)
+                || string.Equals(row.MetricName, metric.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                sameMetric.Add(row);
+            }
+        }
+
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow = null;
+        AlertIncident? matchedIncident = null;
+
+        if (!string.IsNullOrWhiteSpace(dedup))
+        {
+            var key = dedup.Trim();
+            var best = long.MaxValue;
+            foreach (var row in sameMetric)
+            {
+                if (!AlertContextSerializer.TryDeserialize(row.ContextJson, out var ctx) || ctx.Incidents is not { Count: > 0 })
+                {
+                    continue;
+                }
+
+                foreach (var incident in ctx.Incidents)
+                {
+                    if (!string.Equals(incident.DedupKey, key, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var distance = Math.Abs((row.AlertTime - anchor).Ticks);
+                    if (distance < best || (distance == best && matchedRow is not null && row.AlertTime < matchedRow.AlertTime))
+                    {
+                        best = distance;
+                        matchedRow = row;
+                        matchedIncident = incident;
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        if (matchedRow is null && sameMetric.Count > 0)
+        {
+            sameMetric.Sort((a, b) =>
+            {
+                var cmp = Math.Abs((a.AlertTime - anchor).Ticks).CompareTo(Math.Abs((b.AlertTime - anchor).Ticks));
+                return cmp != 0 ? cmp : b.AlertTime.CompareTo(a.AlertTime);
+            });
+            matchedRow = sameMetric[0];
+            if (AlertContextSerializer.TryDeserialize(matchedRow.ContextJson, out var ctx) && ctx.Incidents is { Count: > 0 })
+            {
+                matchedIncident = ctx.Incidents[0];
+            }
+        }
+
+        return (matchedRow, matchedIncident);
+    }
+
+    /// <summary>Status arms 1 and 2 (#4222), extracted as a pure seam (#4366 review F4) over whatever rows the
+    /// caller has already gathered — the caller is responsible for the window (#4366 F1: the caller now
+    /// passes rows from BOTH the backward match read and a forward-looking read so a late resolution or
+    /// re-fire is visible here). Returns null when neither arm fires, meaning the caller should fall through
+    /// to the collector-freshness arms.
+    ///
+    /// <para><b>F2 fix.</b> When the caller has no resolved server id and the alert is not a fleet-level
+    /// metric, this returns Unknown immediately rather than scanning fleet-wide rows — an unresolved
+    /// <c>server=</c> query used to let another host's resolution or re-fire answer for a server the caller
+    /// never actually reached. When a server id IS known, rows are filtered to that server before either arm
+    /// runs, for the same reason.</para></summary>
+    internal static string? StatusFromHistory(
+        IReadOnlyList<DarlingAlertReader.AlertHistoryReadRow> rows, string metric, DateTime anchor,
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow, int? serverId, bool fleetLevelStore)
+    {
+        if (serverId is null && !fleetLevelStore)
+        {
+            return "Unknown (not collected since " + anchor.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) + ")";
+        }
+
+        var trimmedMetric = metric.Trim();
+        var scoped = serverId.HasValue
+            ? rows.Where(row => row.ServerId == serverId.Value)
+            : rows;
+
+        /* Arm 1: a resolution row for THIS metric after `at`. ResolutionAliases maps a resolution TITLE to
+           its firing metric; a resolution row's own metric_name is the alias, not the canonical name, so the
+           search is over every alias that folds onto this metric plus the metric's own resolved-title
+           siblings the alert engine may write directly. */
+        DateTime? resolvedAt = null;
+        foreach (var row in scoped)
+        {
+            if (row.AlertTime <= anchor)
+            {
+                continue;
+            }
+
+            foreach (var (alias, canonical) in DarlingTriageEndpoint.ResolutionAliases)
+            {
+                if (string.Equals(canonical, trimmedMetric, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(row.MetricName, alias, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (resolvedAt is null || row.AlertTime < resolvedAt)
+                    {
+                        resolvedAt = row.AlertTime;
+                    }
+                }
+            }
+        }
+
+        if (resolvedAt is DateTime resolved)
+        {
+            return "Resolved at " + resolved.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        }
+
+        /* Arm 2: a later same-metric firing. */
+        DateTime? refiredAt = null;
+        foreach (var row in scoped)
+        {
+            if (row.AlertTime <= anchor)
+            {
+                continue;
+            }
+
+            if (string.Equals(row.MetricName, trimmedMetric, StringComparison.OrdinalIgnoreCase)
+                && (matchedRow is null || row.AlertTime != matchedRow.AlertTime))
+            {
+                if (refiredAt is null || row.AlertTime < refiredAt)
+                {
+                    refiredAt = row.AlertTime;
+                }
+            }
+        }
+
+        if (refiredAt is DateTime refired)
+        {
+            return "Fired again at " + refired.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        }
+
+        return null;
     }
 
     /// <summary>One alert-history row plus its dedup-matched incident's facts, in the SAME wire shape
