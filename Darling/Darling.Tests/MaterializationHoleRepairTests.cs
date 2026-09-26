@@ -342,6 +342,44 @@ public sealed class MaterializationHoleRepairTests
     }
 
     /// <summary>
+    /// #4301 (H2): a legacy-interior gap — a hole BELOW the legacy's last bucket, inside its own frozen span,
+    /// from an outage that predates this store ever taking the freeze — gets a THIRD window, distinct from
+    /// both the seam window and the ordinary window, emitted FIRST (oldest of the three). Superseded by the
+    /// #4301 ruling ("fill the successor CONTIGUOUSLY DOWNWARD"): the walk no longer takes a separate
+    /// legacy-interior window at all — the seam window's own lower bound moved to raw's filtered floor, so a
+    /// hole below the legacy's last bucket is repaired by the SAME newest-first descent as everything else
+    /// below the successor's floor. <c>MaterializationHoleScanWindows</c> dropped the
+    /// <c>legacyInteriorFrom</c>/<c>legacyInteriorTo</c> parameters this test exercised; removed with them.
+    /// </summary>
+
+    /// <summary>
+    /// #4301 (H2, filter parity): <see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/> (the gate's
+    /// <c>EXISTS</c> wrapper) is the shared hole definition <see cref="TimescaleSupport.RetentionArmSafetySql"/>
+    /// uses. This pins its shape: a well-formed <c>EXISTS(...)</c> wrapping the <c>generate_series(...)</c>
+    /// buckets clause, fenced with <c>OFFSET 0</c> for the #3933 reason its own doc states.
+    /// </summary>
+    [Fact]
+    public void LegacySuccessorHoleExistsSql_WrapsTheBucketsClauseInExists()
+    {
+        const string relation = "query_stats";
+        const string sourceTimeColumn = "collection_time";
+        const string sourceFilter = "sample_interval_seconds IS DISTINCT FROM 0";
+        const string legacy = "query_stats_hourly";
+        const string successor = "query_stats_interval_hourly";
+        const string fromExpr = "$1::timestamp";
+        const string toExpr = "$2::timestamp";
+        const string bucketWidthLiteral = "$3::interval";
+
+        var existsSql = TimescaleSupport.LegacySuccessorHoleExistsSql(
+            relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral);
+
+        Assert.StartsWith("EXISTS (", existsSql, StringComparison.Ordinal);
+        Assert.EndsWith(")", existsSql, StringComparison.Ordinal);
+        Assert.Contains("generate_series(", existsSql, StringComparison.Ordinal);
+        Assert.Contains("OFFSET 0", existsSql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The start path: launched (not awaited) right after the ensure, on its own connection, inside the
     /// TimescaleDB block, before the compression and retention ensures; drained at shutdown beside the baseline
     /// backfill. Source-order pins, the RetiredBaselineAggregateTests shape.
