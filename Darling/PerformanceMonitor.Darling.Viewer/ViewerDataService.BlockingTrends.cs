@@ -195,25 +195,40 @@ public sealed partial class ViewerDataService
     /// <summary>
     /// Blocked-session count per (collection, database) — Lite's <c>GetBlockedSessionTrendAsync</c>
     /// ported to Postgres, then bucketed (#4349). Reads the base <c>waiting_tasks</c> table (no v_ view
-    /// exists), counting rows whose <c>blocking_session_id</c> is set. Same "every row is rated" note as
-    /// <see cref="WaitingTaskTrendSql"/> — a snapshot row carries no delta, so <c>collection_count</c> is
-    /// COUNT(*) over every row a bucket holds. $1 server_id, $2 window start, $3 window end (naive UTC),
+    /// exists), counting rows whose <c>blocking_session_id</c> is set. A blocked-session count is a
+    /// PER-SNAPSHOT gauge, not a delta — a bucket's value is the AVERAGE of the per-collection counts it
+    /// covers (rounded, matching the CPU tab's gauge-averaging idiom, #4234), never their SUM: summing
+    /// would double (or N-tuple) the count purely because a wide bucket merged N snapshots, with no more
+    /// blocking having happened. The inner <c>per_collection</c> CTE keeps the pre-bucket per-collection
+    /// count exactly as the un-bucketed read computed it; <c>collection_count</c> is the number of distinct
+    /// physical collections the bucket merged. $1 server_id, $2 window start, $3 window end (naive UTC),
     /// $4 database filter, $5 bucket width minutes.
     /// </summary>
     public const string BlockedSessionTrendSql = $$"""
+        WITH per_collection AS
+        (
+            SELECT
+                collection_time,
+                database_name,
+                COUNT(*) AS blocked_count
+            FROM waiting_tasks
+            WHERE server_id = $1
+            AND   blocking_session_id > 0
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+            AND   ($4::text[] IS NULL OR database_name = ANY($4))
+            AND   database_name IS NOT NULL
+            GROUP BY
+                collection_time,
+                database_name
+        )
         SELECT
             database_name,
             GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $2) AS bucket_start,
-            COUNT(*) AS blocked_count,
+            CAST(ROUND(AVG(blocked_count)) AS bigint) AS blocked_count,
             MIN(collection_time) AS first_collection_time,
-            COUNT(DISTINCT collection_time) AS collection_count
-        FROM waiting_tasks
-        WHERE server_id = $1
-        AND   blocking_session_id > 0
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        AND   ($4::text[] IS NULL OR database_name = ANY($4))
-        AND   database_name IS NOT NULL
+            COUNT(*) AS collection_count
+        FROM per_collection
         GROUP BY
             database_name, 2
         ORDER BY

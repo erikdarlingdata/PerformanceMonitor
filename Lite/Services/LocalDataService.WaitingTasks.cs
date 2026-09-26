@@ -187,9 +187,13 @@ ORDER BY
 
     /// <summary>
     /// Gets blocked session count trend grouped by database for charting.
-    /// <para>#4349: bucketed (matching #4234/#4340's shape). Same "every row is rated" note as
-    /// <see cref="GetWaitingTaskTrendAsync"/> — a snapshot row carries no delta, so <c>collection_count</c>
-    /// is a plain <c>COUNT(*)</c> over the bucket's rows.</para>
+    /// <para>#4349: bucketed (matching #4234/#4340's shape). A blocked-session count is a PER-SNAPSHOT
+    /// gauge, not a delta — a bucket's value is the AVERAGE of the per-collection counts it covers
+    /// (rounded, matching the CPU tab's gauge-averaging idiom), never their SUM: summing would double (or
+    /// N-tuple) the count purely because a wide bucket merged N snapshots, with no more blocking having
+    /// happened. The inner per-collection subquery keeps the pre-bucket per-collection count exactly as the
+    /// un-bucketed read computed it; <c>collection_count</c> is the number of distinct physical collections
+    /// the bucket merged.</para>
     /// </summary>
     public async Task<List<BlockedSessionTrendPoint>> GetBlockedSessionTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
@@ -204,18 +208,29 @@ ORDER BY
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         command.CommandText = $@"
+WITH per_collection AS
+(
+    SELECT
+        collection_time,
+        database_name,
+        COUNT(*) AS blocked_count
+    FROM v_waiting_tasks
+    WHERE server_id = $1
+    AND   blocking_session_id > 0
+    AND   collection_time >= $2
+    AND   collection_time <= $3" + dbClause + $@"
+    AND   database_name IS NOT NULL
+    GROUP BY
+        collection_time,
+        database_name
+)
 SELECT
     database_name,
     GREATEST(time_bucket(to_minutes(CAST(${widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
-    COUNT(*) AS blocked_count,
+    ROUND(AVG(blocked_count)) AS blocked_count,
     MIN(collection_time) AS first_collection_time,
     COUNT(*) AS collection_count
-FROM v_waiting_tasks
-WHERE server_id = $1
-AND   blocking_session_id > 0
-AND   collection_time >= $2
-AND   collection_time <= $3" + dbClause + $@"
-AND   database_name IS NOT NULL
+FROM per_collection
 GROUP BY
     database_name, 2
 ORDER BY
