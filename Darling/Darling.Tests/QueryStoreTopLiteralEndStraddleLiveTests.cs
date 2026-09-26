@@ -67,6 +67,12 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
         await using var connection = await OpenMigratedAsync(scratch, ct);
+        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct), "TimescaleDB must be enabled on the test cluster for the #3953 literal-end straddle pin's chunk-floor read");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await ScalarBoolAsync(connection,
+            "SELECT EXISTS (SELECT 1 FROM timescaledb_information.hypertables WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats')", ct),
+            "query_store_stats did not convert to a hypertable; the pin's chunk-floor diagnostic cannot be trusted");
+
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
 
@@ -113,8 +119,12 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
         {
             var pendingCount = await ScalarLongAsync(connection,
                 "SELECT COUNT(*) FROM collect.query_store_interval_wide_pending WHERE server_id = @server_id", ct);
-            var rawFloor = await ScalarNullableDateTimeAsync(connection,
-                "SELECT MIN(range_start) AT TIME ZONE 'UTC' FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats'", ct);
+            var chunksTableExists = await ScalarBoolAsync(connection,
+                "SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL", ct);
+            var rawFloor = chunksTableExists
+                ? await ScalarNullableDateTimeAsync(connection,
+                    "SELECT MIN(range_start) AT TIME ZONE 'UTC' FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats'", ct)
+                : (DateTime?)null;
             var tableFloor = await ScalarNullableDateTimeAsync(connection,
                 "SELECT MIN(t.first_execution_time) FROM collect.query_store_interval_wide AS t WHERE t.server_id = @server_id", ct);
             Assert.Fail(
@@ -263,6 +273,12 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
         command.Parameters.AddWithValue("server_id", ServerId);
         command.Parameters.AddWithValue("value", DateTime.SpecifyKind(value, DateTimeKind.Unspecified));
         await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<bool> ScalarBoolAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        return (bool)(await command.ExecuteScalarAsync(ct))!;
     }
 
     private static async Task<NpgsqlConnection> OpenMigratedAsync(ScratchPostgres scratch, CancellationToken ct)
