@@ -756,6 +756,105 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
+    /// #4300 item 3: the CATCH-UP path, not the event path — a successor hourly whose own seam is already
+    /// CLOSED (no legacy/successor gap this pass), but whose dependent successor daily was left behind by an
+    /// earlier chase that never ran (the shape a thrown chase, a budget-cut chase, or a restart between the
+    /// hourly's floor moving and the daily catching up all leave behind). Seeded directly rather than through
+    /// an outage: the successor hourly already has a floor 6 days back plus a separate, more recent bucket;
+    /// the successor daily has materialized only the recent day. One <see
+    /// cref="TimescaleSupport.RepairMaterializationSeamsAsync"/> pass must catch the daily back up to the
+    /// hourly's own floor.
+    /// </summary>
+    [Fact]
+    public async Task StuckDaily_HourlySeamAlreadyClosed_SeamOnlyPassCatchesTheSuccessorDailyUp()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var u = D0.AddDays(20);
+            var oldDay = TimescaleSupport.AlignDown(u.AddDays(-6), TimeSpan.FromDays(1));
+            var recent = u.AddDays(-2);
+
+            /* The successor hourly's own floor, 6 days back — no seam anywhere: raw carries nothing OLDER
+               than this, so the seam-closed check (raw's own filtered floor already at or above the
+               successor's floor) holds without any legacy refresh at all. */
+            for (var hour = 0; hour <= 6; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, oldDay.AddHours(hour), $"stuckdaily_old_{hour}", 900, 9, 3600, ct);
+            }
+
+            /* A separate, more recent bucket — inside the daily's own 3-day policy window — that already got
+               refreshed on both tiers, same as the daily's ordinary policy run would leave behind. */
+            await InsertProcedureStatsAsync(connection, recent, "stuckdaily_recent", 900, 9, 3600, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, oldDay, u, ct);
+
+            /* The successor DAILY has materialized only the recent day — left behind exactly as an earlier
+               chase that never ran (thrown, budget-cut, or across a restart) would leave it, with NO seam
+               left anywhere for the event path to fire from. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalDailyView, recent.AddDays(-1), u, ct);
+
+            var dailyFloorBefore = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorBefore);
+            Assert.True(dailyFloorBefore!.Value > oldDay);
+
+            await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
+            {
+                var hourlyFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
+                Assert.Equal(oldDay, hourlyFloor);
+            }
+
+            /* ONE seam-only pass — the hourly's own seam is already closed, so this takes the catch-up branch,
+               not the event path (there is nothing for the event path to fire from: no seam range closes
+               this pass). */
+            var seamOnly = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(0, seamOnly.BucketsRepaired);
+            Assert.True(seamOnly.DailyBucketsChained > 0);
+
+            var dailyFloorAfter = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorAfter);
+            Assert.True(dailyFloorAfter!.Value <= oldDay);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
     /// #4300: a seam WIDER than the hourly cap (24 buckets) cannot be closed by one seam-only call. The same
     /// shape as <see cref="Outage_SeamWiderThanTheCap_NewestFirstRepairsTheTopAndKeepsTheGateHeldUntilFullyRepaired"/>,
     /// but through <see cref="TimescaleSupport.RepairMaterializationSeamsAsync"/> (the hourly Periodic pass's
