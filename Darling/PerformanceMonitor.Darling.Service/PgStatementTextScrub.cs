@@ -403,9 +403,38 @@ AND   t.server_id = $6";
         return fallbackPairs;
     }
 
+    /// <summary>Is <c>collect.pg_blocking_edges</c> a TimescaleDB hypertable on this store? Checked before
+    /// <see cref="ChunkDaysSql"/> ever runs, because a store without the TimescaleDB extension does not
+    /// have <c>timescaledb_information.chunks</c> at all (#4348): querying a catalog view that does not
+    /// exist throws 42P01 (undefined_table), which the caller's <c>catch (NpgsqlException)</c> treats as
+    /// every server having failed this run, so the plain-table fallback below never runs and the marker
+    /// never gets set on such a store. <c>to_regclass</c> answers "does this relation exist" without ever
+    /// throwing for a missing one, so this is safe on both shapes.</summary>
+    private static async Task<bool> IsPgBlockingEdgesHypertableAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var chunksViewExists = new NpgsqlCommand(
+            "SELECT to_regclass('timescaledb_information.chunks') IS NOT NULL", connection) { CommandTimeout = CandidateReadTimeoutSeconds };
+        if (!(bool)(await chunksViewExists.ExecuteScalarAsync(cancellationToken))!)
+        {
+            return false;
+        }
+
+        await using var isHypertable = new NpgsqlCommand(@"
+SELECT EXISTS (
+    SELECT 1 FROM timescaledb_information.hypertables
+    WHERE hypertable_schema = 'collect'
+    AND   hypertable_name = 'pg_blocking_edges')", connection) { CommandTimeout = CandidateReadTimeoutSeconds };
+        return (bool)(await isHypertable.ExecuteScalarAsync(cancellationToken))!;
+    }
+
     private static async Task<List<DateTime>> ReadChunkDaysAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         var days = new List<DateTime>();
+        if (!await IsPgBlockingEdgesHypertableAsync(connection, cancellationToken))
+        {
+            return days;
+        }
+
         await using var read = new NpgsqlCommand(ChunkDaysSql, connection) { CommandTimeout = CandidateReadTimeoutSeconds };
         await using var reader = await read.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

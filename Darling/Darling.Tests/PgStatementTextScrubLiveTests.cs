@@ -145,6 +145,55 @@ public sealed class PgStatementTextScrubLiveTests
         Assert.Equal(0, second.BlockingEdgesRowsUpdated);
     }
 
+    /// <summary>#4383 own-store, no TimescaleDB at all — deliberately never calls <c>CREATE EXTENSION</c>,
+    /// so <c>timescaledb_information.chunks</c> does not exist on this database. Proves the guard added for
+    /// #4348: without it the chunk-days read throws 42P01, the caller's catch marks every server failed,
+    /// and the marker is never written, so the scrub retries forever on a plain-PostgreSQL store. With the
+    /// guard, the run takes the plain-table fallback, masks the seeded row, and sets the marker on the
+    /// first run.</summary>
+    [Fact]
+    public async Task TheScrubCompletesAndSetsTheMarker_OnAStoreWithoutTimescaleDB()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4383 no-TimescaleDB statement-text scrub (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+
+        await using (var setupConnection = new NpgsqlConnection(scratch.ConnectionString))
+        {
+            await setupConnection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(setupConnection, ct);
+
+            /* Deliberately no TimescaleDB.TryEnableAsync / CREATE EXTENSION / create_hypertable here —
+               this store must never see timescaledb_information.chunks. */
+            await InsertBlockingEdgeAsync(setupConnection, ServerA, Day, 101, Secret, Neighbor, ct);
+
+            Assert.True(await ContainsSecretAsync(setupConnection, ct), "seeding failed to plant the secret this test exists to catch");
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var first = await PgStatementTextScrub.RunAsync(postgres, logger: null, ct);
+        Assert.False(first.AlreadyDone);
+        Assert.Equal(1, first.BlockingEdgesRowsUpdated);
+
+        await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
+        await verifyConnection.OpenAsync(ct);
+
+        Assert.False(await ContainsSecretAsync(verifyConnection, ct), "the raw statement text survived the scrub on a store without TimescaleDB");
+        Assert.Equal(PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText,
+            await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerA, 101, ct));
+
+        var markerValue = await ScalarTextAsync(
+            verifyConnection,
+            "SELECT state_value FROM collect.collector_state WHERE server_id = $1 AND collector_name = $2 AND state_key = $3",
+            DarlingObservability.FleetServerId, PgStatementTextScrub.StateCollectorName, PgStatementTextScrub.ScrubVersionStateKey, ct);
+        Assert.Equal(PgStatementTextScrub.ScrubVersion.ToString(CultureInfo.InvariantCulture), markerValue);
+    }
+
     private static async Task<bool> ContainsSecretAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         var countCommand = new NpgsqlCommand(
