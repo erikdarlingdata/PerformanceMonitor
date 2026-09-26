@@ -645,22 +645,39 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
 
         Assert.NotNull(beforeBytes);
 
+        // DuckDB's "64MB" memory_limit unit is decimal (64 * 1000 * 1000 bytes), not binary (MiB).
+        const double trimTargetBytes = 64.0 * 1000.0 * 1000.0;
+
         var originalThreshold = DuckDbInitializer.TrimThresholdBytes;
         DuckDbInitializer.TrimThresholdBytes = 1;
+        double? afterBytes = null;
         try
         {
-            initializer.RunMemoryTrimCycle();
+            /* #4262: RunMemoryTrimCycle's own contract is "never wait" — it takes s_dbLock's write lock
+               with TryEnterWriteLock(0) and silently skips this cycle if another writer holds it (any
+               concurrent test process-wide, since s_dbLock is static across every DuckDbInitializer
+               instance, not just this one), same as a real caller mid-archival. A skipped cycle reports
+               beforeBytes == afterBytes with no error — exactly the "trim released nothing" failure this
+               test chased intermittently on CI (one Windows run: 105906176 -> 105906176). That is lock
+               contention from an unrelated parallel test, not a broken trim, so the test retries the
+               cycle itself rather than looser-than-the-contract on a single skipped attempt. */
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                initializer.RunMemoryTrimCycle();
+
+                using var measure = initializer.CreateConnection();
+                await measure.OpenAsync();
+                afterBytes = initializer.ReadSentinelMemoryUsageBytes(measure);
+
+                if (afterBytes.HasValue && afterBytes.Value <= trimTargetBytes)
+                    break;
+
+                await Task.Delay(50);
+            }
         }
         finally
         {
             DuckDbInitializer.TrimThresholdBytes = originalThreshold;
-        }
-
-        double? afterBytes;
-        using (var measure = initializer.CreateConnection())
-        {
-            await measure.OpenAsync();
-            afterBytes = initializer.ReadSentinelMemoryUsageBytes(measure);
         }
 
         Assert.NotNull(afterBytes);
@@ -668,9 +685,6 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)";
         initializer.Dispose();
 
         Console.WriteLine($"#4262 round 1 trim measurement (duckdb_memory): before={beforeBytes / (1024.0 * 1024.0):F1} MB, after={afterBytes / (1024.0 * 1024.0):F1} MB");
-
-        // DuckDB's "64MB" memory_limit unit is decimal (64 * 1000 * 1000 bytes), not binary (MiB).
-        const double trimTargetBytes = 64.0 * 1000.0 * 1000.0;
 
         Assert.True(beforeBytes > trimTargetBytes,
             $"Expected the wide read to fill DuckDB's buffer past the trim target before trimming, or this test proves nothing: before={beforeBytes}, target={trimTargetBytes}");
