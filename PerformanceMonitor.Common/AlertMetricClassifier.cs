@@ -196,7 +196,9 @@ namespace PerformanceMonitor.Common
                a whole number like its siblings, not a state, so it renders here rather than joining
                IsStateOnly (its "Custom Alert Rules Recovered" resolution is state-only via IsResolution).
                "Stale Mute Rules" (#3306) is the same shape: the count of mute rules still suppressing alerts
-               with no expiry, past every expiry the product offers. "Collector Cost Digest" (#3443) counts
+               with no expiry, past every expiry the product offers. "Store Settings Need Attention" (#4215)
+               is the same shape again: the count of conditions in force (a last-good fallback, a kept hand
+               edit, a rejected value) on a managed store's darling-managed.conf. "Collector Cost Digest" (#3443) counts
                the (server, collector) pairs the digest listed; its threshold column is the 0 sentinel the
                NOT NULL column demands, because a report has no threshold, and the alert's own threshold
                STRING says so. "Fleet Sweep Rollup" (#3466) is the digest's shape again: its value is the
@@ -204,7 +206,7 @@ namespace PerformanceMonitor.Common
                stated reason. "Analysis Singles Digest" (#3712) is the third document of that shape: its value
                is the count of distinct uncorroborated findings the digest named. */
             "Blocking Detected" or "Deadlocks Detected" or "Failed Agent Job"
-                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules"
+                or "Custom Alert Rules Unhealthy" or "Stale Mute Rules" or "Store Settings Need Attention"
                 or "Collector Cost Digest" or "Fleet Sweep Rollup" or "Analysis Singles Digest" => $"{value:F0}",
 
             /* #1846: a state-only metric never had a number — its display value is a role, a connection

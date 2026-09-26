@@ -605,6 +605,10 @@ public sealed class DarlingManagedPostgres
     private static readonly TimeSpan s_versionProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan s_pgCtlTimeout = TimeSpan.FromSeconds(90);
     private static readonly TimeSpan s_statusTimeout = TimeSpan.FromSeconds(30);
+
+    /* #4215: `postgres -C <key> -D <data>` parses every configuration file and exits — the same shape of
+       probe as s_versionProbeTimeout, so it gets the same short budget. */
+    private static readonly TimeSpan s_confValidateTimeout = TimeSpan.FromSeconds(15);
     private const int PgCtlWaitSeconds = 60;
 
     private readonly PostgresConfig _config;
@@ -670,6 +674,30 @@ public sealed class DarlingManagedPostgres
         = DarlingStoreUpgrade.TimescaleUpdateOutcome.None;
 
     public string DataDirectory => _dataDirectory;
+
+    /// <summary>What <see cref="WriteManagedConfFile"/> did with <c>darling-managed.conf</c> on this start
+    /// (#4215) — carried out of the bootstrap the same way
+    /// <see cref="LastUpgradeOutcome"/> is, so <c>DarlingWorker</c> can fold a hand edit's changed keys into
+    /// the stored verdict rows without re-reading the file itself. Null when the service-owned conf-write path
+    /// never ran this start (the adopted-listener branch of <see cref="EnsureRunningAsync"/>).</summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfWriteResult? LastManagedConfWriteResult { get; private set; }
+
+    /// <summary>Whether THIS start ran PostgreSQL on <see cref="ManagedConfFile.LastGoodFileName"/> rather than
+    /// the file <see cref="WriteManagedConfFile"/> just rendered (#4215) — set only in the recovery
+    /// branch of <see cref="EnsureManagedConfReadyAsync"/>, the one place that copies the last-good file back
+    /// over the rejected one. Reset to false at the top of every <see cref="EnsureManagedConfReadyAsync"/> call
+    /// so a later, clean start clears it without a process restart — carried out to the store-settings self-alert
+    /// the same way <see cref="LastManagedConfWriteResult"/> already is.</summary>
+    [SupportedOSPlatform("windows")]
+    internal bool LastStartUsedLastGoodManagedConf { get; private set; }
+
+    /// <summary>The #4215/#4336 migration's outcome for THIS start — null when
+    /// <see cref="MigrateManagedConfAsync"/> never ran this start (the adopted-listener branch; a Verified
+    /// conf runs Step B instead). Carried out of the bootstrap the same way
+    /// <see cref="LastManagedConfWriteResult"/> already is.</summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfMigrationOutcome? LastManagedConfVerification { get; private set; }
 
     /// <summary>null/empty dataDirectory means %ProgramData%\PerformanceMonitorDarling\pg (created with inherited ACLs).</summary>
     public static string ResolveDataDirectory(PostgresConfig config)
@@ -2442,6 +2470,19 @@ public sealed class DarlingManagedPostgres
         => BuildRoleConnectionString(port, UserName, password);
 
     /// <summary>
+    /// Builds a non-pooled connection string for the #4215 migration's <c>pg_file_settings</c> snapshot. The
+    /// snapshot is a one-shot read that must land on the server this start just launched, never on a pooled
+    /// socket left over from an earlier server lifetime in the same process — the same stale-pool failure
+    /// fixed in <c>DarlingStoreUpgradeTests</c> (#4397).
+    /// </summary>
+    private static string MigrationSnapshotConnectionString(string connectionString)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        builder.Pooling = false;
+        return builder.ConnectionString;
+    }
+
+    /// <summary>
     /// Builds a managed loopback connection string for a specific login role — shared by
     /// <see cref="BuildConnectionString"/> (the owner) and
     /// <see cref="TryBuildMcpConnectionStringFromStoredCredential"/> (the <c>mcp</c> role). Same
@@ -2608,8 +2649,14 @@ public sealed class DarlingManagedPostgres
                reverts and leaves the store exactly as it was. */
             /* #3909: before ANYTHING can start this cluster on PostgreSQL 17 binaries (the upgrade's old-cluster
                start just below, a reverted upgrade's restart, or a plain start of a store still on 17), make
-               sure its conf is one 17 will open. */
-            HealLegacyMaintenanceWorkMem(_dataDirectory);
+               sure its conf is one 17 will open. Legacy conf only (#4215): once the conf has migrated,
+               maintenance_work_mem's value lives in darling-managed.conf, which this heal never touches — a
+               migrated store's cap is the render's own job, not this append. */
+            if (ManagedConfMigrationState.Classify(_dataDirectory) == ManagedConfMigrationState.Kind.Legacy)
+            {
+                HealLegacyMaintenanceWorkMem(_dataDirectory);
+            }
+
             await EnsureDataDirectoryMajorAsync(binDirectory, networkPlan, cancellationToken);
         }
 
@@ -2643,7 +2690,16 @@ public sealed class DarlingManagedPostgres
             }
         }
 
-        EnsureConfAppended(_dataDirectory);
+        /* #4215: the classifier reads the conf's own state ONCE, before the
+           legacy appenders can run. Only a Legacy conf (a v-marker present, or the include missing) may
+           append — a PendingVerify/Verified/MigratedUnstamped conf already carries the migrated file, and
+           EnsureConfAppended appends at the END of postgresql.conf, which would override both the managed
+           file's values AND any operator line this migration moved below the include. */
+        var confState = ManagedConfMigrationState.Classify(_dataDirectory);
+        if (confState == ManagedConfMigrationState.Kind.Legacy)
+        {
+            EnsureConfAppended(_dataDirectory);
+        }
 
         var password = ReadStoredPassword();
 
@@ -2710,6 +2766,18 @@ public sealed class DarlingManagedPostgres
         }
         else
         {
+            /* #4215: the one service-owned settings file, rendered and validated right before the start it
+               takes effect on — never for the adopted-listener branch above, which does not start anything
+               this file could take effect on until the next service-owned start anyway. Skipped
+               on Legacy (no managed file exists yet — the old blocks are still what's in force) and on
+               PendingVerify (a crash left the migrated files exactly where the last attempt wrote them; Step A
+               must not re-derive before the stamp exists, or ResumePending's before/after comparison below
+               would be comparing against a snapshot the render itself just changed). */
+            if (confState == ManagedConfMigrationState.Kind.Verified || confState == ManagedConfMigrationState.Kind.MigratedUnstamped)
+            {
+                await EnsureManagedConfReadyAsync(binDirectory, _dataDirectory, cancellationToken);
+            }
+
             try
             {
                 await StartServerAsync(binDirectory, networkPlan.Value, cancellationToken);
@@ -2737,6 +2805,20 @@ public sealed class DarlingManagedPostgres
             }
 
             _startedByThisProcess = true;
+
+            /* Guarded — Legacy and PendingVerify never ran EnsureManagedConfReadyAsync above, so
+               darling-managed.conf may not exist yet on this start. Copying a missing file would throw and take
+               the whole start down over what SaveLastGoodManagedConf's own doc comment already treats as a
+               no-op-worthy failure. On a Verified confState this start's server started on a FRESH render
+               that Step B (MigrateManagedConfAsync, below) has not verified yet (#4336) — saving here would
+               let a render Step B goes on to reject become the fallback a future rejected render restores
+               to. That save happens only once Step B verifies, further down. Every other confState (Legacy,
+               PendingVerify, MigratedUnstamped) has no Step B to wait on, so the save still belongs here. */
+            if (confState != ManagedConfMigrationState.Kind.Verified
+                && File.Exists(Path.Combine(_dataDirectory, ManagedConfFile.FileName)))
+            {
+                SaveLastGoodManagedConf(_dataDirectory);
+            }
         }
 
         /* Covers all three ways this point is reached with nothing left pending: already running (no start
@@ -2791,7 +2873,220 @@ public sealed class DarlingManagedPostgres
            a network reconcile failure logs + degrades, it does not abort the bootstrap. */
         await ReconcileNetworkAsync(binDirectory, networkPlan.Value, connectionString, cancellationToken);
 
+        /* Only when THIS process started the server — an adopted listener's conf takes effect
+           on the next service-owned start, same rule EnsureManagedConfReadyAsync above already follows, and
+           the migration's own re-snapshot needs a server that is actually up on the files this start wrote. */
+        if (_startedByThisProcess)
+        {
+            var migrationOutcome = await MigrateManagedConfAsync(confState, connectionString, cancellationToken);
+
+            /* #4336: a bootstrap retry can land here on a Verified confState with no write result (Step B's
+               own null-return case, above) — nothing new to report, not a fact that the earlier attempt's
+               outcome is now unknown. Keep the prior non-null outcome rather than erasing it with null. */
+            if (migrationOutcome is not null || LastManagedConfVerification is null)
+            {
+                LastManagedConfVerification = migrationOutcome;
+            }
+        }
+
         return connectionString;
+    }
+
+    /// <summary>
+    /// Runs Step A, resumes a pending Step A, or re-verifies a hand-edited migrated conf — whichever
+    /// <paramref name="confState"/> calls for. <see
+    /// cref="ManagedConfMigrationState.Kind.Verified"/> does nothing here; Step B runs separately. Everything
+    /// is caught: a migration failure logs and reports, it never throws — the store this start already
+    /// brought up must not go down over a verification step.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private async Task<ManagedConfMigrationOutcome?> MigrateManagedConfAsync(
+        ManagedConfMigrationState.Kind confState, string connectionString, CancellationToken cancellationToken)
+    {
+        Func<CancellationToken, Task<IReadOnlyList<FileSettingRow>>> snapshot = async ct =>
+        {
+            await using var connection = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(MigrationSnapshotConnectionString(connectionString)));
+            await connection.OpenAsync(ct);
+            await using var command = new NpgsqlCommand(ManagedConfFileSettings.SnapshotSql, connection)
+            {
+                CommandTimeout = ServiceCommandDeadlines.CliStoreReadSeconds,
+            };
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            var rows = new List<FileSettingRow>();
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(new FileSettingRow(
+                    SourceFile: reader.IsDBNull(0) ? null : reader.GetString(0),
+                    SourceLine: reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                    Name: reader.IsDBNull(2) ? null : reader.GetString(2),
+                    Setting: reader.IsDBNull(3) ? null : reader.GetString(3),
+                    Applied: !reader.IsDBNull(4) && reader.GetBoolean(4),
+                    Error: reader.IsDBNull(5) ? null : reader.GetString(5)));
+            }
+
+            return rows;
+        };
+
+        try
+        {
+            ManagedConfMigrationOutcome outcome;
+            switch (confState)
+            {
+                case ManagedConfMigrationState.Kind.Legacy:
+                {
+                    var postgresMajor = DarlingStoreUpgrade.TryReadDataDirectoryMajor(_dataDirectory) ?? 0;
+                    var inputs = GatherManagedConfRenderInputs(_dataDirectory, postgresMajor);
+                    var derived = new Dictionary<string, string>(StringComparer.Ordinal);
+                    foreach (var (_, name, value) in ParseConfText(ManagedConfFile.RenderBody(inputs)))
+                    {
+                        derived[name] = value;
+                    }
+
+                    outcome = await ManagedConfMigrationRunner.RunStepA(
+                        _dataDirectory, snapshot, derived, inputs, _config.Port, DateTime.UtcNow, _logger, cancellationToken);
+                    break;
+                }
+
+                case ManagedConfMigrationState.Kind.PendingVerify:
+                {
+                    var backupPath = Directory.GetFiles(_dataDirectory, "postgresql.conf.pre-4215.*.bak");
+                    if (backupPath.Length == 0)
+                    {
+                        /* #4336: a PendingVerify conf with no backup has nothing this method can restore
+                           to — the migrated files stay exactly where the last attempt left them, unverified.
+                           Reporting Failed (not Unknown) so the store-settings alert actually fires; Unknown
+                           never fires it alone, and a stuck PendingVerify must not go silent forever. */
+                        _logger.LogWarning(
+                            "{DataDirectory} has a pending #4215 migration but no backup file — cannot resume; reporting Failed.",
+                            _dataDirectory);
+                        return new ManagedConfMigrationOutcome(
+                            ManagedConfVerificationStatus.Failed, Array.Empty<string>(), null, ManagedConfMigrationStep.A,
+                            "resume: no backup file found for a PendingVerify conf");
+                    }
+
+                    Array.Sort(backupPath, StringComparer.Ordinal);
+                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[0], cancellationToken, _logger);
+                    break;
+                }
+
+                case ManagedConfMigrationState.Kind.MigratedUnstamped:
+                {
+                    /* A hand edit of darling-managed.conf, or a crash inside Step B — those two cases look the
+                       same here: migrated, no pending file, stale stamp.
+                       Re-verify against what is on disk NOW: no new error row may come from darling-managed.conf
+                       relative to the file's own current bytes — the file itself is the ground truth once no
+                       pending snapshot survives to compare against. */
+                    var rows = await snapshot(cancellationToken);
+                    var managedConfPath = Path.Combine(_dataDirectory, ManagedConfFile.FileName);
+                    var newErrorFromManagedFile = false;
+                    var mismatchedKeys = new List<string>();
+                    foreach (var row in rows)
+                    {
+                        if (row.Error is not null && row.SourceFile is not null
+                            && string.Equals(Path.GetFileName(row.SourceFile), ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            newErrorFromManagedFile = true;
+                            if (row.Name is not null)
+                            {
+                                mismatchedKeys.Add(row.Name);
+                            }
+                        }
+                    }
+
+                    if (newErrorFromManagedFile)
+                    {
+                        outcome = new ManagedConfMigrationOutcome(
+                            ManagedConfVerificationStatus.Failed, mismatchedKeys, null, ManagedConfMigrationStep.A);
+                        break;
+                    }
+
+                    var managedConfText = File.Exists(managedConfPath) ? File.ReadAllText(managedConfPath) : string.Empty;
+                    ManagedConfMigrationSteps.WriteVerifiedStamp(_dataDirectory, managedConfText);
+                    _logger.LogWarning(
+                        "{Path} was changed outside the service; operator settings belong below the include in postgresql.conf, or in ALTER SYSTEM; the service re-renders this file.",
+                        managedConfPath);
+                    outcome = new ManagedConfMigrationOutcome(
+                        ManagedConfVerificationStatus.Verified, Array.Empty<string>(), null, ManagedConfMigrationStep.A);
+                    break;
+                }
+
+                case ManagedConfMigrationState.Kind.Verified:
+                {
+                    /* Step B: only when this start's own WriteManagedConfFile call actually
+                       wrote a new darling-managed.conf does it have a previous text and the RenderInputs to
+                       verify against; a start that found the same bytes already in force has nothing to do. */
+                    if (LastManagedConfWriteResult is not { Written: true, PreviousText: var previousText, Inputs: { } inputs })
+                    {
+                        return null;
+                    }
+
+                    var renderedText = LastManagedConfWriteResult.Value.RenderedText;
+                    var rows = await snapshot(cancellationToken);
+                    outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDirectory, rows, renderedText, previousText);
+
+                    var changes = ManagedConfMigrationRunner.DiffStepBChanges(previousText, renderedText);
+                    var managedConfPathB = Path.Combine(_dataDirectory, ManagedConfFile.FileName);
+                    if (outcome.Status == ManagedConfVerificationStatus.Verified)
+                    {
+                        _logger.LogInformation(
+                            "{Path} verified against pg_file_settings:\n{Changes}",
+                            managedConfPathB, ManagedConfMigrationRunner.FormatStepBChangeLog(changes, inputs));
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "{Path} failed verification against pg_file_settings for {Keys}; the previous verified file was restored.",
+                            managedConfPathB, string.Join(", ", outcome.MismatchedKeys));
+                    }
+
+                    break;
+                }
+
+                default:
+                    return null;
+            }
+
+            LogMigrationOutcome(outcome);
+
+            if (outcome.Status == ManagedConfVerificationStatus.Verified)
+            {
+                if (File.Exists(Path.Combine(_dataDirectory, ManagedConfFile.FileName)))
+                {
+                    SaveLastGoodManagedConf(_dataDirectory);
+                }
+            }
+
+            return outcome;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            var detail = FormattableString.Invariant($"outer: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogWarning(ex, "The #4215 conf migration failed for {DataDirectory}; the store keeps running on its current conf. {Detail}", _dataDirectory, detail);
+            var failedStep = confState == ManagedConfMigrationState.Kind.Verified
+                ? ManagedConfMigrationStep.B
+                : ManagedConfMigrationStep.A;
+            return new ManagedConfMigrationOutcome(
+                ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, failedStep, detail);
+        }
+    }
+
+    /// <summary>Logs a <see cref="MigrateManagedConfAsync"/> outcome once: Information for a
+    /// clean Verified, Warning for Failed or Unknown — naming the backup path and the mismatched keys so an
+    /// operator has somewhere to look.</summary>
+    [SupportedOSPlatform("windows")]
+    private void LogMigrationOutcome(ManagedConfMigrationOutcome outcome)
+    {
+        if (outcome.Status == ManagedConfVerificationStatus.Verified)
+        {
+            _logger.LogInformation(
+                "#4215 conf migration verified for {DataDirectory} (step {Step}).", _dataDirectory, outcome.Step);
+            return;
+        }
+
+        _logger.LogWarning(
+            "#4215 conf migration {Status} for {DataDirectory} (step {Step}); backup {BackupPath}; mismatched keys: {MismatchedKeys}; detail: {Detail}.",
+            outcome.Status, _dataDirectory, outcome.Step, outcome.BackupPath ?? "(none)", string.Join(", ", outcome.MismatchedKeys), outcome.Detail ?? "(none)");
     }
 
     /// <summary>
@@ -3363,6 +3658,241 @@ public sealed class DarlingManagedPostgres
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);
+    }
+
+    /* ===================== darling-managed.conf (#4215): the one service-owned settings file =====================
+       EnsureConfAppended above and its v1-v15 blocks run ONLY on a Legacy conf (ManagedConfMigrationState.Classify):
+       the blocks are appended when a postgresql.conf still carries them, or is missing the managed include.
+       ManagedConfMigrationRunner.Rewrite (#4336) then migrates that conf, post-start, dropping every block's own
+       line and adding the managed include — from the NEXT start on, darling-managed.conf is the only file that
+       carries these settings. */
+
+    /// <summary>
+    /// Gathers this host's current values for <see cref="ManagedConfFile.RenderInputs"/> — the SAME readers
+    /// v3/v5/v7/v8/v12/v13 already use above (<see cref="GetTotalPhysicalMemoryBytes"/>,
+    /// <see cref="TryGetAuthoritativePhysicalMemoryBytes"/>, <see cref="TryReadDataVolumeSpace"/>,
+    /// <see cref="TimescaleSupport.HypertableCount"/>, <see cref="ReadConfAssignments"/> for the preload list in
+    /// force), so a fresh render never disagrees with what those readers would have told the old blocks.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    private ManagedConfFile.RenderInputs GatherManagedConfRenderInputs(string dataDirectory, int postgresMajor)
+    {
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var ramBytes = GetTotalPhysicalMemoryBytes();
+        var ramAuthoritative = TryGetAuthoritativePhysicalMemoryBytes(out _);
+        var diskAuthoritative = TryReadDataVolumeSpace(dataDirectory, out var freeBytes, out var totalBytes);
+        var preloadChain = ReadConfAssignments(confPath, PreloadSetting);
+        var effectivePreload = preloadChain.Count == 0 ? null : preloadChain[^1].Value;
+
+        return new ManagedConfFile.RenderInputs(
+            ManagedConfFile.CurrentFormulaVersion,
+            "Windows",
+            ramBytes,
+            ramAuthoritative,
+            Environment.ProcessorCount,
+            TimescaleSupport.HypertableCount,
+            postgresMajor,
+            freeBytes,
+            totalBytes,
+            diskAuthoritative,
+            _config.Port,
+            effectivePreload);
+    }
+
+    /// <summary>
+    /// Test-only seam (#4215): when the CURRENT async flow sets this, <see
+    /// cref="WriteManagedConfFile"/> applies it to the freshly rendered text before hand-edit detection or
+    /// writing — so a live test can prove the rejected-value / last-good fallback path without depending on a
+    /// real bug to produce a bad render. <c>AsyncLocal</c>, not a plain static field: its value flows only with
+    /// the call stack that sets it (through every <c>await</c>), so a value one test's flow sets is invisible to
+    /// any other test's flow running concurrently on a different one — xunit parallelizes test classes by
+    /// default, and this class's own gated tests start real managed servers too. Internal, so only
+    /// <c>Darling.Tests</c> can reach it (<c>InternalsVisibleTo</c>) — nothing a config file sets ever touches
+    /// this; it is a delegate reference a unit test installs directly.
+    /// </summary>
+    internal static readonly AsyncLocal<Func<string, string>?> TestOnlyRenderOverride = new();
+
+    /// <summary>
+    /// Renders and, unless the file on disk is a hand edit (<see cref="ManagedConfFile.IsHandEdited"/>) or the
+    /// render is already byte-identical to it, replaces <c>darling-managed.conf</c>. Always
+    /// ensures the <c>include</c> line is present in <c>postgresql.conf</c> — there is no opt-out —
+    /// whichever branch it takes. Never throws: an I/O failure is reported in the result and the file already
+    /// in force stays in force, exactly like a failed <see cref="EnsureConfAppended"/> append would today.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal ManagedConfWriteResult WriteManagedConfFile(string dataDirectory, int postgresMajor)
+    {
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var inputs = GatherManagedConfRenderInputs(dataDirectory, postgresMajor);
+        var rendered = ManagedConfFile.Render(inputs);
+        var renderOverride = TestOnlyRenderOverride.Value;
+        if (renderOverride is not null)
+        {
+            rendered = renderOverride(rendered);
+        }
+
+        string? existingText = null;
+        try
+        {
+            if (File.Exists(managedPath))
+            {
+                existingText = File.ReadAllText(managedPath);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("Could not read {Path} ({Message}); writing a fresh one.", managedPath, ex.Message);
+        }
+
+        if (existingText is not null && ManagedConfFile.IsHandEdited(existingText))
+        {
+            var existingBody = ManagedConfFile.ParseExisting(existingText).Body;
+            var renderedBody = ManagedConfFile.ParseExisting(rendered).Body;
+            var diffs = ManagedConfFile.DiffBodyKeys(existingBody, renderedBody);
+            foreach (var diff in diffs)
+            {
+                _logger.LogWarning(
+                    "{Path} was hand-edited: {Key} = {FileValue} stays in force (a fresh render would write {RenderedValue}).",
+                    managedPath, diff.Key, diff.FileValue ?? "(absent)", diff.RenderedValue ?? "(absent)");
+            }
+
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: true, WriteFailed: false, rendered, diffs);
+        }
+
+        if (string.Equals(existingText, rendered, StringComparison.Ordinal))
+        {
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: false, WriteFailed: false, rendered, []);
+        }
+
+        if (!ManagedConfFile.TryReplaceAtomic(
+                managedPath, rendered, ManagedConfFile.DefaultMaxReplaceAttempts, ManagedConfFile.DefaultReplaceRetryDelay, out var writeError))
+        {
+            _logger.LogError(
+                writeError,
+                "Could not update {Path}; the file already in force stays in force.",
+                managedPath);
+            EnsureManagedIncludeLine(dataDirectory);
+            return new ManagedConfWriteResult(Written: false, HandEdited: false, WriteFailed: true, rendered, []);
+        }
+
+        _logger.LogInformation(
+            existingText is null ? "Wrote {Path}" : "Updated {Path}",
+            managedPath);
+        EnsureManagedIncludeLine(dataDirectory);
+        return new ManagedConfWriteResult(Written: true, HandEdited: false, WriteFailed: false, rendered, [], PreviousText: existingText, Inputs: inputs);
+    }
+
+    /// <summary>
+    /// Appends <see cref="ManagedConfFile.IncludeLine"/> to <c>postgresql.conf</c> when it is missing.
+    /// There is no opt-out, so an operator who removes it gets it back, with a warning, on the next start.
+    /// A present include in any form PostgreSQL itself would parse the same way
+    /// (<see cref="ManagedConfFile.HasManagedInclude"/>) is left exactly where it is — never moved, never
+    /// duplicated.
+    /// </summary>
+    internal void EnsureManagedIncludeLine(string dataDirectory)
+    {
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var conf = File.ReadAllText(confPath);
+        if (ManagedConfFile.HasManagedInclude(conf))
+        {
+            return;
+        }
+
+        File.AppendAllText(confPath, "\n" + ManagedConfFile.IncludeLine + "\n");
+        _logger.LogWarning(
+            "{ConfPath} had no include of {ManagedFile} — appended it back. There is no way to opt out of the managed settings file.",
+            confPath, ManagedConfFile.FileName);
+    }
+
+    /// <summary>
+    /// The <c>postgres -C</c> validation: parses every
+    /// configuration file this data directory's postgresql.conf reaches, <c>darling-managed.conf</c> included,
+    /// and exits without starting a postmaster. <c>-C</c> FIRST is load-bearing: PostgreSQL only skips its
+    /// "refuses to run as an administrator" check when <c>-C</c> is the very first argument, and this service
+    /// can run under LocalSystem or an admin domain account.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static async Task<(bool Valid, string Output)> ValidateManagedConfAsync(
+        string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var postgresExe = Path.Combine(binDirectory, "postgres.exe");
+        var (exitCode, output) = await RunToolAsync(
+            postgresExe, $"-C shared_buffers -D \"{dataDirectory}\"", s_confValidateTimeout, cancellationToken);
+        return (exitCode == 0, output);
+    }
+
+    /// <summary>
+    /// The recovery message for a rejected <c>darling-managed.conf</c>: names
+    /// the two ways an operator can fix a value the product's own formula got wrong for this host — a line
+    /// after the include in <c>postgresql.conf</c>, or <c>ALTER SYSTEM</c> once a store is running on it.
+    /// </summary>
+    internal static string BuildManagedConfValidationFailureMessage(string dataDirectory, string postgresOutput)
+        => $"{ManagedConfFile.FileName} in {dataDirectory} was rejected by postgres -C: {postgresOutput}\n" +
+           "Fix the rejected setting with a line after 'include ''darling-managed.conf''' in " +
+           $"{Path.Combine(dataDirectory, "postgresql.conf")}, or with ALTER SYSTEM once the store is running.";
+
+    /// <summary>
+    /// Everything <see cref="EnsureRunningAsync"/> needs before it can start a server on this data directory
+    /// (#4215): render/write the managed file, validate it, and fall back to the last file that started
+    /// cleanly rather than repeat a start failure forever. Runs
+    /// only on the service-owned start path — see the caller; the adopted-listener path never calls this.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal async Task EnsureManagedConfReadyAsync(string binDirectory, string dataDirectory, CancellationToken cancellationToken)
+    {
+        var postgresMajor = DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory) ?? 0;
+        LastManagedConfWriteResult = WriteManagedConfFile(dataDirectory, postgresMajor);
+        LastStartUsedLastGoodManagedConf = false;
+
+        var (valid, output) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
+        if (valid)
+        {
+            return;
+        }
+
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+        if (File.Exists(lastGoodPath))
+        {
+            File.Copy(lastGoodPath, managedPath, overwrite: true);
+            var (validAfterRestore, outputAfterRestore) = await ValidateManagedConfAsync(binDirectory, dataDirectory, cancellationToken);
+            if (validAfterRestore)
+            {
+                LastStartUsedLastGoodManagedConf = true;
+                _logger.LogError(
+                    "{Message} Restored {LastGood}, which still starts.",
+                    BuildManagedConfValidationFailureMessage(dataDirectory, output), lastGoodPath);
+                return;
+            }
+
+            throw new InvalidOperationException(BuildManagedConfValidationFailureMessage(dataDirectory, outputAfterRestore));
+        }
+
+        throw new InvalidOperationException(BuildManagedConfValidationFailureMessage(dataDirectory, output));
+    }
+
+    /// <summary>
+    /// Copies the file this start just proved PostgreSQL accepts to <see cref="ManagedConfFile.LastGoodFileName"/>
+    /// (design step 2), so the NEXT start has something to fall back to if a formula or a constant later
+    /// produces a value this runtime refuses. Never throws: a failed copy leaves the previous last-good file
+    /// (if any) exactly as it was, which is strictly better than crashing a start that just succeeded.
+    /// </summary>
+    internal void SaveLastGoodManagedConf(string dataDirectory)
+    {
+        var managedPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+        try
+        {
+            File.Copy(managedPath, lastGoodPath, overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not update {LastGood} after a successful start ({Message}). A future rejected render would have nothing to fall back to.",
+                lastGoodPath, ex.Message);
+        }
     }
 
     /// <summary>
