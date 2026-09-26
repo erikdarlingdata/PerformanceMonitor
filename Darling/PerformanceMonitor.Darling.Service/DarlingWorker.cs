@@ -1385,7 +1385,7 @@ public sealed class DarlingWorker : BackgroundService
 
             managedPostgres = new DarlingManagedPostgres(config.Postgres, _logger);
             /* #2936: the sharpest of the three sites, because the judgment already existed and was being
-               thrown away. EnsureDatabaseAsync inside this bootstrap classifies transient connection
+               thrown away. OpenProbedMaintenanceConnectionAsync inside this bootstrap classifies transient connection
                faults and retries 6 times 2 s apart — and when that runs out it throws, and this catch
                discarded the fact that the failure had been RULED transient. Re-classifying here is what
                makes that verdict mean something.
@@ -1759,8 +1759,8 @@ public sealed class DarlingWorker : BackgroundService
            spend MigrationLockWaitTimeoutSeconds — so the wall-clock budget is what stops 25 attempts from
            becoming ten hours, and the attempt count is what the warning line reports.
            A FRESH connection per attempt, not a reuse of the old one — its connector is dead after a
-           transport failure, the same reason DarlingManagedPostgres.EnsureDatabaseAsync retries the whole
-           unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
+           transport failure, the same reason DarlingManagedPostgres.OpenProbedMaintenanceConnectionAsync retries
+           the connect and its first query as one unit rather than just the open. Re-entering MigrateAsync is safe because the applier commits
            each rung's DDL and its darling_schema_version stamp in ONE transaction: a rung that failed
            part-way left nothing applied and nothing stamped, and rungs at or below the stamp are skipped,
            so a retry resumes at the rung that failed instead of redoing the ladder. That rests on the
@@ -9335,11 +9335,19 @@ LIMIT 1";
     /// The sentence is built first, because it reads the verdict that the second step can drop. Nothing here
     /// allocates on the way to null for a fault that is not a <see cref="PostgresException"/>, because the general
     /// handler is also the OutOfMemoryException landing pad.
+    ///
+    /// <para>#4251 round-1 review, M1: also drops a stale pg_file_settings verdict through
+    /// <see cref="DarlingCollectorRunner.ForgetStaleFileSettingsVerdict"/> — a no-op here in practice, since a
+    /// pg_server_config 42501 classifies PERMISSIONS and is caught before reaching this general handler (see
+    /// the other call at the PERMISSIONS arm below), but called anyway so this stays the one place every
+    /// stale-verdict check for a fault this handler sees is reached from, the same way the read-binary-file
+    /// one already is.</para>
     /// </summary>
     internal static string? LogTailGeneralFault(Exception ex, string collectorName, ServerRuntime runtime)
     {
         var explanation = LogTailUndecodableByteExplanation(ex, collectorName, runtime);
         DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
+        DarlingCollectorRunner.ForgetStaleFileSettingsVerdict(collectorName, ex, runtime);
         return explanation;
     }
 
@@ -10258,6 +10266,13 @@ LIMIT 1";
             /* #4051 review L1: a 42501 while the binary route is in use means that grant is gone, so the
                cached verdict must not outlive it by up to an hour. */
             DarlingCollectorRunner.ForgetStaleReadBinaryFileVerdict(collectorName, ex, runtime);
+
+            /* #4251 round-1 review, M1: the real landing spot for a pg_server_config 42501 — PostgresFaultOutcome
+               classifies SqlState 42501 PERMISSIONS for every collector (PostgresTargetProvider.Classify), so
+               this fault never reaches the general catch below, and a call only in LogTailGeneralFault would
+               never fire for it. Dropping the stale verdict here is what lets the next cycle re-probe instead
+               of losing the whole pg_settings snapshot until the hour runs out. */
+            DarlingCollectorRunner.ForgetStaleFileSettingsVerdict(collectorName, ex, runtime);
 
             if (status == "YIELDED")
             {
