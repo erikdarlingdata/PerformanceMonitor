@@ -6581,10 +6581,21 @@ AND   j.hypertable_name = '{relation}'";
     /// own oldest row, not merely the legacy's boundary, so an operator who runs it closes a pre-upgrade hole
     /// the automatic gate can only detect from raw's current floor, not resurrect from below it.</para>
     ///
-    /// <para><b>Source filter for 0-interval rows.</b> For <c>query_stats</c> and <c>procedure_stats</c> the
-    /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude
-    /// first-pass rows the successors themselves never materialize — without this, a single 0-interval row
-    /// older than any successor bucket holds the gate open permanently even after the stitch fix.</para>
+    /// <para><b>Source filter for 0-interval rows, now PER SLOT (#4300, #4423).</b> Each coverage slot gets its
+    /// own filtered floor, <c>source_oldest_i</c>, built from that slot's OWN CREATE — the same
+    /// <see cref="MaterializationHoleSourceFilterFor"/> lookup the hole probe already uses, over
+    /// <see cref="HourlyAggregates"/>, <see cref="DailyAggregates"/>, <see cref="FrozenRollupAggregates"/> and
+    /// <see cref="BaselineAggregates"/> — rather than one shared <c>source_oldest</c> filtered only for
+    /// <c>query_stats</c>/<c>procedure_stats</c>. A slot whose CreateSql has no <c>WHERE</c> of its own (or is
+    /// not found in any of the four lists) falls back to <see cref="IntervalHonestSourceFilter"/> exactly as
+    /// before. This matters because #4423 gave <c>query_stats</c> a SECOND consumer
+    /// (<c>query_stats_db_interval_hourly</c>) with a DIFFERENT row filter than the query-grain successor's — a
+    /// single shared <c>source_oldest</c> could only apply one filter, so a CPU-unknown row that the db-grain
+    /// rollup's own filter admits but the query-grain rollup's filter rejects (or vice versa) could pin one
+    /// slot's floor to a row the OTHER slot's rollup will never materialize, holding that slot Short forever
+    /// even once its own rollup is fully caught up. The FIRST, unfiltered <c>source_oldest</c> column stays for
+    /// the "nothing in the source" empty-store check, which must see every row regardless of any slot's
+    /// filter.</para>
     ///
     /// <para><b>The raw purge never runs by itself (#4299, variant d′).</b> A Covered verdict from this SQL
     /// no longer arms TimescaleDB's own scheduler for the three raw jobs (<see cref="RawRelations"/>) —
@@ -6609,13 +6620,28 @@ AND   j.hypertable_name = '{relation}'";
             throw new ArgumentNullException(nameof(coverageRelations));
         }
 
-        /* Source filter: the interval-honest successors for query_stats and procedure_stats bake
-           IntervalHonestSourceFilter into their CREATE. A 0-interval row in raw that pre-dates every
-           materialized bucket would hold the gate forever even with stitching, so we apply the same
-           filter to source_oldest. query_store_stats has no such filter in its hourly CREATE. */
-        var sourceWhere = relation is "query_stats" or "procedure_stats"
-            ? $"\nWHERE {IntervalHonestSourceFilter}"
-            : string.Empty;
+        /* The FIRST column stays one shared, unfiltered source_oldest — the empty-store check
+           (MeasureRetentionCoverageAsync reads column 0 only for that) must see every row regardless of
+           any slot's own filter. */
+        var sourceOldest = $"(SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest";
+
+        /* Per-slot source filter (#4300, #4423): look the slot's OWN CreateSql up across all four
+           aggregate lists and reuse the same WHERE-clause extraction the hole probe already trusts
+           (MaterializationHoleSourceFilterFor). Fall back to IntervalHonestSourceFilter, exactly as
+           before, only when the lookup finds nothing or the CreateSql carries no WHERE of its own —
+           today that is every relation other than query_stats/procedure_stats's successors. This is what
+           lets query_stats's TWO #4423 consumers (the query-grain successor and
+           query_stats_db_interval_hourly) each pin their own floor: a shared filter could only honor one
+           of them, so a CPU-unknown row one filter admits and the other rejects could hold a slot Short
+           against a row its own rollup will never materialize. */
+        string SlotSourceFilterFor(string coverageRelation)
+        {
+            var createSql = HourlyAggregates.Concat(DailyAggregates).Concat(FrozenRollupAggregates).Concat(BaselineAggregates)
+                .FirstOrDefault(a => string.Equals(a.View, coverageRelation, StringComparison.Ordinal)).CreateSql;
+
+            var filter = createSql is null ? string.Empty : MaterializationHoleSourceFilterFor(createSql);
+            return filter.Length == 0 ? IntervalHonestSourceFilter : filter;
+        }
 
         /* Coverage SQL: for a coverage relation that is an interval-honest successor, stitch it with
            its frozen legacy so an empty successor on an upgrading store falls back to the legacy's
@@ -6670,10 +6696,12 @@ AND   j.hypertable_name = '{relation}'";
                 + $"     FROM (SELECT min(bucket) AS mn, max(bucket) AS mx FROM collect.{legacy}) l{Environment.NewLine}"
                 + $"     CROSS JOIN (SELECT min(bucket) AS mn FROM collect.{c}) s)"
                 : $"(SELECT min(bucket) FROM collect.{c})";
-            return $"    {subquery} AS coverage_oldest_{i}";
+            var slotFilter = SlotSourceFilterFor(c);
+            var slotSourceOldest = $"    (SELECT min({sourceTimeColumn}) FROM collect.{relation} WHERE {slotFilter}) AS source_oldest_{i}";
+            return $"{slotSourceOldest},{Environment.NewLine}    {subquery} AS coverage_oldest_{i}";
         });
 
-        return $"SELECT{Environment.NewLine}    (SELECT min({sourceTimeColumn}) FROM collect.{relation}{sourceWhere}) AS source_oldest,{Environment.NewLine}"
+        return $"SELECT{Environment.NewLine}    {sourceOldest},{Environment.NewLine}"
             + string.Join("," + Environment.NewLine, columns);
     }
 
@@ -6922,19 +6950,34 @@ AND   j.hypertable_name = '{relation}'";
                 return (RetentionCoverage.Covered, null);
             }
 
-            var sourceOldest = reader.GetDateTime(0);
+            /* Column 0 is the shared, unfiltered source_oldest (the empty-store check above). From column
+               1 the shape is pairs — (source_oldest_i, coverage_oldest_i) — one pair per coverage relation,
+               #4300/#4423's per-slot floor: each slot is judged against its OWN filtered source row, not
+               the one shared column every slot used to share. */
             for (var i = 0; i < coverageRelations.Count; i++)
             {
+                var sourceOldestColumn = 1 + (i * 2);
+                var coverageOldestColumn = sourceOldestColumn + 1;
+
+                /* This slot's own filter admits no source rows — nothing for its rollup to be short
+                   against, so the slot is Covered regardless of what its coverage column holds. */
+                if (await reader.IsDBNullAsync(sourceOldestColumn, cancellationToken))
+                {
+                    continue;
+                }
+
+                var slotSourceOldest = reader.GetDateTime(sourceOldestColumn);
+
                 /* Source has data but THIS coverage tier is empty - arming would drop history it never
                    materialized, whatever the other tiers hold. An empty consumer is a MEASUREMENT and not an
                    unknown: the relation exists and answered with no rows, which is precisely the state a
                    newly-added consumer is born in on an upgrading store (#1877). */
-                if (await reader.IsDBNullAsync(i + 1, cancellationToken))
+                if (await reader.IsDBNullAsync(coverageOldestColumn, cancellationToken))
                 {
                     return (RetentionCoverage.Short, coverageRelations[i]);
                 }
 
-                if (reader.GetDateTime(i + 1) > sourceOldest)
+                if (reader.GetDateTime(coverageOldestColumn) > slotSourceOldest)
                 {
                     return (RetentionCoverage.Short, coverageRelations[i]);
                 }
