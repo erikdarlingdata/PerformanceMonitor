@@ -44,17 +44,11 @@ public static class PgStatementText
     /// The shared filter (#4348): a statement <see cref="PgSensitiveStatementFilter.SensitiveStatementPattern"/>
     /// names is withheld before it ever reaches the upsert, replaced with
     /// <see cref="PgSensitiveStatementFilter.PlaceholderText"/> in the fetch itself
-    /// (<see cref="AuroraFetchSql"/>/<see cref="VanillaFetchSql"/>). <c>queryid</c> and every stats row this
-    /// text is keyed to are unaffected; only the text column changes. Single quotes in the pattern (it matches
-    /// a quote character in the target's SQL) are doubled for SQL literal syntax, same rule as
-    /// <c>StoreStatementStats.QuoteLiteral</c> applies for its own copy.
+    /// (<see cref="AuroraFetchSql"/>/<see cref="VanillaFetchSql"/>) via <see cref="PgSensitiveStatementFilter.SqlPredicate"/>.
+    /// <c>queryid</c> and every stats row this text is keyed to are unaffected; only the text column changes.
     /// </summary>
-    private static string SqlLiteral(string value) => "'" + value.Replace("'", "''", System.StringComparison.Ordinal) + "'";
-
     private static readonly string SensitiveTextCase =
-        "CASE WHEN query_text ~* " + SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) +
-        " THEN " + SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) +
-        " ELSE query_text END AS query_text";
+        PgSensitiveStatementFilter.SqlPredicate("query_text") + " AS query_text";
 
     /// <summary>The table. Not a hypertable: one row per statement per server, near-static once a workload is
     /// warm, so it is dimension-shaped and pruned on <see cref="LastSeenColumn"/> rather than by drop_chunks.</summary>

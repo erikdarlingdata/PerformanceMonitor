@@ -106,14 +106,10 @@ public sealed class PgBlockingCollector : PostgresCollectorDefinitionBase<PgBloc
     /// The same shared filter <c>PgStatementText</c> applies to a monitored target's statement text (#4348):
     /// <see cref="PgSensitiveStatementFilter.SensitiveStatementPattern"/> withholds a statement whose text can
     /// carry a credential, replacing it with <see cref="PgSensitiveStatementFilter.PlaceholderText"/> before it
-    /// ever leaves the target. Every other column (pid, state, durations) is unaffected.
+    /// ever leaves the target, via <see cref="PgSensitiveStatementFilter.SqlPredicate"/>. Every other column
+    /// (pid, state, durations) is unaffected.
     /// </summary>
-    private static string SensitiveTextCase(string column) =>
-        "CASE WHEN " + column + " ~* " + SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) +
-        " THEN " + SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) +
-        " ELSE " + column + " END";
-
-    private static string SqlLiteral(string value) => "'" + value.Replace("'", "''", System.StringComparison.Ordinal) + "'";
+    private static string SensitiveTextCase(string column) => PgSensitiveStatementFilter.SqlPredicate(column);
 
     private static readonly string QueryText = @"
 WITH activity AS

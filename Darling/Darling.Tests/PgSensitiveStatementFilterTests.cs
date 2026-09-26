@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -28,12 +29,15 @@ public sealed class PgSensitiveStatementFilterTests
 {
     /// <summary>
     /// One definition in the whole repo. Every occurrence of the pattern's opening token
-    /// (<c>[[:&lt;:]]password[[:&gt;:]]</c>) must be the ONE declaration in <see cref="PgSensitiveStatementFilter"/>
-    /// — a second literal copy anywhere else is exactly the drift #4348 exists to prevent.
+    /// (<c>[[:&lt;:]](create|alter)</c>) must be the ONE declaration in <see cref="PgSensitiveStatementFilter"/>
+    /// — a second literal copy anywhere else is exactly the drift #4348 exists to prevent. The needle itself
+    /// necessarily also appears in THIS file's source (as the string literal below), so that one occurrence
+    /// is excluded by file identity rather than counted as a second definition.
     /// </summary>
     [Fact]
     public void ThePatternHasExactlyOneDefinitionInTheRepo()
     {
+        var selfFileFull = ThisFile();
         var repoRoot = FindRepoRoot();
         var needle = "[[:<:]](create|alter)";
         var hits = 0;
@@ -43,6 +47,14 @@ public sealed class PgSensitiveStatementFilterTests
         {
             if (file.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
                 file.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            // This test file itself contains the needle above (as this very string literal) — a census
+            // hit on the test's own source is not a second definition, so it is excluded deliberately,
+            // by CallerFilePath rather than a name check.
+            if (Path.GetFullPath(file) == selfFileFull)
             {
                 continue;
             }
@@ -78,10 +90,10 @@ public sealed class PgSensitiveStatementFilterTests
     [Fact]
     public void PgStatementText_FetchSql_ReferencesTheSharedFilter()
     {
-        Assert.Contains(PgSensitiveStatementFilter.SensitiveStatementPattern, PerformanceMonitor.Darling.Storage.PgStatementText.AuroraFetchSql, StringComparison.Ordinal);
-        Assert.Contains(PgSensitiveStatementFilter.PlaceholderText, PerformanceMonitor.Darling.Storage.PgStatementText.AuroraFetchSql, StringComparison.Ordinal);
-        Assert.Contains(PgSensitiveStatementFilter.SensitiveStatementPattern, PerformanceMonitor.Darling.Storage.PgStatementText.VanillaFetchSql, StringComparison.Ordinal);
-        Assert.Contains(PgSensitiveStatementFilter.PlaceholderText, PerformanceMonitor.Darling.Storage.PgStatementText.VanillaFetchSql, StringComparison.Ordinal);
+        var predicate = PgSensitiveStatementFilter.SqlPredicate("query_text");
+
+        Assert.Contains(predicate, PerformanceMonitor.Darling.Storage.PgStatementText.AuroraFetchSql, StringComparison.Ordinal);
+        Assert.Contains(predicate, PerformanceMonitor.Darling.Storage.PgStatementText.VanillaFetchSql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -100,8 +112,8 @@ public sealed class PgSensitiveStatementFilterTests
         };
         var query = PgBlockingCollector.Instance.BuildQuery(context).Text;
 
-        Assert.Contains(PgSensitiveStatementFilter.SensitiveStatementPattern, query, StringComparison.Ordinal);
-        Assert.Contains(PgSensitiveStatementFilter.PlaceholderText, query, StringComparison.Ordinal);
+        Assert.Contains(PgSensitiveStatementFilter.SqlPredicate("blocked.query"), query, StringComparison.Ordinal);
+        Assert.Contains(PgSensitiveStatementFilter.SqlPredicate("blocker.query"), query, StringComparison.Ordinal);
         Assert.Equal(2, CountOccurrences(query, PgSensitiveStatementFilter.PlaceholderText));
     }
 
@@ -117,6 +129,10 @@ public sealed class PgSensitiveStatementFilterTests
 
         return count;
     }
+
+    /// <summary>This test file's own full path, so the census below can exclude the needle's literal
+    /// occurrence in this very source file without naming the file by string.</summary>
+    private static string ThisFile([CallerFilePath] string thisFile = "") => Path.GetFullPath(thisFile);
 
     private static string FindRepoRoot()
     {

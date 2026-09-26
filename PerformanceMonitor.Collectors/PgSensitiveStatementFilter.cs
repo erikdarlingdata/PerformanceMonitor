@@ -32,18 +32,14 @@ public static class PgSensitiveStatementFilter
 
     /// <summary>
     /// The statements whose text can carry a credential, as a case-insensitive PostgreSQL regular expression:
-    /// a <c>PASSWORD</c> keyword followed by a literal (covers role, user and group DDL's <c>PASSWORD</c>
+    /// any <c>CREATE</c> or <c>ALTER</c> of a role, user, group, subscription or server — withheld by name
+    /// alone, whether or not that particular statement happens to carry a literal, because subscription and
+    /// foreign-server DDL can carry a connection string in options other than a trailing literal — a
+    /// <c>PASSWORD</c> keyword followed by a literal (covers role, user and group DDL's <c>PASSWORD</c>
     /// clause, and <c>CREATE/ALTER USER MAPPING</c>'s password option, since both always end in the literal),
     /// a libpq <c>password=</c> or <c>PGPASSWORD=</c> setting (covers a connection string wherever it appears —
     /// subscription DDL, foreign server DDL, <c>dblink</c>), and a URI's <c>user:secret@</c>, with comments
     /// allowed wherever the grammar allows whitespace.
-    ///
-    /// <para><b>No blanket DDL-name alternative, on purpose.</b> An earlier version also matched
-    /// <c>CREATE|ALTER ROLE|USER|GROUP|SUBSCRIPTION|SERVER</c> by name alone, meaning to catch every form of
-    /// each DDL statement; in practice it flagged forms that carry no credential at all (<c>ALTER ROLE app
-    /// SET work_mem = '64MB'</c>) while adding nothing the literal-following alternatives below did not
-    /// already catch (every credential-bearing form of that DDL ends in a literal). Removed rather than
-    /// carried forward.</para>
     ///
     /// <para><b>No backslash, on purpose.</b> <c>[[:&lt;:]]</c>, <c>[[:&gt;:]]</c>, <c>[[:space:]]</c>,
     /// <c>[*]</c> and <c>[$]</c> spell what a first version wrote with backslash escapes, so the literal means
@@ -60,4 +56,23 @@ public static class PgSensitiveStatementFilter
     /// names, in place of its text. Fixed, so a reader never has to distinguish "withheld" from "not captured
     /// yet" by anything other than this literal.</summary>
     public const string PlaceholderText = "-- statement text withheld (#4348)";
+
+    /// <summary>
+    /// A value as a single-quoted SQL string literal, with its own quote characters doubled — the one rule
+    /// every caller applies to <see cref="SensitiveStatementPattern"/> and <see cref="PlaceholderText"/>
+    /// before either reaches a query, so a test asserting on the built SQL and a collector building it agree
+    /// on the same doubled form rather than each re-deriving it.
+    /// </summary>
+    public static string SqlLiteral(string value) => "'" + value.Replace("'", "''", System.StringComparison.Ordinal) + "'";
+
+    /// <summary>
+    /// The <c>CASE WHEN ... ~* pattern THEN placeholder ELSE column END</c> expression that withholds
+    /// <paramref name="column"/>'s text when <see cref="SensitiveStatementPattern"/> names it, built once here
+    /// so <c>PgStatementText</c> and <c>PgBlockingCollector</c> embed the identical expression rather than each
+    /// composing their own copy.
+    /// </summary>
+    public static string SqlPredicate(string column) =>
+        "CASE WHEN " + column + " ~* " + SqlLiteral(SensitiveStatementPattern) +
+        " THEN " + SqlLiteral(PlaceholderText) +
+        " ELSE " + column + " END";
 }
