@@ -1243,7 +1243,7 @@ public static class DarlingRetention
     /// <c>false</c> (true plain PostgreSQL, no extension row) leaves the DELETE fallback below byte-identical
     /// to how it always ran.</para>
     /// </summary>
-    private static async Task<bool> ProbeRawSkipSafeAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+    internal static async Task<bool> ProbeRawSkipSafeAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
     {
         try
         {

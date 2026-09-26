@@ -8,6 +8,7 @@
 
 using System;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Darling.Service;
@@ -218,6 +219,15 @@ FROM generate_series(24, 240) AS n", connection) { CommandTimeout = SetupTimeout
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
 
+        /* This rig's template1 (and so every scratch database created from it) may already carry the
+           timescaledb extension row. The probe this pin exists to test decides the skip on pg_extension
+           alone, so \"plain PostgreSQL\" here must mean the extension really is absent, or the probe would
+           see it and skip the raw relation — the opposite of what this pin means to prove. */
+        await using (var dropExtension = new NpgsqlCommand("DROP EXTENSION IF EXISTS timescaledb", connection) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            await dropExtension.ExecuteNonQueryAsync(ct);
+        }
+
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
         var bodySucceeded = false;
         try
@@ -339,5 +349,132 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
     {
         _ = postgres;
         return await TimescaleSupport.IsRawTierDropSafeAsync(sharedConnection, Raw, default);
+    }
+
+    /// <summary>
+    /// Pin 4: a stale <c>timescaleAvailable</c> latch cannot reopen the drop path for the three raw
+    /// relations. On a store WITH the extension present, the same interior-hole seed as
+    /// <see cref="InteriorHole_SurvivesSweep_RawTableLeavesDropPath"/> must still hold the hole's rows even
+    /// when the caller passes <c>timescaleAvailable: false</c> — the skip is decided on the live
+    /// <c>pg_extension</c> probe (<see cref="DarlingRetention.ProbeRawSkipSafeAsync"/>), never on the
+    /// worker's latch argument.
+    /// </summary>
+    [Fact]
+    public async Task StaleTimescaleAvailableLatch_DoesNotReopenDropPath()
+    {
+        var (connection, scratch) = await OpenTimescaleAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await ArmRawJobAsync(connection, Raw);
+            await SeedRawAsync(connection);
+
+            var seedFrom = TimescaleSupport.AlignDown(DateTime.UtcNow.AddDays(-11), TimeSpan.FromHours(1));
+            var seedTo = TimescaleSupport.AlignDown(DateTime.UtcNow, TimeSpan.FromHours(1));
+            var holeStart = TimescaleSupport.AlignDown(DateTime.UtcNow.AddDays(-6), TimeSpan.FromHours(1));
+            var holeEnd = TimescaleSupport.AlignDown(DateTime.UtcNow.AddDays(-5), TimeSpan.FromHours(1));
+
+            await RefreshSuccessorsWithInteriorHoleAsync(connection, seedFrom, seedTo, holeStart, holeEnd);
+
+            var holeRowsBefore = await HoleRowCountAsync(connection, holeStart, holeEnd);
+            Assert.True(holeRowsBefore > 0, "the hole window must hold seeded rows, or this pin proves nothing");
+
+            var chunksBefore = await ChunkCountAsync(connection);
+            Assert.True(chunksBefore > 0, "the seed must have produced at least one raw chunk, or this pin proves nothing");
+
+            await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            /* THE PIN: timescaleAvailable is false here, matching a stale worker latch, but the extension is
+               present in this store — the probe must still skip the raw relations, so the hole's rows and
+               chunk survive exactly as they do when timescaleAvailable is true. */
+            var summary = await DarlingRetention.PurgeAsync(
+                postgres, timescaleAvailable: false, new CapturingTestLogger(), default, retentionDaysFor: _ => 1);
+            _ = summary;
+
+            var chunksAfter = await ChunkCountAsync(connection);
+            var holeRowsAfter = await HoleRowCountAsync(connection, holeStart, holeEnd);
+
+            Assert.Equal(holeRowsBefore, holeRowsAfter);
+            Assert.Equal(chunksBefore, chunksAfter);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
+            });
+            await connection.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// Pin 5: when the live probe itself cannot answer (a connection failure, not an absent extension), the
+    /// probe fails toward keeping rows — it returns <c>true</c> — and logs exactly one Warning rather than
+    /// throwing or logging once per raw table.
+    /// </summary>
+    [Fact]
+    public async Task ProbeRawSkipSafe_ConnectionFailure_KeepsRowsAndLogsOnce()
+    {
+        /* Port 1 is never listening — a connection attempt there fails fast without touching any real
+           server, live or otherwise. */
+        await using var unreachable = NpgsqlDataSource.Create("Host=localhost;Port=1;Timeout=2");
+        var logger = new CapturingTestLogger();
+
+        var skipSafe = await DarlingRetention.ProbeRawSkipSafeAsync(unreachable, logger, default);
+
+        Assert.True(skipSafe, "a probe that cannot answer must fail toward keeping rows (true), not toward deleting on a guess");
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+    }
+
+    /// <summary>
+    /// Pin 6: <c>purge_now</c>'s raw-table report never claims a PREVIOUS pass's stored outcome as this
+    /// pass's own. A <c>ran</c> record written before <paramref name="passStartUtc"/> parameter (below) must
+    /// report <c>gate_unknown</c> with a note saying no outcome was recorded for this pass, driven through
+    /// the same server-side writer (<see cref="TimescaleSupport.RecordRawLastPurgeOutcomeAsync"/>) the
+    /// trigger itself uses, so the store's shape is real.
+    /// </summary>
+    [Fact]
+    public async Task PurgeNow_RawTableReport_StaleOutcome_ReportsGateUnknown()
+    {
+        var (connection, scratch) = await OpenTimescaleAsync();
+        var bodySucceeded = false;
+        try
+        {
+            await ArmRawJobAsync(connection, Raw);
+
+            /* Write a 'ran' outcome for the raw relation right now, on the same connection the trigger
+               would use — the real record shape, not a hand-built JSON string. */
+            await TimescaleSupport.RecordRawLastPurgeOutcomeAsync(connection, Raw, "ran", null, 5, null, default);
+
+            /* passStartUtc reads AFTER the record above was written, so the record is unambiguously from a
+               pass that predates this one — the exact shape BuildRawTablePurgeNowReportAsync must catch. */
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+            var passStartUtc = DateTime.UtcNow;
+
+            var report = await DarlingWorker.BuildRawTablePurgeNowReportAsync(connection, customRetentionDays: null, passStartUtc, null, default);
+
+            var rawEntry = Assert.Single(report, entry => (string)entry.GetType().GetProperty("relation")!.GetValue(entry)! == Raw);
+            var outcome = (string)rawEntry.GetType().GetProperty("outcome")!.GetValue(rawEntry)!;
+            var note = (string)rawEntry.GetType().GetProperty("note")!.GetValue(rawEntry)!;
+
+            /* THE PIN: a real, freshly-written 'ran' record exists, but it predates passStartUtc, so it must
+               not be reported as this pass's outcome. */
+            Assert.Equal("gate_unknown", outcome);
+            Assert.Contains("no outcome was recorded for this pass", note, StringComparison.OrdinalIgnoreCase);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
+            });
+            await connection.DisposeAsync();
+        }
     }
 }
