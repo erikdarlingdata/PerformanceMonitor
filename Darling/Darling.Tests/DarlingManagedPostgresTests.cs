@@ -2885,10 +2885,10 @@ public sealed class DarlingManagedPostgresTests
             /* v4 write throughput and v5 co-located sizing: no live check of these specific values exists in
                this test, so their settings move to darling-managed.conf rather than being dropped. */
             Assert.True(
-                managedConf.Contains("max_connections = 200", StringComparison.Ordinal),
+                managedConf.Contains("max_connections = '200'", StringComparison.Ordinal),
                 $"darling-managed.conf should carry max_connections. {migrationDiagnostics}");
             Assert.True(
-                managedConf.Contains("max_wal_size = 4GB", StringComparison.Ordinal),
+                managedConf.Contains("max_wal_size = '4GB'", StringComparison.Ordinal),
                 $"darling-managed.conf should carry max_wal_size. {migrationDiagnostics}");
 
             /* v6 log rotation: the logging collector is live, proven by the weekday ring file it creates
