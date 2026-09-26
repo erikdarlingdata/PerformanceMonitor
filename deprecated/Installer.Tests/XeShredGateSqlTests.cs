@@ -52,6 +52,7 @@ public class XeShredGateSqlTests
         var sql = CollectorSql("03_create_config_tables.sql");
 
         Assert.Contains("config.xe_shred_state", sql, StringComparison.Ordinal);
+        Assert.Contains("IF OBJECT_ID(N'config.xe_shred_state', N'U') IS NULL", sql, StringComparison.Ordinal);
         Assert.Contains("last_execution_count bigint NOT NULL,", sql, StringComparison.Ordinal);
         Assert.Contains("CONSTRAINT PK_xe_shred_state PRIMARY KEY CLUSTERED (collector_name)", sql, StringComparison.Ordinal);
     }
@@ -78,6 +79,11 @@ public class XeShredGateSqlTests
            instance per branch, so the shred is skippable regardless of platform. */
         var gateInstances = System.Text.RegularExpressions.Regex.Matches(sql, "IF @shred_needed = 1").Count;
         Assert.Equal(2, gateInstances);
+
+        /* A MISSING state row (no prior cycle recorded for this collector) must mean a full read, not
+           "nothing new" — the WHEN branch below is what makes the gate fail open on the first run and
+           after any row loss, instead of silently skipping real data. */
+        Assert.Contains("WHEN @last_execution_count IS NULL THEN 1", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -98,6 +104,10 @@ public class XeShredGateSqlTests
 
         var gateInstances = System.Text.RegularExpressions.Regex.Matches(sql, "IF @shred_needed = 1").Count;
         Assert.Equal(2, gateInstances);
+
+        /* Same fail-open requirement as the blocked-process collector: a missing row means "shred
+           everything", never "nothing new". */
+        Assert.Contains("WHEN @last_execution_count IS NULL THEN 1", sql, StringComparison.Ordinal);
     }
 
     /// <summary>

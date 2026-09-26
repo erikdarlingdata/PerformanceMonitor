@@ -372,6 +372,9 @@ BEGIN
                 ring_buffer xml NOT NULL
             );
 
+            DECLARE
+                @shred_needed bit = 1;
+
             /* #4213: read BEFORE the cast -- no XML materialized, so this costs one integer whether
                or not anything shreds below. Compared against @last_execution_count (this collector''s
                prior cycle, from config.xe_shred_state): an exact match means nothing has arrived since
@@ -446,6 +449,9 @@ BEGIN
             (
                 ring_buffer xml NOT NULL
             );
+
+            DECLARE
+                @shred_needed bit = 1;
 
             /* #4213: see the Azure branch''s twin comment above -- same gate, server-scoped session. */
             SELECT
