@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -34,9 +35,10 @@ public sealed class DarlingMcpPgLogEventTools
         [Description("One family to return: error, connection, lock_wait, temp_file, autovacuum, checkpoint. Omit for every family.")] string? family = null,
         [Description("Lowest severity to return, by seriousness: LOG, INFO, NOTICE, WARNING, ERROR, FATAL, PANIC. Default LOG (everything). See the tool's reading guide.")] string? min_severity = null,
         [Description("Maximum events to return. Default 50. The page is truncated when the window holds more; total_events is the window's count.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -75,7 +77,7 @@ public sealed class DarlingMcpPgLogEventTools
                the cap (#3594). */
             var page = await DarlingPgLogEventReader.GetEventsAsync(
                 postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd,
-                familyFilter, minRank, limit + 1);
+                familyFilter, minRank, limit + 1, cancellationToken);
 
             if (page.Rows.Count == 0)
             {
@@ -86,9 +88,9 @@ public sealed class DarlingMcpPgLogEventTools
                    names the settings a family depends on, because an all-off target is the likeliest
                    reason a log has nothing for a family and nothing else on this surface says so. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_log_events")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_log_events", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_log_events")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_log_events", cancellationToken)
                     ?? McpHelpers.Status(
                         "no_events",
                         $"No log event{(familyFilter is null ? string.Empty : $" in family '{familyFilter}'")}"
@@ -170,7 +172,7 @@ public sealed class DarlingMcpPgLogEventTools
                 }),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_log_events", ex);
         }
