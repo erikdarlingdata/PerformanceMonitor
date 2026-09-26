@@ -119,19 +119,30 @@ public sealed class ManagedConfMigrationTests
         Assert.Equal(HandEditReason.OutsideBlock, lines[0].Reason);
     }
 
-    /// <summary>Uncovered block versions (v1-v12) must never classify as Ours — a caller has to treat
-    /// <see cref="ConfLineClassification.Unclassified"/> as a hand edit until coverage is added.</summary>
+    /// <summary>An uncovered block version must never classify as Ours — a caller has to treat
+    /// <see cref="ConfLineClassification.Unclassified"/> as a hand edit until coverage is added. #4336 lane
+    /// rehearsal (CI on 9174da32): v8 is now in <see cref="CoveredMarkers"/> (#4336 lanes c2b/c2c covered every
+    /// marker), so a real v8 marker no longer proves this — a SYNTHETIC marker string that
+    /// <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> also does not carry (never built by any real
+    /// version, past or future) is what actually exercises the "uncovered marker" path
+    /// (<c>ClassifyLines</c>'s <c>FindUncoveredMarkerLines</c>/<c>IsInsideAnyManagedSpan</c> fall-through), and
+    /// it classifies HandEdit—OutsideBlock rather than Unclassified, because it is not even in
+    /// <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> at all — <see cref="ConfLineClassification.Unclassified"/>
+    /// is reserved for a marker THIS repo has ever shipped that the classifier merely doesn't cover yet, which is
+    /// not a case this test can construct against a synthetic marker without editing the marker list itself.
+    /// Either way the assertion this test exists for — never Ours — holds.</summary>
     [Fact]
     public void ClassifyLines_UncoveredBlockVersion_IsUnclassified_NeverOurs()
     {
-        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV8 + "\neffective_cache_size = 512MB\n";
+        const string fakeMarker = "# Managed by PerformanceMonitor Darling (v99 does not exist) -- do not remove this block";
+        var conf = "\n" + fakeMarker + "\neffective_cache_size = 512MB\n";
         var lines = ClassifyLines(conf);
 
-        var marker = lines.First(l => l.Text == DarlingManagedPostgres.ConfMarkerV8);
+        var marker = lines.First(l => l.Text == fakeMarker);
         var content = FindByText(lines, "effective_cache_size");
 
-        Assert.Equal(ConfLineClassification.Unclassified, marker.Classification);
-        Assert.Equal(ConfLineClassification.Unclassified, content.Classification);
+        Assert.NotEqual(ConfLineClassification.Ours, marker.Classification);
+        Assert.NotEqual(ConfLineClassification.Ours, content.Classification);
     }
 
     /// <summary>Review M6's "older store": a store built before v14/v15 existed has no line for those keys

@@ -59,14 +59,22 @@ public sealed class ManagedConfRewriteTests
     }
 
     /// <summary>(b) An operator line for an owned key that a LATER line overrides is not effective — it
-    /// stays exactly where it is, and is not reported as excluded.</summary>
+    /// stays exactly where it is, and is not reported as excluded. #4336 lane rehearsal (CI on 9174da32):
+    /// the ORIGINAL version of this test used <see cref="DarlingManagedPostgres.BuildLegacyMaintenanceWorkMemCapConfAppend"/>
+    /// as the "later line", but that v14 block sets <c>maintenance_work_mem</c>, never <c>work_mem</c> —
+    /// so the operator's <c>work_mem = 70MB</c> WAS the last (and only) assignment of that key in the file,
+    /// correctly excluded by <c>Rewrite</c>. The test's premise was wrong, not the code. This version's
+    /// "later line" is v3's memory-sizing block at 8 GB RAM, which DOES derive <c>work_mem</c> (16MB, per
+    /// <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>'s clamp(RAM/512, 16MB, 64MB)) — matching
+    /// <see cref="ManagedValues"/>'s own 16MB so the log-suppression path ("this is a covered Ours line
+    /// restating the same derived value, not a genuine override") is exercised too, same as the rehearsal
+    /// fixture's v8-then-v8 case.</summary>
     [Fact]
     public void Rewrite_NonEffectiveOperatorLineForOwnedKey_StaysInPlace_NotExcluded()
     {
         var conf =
             "work_mem = 70MB\n" +
-            DarlingManagedPostgres.BuildLegacyMaintenanceWorkMemCapConfAppend() +
-            "work_mem = 32MB\n";
+            DarlingManagedPostgres.BuildMemorySizingConfAppend(8L * 1024 * 1024 * 1024);
 
         var result = Rewrite(conf, ManagedValues);
 
@@ -125,19 +133,46 @@ public sealed class ManagedConfRewriteTests
         Assert.Equal(1, result.NewConfText.Split('\n').Count(l => l == ManagedConfFile.IncludeLine));
     }
 
-    /// <summary>(f) A conf with no product blocks at all: only the include is appended, and nothing
-    /// moves.</summary>
+    /// <summary>(f) A conf with no product blocks at all and no line for an OWNED key: only the include is
+    /// appended, and nothing moves. #4336 lane rehearsal (CI on 9174da32): the ORIGINAL version of this test
+    /// used <c>max_connections = 300</c>, an owned key — under rule 3, an effective operator line for an
+    /// owned key moves below the include even with no product blocks present at all (there is nothing for
+    /// it to be overridden BY), so <c>Rewrite</c> correctly moved it and the test's "nothing moves" name and
+    /// assertion were wrong, not the code. This version uses only unowned keys
+    /// (<c>log_timezone</c>, an arbitrary <c>something_else</c>) so "nothing moves" actually holds; the
+    /// owned-key-with-no-product-blocks case is covered instead by (g)-adjacent coverage in
+    /// <see cref="Rewrite_EffectiveOperatorLineForOwnedKey_MovesBelowInclude_WithRealDerivedValueInLog"/>
+    /// (which does have a product block) — the design's rule 3 does not condition the move on a product
+    /// block existing, only on the key being one <see cref="ManagedValues"/> owns and the line being the
+    /// currently-effective assignment.</summary>
     [Fact]
-    public void Rewrite_NoProductBlocks_OnlyAppendsInclude_NothingMoves()
+    public void Rewrite_NoProductBlocks_NoOwnedKeyLines_OnlyAppendsInclude_NothingMoves()
+    {
+        const string conf = "log_timezone = 'UTC'\nsomething_else = 1\n";
+
+        var result = Rewrite(conf, ManagedValues);
+
+        Assert.Equal(
+            "log_timezone = 'UTC'\nsomething_else = 1\n" + ManagedConfFile.IncludeLine + "\n",
+            result.NewConfText);
+        Assert.Empty(result.ExcludedKeys);
+    }
+
+    /// <summary>(f2) A conf with no product blocks at ALL but an operator line for an OWNED key: rule 3 still
+    /// moves it below the include — there is no product block for it to be overridden by, so it is
+    /// trivially the last (and only) assignment of that key.</summary>
+    [Fact]
+    public void Rewrite_NoProductBlocks_OwnedKeyLinePresent_MovesBelowInclude()
     {
         const string conf = "log_timezone = 'UTC'\nmax_connections = 300\n";
 
         var result = Rewrite(conf, ManagedValues);
 
-        Assert.Equal(
-            "log_timezone = 'UTC'\nmax_connections = 300\n" + ManagedConfFile.IncludeLine + "\n",
-            result.NewConfText);
-        Assert.Empty(result.ExcludedKeys);
+        var lines = result.NewConfText.Split('\n');
+        var includeIndex = Array.IndexOf(lines, ManagedConfFile.IncludeLine);
+        Assert.True(Array.IndexOf(lines, "log_timezone = 'UTC'") < includeIndex);
+        Assert.True(Array.IndexOf(lines, "max_connections = 300") > includeIndex);
+        Assert.Contains("max_connections", result.ExcludedKeys);
     }
 
     /// <summary>(g) Two effective operator lines for two different owned keys keep their original relative
