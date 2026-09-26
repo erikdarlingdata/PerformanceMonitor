@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -73,6 +74,11 @@ public sealed class PlanForceActionDetailScrubLiveTests
         var first = await PlanForceActionDetailScrub.RunAsync(postgres, logger: null, ct);
         Assert.False(first.AlreadyDone);
         Assert.Equal(1, first.RowsUpdated);
+
+        // The coarse filter's candidate count matches the number of rows seeded: the legacy row AND
+        // the post-#4326 row both mention the block's prefix, so both are read as candidates even
+        // though only the legacy row actually changes under the sanitizer.
+        Assert.Equal(2, first.CandidatesRead);
 
         var afterLegacy = await ReadRawDetailAsync(connection, legacyId, ct);
         Assert.DoesNotContain("darling_ro", afterLegacy);
@@ -162,6 +168,71 @@ public sealed class PlanForceActionDetailScrubLiveTests
             $"AND collector_name = '{PlanForceActionDetailScrub.StateCollectorName}' AND state_key = '{PlanForceActionDetailScrub.DoneStateKey}'",
             ct);
         Assert.Equal("1", markerValueAfterRetry);
+    }
+
+    /// <summary>
+    /// Pins the scrub across MORE than one write batch (<see cref="PlanForceActionDetailScrub.MaxKeysPerUpdate"/>
+    /// legacy rows per batch): every legacy row is rewritten regardless of which batch carries it, the
+    /// post-#4326 rows stay byte-identical, the marker is set, <c>RowsUpdated</c> equals the legacy count,
+    /// and a second run is <c>AlreadyDone</c>.
+    /// </summary>
+    [Fact]
+    public async Task TheScrub_RewritesEveryLegacyRow_AcrossMultipleBatches_AndIsIdempotent()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4346 multi-batch scrub test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        const int legacyCount = PlanForceActionDetailScrub.MaxKeysPerUpdate + 3;
+        const int postFixCount = 3;
+
+        var legacyIds = new List<long>(legacyCount);
+        for (var i = 0; i < legacyCount; i++)
+        {
+            legacyIds.Add(await InsertActionAsync(connection, LegacyDetail, ct));
+        }
+
+        var postFixIds = new List<long>(postFixCount);
+        for (var i = 0; i < postFixCount; i++)
+        {
+            postFixIds.Add(await InsertActionAsync(connection, SafeDetail, ct));
+        }
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var first = await PlanForceActionDetailScrub.RunAsync(postgres, logger: null, ct);
+        Assert.False(first.AlreadyDone);
+        Assert.Equal(legacyCount, first.RowsUpdated);
+
+        foreach (var legacyId in legacyIds)
+        {
+            var afterLegacy = await ReadRawDetailAsync(connection, legacyId, ct);
+            Assert.Equal(RedactedLegacyDetail, afterLegacy);
+        }
+
+        foreach (var postFixId in postFixIds)
+        {
+            var afterPostFix = await ReadRawDetailAsync(connection, postFixId, ct);
+            Assert.Equal(SafeDetail, afterPostFix);
+        }
+
+        var markerValue = await ScalarTextAsync(connection,
+            $"SELECT state_value FROM collect.collector_state WHERE server_id = {DarlingObservability.FleetServerId} " +
+            $"AND collector_name = '{PlanForceActionDetailScrub.StateCollectorName}' AND state_key = '{PlanForceActionDetailScrub.DoneStateKey}'",
+            ct);
+        Assert.Equal("1", markerValue);
+
+        var second = await PlanForceActionDetailScrub.RunAsync(postgres, logger: null, ct);
+        Assert.True(second.AlreadyDone);
+        Assert.Equal(0, second.RowsUpdated);
+        Assert.Equal(0, second.CandidatesRead);
     }
 
     private static async Task<long> InsertActionAsync(NpgsqlConnection connection, string detail, CancellationToken ct)
