@@ -612,19 +612,37 @@ public sealed class RollupBackfillTests
     }
 
     /// <summary>
-    /// The backfill covers exactly the rollups the ROUTER can route to. A rollup the router uses but the
-    /// backfill skips would stay permanently un-materialized — its windows served from raw forever, and its raw
-    /// purge held forever, which is #1759 unfixed for that table.
+    /// The backfill covers exactly the rollups the ROUTER can route to, EXCEPT the six #3653 LC froze. A
+    /// rollup the router uses but the backfill skips would ordinarily stay permanently un-materialized — its
+    /// windows served from raw forever, and its raw purge held forever, which is #1759 unfixed for that table
+    /// — but a frozen rollup's watermark never advances again by construction (no refresh policy —
+    /// <see cref="TimescaleSupport.FrozenRollupAggregates"/>), so there is nothing left for a backfill to
+    /// converge toward, and its raw purge is no longer gated on it either (<see cref="TimescaleSupport.RawTierCoverage"/>
+    /// moved that to the successors). The router still routes to it below the successor's floor, which is why
+    /// it stays in <see cref="TimescaleSupport.RollupViews"/> even though it leaves this list.
     /// </summary>
     [Fact]
     public void Targets_CoverEveryRoutedRollup_WithItsOwnRawTable()
     {
+        var routedAndBackfillable = TimescaleSupport.RollupViews
+            .Select(r => r.View)
+            .Where(v => !TimescaleSupport.IsFrozenRollupAggregate(v))
+            .OrderBy(v => v, StringComparer.Ordinal)
+            .ToArray();
+
         Assert.Equal(
-            TimescaleSupport.RollupViews.Select(r => r.View).OrderBy(v => v, StringComparer.Ordinal).ToArray(),
+            routedAndBackfillable,
             RollupBackfill.Targets.Select(t => t.View).OrderBy(v => v, StringComparer.Ordinal).ToArray());
 
-        /* And each target names the same raw table the router falls back to, or the backfill would chase a
-           coverage target the router never compares against. */
+        /* The frozen six are routed but deliberately absent from the backfill plan. */
+        foreach (var (_, view) in TimescaleSupport.FrozenRollupAggregates)
+        {
+            Assert.Contains(view, TimescaleSupport.RollupViews.Select(r => r.View));
+            Assert.DoesNotContain(view, RollupBackfill.Targets.Select(t => t.View));
+        }
+
+        /* And each remaining target names the same raw table the router falls back to, or the backfill would
+           chase a coverage target the router never compares against. */
         foreach (var target in RollupBackfill.Targets)
         {
             Assert.Equal(RollupCoverage.RawTableFor(target.View), target.RawTable);

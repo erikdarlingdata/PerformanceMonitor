@@ -102,16 +102,16 @@ ORDER BY b.bucket";
         var ct = TestContext.Current.CancellationToken;
         DateTime H(int n) => h0.AddHours(n);
 
+        /* #3653 LC: query_stats_hourly and query_stats_daily are frozen out of MaterializationHoleTargets — the
+           repair walk (and this oracle, which reads the same registry) never scans them any more. The legacy's
+           own half of the restart-row contrast (it admits H20, so H20 is neither a hole nor absent) is pinned
+           purely against its CreateSql text (MaterializationHoleRepairTests.TheSourceFilter_...); what remains
+           live to prove is the successor's half. */
         var expected = new Dictionary<string, DateTime[]>(StringComparer.Ordinal)
         {
-            /* The tail. Not the outage, not the covered hours, and for the legacy, which admits the restart row,
-               not H20 either: it materialized that row. */
-            [TimescaleSupport.QueryStatsHourlyView] = new[] { H(3), H(4) },
             /* The successor rejects the restart row, so H20 is neither materialized nor a hole for it. */
             [TimescaleSupport.QueryStatsIntervalHourlyView] = new[] { H(3), H(4) },
             [TimescaleSupport.QueryStatsBaselineView] = new[] { H(3), H(4) },
-            /* The daily over its hourly source: day B is held by the hourly and never materialized here. */
-            [TimescaleSupport.QueryStatsDailyView] = new[] { h0.AddDays(1) },
         };
 
         foreach (var (view, holes) in expected)
@@ -142,7 +142,9 @@ ORDER BY b.bucket";
         var (connection, h0) = (seed.Connection, seed.H0);
         var ct = TestContext.Current.CancellationToken;
 
-        var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == TimescaleSupport.QueryStatsHourlyView);
+        /* #3653 LC: query_stats_hourly is frozen out of MaterializationHoleTargets; the live successor is
+           refreshed over the identical windows in SeedAsync, so its plan shape is the same proof. */
+        var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == TimescaleSupport.QueryStatsIntervalHourlyView);
         var materialization = await TimescaleSupport.ResolveMaterializationAsync(connection, target.View, ct);
         Assert.NotNull(materialization);
 
@@ -163,7 +165,14 @@ ORDER BY b.bucket";
         Assert.Equal(48, LoopsOfTheOnlySubPlanUnder(buckets));
 
         var candidates = nodes.Single(n => NodeType(n) == "Subquery Scan" && n.GetProperty("Alias").GetString()!.StartsWith('c'));
-        Assert.Equal(6, LoopsOfTheOnlySubPlanUnder(candidates));
+        /* #3653 LC: the test switched from query_stats_hourly (legacy, which admitted the H20 restart row and
+           created a bucket for it) to query_stats_interval_hourly (successor, which filters restart rows in its
+           WHERE and therefore creates NO bucket for H20). H20 is now a candidate (missing from the aggregate)
+           even though the source check rejects it (restart row filtered). Candidates = H3, H4, H5, H6, H7, H8,
+           H20 = 7. The "source only where the materialization is empty" shape is unchanged: the outer EXISTS
+           filters H5-H8 (no raw data) and H20 (only a restart row, filtered by the source filter), leaving H3
+           and H4 as the actual holes repaired. */
+        Assert.Equal(7, LoopsOfTheOnlySubPlanUnder(candidates));
     }
 
     /* ───────────────────────────── seed ───────────────────────────── */

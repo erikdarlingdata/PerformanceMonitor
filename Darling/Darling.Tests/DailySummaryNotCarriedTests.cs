@@ -38,8 +38,9 @@ namespace Darling.Tests;
 /// <para><b>The witness is the hole scan's definition, reused, not a second one.</b> The scan calls a bucket a
 /// hole when the materialization holds no row for it AND the source holds an admitted row in it. The routed
 /// <c>queries</c> CTE's third member asks the same two questions per server at day grain, with the source, its
-/// time column and its filter read off <see cref="TimescaleSupport.MaterializationHoleTargets"/> — the repair's
-/// own target list. So a server that genuinely ran nothing that day (no source row) is NOT named: the
+/// time column and its filter read off <see cref="TimescaleSupport.RollupCoverageProbeTargets"/> — the repair's
+/// own target list, extended (#3653 LC) so a frozen legacy rollup still has one. So a server that genuinely
+/// ran nothing that day (no source row) is NOT named: the
 /// disclosure cannot claim a hole where the raw table was simply empty. The live test below plants exactly
 /// that control beside the hole.</para>
 ///
@@ -88,7 +89,9 @@ public sealed class DailySummaryNotCarriedTests
         foreach (var (tier, relation) in RoutedForms)
         {
             var sql = DailySummarySql.RangeSqlFor(tier, relation);
-            var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == relation);
+            /* #3653 LC froze query_stats_hourly/_daily out of MaterializationHoleTargets; RollupCoverageProbeTargets
+               still knows every relation the daily summary can route to. */
+            var target = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == relation);
             var filter = TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql);
 
             Assert.Contains("SELECT b.d, NULL::bigint AS c", sql, StringComparison.Ordinal);
@@ -138,7 +141,7 @@ public sealed class DailySummaryNotCarriedTests
 
     private static (string Source, string TimeColumn, string Filter) SourceOf(string view)
     {
-        var target = TimescaleSupport.MaterializationHoleTargets.Single(t => t.View == view);
+        var target = TimescaleSupport.RollupCoverageProbeTargets.Single(t => t.View == view);
         return (target.Source, target.SourceTimeColumn, TimescaleSupport.MaterializationHoleSourceFilterFor(target.CreateSql));
     }
 
@@ -174,7 +177,7 @@ public sealed class DailySummaryNotCarriedTests
     public void RangeSqlFor_RefusesAnUnregisteredRelation()
     {
         var ex = Assert.Throws<ArgumentException>(() => DailySummarySql.RangeSqlFor(RetentionTier.Hourly, "some_future_rollup"));
-        Assert.Contains("MaterializationHoleTargets", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("RollupCoverageProbeTargets", ex.Message, StringComparison.Ordinal);
         Assert.Throws<ArgumentException>(() => DailySummarySql.RangeSqlFor(RetentionTier.Hourly, " "));
     }
 
@@ -302,6 +305,8 @@ public sealed class DailySummaryNotCarriedLiveTests
         var hourly = TimescaleSupport.QueryStatsHourlyView;
         var successor = TimescaleSupport.QueryStatsIntervalHourlyView;
         var daily = TimescaleSupport.QueryStatsDailyView;
+        // #3653 LC: the repair now targets the successor daily (legacy frozen); used below in the repair assertions.
+        var successorDaily = TimescaleSupport.QueryStatsIntervalDailyView;
 
         /* One layout, planted twice. Five whole UTC days, D0 the oldest, window [D0, D5). D0: 3 hashes. D1:
            NOTHING — the control, a day the server genuinely had no rows for. D2: 5 hashes, the day the daily
@@ -414,17 +419,31 @@ public sealed class DailySummaryNotCarriedLiveTests
             Assert.Equal("purged", root.GetProperty("hints").GetProperty("data_state").GetString());
         }
 
-        /* THE REPAIR: the start-up pass scans the daily from its floor (the recent D0 is inside the hourly source's
-           90-day horizon) and finds exactly the recent D2 — its source, the hourly, holds the day and the daily
-           never materialized it — and closes it. The old cluster is past the scan horizon and stands (the
-           disclosure above did not depend on the repair). The same calendar read then prints 5 where it printed
-           NULL, D2 counts as a source again, and the recent server's DaysMissing at the daily tier is empty. */
+        /* #3653 LC: the repair now operates on query_stats_interval_daily (the successor), not the frozen
+           query_stats_daily. Set up a hole in the successor daily by refreshing the successor hourly for D2
+           (giving it a source), then materializing the successor daily for D0 and D3 only.
+           The old server's successor hourly is left untouched so its cluster stays past the repair's scan
+           horizon and oldAfter.DaysMissing remains [O(2)]. */
+        await RefreshAsync(connection, successor, R(2), R(3), ct);
+        await RefreshAsync(connection, successorDaily, R(0), R(1), ct);
+        await RefreshAsync(connection, successorDaily, R(3), R(4), ct);
+        Assert.Equal(new[] { R(0), R(3) }, await BucketDaysAsync(connection, successorDaily, RecentServerId, ct));
+
+        /* THE REPAIR: the start-up pass scans the successor daily from its floor (the recent D0 is inside the
+           hourly source's 90-day horizon) and finds exactly the recent D2 — its source, the successor hourly,
+           holds the day and the successor daily never materialized it — and closes it. The old cluster is past
+           the scan horizon and stands. The stitch-aware calendar read then prints 5 where it printed NULL. */
         var log = new CapturingTestLogger();
         var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, log, DateTime.UtcNow, ct);
         Assert.Equal(0, summary.Failures);
-        Assert.Contains($"{daily} had 1 bucket(s) in [{R(2):O}, {R(3):O})", log.Joined, StringComparison.Ordinal);
+        Assert.Contains($"{successorDaily} had 1 bucket(s) in [{R(2):O}, {R(3):O})", log.Joined, StringComparison.Ordinal);
 
-        var repaired = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily), RecentServerId, R(0), R(5), ct);
+        /* Read the repaired result via the stitch-aware router. The successor daily's floor is now R(0), so
+           StitchFloor returns null (successor covers the whole window) and RangeSqlFor picks the successor
+           daily for the whole window. D4 still falls through to raw (past ceiling). */
+        var coverageForRepair = await TimescaleSupport.DetectRollupCoverageAsync(
+            postgres, await TimescaleSupport.DetectRollupsAsync(postgres, ct), ct);
+        var repaired = await ReadCalendarAsync(connection, DailySummarySql.RangeSqlFor(RetentionTier.Daily, coverageForRepair, R(0)), RecentServerId, R(0), R(5), ct);
         Assert.Equal(new[] { R(0), R(2), R(3), R(4) }, repaired.Select(r => r.Day).ToArray());
         Assert.Equal(new long?[] { 3L, 5L, 7L, 2L }, repaired.Select(r => r.UniqueQueries).ToArray());
         Assert.Equal(new[] { 1, 1, 1, 1 }, repaired.Select(r => r.SignalSourcesPresent).ToArray());

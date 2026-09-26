@@ -1424,36 +1424,38 @@ $do$";
     /// <para>Hoisted out of the ensure sweep (#3012) so that sweep, the phase order and the collision guard
     /// all read ONE list. Restating it in the guard would let the guard pass while the sweep drifted.</para>
     ///
-    /// <para><b>Nine since #3653 (Q12), and the three interval-honest successors are APPENDED rather than put in
-    /// their legacy's positions, which is the opposite of what #3698 did for the baseline pair — deliberately,
-    /// and the reason is on <see cref="SupersededHourlyRollups"/>.</b> The legacy trio cannot leave this list:
-    /// each has an indefinite daily tier hierarchical from it, so it must go on being created, refreshed and
-    /// phased. Nine members means the phase grid RE-DERIVES itself — <see cref="LightHourlyRefreshCount"/>
+    /// <para><b>Nine from #3653 (Q12) to #3653 (LC), and the three interval-honest successors were APPENDED
+    /// rather than put in their legacy's positions, which was the opposite of what #3698 did for the baseline
+    /// pair — deliberately, and the reason is on <see cref="SupersededHourlyRollups"/>.</b> Q12 could not take
+    /// the legacy trio off this list: each had an indefinite daily tier hierarchical from it, so it had to go
+    /// on being created, refreshed and phased for as long as that daily read it directly. LC is what changed
+    /// that — the three successor DAILIES (<see cref="SupersededDailyRollups"/>) now cover the daily tier
+    /// the legacy trio's own dailies used to be the only source for, so the legacy trio (and its dailies) could
+    /// move to <see cref="FrozenRollupAggregates"/>, off this list, the phase grid and the compression band,
+    /// for good. Nine members briefly meant the phase grid RE-DERIVED itself — <see cref="LightHourlyRefreshCount"/>
     /// 12→15, <see cref="LightBandSpanMinutes"/> 11→14, <see cref="HeaviestRefreshStartMinute"/> 15→18,
     /// <see cref="HeaviestRefreshWindowMinutes"/> 21→18 and <see cref="RefreshSlotWarningSeconds"/>
     /// 1,050→900 s against the 896 s <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> — by the
-    /// method the grid documents, not by anyone renumbering it; the pins in TimescaleSupportTests and
-    /// RefreshCeilingProvenancePinTests carry that derivation. Appended at the END of this list so the six
-    /// members ahead of them keep their minutes: the unbounded-cardinality successor takes the fourth
-    /// every-fourth position (12), and the two bounded successors are dealt into the bounded class in registry
-    /// order (3 and 5), which moves the seven baseline members — dealt after this list — two positions later
-    /// each. Nine sub-3 s policies re-phased once by <see cref="ConvergeContinuousAggregateRefreshAsync"/> on
-    /// the first start that carries this build, the operation that converge exists for; the map stays
-    /// injective and no two policies on one source share a minute. The raw source of each successor is a
-    /// hypertable, so none carries an ordering requirement against the corrected Query Store pair.</para>
+    /// method the grid documents, not by anyone renumbering it — and LC's freeze re-derives it AGAIN, back to
+    /// the pre-Q12 six-member figures, because six is what this list holds once more (the successors now
+    /// occupy the fourth, fifth and sixth slots the legacy trio held, rather than joining behind them); the
+    /// pins in TimescaleSupportTests and RefreshCeilingProvenancePinTests carry both derivations. The raw
+    /// source of each successor is a hypertable, so none carries an ordering requirement against the corrected
+    /// Query Store pair.</para>
     /// </summary>
     public static readonly (string CreateSql, string View)[] HourlyAggregates =
     {
-        (CreateQueryStatsHourlySql,      QueryStatsHourlyView),
-        (CreateProcedureStatsHourlySql,  ProcedureStatsHourlyView),
         (CreateQueryStoreStatsHourlySql, QueryStoreStatsHourlyView),
-        (CreateQueryStatsDbHourlySql,    QueryStatsDbHourlyView),
         /* The corrected Query Store rollups (#1849): L1 is raw-sourced and MUST precede the corrected view,
            which is hierarchical from it. */
         (CreateQueryStoreStatsIntervalHourlySql,  QueryStoreStatsIntervalHourlyView),
         (CreateQueryStoreStatsCorrectedHourlySql, QueryStoreStatsCorrectedHourlyView),
-        /* The interval-honest successors of the first, second and fourth members (#3653, Q12), appended — see
-           the summary and SupersededHourlyRollups for why they do not take their legacy's positions. */
+        /* The interval-honest successors of the legacy trio (#3653, Q12) that FROZE it (#3653, LC): this list
+           held all nine from Q12 until LC moved the three legacy members — query_stats_hourly,
+           procedure_stats_hourly, query_stats_db_hourly — into FrozenRollupAggregates, off the phase grid and
+           the compression band for good (see that list, and SupersededHourlyRollups for the coverage/stitch
+           story the legacy trio still plays). Six again, exactly as before Q12 added the successors, because
+           the successors REPLACE the legacy trio's grid membership rather than merely joining it now. */
         (CreateQueryStatsIntervalHourlySql,       QueryStatsIntervalHourlyView),
         (CreateProcedureStatsIntervalHourlySql,   ProcedureStatsIntervalHourlyView),
         (CreateQueryStatsDbIntervalHourlySql,     QueryStatsDbIntervalHourlyView),
@@ -1466,52 +1468,50 @@ $do$";
     /// reads this list and applies <see cref="PrefersSuccessor"/>.
     ///
     /// <para><b>These three do NOT retire the way #3698's baseline pair retires, and the difference is
-    /// structural rather than a choice.</b> <see cref="SupersededBaselineRelations"/> drops a legacy aggregate
-    /// once its successor covers the tier, because nothing else depends on it. Each legacy here has a DAILY
-    /// continuous aggregate built <c>FROM</c> it — <see cref="QueryStatsDailyView"/>,
+    /// structural rather than a choice — but from #3653's LC onward they DO leave the phase grid and the
+    /// compression band, which is a different thing from retiring.</b> <see cref="SupersededBaselineRelations"/>
+    /// drops a legacy aggregate once its successor covers the tier, because nothing else depends on it. Each
+    /// legacy here has a DAILY continuous aggregate built <c>FROM</c> it — <see cref="QueryStatsDailyView"/>,
     /// <see cref="ProcedureStatsDailyView"/>, <see cref="QueryStatsDbDailyView"/> — and a continuous aggregate's
-    /// source is fixed at CREATE. A <c>DROP ... CASCADE</c> of the legacy takes the daily with it, and the daily
-    /// is the tier kept INDEFINITELY, holding history no other relation has; removing the legacy's REFRESH
-    /// policy instead would freeze the daily at that watermark, and a daily-tier window ending at now would
-    /// then be served incomplete, silently — the #1759 shape. So the legacy keeps its registration, its
-    /// refresh policy, its minute on the phase grid, its retention and its compression, for as long as the
-    /// daily tier reads through it.</para>
+    /// source is fixed at CREATE, so a <c>DROP ... CASCADE</c> of the legacy would take the daily with it, and
+    /// the daily is the tier kept INDEFINITELY, holding history no other relation has. That is why the legacy
+    /// is never DROPped. It is NOT why the legacy needs a live refresh policy forever: once the daily's own
+    /// reader routes to a successor daily above the successor's floor (<see cref="SupersededDailyRollups"/>,
+    /// LA's stitch), a legacy that stops advancing only ever serves the FIXED historical window it had reached
+    /// at the freeze, which is exactly what a read below that floor wants. LC is what draws that line:
+    /// <see cref="FrozenRollupAggregates"/> holds the legacy CREATE so a missing one is still created, but no
+    /// refresh policy, no phase-grid minute and no compression-band hour — see there for what an existing
+    /// store's already-registered policy gets on the next start.</para>
     ///
-    /// <para><b>What that costs, stated.</b> Three more hourly refreshes on the grid for good — two sub-3 s
-    /// deployment-bounded ones and one unbounded-cardinality one (<see cref="QueryStatsIntervalHourlyView"/>
-    /// groups by statement, like its legacy, measured at 23.3 s on the largest store), each on its own minute,
-    /// so no lock adjacency — and the grid re-derived around fifteen light members instead of twelve, which
-    /// takes 180 s of window from the heaviest refresh and leaves
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> 4 s under the re-derived
-    /// <see cref="RefreshSlotWarningSeconds"/>. That margin is the ceiling essay's own "18 whole minutes" — the
-    /// smallest window whose five-sixths line still clears 896 s — reached exactly, and it is pinned rather than
-    /// eased: a live run past 900 s now warns where 1,050 s did, and the compression band's first minute
-    /// (<see cref="AggregateCompressionBandMinute"/>) does not move, because the band is the hour's remainder
-    /// after a window that shrank by what the light band grew.</para>
+    /// <para><b>What Q12 cost while it lasted, and what LC gave back.</b> From Q12 to LC this list carried
+    /// three more hourly refreshes for good — two sub-3 s deployment-bounded ones and one unbounded-cardinality
+    /// one (<see cref="QueryStatsIntervalHourlyView"/> groups by statement, like its legacy, measured at 23.3 s
+    /// on the largest store) — and the grid re-derived around fifteen light members instead of twelve, taking
+    /// 180 s of window from the heaviest refresh and leaving <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/>
+    /// 4 s under the re-derived <see cref="RefreshSlotWarningSeconds"/>. LC removes the legacy trio (not the
+    /// successors, which stay — see <see cref="HourlyAggregates"/>) from this list, so the grid is back to
+    /// twelve light members and the 1,050 s line Q12 narrowed away from.</para>
     ///
-    /// <para><b>What the daily tier does NOT get from this.</b> The dailies stay hierarchical from the legacy
-    /// trio, so they inherit the legacy's contamination at the day grain: one extra <c>sample_count</c> per
-    /// restart per group, and a <c>min()</c> of 0 on any day with a restart. Their honesty is their parent's
-    /// (the measurement census scopes rule 5 to aggregates that read a delta family directly, for that reason).
-    /// Interval-honest dailies would be three more aggregates hierarchical from the successors here — and
-    /// <see cref="AggregateCompressionBandHourFor"/>'s band is FULL at twenty-three members after this change
-    /// (hours 1–23 of 24), so that lane re-derives the daily compression band before it registers anything.
-    /// Until it lands, the retirement condition for a legacy here is "its daily has a registered successor that
-    /// covers every daily-tier window the readers can ask for" — which, for an indefinite tier read by relation
-    /// rather than stitched, is never; the honest statement is that the legacy trio is permanent under the
-    /// current reader model, and this list is what a future stitched read or daily-successor lane consults.
-    /// <see cref="LogSupersededHourlyRollupCoverageAsync"/> reports the successor's reach on every start so the
-    /// hand-over is visible while it happens.</para>
+    /// <para><b>What the daily tier gets now that it did not get from Q12 alone.</b> The legacy dailies stay
+    /// hierarchical from the legacy trio and keep inheriting its day-grain contamination — one extra
+    /// <c>sample_count</c> per restart per group, a <c>min()</c> of 0 on any day with a restart — for whatever
+    /// history they had already materialized before the freeze; that history does not get retroactively
+    /// corrected, and does not need to, because it is exactly what a read below the successor daily's floor
+    /// asks for. What changed is the window ABOVE that floor: <see cref="SupersededDailyRollups"/>'s three
+    /// interval-honest successor DAILIES, hierarchical from the successors here, now cover it, which is what
+    /// let LC take the legacy trio off the grid without leaving any live window unserved.
+    /// <see cref="LogSupersededHourlyRollupCoverageAsync"/> still reports the successor's reach on every start.</para>
     ///
-    /// <para><b>The raw purge is NOT gated on the successors</b>, following the <see cref="QueryStatsDbHourlyView"/>
-    /// precedent (#1661) rather than the corrected Query Store L1's (#1849): adding them to
-    /// <see cref="RawTierCoverage"/> would HOLD every store's <c>query_stats</c> and <c>procedure_stats</c>
-    /// purge from the first start until an operator ran <c>--backfill-rollups</c>, and on the largest store
-    /// raw grows faster than that dependency can be assumed to be met. So a successor's history begins at the
-    /// first refresh after the start that created it (one <see cref="HourlyRefreshStartOffset"/> back) unless
-    /// the operator backfills within the raw horizon; the sliver it then lacks stays on the legacy read for
-    /// exactly as long as the legacy holds it, by <see cref="PrefersSuccessor"/>, and ages out at the hourly
-    /// tier's horizon. Nothing is lost that the legacy did not already hold.</para>
+    /// <para><b>The raw purge MOVED onto the successors at LC</b> — the opposite of the Q12-era rule, which
+    /// followed the <see cref="QueryStatsDbHourlyView"/> precedent (#1661) and kept it on the legacy precisely
+    /// so a fresh successor's empty history could not hold every store's <c>query_stats</c> and
+    /// <c>procedure_stats</c> purge. That rule assumed the legacy would go on refreshing forever; once LC
+    /// freezes it, the legacy's own coverage floor stops advancing while <see cref="HourlyRetentionInterval"/>
+    /// keeps trimming its oldest chunks, so a raw-purge gate still keyed on the legacy would eventually find it
+    /// EMPTY and hold the purge forever with no self-release. <see cref="RawTierCoverage"/> now names the
+    /// successor, which is why LC ships only once every store's successor dailies are backfilled (this PR's
+    /// merge gate) — the dependency #1661 avoided is accepted here deliberately, with the backfill runbook as
+    /// its precondition rather than an unstated assumption.</para>
     /// </summary>
     public static readonly (string Legacy, string Successor, string DependentDaily)[] SupersededHourlyRollups =
     {
@@ -1521,17 +1521,21 @@ $do$";
     };
 
     /// <summary>
-    /// The daily rollups that will eventually be SUPERSEDED for the daily-tier read by an interval-honest
-    /// successor daily (#3653, A6): each legacy daily, its successor daily, and the successor HOURLY the
-    /// successor daily is hierarchical from. Registered here — by the lane that adds the three successor
-    /// dailies — but not yet consumed by any reader: LA's stitched reads and LC's freeze are what make this
-    /// list load-bearing for routing. Until then it is a forward-looking record of intent, matched by name to
+    /// The daily rollups SUPERSEDED for the daily-tier read by an interval-honest successor daily (#3653, A6):
+    /// each legacy daily, its successor daily, and the successor HOURLY the successor daily is hierarchical
+    /// from. Registered by the lane that added the three successor dailies (A6 LB); consumed for ROUTING by
+    /// LA's stitched reads, and consumed for RETIREMENT by LC's freeze — <see cref="FrozenRollupAggregates"/>
+    /// takes its <c>LegacyDaily</c> names from here, and <see cref="RetentionPolicies"/> takes the successor
+    /// hourlies' own coverage relation from the matching <c>SuccessorDaily</c>, matched by name to
     /// <see cref="SupersededHourlyRollups"/>.
     ///
-    /// <para>The successor dailies are excluded from aggregate compression
-    /// (<see cref="CompressionDeferredUntilFreeze"/>) until LC frees the three daily-compression-band slots
-    /// the legacy trio's eventual freeze makes available; the daily compression band is full at 23 members
-    /// today, and 23 + 3 would overflow it.</para>
+    /// <para>The successor dailies were excluded from aggregate compression (a set once named
+    /// <c>CompressionDeferredUntilFreeze</c>) until LC froze the legacy trio's own daily-band membership: the
+    /// daily compression band was full at 23 members with the legacy trio still on it, so a successor daily
+    /// joining unconditionally would have overflowed it. LC removed that set — the legacy trio's three
+    /// members are what it no longer counts, which is what frees the three slots the successors now take in
+    /// <see cref="AggregateCompressionTargets"/> (declared without the trio, rather than with them minus a
+    /// deferral).</para>
     /// </summary>
     public static readonly (string LegacyDaily, string SuccessorDaily, string SuccessorHourly)[] SupersededDailyRollups =
     {
@@ -1555,6 +1559,54 @@ $do$";
 
         return null;
     }
+
+    /// <summary>Same as <see cref="SuccessorOf"/>, for a caller (<see cref="RawTierCoverage"/>'s query_stats and
+    /// procedure_stats rows) that already knows <paramref name="legacyHourly"/> must be superseded — a
+    /// <c>null</c> there would only hide <see cref="SupersededHourlyRollups"/> and its caller drifting apart, so
+    /// this throws instead of handing one back.</summary>
+    private static string RequireSuccessorOf(string legacyHourly)
+        => SuccessorOf(legacyHourly) ?? throw new InvalidOperationException($"{legacyHourly} has no successor in {nameof(SupersededHourlyRollups)}.");
+
+    /// <summary>The legacy hourly that <paramref name="successor"/> supersedes, or <c>null</c> when
+    /// <paramref name="successor"/> is not a member of <see cref="SupersededHourlyRollups"/>.  Used by
+    /// <see cref="RetentionArmSafetySql"/> to generate stitched coverage SQL for frozen-legacy + successor
+    /// pairs — see that member's doc for the full rationale (#3653 high-fix, Option 4).</summary>
+    private static string? LegacyOf(string successor)
+    {
+        foreach (var (legacy, s, _) in SupersededHourlyRollups)
+        {
+            if (string.Equals(s, successor, StringComparison.Ordinal))
+            {
+                return legacy;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The interval-honest successor DAILY that covers <paramref name="successorHourly"/> once the
+    /// hourly-tier read routes past its own horizon (#3653, A6/LB's three successor dailies) — the coverage
+    /// relation <see cref="RetentionPolicies"/> arms a successor hourly's own drop_chunks against, in place of
+    /// the LEGACY daily <see cref="SupersededHourlyRollups"/> already froze off the refresh grid. <c>null</c> for
+    /// anything that is not a <c>SuccessorHourly</c> in <see cref="SupersededDailyRollups"/>.</summary>
+    public static string? SuccessorDailyOf(string successorHourly)
+    {
+        foreach (var (_, successorDaily, hourly) in SupersededDailyRollups)
+        {
+            if (string.Equals(hourly, successorHourly, StringComparison.Ordinal))
+            {
+                return successorDaily;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Same as <see cref="SuccessorDailyOf"/>, for a caller (<see cref="RetentionPolicies"/>'s three
+    /// successor-hourly rows) that already knows <paramref name="successorHourly"/> must have one — throws
+    /// rather than silently naming a policy's coverage <c>null</c>.</summary>
+    private static string RequireSuccessorDailyOf(string successorHourly)
+        => SuccessorDailyOf(successorHourly) ?? throw new InvalidOperationException($"{successorHourly} has no successor daily in {nameof(SupersededDailyRollups)}.");
 
     /// <summary>
     /// THE SUPPLY RULE (#3653), pure so the tests can walk it, and shared: <c>PgBaselineProvider</c> applies it
@@ -1702,27 +1754,98 @@ $do$";
     /// list to know which materializations it owns and which tier's <c>compress_after</c> each one takes, and
     /// a second hand-kept copy of seven names is a copy that drifts. The ensure sweep, the compression
     /// registry (<see cref="AggregateCompressionTargets"/>) and the tests now read ONE list.</para>
+    ///
+    /// <para><b>Seven again since #3653's LC, and not by coincidence.</b> A6 LB appended the three
+    /// interval-honest successor dailies, taking this list to ten; LC then moved the three LEGACY dailies —
+    /// <see cref="QueryStatsDailyView"/>, <see cref="ProcedureStatsDailyView"/>, <see cref="QueryStatsDbDailyView"/>
+    /// — into <see cref="FrozenRollupAggregates"/>, the same trade <see cref="HourlyAggregates"/> made for
+    /// their hourly parents: the successors REPLACE the legacy trio's membership here rather than merely
+    /// joining behind it.</para>
     /// </summary>
     public static readonly (string CreateSql, string View)[] DailyAggregates =
     {
-        (CreateQueryStatsDailySql,                QueryStatsDailyView),
-        (CreateProcedureStatsDailySql,            ProcedureStatsDailyView),
         (CreateQueryStoreStatsDailySql,           QueryStoreStatsDailyView),
         (CreateQueryStoreStatsCorrectedDailySql,  QueryStoreStatsCorrectedDailyView),
-        (CreateQueryStatsDbDailySql,              QueryStatsDbDailyView),
         /* The DAY-grain corrected daily (#1869), THREE levels deep: L1 (an hourly) -> L2 interval_daily ->
            daygrain_daily. Both must follow L1 and L2 must precede its own child, which this ordered list
            gives — the same requirement the daily tier has, one level longer. */
         (CreateQueryStoreStatsIntervalDailySql,   QueryStoreStatsIntervalDailyView),
         (CreateQueryStoreStatsDayGrainDailySql,   QueryStoreStatsDayGrainDailyView),
-        /* The interval-honest successor DAILIES (#3653, A6), hierarchical from the interval-honest hourly
+        /* The interval-honest successor DAILIES (#3653, A6/LC), hierarchical from the interval-honest hourly
            successors above (which must therefore precede these three) rather than from the legacy trio.
-           Appended, like their hourly successors: see SupersededDailyRollups. Excluded from aggregate
-           compression by CompressionDeferredUntilFreeze until LC frees the band's slots. */
+           SupersededDailyRollups names the legacy each one replaced on this list. Compression-registered like
+           any other member here now that LC has removed the deferral that used to hold them back (see
+           SupersededDailyRollups). */
         (CreateQueryStatsIntervalDailySql,        QueryStatsIntervalDailyView),
         (CreateProcedureStatsIntervalDailySql,     ProcedureStatsIntervalDailyView),
         (CreateQueryStatsDbIntervalDailySql,       QueryStatsDbIntervalDailyView),
     };
+
+    /// <summary>
+    /// The six rollups #3653's LC freezes — three legacy hourlies and the three legacy dailies hierarchical
+    /// from them — moved OUT of <see cref="HourlyAggregates"/> and <see cref="DailyAggregates"/> (which is why
+    /// both are six and seven, not nine and ten, again) rather than merely excluded from a policy. Those two
+    /// lists are what <see cref="HourlyRefreshPhaseOrder"/> and <see cref="AggregateCompressionTargets"/>
+    /// derive from BY COUNT, so a trio left in either list would still be charged a phase-grid minute or a
+    /// compression-band hour it no longer uses.
+    ///
+    /// <para><b>Still CREATED, following the <see cref="OffGridAggregates"/> pattern that lets the sweep make
+    /// an aggregate outside the phase grid — but with no policy builder at all, which is the one way this list
+    /// differs from that one.</b> <see cref="OffGridAggregates"/> members are off the grid AND still get a
+    /// refresh policy, just not the shared one; these six get NONE, ever. A missing one is still created on a
+    /// fresh store or one upgrading past LC for the first time — the daily CAGGs that read
+    /// <see cref="SupersededHourlyRollups"/>' legacy hourlies need their source to exist — but nothing ever
+    /// calls <c>add_continuous_aggregate_policy</c> on it, so it never materializes a bucket past whatever it
+    /// already held (WITH NO DATA on a store that never had this build, a frozen tail everywhere else). An
+    /// EXISTING store's own pre-LC refresh policy is not merely left un-converged, the way an unregistered
+    /// aggregate's would be: <see cref="EnsureContinuousAggregatesAsync"/> actively detaches it every start
+    /// (<see cref="RemoveFrozenRollupRefreshPolicySql"/>), so <see cref="ConvergeContinuousAggregateRefreshAsync"/>
+    /// — which only ever touches a view still ON <see cref="HourlyRefreshPhaseOrder"/> — never has one to
+    /// re-add, and neither does any other converge: there is no policy builder anywhere in this list for one
+    /// to read.</para>
+    ///
+    /// <para><b>Everything else about these six is unchanged.</b> They stay in <see cref="RollupViews"/> (the
+    /// coverage probe and the stitch both still need their floors) and out of
+    /// <see cref="RollupBackfill.Targets"/> and the materialization-hole repair targets derived from it — there
+    /// is nothing left to backfill or repair once nothing ever advances the watermark those verbs converge
+    /// toward. Their own retention and compression are named where each already lived:
+    /// <see cref="RetentionPolicies"/> for the three still with a drop_chunks policy (the legacy hourlies
+    /// this raw purge moved off of keep their OWN retention unchanged — only <see cref="RawTierCoverage"/>'s
+    /// raw-purge COVERAGE moved to the successors), and the frozen dailies' compression drain rule
+    /// (<see cref="DrainFrozenDailyCompressionPoliciesAsync"/>) for the daily half.</para>
+    /// </summary>
+    public static readonly (string CreateSql, string View)[] FrozenRollupAggregates =
+    {
+        (CreateQueryStatsHourlySql,     QueryStatsHourlyView),
+        (CreateProcedureStatsHourlySql, ProcedureStatsHourlyView),
+        (CreateQueryStatsDbHourlySql,   QueryStatsDbHourlyView),
+        (CreateQueryStatsDailySql,      QueryStatsDailyView),
+        (CreateProcedureStatsDailySql,  ProcedureStatsDailyView),
+        (CreateQueryStatsDbDailySql,    QueryStatsDbDailyView),
+    };
+
+    /// <summary>Is <paramref name="view"/> (bare or <c>collect.</c>-qualified) one of the six frozen legacy
+    /// rollups (<see cref="FrozenRollupAggregates"/>)? Same bare-name resolution as
+    /// <see cref="IsOffGridAggregate"/>.</summary>
+    public static bool IsFrozenRollupAggregate(string? view)
+    {
+        if (string.IsNullOrEmpty(view))
+        {
+            return false;
+        }
+
+        var dot = view.LastIndexOf('.');
+        var bare = dot >= 0 ? view[(dot + 1)..] : view;
+        return FrozenRollupAggregates.Any(a => string.Equals(a.View, bare, StringComparison.Ordinal));
+    }
+
+    /// <summary>Detaches an EXISTING refresh policy from a frozen legacy rollup, if the store still carries one
+    /// from before #3653's LC — <c>if_exists</c>, so a store that has never had one, or has already lost it,
+    /// changes nothing. Issued once per <see cref="FrozenRollupAggregates"/> member, every start, by
+    /// <see cref="EnsureContinuousAggregatesAsync"/> — the one place any continuous aggregate's refresh policy
+    /// is REMOVED in this file rather than added or converged.</summary>
+    public static string RemoveFrozenRollupRefreshPolicySql(string view)
+        => $"SELECT remove_continuous_aggregate_policy('collect.{view}', if_exists => true)";
 
     /// <summary>The query_stats hourly rollup as #1849-era stores built it — SUPERSEDED for the hourly-tier READ by
     /// <see cref="QueryStatsIntervalHourlyView"/> (#3653, Q12), and still REGISTERED: see
@@ -2131,17 +2254,18 @@ WITH NO DATA";
 
        WITH NO DATA: these start empty and are filled by --backfill-rollups (see
        docs/runbooks/a6-successor-daily-backfill.md) or by their own refresh policy reaching forward from
-       creation. EXCLUDED from aggregate compression for now (see CompressionDeferredUntilFreeze) — the daily
-       compression band is full at 23 members, and freeing three slots for these is #3653 A6 lane LC's job,
-       not this one's. Registered in DailyAggregates, RollupViews and the availability probe so the ensure
-       sweep creates them, the backfill verb and coverage probe see them, and SupersededDailyRollups records
-       which legacy daily each will eventually replace. */
+       creation. Compression-registered like any other member of DailyAggregates since #3653 A6 lane LC's
+       freeze retired the legacy trio's own daily-band membership and freed the three slots these take in
+       AggregateCompressionTargets (see that list's own note). Registered in DailyAggregates, RollupViews and
+       the availability probe so the ensure sweep creates them, the backfill verb and coverage probe see them,
+       and SupersededDailyRollups records which legacy daily each replaced. */
 
     /// <summary>The INTERVAL-HONEST successor of <see cref="CreateQueryStatsDailySql"/> (#3653, A6) —
     /// hierarchical from <see cref="CreateQueryStatsIntervalHourlySql"/>, not from the legacy
     /// <see cref="QueryStatsHourlyView"/> its sibling reads. Same dims and re-aggregated columns as the
     /// legacy daily, plus <c>sum(sample_interval_seconds_sum)</c> carried forward from the successor hourly.
-    /// <c>WITH NO DATA</c>; excluded from compression until the freeze (<see cref="CompressionDeferredUntilFreeze"/>).</summary>
+    /// <c>WITH NO DATA</c>; compression-registered like any other <see cref="DailyAggregates"/> member since
+    /// #3653 A6 lane LC's freeze (<see cref="AggregateCompressionTargets"/>).</summary>
     public const string CreateQueryStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_stats_interval_daily
 WITH (timescaledb.continuous) AS
 SELECT
@@ -3633,9 +3757,9 @@ WITH NO DATA";
     ///
     /// <para><b>So: the small-residual reading is conditional on how long this job runs, and what
     /// invalidates it is that runtime approaching <see cref="RefreshPhaseSlotSeconds"/>.</b> At 896 s
-    /// against a 1080-second slot the margin is 184 seconds — the clearance the population above carries, a
-    /// property of that closed record rather than of current load (it was 364 s against #3174's 1,260 s slot;
-    /// #3653's three appended hourly successors re-derived the window to 18 minutes); the heaviest
+    /// against a 1260-second slot the margin is 364 seconds — the clearance the population above carries, a
+    /// property of that closed record rather than of current load (it was 184 s against #3653's 1,080 s slot;
+    /// the A6 freeze re-derived the window back to 21 minutes); the heaviest
     /// slot is excluded WHOLE rather than guarded on the guard band being shorter than the refresh rather
     /// than on the refresh filling the slot (see <see cref="CompressionPhaseMinutes"/>). A value at or past
     /// the slot width is asserted as a failure rather than accommodated: past that point the refresh runs
@@ -3644,10 +3768,10 @@ WITH NO DATA";
     /// <para><b>THE LIVE ENVELOPE, which the census has now COLLAPSED onto that clearance rather than
     /// leaving beside it (#3119, #3166).</b> Over <c>2026-09-07</c> — one closed day, its 24 runs read from
     /// <c>timescaledb_information.job_history</c> at one row per run — this job's maximum was
-    /// <b>896.1 s</b>. That leaves <b>183.9 s</b> of the slot, <b>17.0%</b> of it, and sits <b>3.9 s</b>
+    /// <b>896.1 s</b>. That leaves <b>363.9 s</b> of the slot, <b>28.8%</b> of it, and sits <b>153.9 s</b>
     /// BELOW <see cref="RefreshSlotWarningSeconds"/>, which <see cref="ClassifyRefreshSlotHeadroom"/> bands
-    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by four seconds, at #3653's re-derived 1,080 s window
-    /// (363.9 s, 28.8% and 153.9 s against #3174's 1,260 s). #3119 had to state these figures apart from the
+    /// <see cref="RefreshSlotHeadroom.InsideSlot"/> — by 153.9 s, at the A6 freeze's re-derived 1,260 s window
+    /// (183.9 s, 17.0% and 3.9 s against #3653's 1,080 s). #3119 had to state these figures apart from the
     /// clearance because the constant was the maximum of a SAMPLE and the census exceeded it. They agree to
     /// the second — and that agreement is a COINCIDENCE ABOUT WHERE ONE RUN LANDED rather than an identity
     /// of populations (#3182). This day's runs are a SUBSET of the population above, not the whole of it:
@@ -3768,9 +3892,9 @@ WITH NO DATA";
     /// <para><b>The alternative, and the reason it is rejected — which #3174 had to RE-TAKE rather than
     /// restate, because the old reason stopped being true — and which #3653 re-took once more, because it
     /// came back.</b> The alternative that tempts here is the slot less one
-    /// <see cref="CompressionPhaseGuardMinutes"/> band, 840 s, and it sits BELOW
-    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #3653's 18-minute window, as it did under
-    /// the uniform grid (480 s) and did NOT at #3174's 21-minute window (1,020 s). Below the ceiling was the
+    /// <see cref="CompressionPhaseGuardMinutes"/> band, 1020 s, and it sits ABOVE
+    /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> at #3653's A6 freeze's 21-minute window, as it
+    /// did NOT under #3653's 18-minute window (840 s) and did at #3174's 21-minute window (1,020 s). Above the ceiling was
     /// whole of its original rejection, since a line under the recorded ceiling warns on the very run the
     /// compression grid is sized against; #3174's re-derivation took that argument away by shrinking the
     /// guard band from half a uniform slot to the light refreshes' own ceiling, leaving both lines clear of
@@ -3790,8 +3914,8 @@ WITH NO DATA";
     /// what makes a crossing mean something.</b> The census re-derivation (#3166) put that constant at
     /// <b>896 s</b>, which INVERTED the ordering against the 750 s line a 15-minute slot produced — and
     /// restoring it is one of the two things the re-derived grid is for. Against the window the hour can
-    /// spare, this line is 900 s and the ceiling is 4 s below it (#3174's 21-minute window had it at 1,050 s
-    /// and 154 s; #3653's 18-minute window is the floor the ceiling essay's own arithmetic names), so a
+    /// spare, this line is 1,050 s and the ceiling is 154 s below it (#3653's 18-minute window had it at 900 s
+    /// and 4 s; #3653's A6 freeze restored #3174's 21-minute window), so a
     /// reading in this band is again past the whole of the record the compression grid is sized against: a
     /// different signal calling for a different response, rather than a restatement of the grid's own
     /// sizing. <b>The relationship is what is pinned, not the two numbers</b> — a ceiling that rose past
@@ -3801,11 +3925,10 @@ WITH NO DATA";
     /// that changes anything — and at four seconds of margin the next re-derivation has no geometry left to
     /// give and has to take a member OFF the grid or a minute off the compression band.</para>
     ///
-    /// <para><b>The alternative's ordering is BACK below the ceiling at #3653's window</b>: 1,080 - 240 = 840 s
-    /// sits 56 s under the 896 s constant, so the rejection the paragraph above re-took as coupling is again
-    /// also an ordering — the alternative would warn on the grid's own sizing figure. Both reasons stand;
-    /// TimescaleSupportTests pins both, and says which one is left if a wider window ever restores #3174's
-    /// state.</para>
+    /// <para><b>The alternative's ordering is ABOVE the ceiling at #3653's A6 freeze</b>: 1,260 - 240 = 1,020 s
+    /// sits 124 s above the 896 s constant, so coupling stands as the sole reason for the rejection — the
+    /// ordering argument is gone again, as it was at #3174's 21-minute window. TimescaleSupportTests pins both
+    /// reasons and says which one remains if a narrower window re-takes the ordering.</para>
     /// </summary>
     public static int RefreshSlotWarningSeconds =>
         RefreshPhaseSlotSeconds * WindowWatchLeadNumerator / WindowWatchLeadDenominator;
@@ -4225,16 +4348,7 @@ WITH NO DATA";
     /// <para><b>THE CENSUS.</b> Post-boundary, the maximum is <b>226.8</b> s over <b>874</b> runs of
     /// <b>12</b> views, with 95th percentile <b>42.2</b> s and median <b>0.8</b> s. Zero rows are removed by
     /// the succeeded/finish filter (<b>874</b> of <b>874</b>), so this is the whole of the span rather than a
-    /// status-selected part of it. <b>TWELVE OF FIFTEEN, since #3653 (Q12).</b> The read predates the three
-    /// interval-honest hourly successors, so it covers 12 of the 15 light views the constant now bounds; the 3
-    /// registered after the read are unmeasured, and are held under this bound by SHAPE rather than by a
-    /// reading: <see cref="QueryStatsIntervalHourlyView"/> reads the same raw rows under the same group key
-    /// as <see cref="QueryStatsHourlyView"/> less the interval-0 rows (that view's own maximum in this
-    /// population is 23.3 s), and the other two are their legacies' shape less the same rows (sub-3 s). A
-    /// member that reads a SUBSET of a measured sibling's rows into the same group key cannot cost more
-    /// than the sibling, so the bound is argued, not measured — and <see cref="LogRefreshCeilingStaleness"/>
-    /// reports the first run of any of the three that falsifies it, exactly as it would for the twelve. The
-    /// next census over the fifteen-view layout replaces this sentence with a count. <b>ONE STORE'S, on the same precondition
+    /// status-selected part of it. <b>ONE STORE'S, on the same precondition
     /// <see cref="HeaviestHourlyRefreshObservedCeilingSeconds"/> states (#3175):</b> the read only sees
     /// executions where <c>timescaledb.enable_job_execution_logging</c> is ON, that GUC could not be healed
     /// onto a cluster predating the conf block that set it until #3175/#3177 gave it a marker of its own,
@@ -4603,12 +4717,12 @@ WITH NO DATA";
     /// this band cannot drift apart.</para>
     ///
     /// <para><b>Why the heaviest window is excluded whole rather than guarded.</b>
-    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1080 seconds in its window and the
+    /// <see cref="HeaviestHourlyRefreshView"/> occupies 896 of the 1260 seconds in its window and the
     /// <see cref="CompressionPhaseGuardMinutes"/> band is 4, so applying the ordinary band to this window
     /// would admit 11 minutes that sit INSIDE the refresh — the band is the wrong size for it, which is the
     /// arithmetic the exclusion rests on and the reason widening the band is not the alternative. The other
-    /// 3 minutes of the window are past the refresh and are left on the table deliberately (6 of #3174's
-    /// 1,260 s window; #3653's three hourly successors took three of them): recovering them
+    /// 6 minutes of the window are past the refresh and are left on the table deliberately (3 of #3653's
+    /// 1,080 s window; the A6 freeze re-added three): recovering them
     /// means sizing a band for one window against a bound whose population is 57 readings and still moving
     /// (194 s to 896 s within the clean regime), which is #3035's exclude-versus-guard decision to reopen and
     /// not a renumbering. Stated in SECONDS against the window in seconds, because the occupancy is only
@@ -5301,19 +5415,32 @@ WITH NO DATA";
            ensure decides each materialization's compress_after by tier, and it must read the same seven
            names this sweep creates rather than a second copy of them. The list carries its own ordering
            requirement — L2 before the day-grain daily it feeds — on its declaration. */
+        /* Named so every branch below produces the exact same nominal type: a tuple literal cast per branch
+           left two of the four Concat calls warning CS8620 (nullability mismatch) despite each branch's
+           element being individually nullable-annotated correctly — a Roslyn tuple/LINQ inference rough edge,
+           not a real mismatch. Routing every branch through one local function's declared return type removes
+           the ambiguity instead of suppressing the warning. */
+        static (string CreateSql, string View, Func<string>? Policy) Staged(string createSql, string view, Func<string>? policy)
+            => (createSql, view, policy);
+
         var aggregates = HourlyAggregates
-            .Select(a => (CreateSql: a.CreateSql, View: a.View, Policy: (Func<string>)(() => AddHourlyRefreshPolicySql(a.View))))
-            .Concat(DailyAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Policy: (Func<string>)(() => AddDailyRefreshPolicySql(a.View)))))
+            .Select(a => Staged(a.CreateSql, a.View, () => AddHourlyRefreshPolicySql(a.View)))
+            .Concat(DailyAggregates.Select(a => Staged(a.CreateSql, a.View, () => AddDailyRefreshPolicySql(a.View))))
         /* The seven baseline-tier aggregates (#1757; nine until #2007) ride the HOURLY tier: they are sourced from
            raw like the hourly tier, not hierarchically from another CAGG, so they carry no ordering
            requirement against the daily tier. Appended from the single BaselineAggregates list so this sweep
            and the retention list cannot drift apart. HourlyRefreshPhaseOrder appends them from the same list,
            so every view here has a slot on the phase grid. */
-        .Concat(BaselineAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Policy: (Func<string>)(() => AddHourlyRefreshPolicySql(a.View)))))
+        .Concat(BaselineAggregates.Select(a => Staged(a.CreateSql, a.View, () => AddHourlyRefreshPolicySql(a.View))))
         /* #3893: the off-grid aggregates, LAST - raw-sourced, so no ordering requirement - each with its own
            policy builder rather than a tier flag, because they take neither tier's policy (no grid minute, no
            daily window). See OffGridAggregates. */
-        .Concat(OffGridAggregates.Select(a => (CreateSql: a.CreateSql, View: a.View, Policy: a.PolicySql)))
+        .Concat(OffGridAggregates.Select(a => Staged(a.CreateSql, a.View, a.PolicySql)))
+        /* #3653 LC: the six FROZEN legacy rollups, LAST like the off-grid ones — raw- or hourly-sourced, so no
+           ordering requirement against anything above. A NULL policy rather than a builder: the loop below
+           reads that as "create it if missing and detach whatever refresh policy it has", never as "attach
+           one". See FrozenRollupAggregates. */
+        .Concat(FrozenRollupAggregates.Select(a => Staged(a.CreateSql, a.View, null)))
         .ToArray();
 
         /* A store that ran WITHOUT TimescaleDB and has now gained it is carrying the plain fallback views
@@ -5346,11 +5473,6 @@ WITH NO DATA";
                     await create.ExecuteNonQueryAsync(cancellationToken);
                 }
 
-                /* Built HERE, not in the array above, so RefreshPhaseMinutesFor's throw for an hourly view
-                   missing from HourlyRefreshPhaseOrder costs that one aggregate and names it in the warning
-                   below, instead of taking the whole sweep down before the first CREATE runs. */
-                var policySql = policyFor();
-
                 /* #3893: an off-grid aggregate's materialization width is set HERE, after its CREATE and BEFORE
                    its policy exists, because nothing later would be early enough. #3620's width ensure runs in
                    the aggregate-compression step, a later convergence stage, and walks the compression targets
@@ -5363,8 +5485,22 @@ WITH NO DATA";
                     await width.ExecuteNonQueryAsync(cancellationToken);
                 }
 
-                using (var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds })
+                if (policyFor is null)
                 {
+                    /* #3653 LC: FrozenRollupAggregates carries no policy builder for this view. Detach
+                       whatever refresh policy an existing store still has on it from before the freeze —
+                       if_exists, so a store that never had one, or has already lost it, changes nothing — and
+                       never attach one. */
+                    using var removePolicy = new NpgsqlCommand(RemoveFrozenRollupRefreshPolicySql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await removePolicy.ExecuteNonQueryAsync(cancellationToken);
+                }
+                else
+                {
+                    /* Built HERE, not in the array above, so RefreshPhaseMinutesFor's throw for an hourly view
+                       missing from HourlyRefreshPhaseOrder costs that one aggregate and names it in the warning
+                       below, instead of taking the whole sweep down before the first CREATE runs. */
+                    var policySql = policyFor();
+                    using var policy = new NpgsqlCommand(policySql, connection) { CommandTimeout = SetupTimeoutSeconds };
                     await policy.ExecuteNonQueryAsync(cancellationToken);
                 }
 
@@ -5372,9 +5508,23 @@ WITH NO DATA";
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                logger?.LogWarning(
-                    "Continuous aggregate {View} setup failed — composer queries fall back to raw scans: {Message}",
-                    view, ex.Message);
+                /* A frozen rollup (policyFor is null) has no raw-scan fallback to name: on an existing store its
+                   CREATE is a no-op and the throw is the policy detach, so the view keeps serving composer
+                   queries on its pre-freeze refresh schedule until a later start's retry detaches it. The same
+                   catch also sees a failed CREATE (a fresh store) or width step, so the line names both steps
+                   rather than claiming the view exists. */
+                if (IsFrozenRollupAggregate(view))
+                {
+                    logger?.LogWarning(
+                        "Could not create frozen rollup {View} or detach its refresh policy; a later start retries it, and until then it keeps any refresh policy it had: {Message}",
+                        view, ex.Message);
+                }
+                else
+                {
+                    logger?.LogWarning(
+                        "Continuous aggregate {View} setup failed — composer queries fall back to raw scans: {Message}",
+                        view, ex.Message);
+                }
             }
         }
 
@@ -5929,6 +6079,18 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
+    /// The <c>WHERE</c> predicate the interval-honest successor hourlies bake into their CREATE — they exclude
+    /// first-pass rows where the collector had no previous sample to delta against and stored
+    /// <c>sample_interval_seconds = 0</c>. <see cref="RetentionArmSafetySql"/> applies the same predicate to
+    /// the <c>source_oldest</c> subquery for <c>query_stats</c> and <c>procedure_stats</c>, so a 0-interval row
+    /// that pre-dates every materialized bucket cannot hold the purge gate open indefinitely (#3653 high-fix).
+    ///
+    /// <para>A pin test in <c>IntervalHonestHourlyRollupTests</c> asserts this constant appears in each
+    /// successor's CREATE text, so a CREATE change that drops the predicate is caught automatically.</para>
+    /// </summary>
+    public const string IntervalHonestSourceFilter = "sample_interval_seconds IS DISTINCT FROM 0";
+
+    /// <summary>
     /// Is it safe to arm <paramref name="relation"/>'s retention policy — i.e. does EVERY tier below it already
     /// cover everything this relation holds? Emits the source's oldest row followed by one
     /// <c>min(bucket)</c> column per coverage relation, in <paramref name="coverageRelations"/> order.
@@ -5945,6 +6107,61 @@ AND   j.hypertable_name = '{relation}'";
     /// <c>GREATEST</c> would have expressed it in one column and is exactly wrong here, because it SKIPS NULLs.
     /// An empty new rollup would vanish from the comparison and the gate would pass on the old rollup alone —
     /// which is the whole failure this exists to prevent.</para>
+    ///
+    /// <para><b>Stitched coverage for frozen-legacy + successor pairs (#3653 high-fix, Option 4; seam-checked
+    /// since #4186).</b> When a coverage relation is an interval-honest successor (a member of
+    /// <see cref="SupersededHourlyRollups"/>), the SQL for that coverage slot stitches the legacy's floor with
+    /// the successor's so an upgrading store whose successor is still empty can fall back to the frozen
+    /// legacy's floor rather than reading Short forever.</para>
+    ///
+    /// <para><b>The stitch is NOT gap-free by construction — an earlier version of this comment claimed it
+    /// was, and that was false.</b> A store stopped longer than <see cref="HourlyRefreshStartOffset"/> before
+    /// the successor's first refresh leaves raw rows between the legacy's last bucket and the successor's
+    /// floor that NEITHER side ever materializes (the outage shape <c>MaterializationHoles.cs</c>'s class doc
+    /// works through in full). An unconditional stitch reports that seam Covered right up to the moment the
+    /// raw purge destroys it. So the SQL probes raw itself, filtered the same way <see cref="IntervalHonestSourceFilter"/>
+    /// filters everything else here, for a row at or after the legacy's last bucket and before the successor's
+    /// floor (or +infinity when the successor is empty): none found → <c>LEAST(legacy.min, successor.min)</c>,
+    /// the stitched floor, honest because the seam really is empty; a row found → the successor's OWN
+    /// <c>min(bucket)</c> alone (NULL when empty, giving <c>Short</c>), because the legacy cannot vouch for
+    /// history it never covered. Once the successor's own floor reaches back past the legacy's last bucket,
+    /// there is no seam left to hold a row, the probe always comes back empty, and the two branches converge —
+    /// the same steady state the old unconditional stitch reached, just no longer assumed along the way. Both
+    /// empty → <c>NULL</c> → <c>Short</c> (correct: fresh install, no history yet). The seam is what
+    /// <see cref="RepairMaterializationHolesAsync"/> repairs, by giving a stitched successor a SEAM scan window
+    /// down to the legacy's last bucket, unclamped by the horizon that bounds its ordinary scan window — so an
+    /// outage longer than that horizon's own span (#4186 follow-up: the first cut folded the seam into the same
+    /// horizon clamp as the ordinary window, and a seam older than it was silently never scanned) still gets
+    /// repaired instead of clamped away — PROVIDED the raw purge was already held when the store stopped.
+    /// That proviso is real, not decoration: PostgreSQL runs its own overdue retention jobs at start, before
+    /// this service's start sweep can hold anything, so a purge left armed across a long enough stop drops the
+    /// chunk holding the seam before the walk ever gets a turn (#4299, pre-existing — 3.8.0 loses the same
+    /// chunk on the same schedule). Once the repair does run, the seam is empty and this gate's fallback
+    /// releases — automatically within the hour on a store that keeps running (#3812), but only from the
+    /// SECOND start after an outage that crosses the upgrade: the walk skips a successor with nothing
+    /// materialized yet, so the seam does not exist for it to find until the successor's own first refresh has
+    /// run, and nothing re-runs the walk between starts (#4300). Once it does run, release is bounded only by
+    /// the repair's own per-start cap — a seam wider than one start's cap takes more than one start to close in
+    /// full, but every start makes progress on it.</para>
+    ///
+    /// <para><b>The stitch also trusts the frozen legacy's OWN span unconditionally — accepted as 3.8.0 parity,
+    /// not fixed by this round.</b> The seam probe above only checks AT OR AFTER the legacy's last bucket.
+    /// Below that bucket, <c>LEAST(legacy.min, successor.min)</c> runs with no check at all: a raw-row gap that
+    /// opened INSIDE the frozen legacy's own materialized span — from an outage before this store ever took the
+    /// freeze, that 3.8.0's own retention already lost before the upgrade — reads Covered forever, because the
+    /// legacy stopped refreshing at the freeze and the six frozen views never re-enter the walk to close it
+    /// (<see cref="MaterializationHoleTargets"/> excludes them; see its note). This is accepted, not a
+    /// regression: 3.8.0 has no walk at all, so it loses the exact same rows on the exact same schedule — its
+    /// raw purge drops them once they age past the horizon, upgrade or not. What this build adds beyond that
+    /// parity is the A6 backfill (<c>--backfill-rollups</c>, <see cref="RollupBackfill"/>), which — unlike the
+    /// automatic walk — fills the successor down to RAW's own oldest row, not merely the legacy's boundary, so
+    /// an operator who runs it closes a pre-upgrade hole the automatic gate will otherwise trust without ever
+    /// looking.</para>
+    ///
+    /// <para><b>Source filter for 0-interval rows.</b> For <c>query_stats</c> and <c>procedure_stats</c> the
+    /// <c>source_oldest</c> subquery adds <c>WHERE <see cref="IntervalHonestSourceFilter"/></c> to exclude
+    /// first-pass rows the successors themselves never materialize — without this, a single 0-interval row
+    /// older than any successor bucket holds the gate open permanently even after the stitch fix.</para>
     /// </summary>
     public static string RetentionArmSafetySql(string relation, string sourceTimeColumn, IReadOnlyList<string> coverageRelations)
     {
@@ -5953,8 +6170,55 @@ AND   j.hypertable_name = '{relation}'";
             throw new ArgumentNullException(nameof(coverageRelations));
         }
 
-        var columns = coverageRelations.Select((c, i) => $"    (SELECT min(bucket) FROM collect.{c}) AS coverage_oldest_{i}");
-        return $"SELECT{Environment.NewLine}    (SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest,{Environment.NewLine}"
+        /* Source filter: the interval-honest successors for query_stats and procedure_stats bake
+           IntervalHonestSourceFilter into their CREATE. A 0-interval row in raw that pre-dates every
+           materialized bucket would hold the gate forever even with stitching, so we apply the same
+           filter to source_oldest. query_store_stats has no such filter in its hourly CREATE. */
+        var sourceWhere = relation is "query_stats" or "procedure_stats"
+            ? $"\nWHERE {IntervalHonestSourceFilter}"
+            : string.Empty;
+
+        /* Coverage SQL: for a coverage relation that is an interval-honest successor, stitch it with
+           its frozen legacy so an empty successor on an upgrading store falls back to the legacy's
+           floor — BUT ONLY WHEN THE SEAM IS EMPTY (#4186). The legacy stopped refreshing at the
+           freeze; if the store was down past HourlyRefreshStartOffset before the successor's first
+           refresh, the raw rows collected between the legacy's last bucket and the successor's floor
+           were never materialized by either side (see MaterializationHoles.cs's class doc for the
+           shape). A stitch that ignores that seam reports Covered over history nobody holds.
+           So: probe raw for a filter-admitted row at or after the legacy's last bucket (+ one hour, so
+           the legacy's own last bucket is not re-counted as seam) and before the successor's floor (or
+           +infinity when the successor is empty). Any such row means the seam is NOT gap-free, so the
+           slot falls back to the successor's OWN min(bucket) — NULL when empty, which reports Short
+           honestly instead of the false Covered the unconditional stitch gave. LEGACY.mx is NULL for a
+           legacy that never materialized anything; the comparison against it is then UNKNOWN for every
+           row, EXISTS is false, and the stitch behaves exactly as it did before this seam probe existed.
+           LegacyOf() returns null for any relation that is not in SupersededHourlyRollups (dailies,
+           query_store_stats, baseline aggregates), keeping those as simple min(bucket). PostgreSQL's
+           LEAST ignores NULL arguments (returns NULL only when EVERY argument is NULL), so
+           LEAST(l.mn, s.mn) already is what COALESCE(LEAST(l.mn, s.mn), l.mn, s.mn) computed. */
+        var columns = coverageRelations.Select((c, i) =>
+        {
+            var legacy = LegacyOf(c);
+            var subquery = legacy is not null
+                ? $"(SELECT CASE{Environment.NewLine}"
+                + $"                WHEN EXISTS ({Environment.NewLine}"
+                + $"                    SELECT 1{Environment.NewLine}"
+                + $"                    FROM collect.{relation} AS seam{Environment.NewLine}"
+                + $"                    WHERE seam.{sourceTimeColumn} >= l.mx + INTERVAL '1 hour'{Environment.NewLine}"
+                + $"                    AND   seam.{sourceTimeColumn} < COALESCE(s.mn, 'infinity'::timestamp){Environment.NewLine}"
+                + $"                    AND   {IntervalHonestSourceFilter}{Environment.NewLine}"
+                + $"                    ORDER BY seam.{sourceTimeColumn}{Environment.NewLine}"
+                + $"                    LIMIT 1){Environment.NewLine}"
+                + $"                THEN s.mn{Environment.NewLine}"
+                + $"                ELSE LEAST(l.mn, s.mn){Environment.NewLine}"
+                + $"           END{Environment.NewLine}"
+                + $"     FROM (SELECT min(bucket) AS mn, max(bucket) AS mx FROM collect.{legacy}) l{Environment.NewLine}"
+                + $"     CROSS JOIN (SELECT min(bucket) AS mn FROM collect.{c}) s)"
+                : $"(SELECT min(bucket) FROM collect.{c})";
+            return $"    {subquery} AS coverage_oldest_{i}";
+        });
+
+        return $"SELECT{Environment.NewLine}    (SELECT min({sourceTimeColumn}) FROM collect.{relation}{sourceWhere}) AS source_oldest,{Environment.NewLine}"
             + string.Join("," + Environment.NewLine, columns);
     }
 
@@ -5975,8 +6239,19 @@ AND   j.hypertable_name = '{relation}'";
     public static readonly IReadOnlyList<(string Relation, string TimeColumn, IReadOnlyList<string> Coverage)> RawTierCoverage =
         new (string, string, IReadOnlyList<string>)[]
     {
-        ("query_stats", "collection_time", new[] { QueryStatsHourlyView }),
-        ("procedure_stats", "collection_time", new[] { ProcedureStatsHourlyView }),
+        /* LC (#3653): named through RequireSuccessorOf rather than the legacy hourlies directly. A gate still
+           keyed on query_stats_hourly/procedure_stats_hourly would eventually find them EMPTY — their OWN
+           retention policy (RetentionPolicies, unchanged by LC) keeps trimming their chunks at
+           HourlyRetentionInterval while the freeze stops anything from refilling them past that point — and
+           hold the raw purge forever with no self-release. See SupersededHourlyRollups for the full story.
+           query_stats has TWO consumers, same #1849 reason query_store_stats does below: the query-grain
+           successor AND query_stats_db_interval_hourly (CreateQueryStatsDbIntervalHourlySql), the db-grain
+           successor, both read raw collect.query_stats directly, so raw cannot purge over history either is
+           missing. */
+        ("query_stats", "collection_time", new[] { RequireSuccessorOf(QueryStatsHourlyView), RequireSuccessorOf(QueryStatsDbHourlyView) }),
+        ("procedure_stats", "collection_time", new[] { RequireSuccessorOf(ProcedureStatsHourlyView) }),
+        /* query_store_stats is not one of #3653's legacy six (see FrozenRollupAggregates) — both consumers
+           below go on refreshing, so their coverage is still named directly. */
         ("query_store_stats", "collection_time", new[] { QueryStoreStatsHourlyView, QueryStoreStatsIntervalHourlyView }),
     };
 
@@ -6019,19 +6294,23 @@ AND   j.hypertable_name = '{relation}'";
             (Relation: QueryStoreStatsHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStoreStatsDailyView }),
             (Relation: QueryStatsDbHourlyView,    DropAfter: HourlyRetentionInterval, TimeColumn: "bucket",          Coverage: new[] { QueryStatsDbDailyView }),
 
-            /* The interval-honest hourly successors (#3653, Q12) take the hourly tier's horizon and the LEAF RULE
-               (#1757): nothing is hierarchical from them, so their consumer is the routed READ, which past
-               HourlyMaxAge goes to the daily tier — and the daily tier is the LEGACY daily, hierarchical from the
-               legacy hourly over the same raw rows (see SupersededHourlyRollups for why the successors have no
-               daily of their own yet). That is the corrected Query Store hourly's shape exactly: a leaf whose
-               coverage relation is a sibling daily built from a different parent over the same source. What the
-               gate protects here is the coarsened history — a successor bucket purged at 90 days is a day the
-               legacy daily has already summed; what it cannot protect, and does not claim to, is the successor's
-               interval-honest sample_count and min() at the day grain, which no daily carries until one is built
-               from these. */
-            (Relation: QueryStatsIntervalHourlyView,     DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStatsDailyView }),
-            (Relation: ProcedureStatsIntervalHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { ProcedureStatsDailyView }),
-            (Relation: QueryStatsDbIntervalHourlyView,   DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { QueryStatsDbDailyView }),
+            /* The interval-honest hourly successors (#3653, Q12) took the LEAF RULE (#1757) at Q12: nothing was
+               hierarchical from them yet, so their consumer was the routed READ, which past HourlyMaxAge went to
+               the LEGACY daily — the same relation SupersededHourlyRollups' legacy hourly fed, over the same raw
+               rows. #3653's LB gave each successor its own successor DAILY, hierarchical from it exactly the way
+               the legacy trio's own daily is hierarchical from the legacy hourly (SupersededDailyRollups); LC's
+               freeze retired the leaf shape along with the legacy trio itself. Coverage now names that successor
+               daily — derived through RequireSuccessorDailyOf rather than the legacy daily, because the legacy
+               daily is the one relation LC already froze off the refresh grid
+               (RemoveFrozenRollupRefreshPolicySql): its own coverage floor stopped advancing at the freeze, so
+               gating the successor's drop_chunks on it would never actually ask whether the RIGHT consumer — the
+               successor daily — has materialized the bucket about to be dropped, which is precisely the "never
+               drop what your consumer has not captured yet" failure this whole list exists to prevent (see the
+               summary above). What the gate protects is unchanged: the coarsened history a successor bucket
+               summarizes once it is purged at 90 days. */
+            (Relation: QueryStatsIntervalHourlyView,     DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(QueryStatsIntervalHourlyView) }),
+            (Relation: ProcedureStatsIntervalHourlyView, DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(ProcedureStatsIntervalHourlyView) }),
+            (Relation: QueryStatsDbIntervalHourlyView,   DropAfter: HourlyRetentionInterval, TimeColumn: "bucket", Coverage: new[] { RequireSuccessorDailyOf(QueryStatsDbIntervalHourlyView) }),
 
             /* The corrected Query Store tier (#1849, extended by #1869).
 
@@ -6705,25 +6984,6 @@ AND   j.hypertable_name = '{relation}'";
     public const string AggregateCompressionSegmentBy = "server_id";
 
     /// <summary>
-    /// The three interval-honest successor DAILIES (#3653, A6), held OUT of
-    /// <see cref="AggregateCompressionTargets"/> so the daily compression band — full at 23 members — does not
-    /// overflow to 26. They are still created (registered in <see cref="DailyAggregates"/>), refreshed, and
-    /// backfillable; they simply carry no compression policy YET. #3653 A6 lane LC's freeze retires the legacy
-    /// trio's own daily-band membership, which is what frees the three slots this set holds these back for;
-    /// once that lands, LC removes this set (or these three names from it) and the ensure sweep enables their
-    /// compression on the next start, the same as any newly-registered aggregate.
-    ///
-    /// <para><b>MUST stay declared before <see cref="AggregateCompressionTargets"/></b>: static field
-    /// initializers run in declaration order, and that list reads this set.</para>
-    /// </summary>
-    public static readonly IReadOnlySet<string> CompressionDeferredUntilFreeze = new HashSet<string>(StringComparer.Ordinal)
-    {
-        QueryStatsIntervalDailyView,
-        ProcedureStatsIntervalDailyView,
-        QueryStatsDbIntervalDailyView,
-    };
-
-    /// <summary>
     /// Every continuous aggregate this product owns, paired with the CREATE that defines it and whether its
     /// refresh policy is hourly — the registry the compression ensure walks, in the order that ALSO decides each
     /// one's hour on the daily band (<see cref="AggregateCompressionBandHourFor"/>).
@@ -6733,15 +6993,22 @@ AND   j.hypertable_name = '{relation}'";
     /// — rather than hand-listed, so an aggregate registered for creation is compression-registered the same
     /// moment, with its tier decided by which list it came from. There is no fourth list to forget.</para>
     ///
+    /// <para><b>Twenty, not twenty-three (#3653, LC).</b> A set once named <c>CompressionDeferredUntilFreeze</c>
+    /// held the three interval-honest successor dailies (<see cref="QueryStatsIntervalDailyView"/>,
+    /// <see cref="ProcedureStatsIntervalDailyView"/>, <see cref="QueryStatsDbIntervalDailyView"/>) out of this
+    /// list from A6 until LC's freeze — the daily band was full at 23 members with the legacy trio still on it,
+    /// so the successors joining unconditionally would have overflowed it. LC moved the legacy trio itself out
+    /// of <see cref="HourlyAggregates"/> and <see cref="DailyAggregates"/> (into
+    /// <see cref="FrozenRollupAggregates"/>), which is what frees the three slots the successors take here — so
+    /// this list is declared straight from the three source lists, with no deferral to subtract.</para>
+    ///
     /// <para><b>MUST stay declared after those three lists</b>: static field initializers run in declaration
     /// order, and this one reads all three.</para>
     /// </summary>
-
     public static readonly IReadOnlyList<(string CreateSql, string View, bool Hourly)> AggregateCompressionTargets =
         HourlyAggregates.Select(a => (a.CreateSql, a.View, Hourly: true))
             .Concat(DailyAggregates.Select(a => (a.CreateSql, a.View, Hourly: false)))
             .Concat(BaselineAggregates.Select(a => (a.CreateSql, a.View, Hourly: true)))
-            .Where(a => !CompressionDeferredUntilFreeze.Contains(a.View))
             .ToArray();
 
     /// <summary>
@@ -7855,6 +8122,11 @@ ORDER BY i.indexname";
             AggregateCompressionBandMinute, AggregateCompressionBandFirstHour,
             stagedLines.Count == 0 ? "none this start" : string.Join("; ", stagedLines));
 
+        /* #3653 LC point 7, the drain: a separate concern from everything above — these three are never
+           AggregateCompressionTargets, so the states/needingPolicy/converge loops above never see them and
+           this call never sees what they did. Runs last so it costs no target its own progress if it fails. */
+        await DrainFrozenDailyCompressionPoliciesAsync(connection, logger, cancellationToken);
+
         return inPlace;
     }
 
@@ -7862,6 +8134,173 @@ ORDER BY i.indexname";
     /// are stated in.</summary>
     private static string FormatGiB(long bytes)
         => (bytes / 1073741824d).ToString("0.0", CultureInfo.InvariantCulture) + " GiB";
+
+    /* ─────────────── the frozen dailies' compression drain (#3653, LC point 7) ─────────────── */
+
+    /// <summary>
+    /// One of the six frozen rollups' (<see cref="FrozenRollupAggregates"/> members) own compression drain
+    /// state, as <see cref="FrozenDailyCompressionDrainStateSql"/> reads it — its compression job if any,
+    /// and how many of its materialization's chunks are uncompressed.
+    /// </summary>
+    public sealed record FrozenDailyCompressionDrainState(string View, int? JobId, long UncompressedChunks);
+
+    /// <summary>
+    /// All six frozen rollups' (<see cref="FrozenRollupAggregates"/>) own compression drain state in one
+    /// read: whether each still carries a compression job, and how many of its materialization's chunks are
+    /// uncompressed — EVERY uncompressed chunk, of any age, not the age-gated
+    /// <c>eligible_under_hourly_rule</c> / <c>eligible_under_daily_rule</c> columns
+    /// <see cref="AggregateCompressionStateSql"/> reads for the registered targets.
+    ///
+    /// <para><b>Why not those columns.</b> They answer "how many chunks would this policy's NEXT run compress",
+    /// which is gated on a tier's <c>compress_after</c> — a chunk younger than that window is not eligible YET
+    /// but is still uncompressed. <see cref="ShouldDrainFrozenDailyCompression"/> asks a different question:
+    /// has this aggregate finished compressing everything it will ever hold. A young uncompressed chunk must
+    /// still count toward that, or the drain would remove the policy while a chunk was still waiting its turn
+    /// to compress, and nothing would ever compress it afterward.</para>
+    ///
+    /// <para>Scoped BY NAME to exactly <see cref="FrozenRollupAggregates"/>'s six members — all six this
+    /// rule ever drains (three legacy hourlies and three legacy dailies; existing stores had compression
+    /// policies on all six before the LC freeze) — rather than reading every non-target aggregate under
+    /// <c>collect</c>, so an unrelated off-grid or newly-registered-but-not-yet-enabled aggregate can never be
+    /// swept in by a broadened <c>WHERE</c> later. Same join shape as <see cref="AggregateCompressionStateSql"/>
+    /// (job resolved on either the view or the materialization identity) for the same measured reason.</para>
+    /// </summary>
+    public static string FrozenDailyCompressionDrainStateSql
+    {
+        get
+        {
+            var views = string.Join(", ", FrozenRollupAggregates.Select(a => $"'{a.View}'"));
+            return $@"
+SELECT
+    ca.view_name,
+    j.job_id,
+    (
+        SELECT count(*)
+        FROM timescaledb_information.chunks AS c
+        WHERE c.hypertable_schema = ca.materialization_hypertable_schema
+        AND   c.hypertable_name = ca.materialization_hypertable_name
+        AND   NOT c.is_compressed
+    ) AS uncompressed_chunks
+FROM timescaledb_information.continuous_aggregates AS ca
+LEFT JOIN timescaledb_information.jobs AS j
+  ON  (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')
+  AND (
+        (j.hypertable_schema = ca.view_schema AND j.hypertable_name = ca.view_name)
+     OR (j.hypertable_schema = ca.materialization_hypertable_schema AND j.hypertable_name = ca.materialization_hypertable_name)
+      )
+WHERE ca.view_schema = 'collect'
+AND   ca.view_name IN ({views})";
+        }
+    }
+
+    /// <summary>
+    /// THE DRAIN RULE (#3653, LC point 7), pure so the truth table pins directly: does
+    /// <paramref name="state"/>'s frozen daily lose its compression policy now? Only once there is a policy to
+    /// lose — <c>JobId</c> not null; a store that never enabled compression on it, or has already been
+    /// drained, changes nothing — AND every one of its materialization's chunks is already compressed
+    /// (<c>UncompressedChunks == 0</c>). Any uncompressed chunk, however old or young, holds the policy in
+    /// place, because compression still has a chunk left to do; once that count reaches zero it can only ever
+    /// STAY zero, since nothing refreshes a frozen daily past the freeze to create another one
+    /// (<see cref="FrozenRollupAggregates"/>).
+    /// </summary>
+    public static bool ShouldDrainFrozenDailyCompression(FrozenDailyCompressionDrainState state)
+    {
+        if (state is null)
+        {
+            throw new ArgumentNullException(nameof(state));
+        }
+
+        return state.JobId is not null && state.UncompressedChunks == 0;
+    }
+
+    /// <summary>Removes a DRAINED frozen daily's compression policy (<see cref="ShouldDrainFrozenDailyCompression"/>)
+    /// — <c>if_exists</c>, so a policy already removed on a prior start, or never created, changes nothing. The
+    /// chunks it already compressed keep their compression (this removes the JOB, not the columnstore data);
+    /// it only stops a future run from firing on an aggregate that will never materialize another chunk.</summary>
+    public static string RemoveFrozenDailyCompressionPolicySql(string view)
+        => $"SELECT remove_compression_policy('collect.{view}', if_exists => true)";
+
+    /// <summary>
+    /// THE DRAIN (#3653, LC point 7, Medium finding fix): walks all six frozen rollups
+    /// (<see cref="FrozenRollupAggregates"/>) and removes a compression policy that has nothing left to
+    /// compress (<see cref="ShouldDrainFrozenDailyCompression"/>), via
+    /// <see cref="RemoveFrozenDailyCompressionPolicySql"/>. Called once, at the end of
+    /// <see cref="EnsureAggregateCompressionAsync"/> — a separate concern from that function's own
+    /// enable/stage/converge loops, which never see these six (<see cref="IsAggregateCompressionTarget"/>
+    /// excludes the active twenty; <see cref="IsFrozenRollupAggregate"/> identifies these six) the way this
+    /// method's own scoped probe never sees a registered target.
+    ///
+    /// <para><b>Why these six ever HAD a policy to drain.</b> Every store that took a build before LC's
+    /// freeze enabled compression and attached a policy on all six the same as any other registered aggregate;
+    /// the freeze stopped their REFRESH (<see cref="RemoveFrozenRollupRefreshPolicySql"/>) but left the
+    /// existing compression policy running, because a policy already converged onto the shipped window is not
+    /// itself wrong — it is aimed at an aggregate that will, from the freeze on, only ever gain MORE compressed
+    /// chunks and never another uncompressed one. This is what eventually turns that policy off, once there is
+    /// truly nothing left for it to do — never on a fresh store past the freeze, which creates these six with
+    /// no compression policy at all (<see cref="FrozenRollupAggregates"/> carries no policy builder), so
+    /// there is nothing here to drain and <see cref="ShouldDrainFrozenDailyCompression"/> reads a null
+    /// <c>JobId</c> forever.</para>
+    ///
+    /// <para>Failure-isolated per aggregate and per statement, the same as every other step in
+    /// <see cref="EnsureAggregateCompressionAsync"/>: a read or removal that fails costs a warning and the
+    /// others still run.</para>
+    /// </summary>
+    public static async Task<int> DrainFrozenDailyCompressionPoliciesAsync(NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken = default)
+    {
+        if (connection is null)
+        {
+            throw new ArgumentNullException(nameof(connection));
+        }
+
+        var states = new List<FrozenDailyCompressionDrainState>();
+        try
+        {
+            using var probe = new NpgsqlCommand(FrozenDailyCompressionDrainStateSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                states.Add(new FrozenDailyCompressionDrainState(
+                    View: reader.GetString(0),
+                    JobId: reader.IsDBNull(1) ? null : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
+                    UncompressedChunks: Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture)));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug(
+                "TimescaleDB: could not read the frozen dailies' compression drain state, so none was drained this start: {Message}",
+                ex.Message);
+            return 0;
+        }
+
+        var drained = 0;
+        foreach (var state in states)
+        {
+            if (!ShouldDrainFrozenDailyCompression(state))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var remove = new NpgsqlCommand(RemoveFrozenDailyCompressionPolicySql(state.View), connection) { CommandTimeout = SetupTimeoutSeconds };
+                await remove.ExecuteNonQueryAsync(cancellationToken);
+                drained++;
+
+                logger?.LogInformation(
+                    "TimescaleDB: removed frozen daily {View}'s compression policy (job {JobId}) — every chunk it will ever hold is already compressed, and nothing refreshes it past the freeze to make another (#3653).",
+                    state.View, state.JobId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Could not remove frozen daily {View}'s drained compression policy (job {JobId}) — it stays, harmlessly, since it has nothing left to compress: {Message}",
+                    state.View, state.JobId, ex.Message);
+            }
+        }
+
+        return drained;
+    }
 
     /* ─────────────── rollup availability (the plain-PostgreSQL guard, #1664) ─────────────── */
 
@@ -8523,6 +8962,15 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                 var ours = withPhase
                     && !reader.IsDBNull(6)
                     && string.Equals(reader.GetString(6), PgSchemaGenerator.CollectSchema, StringComparison.Ordinal);
+
+                /* #3653 LC (Medium security finding): frozen rollups are removed from
+                   AggregateCompressionTargets, so without this guard they fall through and get their
+                   compression schedule reset to the 1-hour raw cadence on every start. Skip them
+                   unconditionally — their schedule is never ours to tune. */
+                if (IsFrozenRollupAggregate(hypertable))
+                {
+                    continue;
+                }
 
                 /* The continuous aggregates' compression policies are NOT this converge's to retune (#3581).
                    Their job reports the aggregate's user view as its hypertable (collect / <view>), so it
@@ -10606,9 +11054,12 @@ WHERE j.proc_name LIKE '%compression%'
         if (running == 0 && backlog == 0)
         {
             var aggregatePolicies = activity.Count(item => IsAggregateCompressionTarget(item.HypertableName));
+            /* #3653 LC: frozen views are not in AggregateCompressionTargets, so subtract them from the
+               raw count too — they drain asynchronously and are not at the raw 1-hour cadence. */
+            var frozenPolicies = activity.Count(item => IsFrozenRollupAggregate(item.HypertableName));
             logger.LogDebug(
                 "TimescaleDB: {Count} compression policies on a {Interval} tick and {AggregateCount} continuous-aggregate policies on a {AggregateInterval} cadence, nothing running, no eligible chunk uncompressed.",
-                activity.Count - aggregatePolicies, CompressScheduleInterval, aggregatePolicies, AggregateCompressionScheduleInterval);
+                activity.Count - aggregatePolicies - frozenPolicies, CompressScheduleInterval, aggregatePolicies, AggregateCompressionScheduleInterval);
         }
 
         LogCompressionClearance(activity, logger);
@@ -11452,12 +11903,13 @@ public sealed class RollupCoverage
     /// handed.
     ///
     /// <para><b>Called AFTER the tier is resolved, never instead of it.</b> The router decides whether the hourly
-    /// tier can answer a window from <see cref="For"/> over the LEGACY pair — the legacy floor is the deeper of
-    /// the two by construction (an upgraded store's successor starts <c>WITH NO DATA</c>), so "can the hourly
-    /// tier serve this window" is the legacy's question. Only once the tier is Hourly does THIS choose which
+    /// tier can answer a window from <see cref="For"/> over the LEGACY pair — <see cref="For"/> stitches the
+    /// legacy and successor floors (#3653 LC), taking the deeper of the two, so "can the hourly tier serve this
+    /// window" is answered correctly on both a pre-freeze store (legacy is deeper) and a fresh or post-trim store
+    /// (successor is deeper or the only non-null floor).  Only once the tier is Hourly does THIS choose which
     /// hourly relation, and the successor is chosen only when the window loses nothing by it. A reader that
-    /// asked this first and routed on the successor's floor would fall to raw on the very stores where the
-    /// legacy still holds the answer.</para>
+    /// asked this first and routed on the successor's floor alone would fall to raw on stores where the legacy
+    /// still holds the answer.</para>
     ///
     /// <para><b>Absence beats coverage.</b> A store on a service that predates the successors
     /// (<see cref="RollupAvailability.WithoutIntervalHourlies"/>) has a null successor floor AND no successor
@@ -11518,14 +11970,59 @@ public sealed class RollupCoverage
     /// <see cref="RetentionTierRouter.Resolve(DateTime, DateTime, bool, bool, TierCoverage)"/>. A pair with no
     /// daily view (or an unrecognized hourly view) still answers — with nulls, which the router treats as
     /// "no evidence".
+    ///
+    /// <para><b>Stitched floor for frozen-legacy pairs (#3653 LC).</b> After the LC freeze, a FRESH store
+    /// (just upgraded, legacy starts <c>WITH NO DATA</c>) has a null legacy floor while its successor holds real
+    /// data.  A store 90+ days post-freeze has had its legacy trimmed to empty for the same reason.  Both shapes
+    /// produce a null legacy floor, so routing on the legacy floor alone falls every window older than 4 days to
+    /// raw.  This method therefore stitches the legacy AND the successor: the effective floor for each tier is
+    /// the deeper (earlier) of the two non-null floors.  A null from both is still null (no evidence from
+    /// either).  Callers that determine which hourly <em>relation</em> to name in SQL still go through
+    /// <see cref="HourlyRelationFor"/>, which makes the legacy-vs-successor choice independently and only after
+    /// the tier has been resolved.</para>
     /// </summary>
     public TierCoverage For(string hourlyView, string? dailyView)
     {
         var rawTable = RawTableFor(hourlyView);
-        return new TierCoverage(
+
+        // #3653 LC: stitch legacy and successor floors so that fresh stores (empty legacy, successor has
+        // data) and post-trim stores (legacy drained by retention) still route correctly to the hourly tier.
+        var successorHourly = TimescaleSupport.SuccessorOf(hourlyView);
+        var hourlyFloor = DeepestFloor(
             FloorOf(hourlyView),
-            dailyView is null ? null : FloorOf(dailyView),
-            rawTable is null ? null : RawOldestOf(rawTable));
+            successorHourly is null ? null : FloorOf(successorHourly));
+
+        DateTime? dailyFloor = null;
+        if (dailyView is not null)
+        {
+            var successorDaily = SuccessorDailyFromLegacy(dailyView);
+            dailyFloor = DeepestFloor(
+                FloorOf(dailyView),
+                successorDaily is null ? null : FloorOf(successorDaily));
+        }
+
+        return new TierCoverage(hourlyFloor, dailyFloor, rawTable is null ? null : RawOldestOf(rawTable));
+    }
+
+    /// <summary>The deeper (earlier) of two nullable UTC floors — the effective floor when a frozen legacy
+    /// and its interval-honest successor both cover part of the span (#3653 LC). A null on either side is
+    /// skipped; null on both yields null (no evidence from either tier).</summary>
+    private static DateTime? DeepestFloor(DateTime? a, DateTime? b) =>
+        (a, b) is ({ } da, { } db) ? (da < db ? da : db) : a ?? b;
+
+    /// <summary>The interval-honest SUCCESSOR DAILY that replaces <paramref name="legacyDaily"/> for the
+    /// daily-tier floor lookup (#3653 LC), or <c>null</c> for a daily view that was never superseded.</summary>
+    private static string? SuccessorDailyFromLegacy(string legacyDaily)
+    {
+        foreach (var (legacyDailyV, successorDaily, _) in TimescaleSupport.SupersededDailyRollups)
+        {
+            if (string.Equals(legacyDailyV, legacyDaily, StringComparison.Ordinal))
+            {
+                return successorDaily;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>Which tier <see cref="StitchedRelationSql"/> is stitching (#3653 A6): the boundary is the

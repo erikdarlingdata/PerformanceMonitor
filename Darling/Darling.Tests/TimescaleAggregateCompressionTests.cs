@@ -82,40 +82,40 @@ public sealed class TimescaleAggregateCompressionTests
     }
 
     /// <summary>
-    /// The registry is the three creation lists and nothing else: twenty-three aggregates since #3653 (Q12 —
-    /// nine hourly, the six #3581 counted plus the three interval-honest successors; twenty before), each
-    /// registered once, each carrying the tier of the list it came from, each aliasing its bucket <c>bucket</c>,
-    /// and each grouping by <c>server_id</c> — the last two recovered from the shipped CREATE text, which is what
-    /// lets the <c>segmentby</c>/<c>orderby</c> the ensure emits be a property of the registry rather than an
-    /// assumption.
+    /// The registry is the three creation lists and nothing else: twenty aggregates since #3653's LC froze the
+    /// legacy trio off <see cref="TimescaleSupport.HourlyAggregates"/> and <see cref="TimescaleSupport.DailyAggregates"/>
+    /// and then removed the deferral that had held the three interval-honest successor dailies out of the band
+    /// (six hourly + seven daily + seven baseline; twenty-three before LC, when the legacy trio still counted
+    /// and the successors did not), each registered once, each carrying the tier of the list it came from, each
+    /// aliasing its bucket <c>bucket</c>, and each grouping by <c>server_id</c> — the last two recovered from the
+    /// shipped CREATE text, which is what lets the <c>segmentby</c>/<c>orderby</c> the ensure emits be a
+    /// property of the registry rather than an assumption.
     /// </summary>
     [Fact]
     public void EveryAggregate_IsRegisteredOnce_WithItsTier_ABucketColumn_AndServerIdInItsGroupKey()
     {
         var targets = TimescaleSupport.AggregateCompressionTargets;
 
-        /* #3653 A6: DailyAggregates grew from 7 to 10 (the three interval-honest successor dailies), but
-           they are held out of AggregateCompressionTargets by CompressionDeferredUntilFreeze until lane LC's
-           freeze frees the band's slots — so the compressed count stays 23, derived as 9 + 10 + 7 - 3. */
-        Assert.Equal(23, targets.Count);
-        Assert.Equal(9, TimescaleSupport.HourlyAggregates.Length);
-        Assert.Equal(10, TimescaleSupport.DailyAggregates.Length);
+        /* #3653 LC: the legacy trio's freeze took HourlyAggregates from 9 to 6 and DailyAggregates from 10 to
+           7 (into FrozenRollupAggregates, off the band entirely); LC then removed the deferral that had held
+           the three interval-honest successor dailies out of AggregateCompressionTargets, so the list is now
+           every member of all three source lists, with nothing subtracted — 6 + 7 + 7. */
+        Assert.Equal(6, TimescaleSupport.HourlyAggregates.Length);
+        Assert.Equal(7, TimescaleSupport.DailyAggregates.Length);
         Assert.Equal(7, TimescaleSupport.BaselineAggregates.Length);
-        Assert.Equal(3, TimescaleSupport.CompressionDeferredUntilFreeze.Count);
         Assert.Equal(
-            TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length
-                - TimescaleSupport.CompressionDeferredUntilFreeze.Count,
+            TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length + TimescaleSupport.BaselineAggregates.Length,
             targets.Count);
+        Assert.Equal(20, targets.Count);
 
         Assert.Equal(targets.Count, targets.Select(t => t.View).Distinct(StringComparer.Ordinal).Count());
 
         /* Order and tier are the source lists', in order — the same order the ensure sweep creates in, so the
-           hour each aggregate takes on the band follows creation order and nothing else — minus the deferred
-           daily successors, which never reach the band. */
+           hour each aggregate takes on the band follows creation order and nothing else. No deferral to
+           subtract now: every member of all three lists reaches the band. */
         var expected = TimescaleSupport.HourlyAggregates.Select(a => (a.View, Hourly: true))
             .Concat(TimescaleSupport.DailyAggregates.Select(a => (a.View, Hourly: false)))
             .Concat(TimescaleSupport.BaselineAggregates.Select(a => (a.View, Hourly: true)))
-            .Where(t => !TimescaleSupport.CompressionDeferredUntilFreeze.Contains(t.View))
             .ToArray();
         Assert.Equal(expected, targets.Select(t => (t.View, t.Hourly)).ToArray());
 
@@ -192,11 +192,14 @@ public sealed class TimescaleAggregateCompressionTests
                 $"{relation} compresses after {compressAfter} against a {dropAfter} horizon, so less than half its life is compressed");
         }
 
-        /* The control: the walk covered the whole aggregate ladder — every hourly history tier (eight since
-           #3653: the four originals, the corrected Query Store hourly and the three interval-honest
-           successors), both interval-identity tiers (the L1 dedup layer and the interval-grain daily) and the
-           seven baselines: 8 + 2 + 7. Zero here is a filter that matched nothing. */
-        Assert.Equal(17, checkedTiers);
+        /* The control: the walk covered the whole aggregate ladder — every hourly history tier still ON the
+           band (five since #3653's LC: QueryStoreStatsHourlyView, the corrected Query Store hourly and the
+           three interval-honest successors — the legacy trio dropped out when LC froze it off
+           HourlyAggregates, so it no longer passes IsAggregateCompressionTarget here), both interval-identity
+           tiers (the L1 dedup layer and the interval-grain daily) and the seven baselines: 5 + 2 + 7. Was 17
+           before LC (8 + 2 + 7, with the legacy trio still counted); three fewer now. Zero here is a filter
+           that matched nothing. */
+        Assert.Equal(17 - 3, checkedTiers);
     }
 
     /// <summary>
@@ -228,13 +231,12 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.DoesNotContain(minute, TimescaleSupport.CompressionPhaseMinutes);
         Assert.Equal(TimescaleSupport.CompressionPhaseMinutes[0], minute + 1);
 
-        /* Past the recorded ceiling of the heaviest refresh, with the margin stated: (35 - 18) * 60 = 1,020 s
-           after its start against 896 s (1,200 s while the heaviest started at :15; #3653's re-derived grid
-           moved its start three minutes later and left the band's minute where it was). The grid asserts the
-           ceiling fits the window; this asserts the band sits past the ceiling inside that window, and a
-           ceiling that grew to meet it fails here — 124 s of margin now, where there were 304. */
+        /* Past the recorded ceiling of the heaviest refresh, with the margin stated: (35 - 15) * 60 = 1,200 s
+           after its start against 896 s. The grid asserts the ceiling fits the window; this asserts the band
+           sits past the ceiling inside that window, and a ceiling that grew to meet it fails here — 304 s of
+           margin. */
         var secondsPastHeaviest = (minute - TimescaleSupport.HeaviestRefreshStartMinute) * 60;
-        Assert.Equal(1020, secondsPastHeaviest);
+        Assert.Equal(1200, secondsPastHeaviest);
         Assert.True(
             secondsPastHeaviest > TimescaleSupport.HeaviestHourlyRefreshObservedCeilingSeconds,
             $"the daily band's minute is {secondsPastHeaviest}s past the heaviest refresh's start against a "
@@ -262,10 +264,12 @@ public sealed class TimescaleAggregateCompressionTests
 
         /* THE HOURS: one per aggregate in registry order from hour 1, distinct, never the midnight hour, all
            inside the day. Asserted as identities against the registry so a new aggregate is placed without
-           editing this, and as a fit so a twenty-fourth is red rather than wrapped onto midnight. #3653's
-           three successors took hours 21, 22 and 23: the band is FULL — the next aggregate registered
-           anywhere re-derives this band (two per hour, or a second minute) before it can be placed. */
-        Assert.Equal(TimescaleSupport.HoursInDailyCadence, TimescaleSupport.AggregateCompressionBandFirstHour + TimescaleSupport.AggregateCompressionTargets.Count);
+           editing this, and as a fit so an overflowing registry is red rather than wrapped onto midnight.
+           #3653's LC freed three hours (21, 22, 23) when it removed the deferral that had held the band at a
+           full 23 members — twenty now, so the band has room again, a strict fit rather than an exact one. */
+        Assert.True(
+            TimescaleSupport.AggregateCompressionBandFirstHour + TimescaleSupport.AggregateCompressionTargets.Count < TimescaleSupport.HoursInDailyCadence,
+            "the band used to be exactly full to hour 23; LC's freeze should have freed hours, so this must be a strict fit with room, not an exact one");
         Assert.Equal(1, TimescaleSupport.AggregateCompressionBandFirstHour);
         Assert.Equal(24, TimescaleSupport.HoursInDailyCadence);
         Assert.Equal(TimeSpan.FromDays(1), TimescaleSupport.AggregateCompressionScheduleSpan);
@@ -297,9 +301,10 @@ public sealed class TimescaleAggregateCompressionTests
     [Fact]
     public void TheStatements_CarryTheTiersWindow_TheDailyCadence_AndAFixedUtcAnchorOnTheBand()
     {
+        /* #3653 LC: query_stats_hourly is frozen off the registry now, so this uses a still-registered view. */
         Assert.Equal(
-            "ALTER MATERIALIZED VIEW collect.query_stats_hourly SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id', timescaledb.compress_orderby = 'bucket DESC')",
-            TimescaleSupport.EnableAggregateCompressionSql(TimescaleSupport.QueryStatsHourlyView));
+            "ALTER MATERIALIZED VIEW collect.query_store_stats_hourly SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id', timescaledb.compress_orderby = 'bucket DESC')",
+            TimescaleSupport.EnableAggregateCompressionSql(TimescaleSupport.QueryStoreStatsHourlyView));
 
         foreach (var (_, view, hourly) in TimescaleSupport.AggregateCompressionTargets)
         {
@@ -441,8 +446,8 @@ public sealed class TimescaleAggregateCompressionTests
                 (TimescaleSupport.QueryStoreStatsHourlyView, 1),
                 (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, 2),
                 (TimescaleSupport.QueryStatsHourlyView, 3),
-                /* Night zero, in REGISTRY order rather than input order — the daily (registry position 8)
-                   ahead of the interval daily (11) ahead of the baseline (13). */
+                /* Night zero, in REGISTRY order rather than input order — the daily ahead of the interval
+                   daily ahead of the baseline, exactly DailyAggregates' and BaselineAggregates' own order. */
                 (TimescaleSupport.QueryStoreStatsDailyView, 0),
                 (TimescaleSupport.QueryStoreStatsIntervalDailyView, 0),
                 (TimescaleSupport.PerfmonIntervalBaselineView, 0),
@@ -460,13 +465,17 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.All(fresh, s => Assert.Equal(0, s.NightOffset));
         Assert.Equal(TimescaleSupport.AggregateCompressionTargets.Select(t => t.View).ToArray(), fresh.Select(s => s.View).ToArray());
 
-        /* Ties on size break on registry order, not on input order. */
+        /* Ties on size break on registry order, not on input order. #3653 LC froze QueryStatsHourlyView and
+           ProcedureStatsHourlyView off the registry, so a tie between those two would now break on neither
+           order (both read int.MaxValue from the registry lookup) — this uses two aggregates still ON
+           AggregateCompressionTargets, listed here in the OPPOSITE of registry order, so a pass still proves
+           the break is by registry position and not by input position. */
         var tied = TimescaleSupport.StageAggregateCompressionNights(new[]
         {
-            State(TimescaleSupport.ProcedureStatsHourlyView, gib, 3),
-            State(TimescaleSupport.QueryStatsHourlyView, gib, 3),
+            State(TimescaleSupport.QueryStoreStatsIntervalHourlyView, gib, 3),
+            State(TimescaleSupport.QueryStoreStatsHourlyView, gib, 3),
         });
-        Assert.Equal(TimescaleSupport.QueryStatsHourlyView, tied[0].View);
+        Assert.Equal(TimescaleSupport.QueryStoreStatsHourlyView, tied[0].View);
         Assert.Equal(0, tied[0].NightOffset);
         Assert.Equal(1, tied[1].NightOffset);
 
@@ -551,16 +560,18 @@ public sealed class TimescaleAggregateCompressionTests
             var created = await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             /* #3893: the ensure sweep also creates the off-grid aggregates, which are deliberately NOT compression
                targets (no compression band slot) — so the created count is the targets plus those.
-               #3653 A6 lane LB-2 (live-measured): the three interval-honest successor DAILIES are ALSO created by
-               this sweep but held OUT of AggregateCompressionTargets by CompressionDeferredUntilFreeze until lane
-               LC frees their band slots — so "created" is HourlyAggregates + DailyAggregates + BaselineAggregates
-               + OffGridAggregates (every registered aggregate), not AggregateCompressionTargets + OffGridAggregates
-               (only the ones with a compression policy). The two counts were equal before lane LB added a
-               registered-but-deferred daily tier; this assertion still read the old, now-coincidentally-wrong,
-               formula. */
+               #3653 LC: the sweep's unified aggregates list also concats FrozenRollupAggregates — the six frozen
+               legacy rollups still get CREATEd on a fresh store (WITH NO DATA, no refresh policy ever attached)
+               — so "created" is HourlyAggregates + DailyAggregates + BaselineAggregates + OffGridAggregates +
+               FrozenRollupAggregates (every registered aggregate), not AggregateCompressionTargets +
+               OffGridAggregates (only the ones with a compression policy). The three interval-honest successor
+               dailies that lane LB registered are counted in DailyAggregates already and are no longer held out
+               of AggregateCompressionTargets either — LC removed that deferral once the legacy trio's move to
+               FrozenRollupAggregates freed their band slots. */
             Assert.Equal(
                 TimescaleSupport.HourlyAggregates.Length + TimescaleSupport.DailyAggregates.Length
-                    + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length,
+                    + TimescaleSupport.BaselineAggregates.Length + TimescaleSupport.OffGridAggregates.Length
+                    + TimescaleSupport.FrozenRollupAggregates.Length,
                 created);
 
             /* The widths the store gave the fresh materializations, before the ensure narrows them: on 2.28.1
@@ -587,10 +598,13 @@ public sealed class TimescaleAggregateCompressionTests
                 Assert.Equal((long)TimescaleSupport.MaterializationChunkIntervalSpan.TotalSeconds, seconds);
             }
 
-            /* 23 since #3653 (Q12): the count is the registry's, not a literal, so the three successors are counted
-               the moment they are registered. */
+            /* Twenty, not twenty-three (#3653, LC): the legacy trio's move to FrozenRollupAggregates took them out
+               of HourlyAggregates/DailyAggregates, and the three interval-honest successor dailies (previously
+               held out by CompressionDeferredUntilFreeze) now fill the freed band slots. The count is the
+               registry's, not a literal chosen to match; this pin catches the day either side of that trade
+               moves without the other. */
             Assert.Contains($"{TimescaleSupport.AggregateCompressionTargets.Count}/{TimescaleSupport.AggregateCompressionTargets.Count} materializations chunked at {TimescaleSupport.MaterializationChunkInterval}", firstLog.Joined, StringComparison.Ordinal);
-            Assert.Equal(23, TimescaleSupport.AggregateCompressionTargets.Count);
+            Assert.Equal(20, TimescaleSupport.AggregateCompressionTargets.Count);
             Assert.Contains($"{wideBefore} changed this start", firstLog.Joined, StringComparison.Ordinal);
 
             /* A settled store issues no set_chunk_time_interval at all: the direct call returns zero changes and
@@ -718,7 +732,11 @@ public sealed class TimescaleAggregateCompressionTests
             await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
             await TimescaleSupport.EnsureAggregateCompressionAsync(connection, null, ct);
 
-            var view = TimescaleSupport.ProcedureStatsHourlyView;
+            /* #3653 LC: procedure_stats_hourly is one of the frozen six now and left AggregateCompressionTargets
+               entirely (EnsureAggregateCompressionAsync never attaches it a policy to drift), so the alter_job
+               below would match no row. procedure_stats_interval_hourly, its interval-honest successor, is
+               still hourly-tier compressed and stands in as the example. */
+            var view = TimescaleSupport.ProcedureStatsIntervalHourlyView;
 
             /* Drift one policy the way an older build would have left it: the raw tier's window and tick, an
                anchor off the band. */
@@ -814,5 +832,104 @@ public sealed class TimescaleAggregateCompressionTests
         Assert.Equal(2, parts.Length);
         Assert.Equal("days", parts[1]);
         return TimeSpan.FromDays(int.Parse(parts[0], CultureInfo.InvariantCulture));
+    }
+
+    /// <summary>
+    /// #3653 LC point 7: the drain rule's truth table, pure — no job means nothing to drain regardless of
+    /// chunk count; a job with any uncompressed chunk, however few, stays; only a job with zero uncompressed
+    /// chunks drains.
+    /// </summary>
+    [Fact]
+    public void ShouldDrainFrozenDailyCompression_OnlyWhenAJobExistsAndNoChunkIsUncompressed()
+    {
+        Assert.False(TimescaleSupport.ShouldDrainFrozenDailyCompression(
+            new TimescaleSupport.FrozenDailyCompressionDrainState(TimescaleSupport.QueryStatsDailyView, JobId: null, UncompressedChunks: 0)));
+        Assert.False(TimescaleSupport.ShouldDrainFrozenDailyCompression(
+            new TimescaleSupport.FrozenDailyCompressionDrainState(TimescaleSupport.QueryStatsDailyView, JobId: null, UncompressedChunks: 5)));
+        Assert.False(TimescaleSupport.ShouldDrainFrozenDailyCompression(
+            new TimescaleSupport.FrozenDailyCompressionDrainState(TimescaleSupport.QueryStatsDailyView, JobId: 42, UncompressedChunks: 1)));
+        Assert.True(TimescaleSupport.ShouldDrainFrozenDailyCompression(
+            new TimescaleSupport.FrozenDailyCompressionDrainState(TimescaleSupport.QueryStatsDailyView, JobId: 42, UncompressedChunks: 0)));
+
+        Assert.Throws<ArgumentNullException>(() => TimescaleSupport.ShouldDrainFrozenDailyCompression(null!));
+    }
+
+    /// <summary>
+    /// #3653 LC point 7 (Medium finding fix): the drain's probe names all six frozen rollups —
+    /// three legacy hourlies and three legacy dailies — counts EVERY uncompressed chunk (no
+    /// <c>range_end</c>/age filter, unlike <see cref="TimescaleSupport.AggregateCompressionStateSql"/>'s
+    /// <c>eligible_under_*_rule</c> columns), and removes the compression policy once a frozen
+    /// rollup holds nothing left to compress.
+    /// </summary>
+    [Fact]
+    public void FrozenDailyCompressionDrainStateSql_NamesAllSixFrozenRollups_AndCountsEveryUncompressedChunk()
+    {
+        var sql = TimescaleSupport.FrozenDailyCompressionDrainStateSql;
+
+        /* All three frozen dailies must appear. */
+        Assert.Contains($"'{TimescaleSupport.QueryStatsDailyView}'", sql, StringComparison.Ordinal);
+        Assert.Contains($"'{TimescaleSupport.ProcedureStatsDailyView}'", sql, StringComparison.Ordinal);
+        Assert.Contains($"'{TimescaleSupport.QueryStatsDbDailyView}'", sql, StringComparison.Ordinal);
+
+        /* All three frozen hourlies must also appear — existing stores had compression policies on all
+           six before the LC freeze, and all six need draining (#3653, Medium finding fix). */
+        Assert.Contains($"'{TimescaleSupport.QueryStatsHourlyView}'", sql, StringComparison.Ordinal);
+        Assert.Contains($"'{TimescaleSupport.ProcedureStatsHourlyView}'", sql, StringComparison.Ordinal);
+        Assert.Contains($"'{TimescaleSupport.QueryStatsDbHourlyView}'", sql, StringComparison.Ordinal);
+
+        Assert.Contains("NOT c.is_compressed", sql, StringComparison.Ordinal);
+
+        /* No age gate — every uncompressed chunk counts, not just the ones a tier's compress_after would
+           already call eligible. */
+        Assert.DoesNotContain("range_end", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("eligible_under", sql, StringComparison.Ordinal);
+
+        /* Exactly six — one per FrozenRollupAggregates member. */
+        Assert.Equal(6, TimescaleSupport.FrozenRollupAggregates.Length);
+
+        var remove = TimescaleSupport.RemoveFrozenDailyCompressionPolicySql(TimescaleSupport.QueryStatsDailyView);
+        Assert.Contains("remove_compression_policy('collect.query_stats_daily'", remove, StringComparison.Ordinal);
+        Assert.Contains("if_exists => true", remove, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #3653 LC (Medium finding fix): <see cref="TimescaleSupport.IsFrozenRollupAggregate"/> returns true
+    /// for all six frozen views — bare and <c>collect.</c>-qualified — and false for everything else.
+    /// The six frozen views are NOT in <see cref="TimescaleSupport.AggregateCompressionTargets"/>, which is
+    /// why <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync"/> needs the separate
+    /// <see cref="TimescaleSupport.IsFrozenRollupAggregate"/> guard: without it, they fall through and
+    /// get their compression schedule reset to the 1-hour raw cadence on every start.
+    /// </summary>
+    [Fact]
+    public void IsFrozenRollupAggregate_ReturnsTrueForAllSixFrozenViews_AndFalseForOthers()
+    {
+        foreach (var (_, view) in TimescaleSupport.FrozenRollupAggregates)
+        {
+            Assert.True(TimescaleSupport.IsFrozenRollupAggregate(view), $"bare: {view}");
+            Assert.True(TimescaleSupport.IsFrozenRollupAggregate("collect." + view), $"qualified: {view}");
+
+            /* Not an active compression target — the guard in ConvergeCompressionScheduleAsync is needed
+               precisely because they are absent from this list. */
+            Assert.False(TimescaleSupport.IsAggregateCompressionTarget(view), $"must not be a compression target: {view}");
+        }
+
+        /* Active aggregates and raw tables are not frozen. */
+        foreach (var (_, view, _) in TimescaleSupport.AggregateCompressionTargets)
+        {
+            Assert.False(TimescaleSupport.IsFrozenRollupAggregate(view), view);
+        }
+
+        foreach (var table in TimescaleSupport.CompressionPhaseOrder)
+        {
+            Assert.False(TimescaleSupport.IsFrozenRollupAggregate(table), table);
+        }
+
+        Assert.False(TimescaleSupport.IsFrozenRollupAggregate(null));
+        Assert.False(TimescaleSupport.IsFrozenRollupAggregate(string.Empty));
+
+        /* The two predicates are disjoint: no view can be both active and frozen. */
+        Assert.Empty(
+            TimescaleSupport.FrozenRollupAggregates.Select(a => a.View)
+                .Intersect(TimescaleSupport.AggregateCompressionTargets.Select(t => t.View), StringComparer.Ordinal));
     }
 }

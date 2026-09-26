@@ -683,7 +683,10 @@ public sealed class QueryStoreCorrectedRollupLiveTests
             TimescaleSupport.QueryStoreStatsCorrectedDailyView,
             TimescaleSupport.QueryStoreStatsIntervalDailyView,
             TimescaleSupport.QueryStoreStatsDayGrainDailyView,
-            TimescaleSupport.QueryStatsHourlyView,
+            // #3653 LC: RawTierCoverage now requires BOTH successor hourlies; legacy query_stats_hourly
+            // is frozen and excluded from coverage checks, so refresh the two live successors instead.
+            TimescaleSupport.QueryStatsIntervalHourlyView,
+            TimescaleSupport.QueryStatsDbIntervalHourlyView,
         })
         {
             await RefreshRangeAsync(connection, view, span.From, span.To, ct);
@@ -721,7 +724,9 @@ public sealed class QueryStoreCorrectedRollupLiveTests
         }
 
         await using (var drop = new NpgsqlCommand(
-            $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.QueryStatsHourlyView} CASCADE", connection))
+            // #3653 LC: coverage now probes query_stats_interval_hourly (not the frozen legacy hourly);
+            // drop it so IsRawTierDropSafeAsync returns Unknown → false (fail-closed, #1793).
+            $"DROP MATERIALIZED VIEW collect.{TimescaleSupport.QueryStatsIntervalHourlyView} CASCADE", connection))
         {
             await drop.ExecuteNonQueryAsync(ct);
         }

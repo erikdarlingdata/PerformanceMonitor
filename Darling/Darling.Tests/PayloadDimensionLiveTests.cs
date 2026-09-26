@@ -1838,8 +1838,10 @@ public sealed class PayloadDimensionLiveTests
             await EnsureAggregatesWithoutPoliciesAsync(connection, ct);
 
             using (var seed = new NpgsqlCommand(
-                "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash) " +
-                "VALUES ($1, $2, $3, $4, 'pm1784', '0xPM1784')", connection))
+                // #3653 LC: include delta_worker_time so the row qualifies for query_stats_db_interval_hourly
+                // (which filters WHERE delta_worker_time IS NOT NULL) — both successor hourlies must cover raw.
+                "INSERT INTO query_stats (collection_id, collection_time, server_id, server_name, database_name, query_hash, delta_worker_time) " +
+                "VALUES ($1, $2, $3, $4, 'pm1784', '0xPM1784', 1)", connection))
             {
                 seed.Parameters.AddWithValue(CollectionIdGenerator.Next());
                 seed.Parameters.AddWithValue(ancient);
@@ -1848,11 +1850,13 @@ public sealed class PayloadDimensionLiveTests
                 await seed.ExecuteNonQueryAsync(ct);
             }
 
-            /* Coverage LAGS: refresh the aggregate only over the recent window, so it holds buckets but none
-               reaching back to the ancient row. That is the field state — a rollup that starts later than raw. */
-            using (var refresh = new NpgsqlCommand(
-                TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsHourlyView), connection))
+            /* Coverage LAGS: refresh BOTH successor hourlies only over the recent window, so they hold buckets
+               but none reaching back to the ancient row. #3653 LC: RawTierCoverage now requires both
+               query_stats_interval_hourly AND query_stats_db_interval_hourly; the frozen legacy hourly is
+               no longer in the coverage gate. */
+            foreach (var lagView in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsDbIntervalHourlyView })
             {
+                using var refresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(lagView), connection);
                 refresh.Parameters.AddWithValue(DateTime.SpecifyKind(DateTime.UtcNow.AddDays(-2), DateTimeKind.Unspecified));
                 await refresh.ExecuteNonQueryAsync(ct);
             }
@@ -1869,10 +1873,10 @@ public sealed class PayloadDimensionLiveTests
             Assert.Equal(1L, await AncientRowCountAsync(connection, serverId, ct));
             Assert.Contains(CoverageSkipSignature, skipLog.Joined, StringComparison.Ordinal);
 
-            /* Now let coverage reach back over the ancient row. force => recompute the older buckets. */
-            using (var refresh = new NpgsqlCommand(
-                TimescaleSupport.RefreshContinuousAggregateSql(TimescaleSupport.QueryStatsHourlyView, force: true), connection))
+            /* Now let coverage reach back over the ancient row for BOTH successor hourlies (force to recompute). */
+            foreach (var coverView in new[] { TimescaleSupport.QueryStatsIntervalHourlyView, TimescaleSupport.QueryStatsDbIntervalHourlyView })
             {
+                using var refresh = new NpgsqlCommand(TimescaleSupport.RefreshContinuousAggregateSql(coverView, force: true), connection);
                 refresh.Parameters.AddWithValue(DateTime.SpecifyKind(ancient.AddDays(-1), DateTimeKind.Unspecified));
                 await refresh.ExecuteNonQueryAsync(ct);
             }

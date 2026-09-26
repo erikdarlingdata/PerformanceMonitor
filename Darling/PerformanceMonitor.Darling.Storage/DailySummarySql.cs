@@ -286,8 +286,10 @@ public static class DailySummarySql
     /// questions of every day at or below the ceiling, with <c>server_id = $1</c> on both probes (this is one
     /// server's calendar) and the day as the bucket: no rollup row for this server that day, and a source row
     /// for this server that day the aggregate would have produced output from. The source, its time column
-    /// and its filter are read off <see cref="TimescaleSupport.MaterializationHoleTargets"/> — the repair's own
-    /// target list — so the daily tier probes <c>query_stats_hourly</c> (its hierarchical source, 90 days),
+    /// and its filter are read off <see cref="TimescaleSupport.RollupCoverageProbeTargets"/> — the repair's own
+    /// target list, plus the six the freeze (#3653 LC) took off it, since a frozen legacy rollup is still a
+    /// valid relation for this probe to name — so the daily tier probes <c>query_stats_hourly</c> (its
+    /// hierarchical source, 90 days),
     /// the hourly tier probes raw <c>query_stats</c> (4 days), and the interval-honest successor's probe
     /// carries <c>sample_interval_seconds IS DISTINCT FROM 0</c> (<see cref="TimescaleSupport.MaterializationHoleSourceFilterFor"/>)
     /// so a day holding only restart rows is not called a hole. The second probe is what keeps the disclosure
@@ -337,12 +339,12 @@ public static class DailySummarySql
            the CREATE its filter is read from. Looked up rather than restated so the calendar's idea of "what the
            rollup reads" cannot drift from the scan's. A relation the registry does not know is refused here,
            before it reaches the store as a 42P01. */
-        var target = TimescaleSupport.MaterializationHoleTargets
+        var target = TimescaleSupport.RollupCoverageProbeTargets
             .FirstOrDefault(t => string.Equals(t.View, relation, StringComparison.Ordinal));
         if (target.View is null)
         {
             throw new ArgumentException(
-                $"'{relation}' is not a registered continuous aggregate (TimescaleSupport.MaterializationHoleTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
+                $"'{relation}' is not a registered continuous aggregate (TimescaleSupport.RollupCoverageProbeTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
                 nameof(relation));
         }
 
@@ -430,21 +432,21 @@ public static class DailySummarySql
     /// </summary>
     private static string QueriesCteForStitchedCagg(string legacy, string successor, DateTime successorFloor)
     {
-        var legacyTarget = TimescaleSupport.MaterializationHoleTargets
+        var legacyTarget = TimescaleSupport.RollupCoverageProbeTargets
             .FirstOrDefault(t => string.Equals(t.View, legacy, StringComparison.Ordinal));
         if (legacyTarget.View is null)
         {
             throw new ArgumentException(
-                $"'{legacy}' is not a registered continuous aggregate (TimescaleSupport.MaterializationHoleTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
+                $"'{legacy}' is not a registered continuous aggregate (TimescaleSupport.RollupCoverageProbeTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
                 nameof(legacy));
         }
 
-        var successorTarget = TimescaleSupport.MaterializationHoleTargets
+        var successorTarget = TimescaleSupport.RollupCoverageProbeTargets
             .FirstOrDefault(t => string.Equals(t.View, successor, StringComparison.Ordinal));
         if (successorTarget.View is null)
         {
             throw new ArgumentException(
-                $"'{successor}' is not a registered continuous aggregate (TimescaleSupport.MaterializationHoleTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
+                $"'{successor}' is not a registered continuous aggregate (TimescaleSupport.RollupCoverageProbeTargets), so the daily summary cannot name its source or the days it did not carry (#3653 A6).",
                 nameof(successor));
         }
 
