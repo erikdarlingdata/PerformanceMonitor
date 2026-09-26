@@ -821,7 +821,7 @@ ORDER BY c.bucket";
                     else
                     {
                         logger?.LogWarning(
-                            "Materialization-hole repair (#3653): {View} still shows {Remaining} of {Buckets} bucket(s) in [{Start}, {End}) as holes after a plain and a forced refresh ({Seconds:F1}s) — the source has rows there that the refresh produced no output for; the aggregate's own filter and the scan's copy of it may have diverged, or the refresh was cut short. Re-judged on the next start.",
+                            "Materialization-hole repair (#3653): {View} still shows {Remaining} of {Buckets} bucket(s) in [{Start}, {End}) as holes after a plain and a forced refresh ({Seconds:F1}s) — the source has rows there that the refresh produced no output for; the aggregate's own filter and the scan's copy of it may have diverged, or the refresh was cut short. Re-judged on a later run.",
                             target.View, remaining, buckets, start.ToString("O", CultureInfo.InvariantCulture), end.ToString("O", CultureInfo.InvariantCulture), stopwatch.Elapsed.TotalSeconds);
                     }
 
@@ -854,7 +854,7 @@ ORDER BY c.bucket";
                     holesDeferred++;
                     bucketsDeferred += buckets;
                     logger?.LogInformation(
-                        "Materialization-hole repair (#3653): {View} has a further {Buckets} bucket(s) of hole in [{Start}, {End}) left for the next start — this start's cap for it is {Cap} bucket(s), one refresh policy window, so a start never re-materializes more for one aggregate than an ordinary policy run does.",
+                        "Materialization-hole repair (#3653): {View} has a further {Buckets} bucket(s) of hole in [{Start}, {End}) left for a later run — this run's cap for it is {Cap} bucket(s), one refresh policy window, so a run never re-materializes more for one aggregate than an ordinary policy run does.",
                         target.View, buckets, start.ToString("O", CultureInfo.InvariantCulture), end.ToString("O", CultureInfo.InvariantCulture), MaterializationHoleRepairCapBuckets(target.BucketWidth));
                 }
             }
@@ -862,7 +862,7 @@ ORDER BY c.bucket";
             {
                 failures++;
                 logger?.LogWarning(
-                    "Materialization-hole repair (#3653): could not scan or repair {View} this start — its holes, if any, stand until the next start retries: {Message}",
+                    "Materialization-hole repair (#3653): could not scan or repair {View} this run — its holes, if any, stand until a later run retries: {Message}",
                     target.View, ex.Message);
             }
         }
@@ -992,5 +992,60 @@ ORDER BY c.bucket";
         }
 
         return new DateTime(instant.Ticks - (instant.Ticks % bucketWidth.Ticks), DateTimeKind.Unspecified);
+    }
+
+    /// <summary>
+    /// #4300: how many hours of open legacy/successor seam still stand, across every legacy-paired target,
+    /// after a seam-only pass is cut short by its own budget — a cheap re-read (one span read, one raw-floor
+    /// read per target, the same two probes <see cref="RepairMaterializationTargetsAsync"/>'s own skip check
+    /// already makes), not a re-walk of the seam itself, so a caller can name a real count in a WARNING
+    /// without spending what the budget just cut off. A target whose seam is already closed (or one this
+    /// store never registered as a continuous aggregate) contributes zero.
+    /// </summary>
+    public static async Task<int> CountOpenSeamHoursAsync(NpgsqlConnection connection, DateTime utcNow, CancellationToken cancellationToken)
+    {
+        var totalHours = 0;
+        foreach (var target in MaterializationHoleTargets)
+        {
+            if (LegacyOf(target.View) is null)
+            {
+                continue;
+            }
+
+            var materialization = await ResolveMaterializationAsync(connection, target.View, cancellationToken);
+            if (materialization is null)
+            {
+                continue;
+            }
+
+            DateTime? floor;
+            using (var span = new NpgsqlCommand(MaterializationSpanSql(materialization.Value), connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await using var reader = await span.ExecuteReaderAsync(cancellationToken);
+                await reader.ReadAsync(cancellationToken);
+                floor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+            }
+
+            if (floor is null)
+            {
+                continue;
+            }
+
+            var sourceFilter = MaterializationHoleSourceFilterFor(target.CreateSql);
+            var sourceWhere = sourceFilter.Length == 0 ? string.Empty : $" WHERE {sourceFilter}";
+            using var rawFilteredFloor = new NpgsqlCommand($"SELECT min({target.SourceTimeColumn}) FROM collect.{target.Source}{sourceWhere}", connection) { CommandTimeout = SetupTimeoutSeconds };
+            if (await rawFilteredFloor.ExecuteScalarAsync(cancellationToken) is not DateTime rawFloor)
+            {
+                continue;
+            }
+
+            var seamBound = AlignDown(rawFloor, target.BucketWidth);
+            if (seamBound < floor.Value)
+            {
+                totalHours += (int)((floor.Value - seamBound).Ticks / target.BucketWidth.Ticks);
+            }
+        }
+
+        return totalHours;
     }
 }

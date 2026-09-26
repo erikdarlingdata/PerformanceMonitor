@@ -368,32 +368,54 @@ public sealed class RetentionReevaluationTests
         Assert.Contains("budget.CancelAfter(s_retentionReevaluationBudget);", body, StringComparison.Ordinal);
         Assert.Contains("private static readonly TimeSpan s_retentionReevaluationBudget = TimeSpan.FromMinutes(5);", worker, StringComparison.Ordinal);
 
-        /* Three catches, in the order that makes each filter mean what it says: shutdown first (a shutdown
-           also trips the linked budget), then the budget, then everything else. No rethrow past THESE outer
-           catches — the sweep loop must never see this pass fail.
+        /* #4300: the seam-only repair runs BEFORE the coverage sweep, so a seam it closes this tick is
+           already gone by the time EnsureRetentionPoliciesAsync re-judges coverage a moment later. A full
+           walk (RepairMaterializationHolesAsync) must never appear on this hourly pass — that is the
+           start-path's own call, and landing here by accident would repeat the whole registry every hour. */
+        var seamAt = body.IndexOf("TimescaleSupport.RepairMaterializationSeamsAsync(", StringComparison.Ordinal);
+        var sweepAt = body.IndexOf("await TimescaleSupport.EnsureRetentionPoliciesAsync(", StringComparison.Ordinal);
+        Assert.True(seamAt > 0 && sweepAt > seamAt, "the seam-only repair runs before the coverage sweep");
+        Assert.Equal(0, CountOf(body, "RepairMaterializationHolesAsync"));
 
-           #4300: the seam repair runs in its own failure-isolated try BEFORE this block, with its own earlier
-           "catch (Exception ex) when (ex is not OperationCanceledException)" — that inner catch is not the
-           outer "everything else" this assertion checks the order of, so otherAt is searched for starting
-           from budgetAt, past the seam's own isolation, to find the OUTER catch's position rather than the
-           seam's. The seam's own inner catch for a shutdown DOES rethrow ("throw;") so a real cancellation
-           bubbles out to these very outer catches rather than being swallowed there; that inner rethrow sits
-           BEFORE budgetAt, so the no-rethrow check below is scoped to body[budgetAt..] to guard only the
-           outer catches it is actually about. */
-        var shutdownAt = body.IndexOf("catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)", StringComparison.Ordinal);
+        /* #4300: the seam repair skips entirely while a full walk is already running in this process (the
+           two would refresh the same aggregate on two connections for no gain), and otherwise runs under its
+           OWN child budget (s_seamRepairBudget) linked to the pass's budget, so a wide seam cannot starve the
+           coverage sweep, the purge trigger and the epoch relaunch that follow it in the same pass. */
+        Assert.Contains("if (_materializationHoleRepairRunning)", body, StringComparison.Ordinal);
+        Assert.Contains("using var seamBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);", body, StringComparison.Ordinal);
+        Assert.Contains("seamBudget.CancelAfter(s_seamRepairBudget);", body, StringComparison.Ordinal);
+        Assert.Contains("private static readonly TimeSpan s_seamRepairBudget = TimeSpan.FromMinutes(2);", worker, StringComparison.Ordinal);
+
+        /* Four catches, in the order that makes each filter mean what it says: the seam's own inner shutdown
+           catch (rethrows — a real cancellation must bubble out to the outer catches, not be swallowed
+           here), then the seam's own child-budget catch (does NOT rethrow — the rest of the pass still runs
+           this tick), then the OUTER shutdown catch (also does not rethrow — nothing throws past this pass
+           into the sweep loop), then the outer budget catch, then everything else.
+
+           shutdownAt below is the OUTER shutdown catch specifically: IndexOf alone would land on the seam's
+           own INNER shutdown catch, which sits earlier in the body and is searched for separately as
+           innerShutdownAt. The outer one is the LAST occurrence before budgetAt (the outer budget catch),
+           found with LastIndexOf bounded at budgetAt so a future edit that adds yet another earlier catch
+           cannot make this pin silently walk past the wrong one. */
+        const string shutdownCatch = "catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)";
+        var innerShutdownAt = body.IndexOf(shutdownCatch, StringComparison.Ordinal);
         var budgetAt = body.IndexOf("catch (OperationCanceledException) when (budget.IsCancellationRequested)", StringComparison.Ordinal);
+        var shutdownAt = budgetAt > 0 ? body.LastIndexOf(shutdownCatch, budgetAt, StringComparison.Ordinal) : -1;
         var otherAt = body.IndexOf("catch (Exception ex)", budgetAt, StringComparison.Ordinal);
-        Assert.True(shutdownAt > 0 && budgetAt > shutdownAt && otherAt > budgetAt, "shutdown, then budget, then everything else");
-        Assert.DoesNotContain("throw", body[budgetAt..], StringComparison.Ordinal);
+        Assert.Equal(2, CountOf(body, shutdownCatch));
+        Assert.True(innerShutdownAt > 0 && shutdownAt > innerShutdownAt && budgetAt > shutdownAt && otherAt > budgetAt,
+            "seam's inner shutdown catch, then the outer shutdown catch, then the outer budget catch, then everything else");
+        Assert.Contains("throw;", body[innerShutdownAt..shutdownAt], StringComparison.Ordinal);
+        Assert.DoesNotContain("throw", body[shutdownAt..], StringComparison.Ordinal);
 
-        /* Each non-quiet outcome is a distinct WARNING naming what it knows. #4300 adds a third, EARLIER
-           LogWarning for the seam repair's own isolated failure ("the seam repair could not run this
-           pass—") — a different site from the two outer-catch warnings below, so the count moved from 2 to 3
-           rather than the assertion being weakened. */
+        /* Each non-quiet outcome is a distinct WARNING naming what it knows: the seam's own isolated failure,
+           the seam's own child-budget cutoff (names the hours still deferred), then the two outer-pass
+           warnings (the outer budget, and everything else). Five now, up from the original three. */
         Assert.Contains("\"Retention re-evaluation exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short", body, StringComparison.Ordinal);
         Assert.Contains("\"Retention re-evaluation could not run after {ElapsedMs} ms", body, StringComparison.Ordinal);
         Assert.Contains("\"Retention re-evaluation: the seam repair could not run this pass", body, StringComparison.Ordinal);
-        Assert.Equal(3, CountOf(body, "_logger.LogWarning("));
+        Assert.Contains("\"Retention re-evaluation: seam repair paused at the {BudgetMinutes}-minute budget; resumes next hour; {HoursDeferred} hour(s) still deferred.\"", body, StringComparison.Ordinal);
+        Assert.Equal(4, CountOf(body, "_logger.LogWarning("));
     }
 
     /// <summary>
