@@ -42,7 +42,13 @@ public sealed class ViewerPlanCacheSqlTests
         /* #4349: the per_collection CTE still groups by collection_time, but the outer read
          * buckets those rows by bucket_start and orders the bucketed result, not the raw rows. */
         Assert.Contains("AS bucket_start", sql, StringComparison.Ordinal);
-        Assert.Contains("GROUP BY 1\n        ORDER BY 1", sql.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+
+        var normalized = sql.ReplaceLineEndings("\n");
+        var outer = normalized[(normalized.LastIndexOf("\nFROM ", StringComparison.Ordinal) + 1)..];
+        var groupByIndex = outer.IndexOf("GROUP BY 1", StringComparison.Ordinal);
+        var orderByIndex = outer.IndexOf("ORDER BY 1", StringComparison.Ordinal);
+        Assert.True(groupByIndex >= 0, "expected GROUP BY 1 in the outer read");
+        Assert.True(orderByIndex > groupByIndex, "expected ORDER BY 1 to follow GROUP BY 1 in the outer read");
     }
 
     [Fact]
