@@ -210,12 +210,12 @@ public sealed partial class ViewerDataService
                 row.UserObjectReservedMb,
                 row.InternalObjectReservedMb,
                 row.VersionStoreReservedMb,
-                reader.IsDBNull(4) ? 0 : reader.GetDouble(4),
-                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                /* bigint — GetInt64; GetInt32 would throw against the bigint column. */
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                reader.IsDBNull(7) ? 0 : reader.GetInt32(7),
-                reader.IsDBNull(8) ? 0 : reader.GetDouble(8)));
+                row.TotalReservedMb,
+                row.UnallocatedMb,
+                /* bigint — read via the buffered row's own long field, matching the reader's GetInt64. */
+                row.TotalSessionsUsingTempDb,
+                row.TopSessionId,
+                row.TopSessionTempDbMb));
         }
 
         return samples;
