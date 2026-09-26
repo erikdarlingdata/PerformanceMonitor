@@ -6074,7 +6074,8 @@ AND   (j.config->>'drop_after')::interval IS DISTINCT FROM $1::interval";
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
-AND   j.hypertable_name = '{relation}'";
+AND   j.hypertable_name = '{relation}'
+AND   (j.scheduled OR (j.config->>'darling_armed')::boolean IS DISTINCT FROM $1::boolean)";
 
     /// <summary>
     /// #4299 (d′): the shared read for a raw job's armed verdict under the never-scheduled design — a
@@ -6101,17 +6102,19 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
-    /// #4299 L3b (M1): the trigger's own record of its last decision for <paramref name="relation"/> — the
-    /// key <c>darling_last_purge</c> under the same job <c>config</c> <see cref="ConvergeRawArmedStateSql"/>
-    /// already merges into, so <c>drop_after</c> and <c>darling_armed</c> survive untouched. <c>$1</c> is the
-    /// whole record as one <c>jsonb</c> object — <c>{"at", "outcome", "sql_state", "elapsed_ms"}</c> — built
-    /// by the caller (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>) so this statement stays a plain
-    /// merge with no knowledge of which outcome it is recording. <c>||</c> merge, same discipline as
-    /// <see cref="ConvergeRawArmedStateSql"/> and <see cref="RawRepairEpochStampSql"/> — an unconditional
-    /// <c>config =</c> would drop every other key already there.
+    /// #4299/#4391 L3b (M1): the trigger's own record of its last decision for <paramref name="relation"/> —
+    /// the key <c>darling_last_purge</c> under the same job <c>config</c> <see cref="ConvergeRawArmedStateSql"/>
+    /// already merges into, so <c>drop_after</c> and <c>darling_armed</c> survive untouched. The record is built
+    /// SERVER-SIDE with <c>jsonb_build_object('at', now(), 'outcome', $1, 'sql_state', $2, 'elapsed_ms', $3)</c> —
+    /// the same four keys the C#-interpolated record used before #4391 (<c>at</c>, <c>outcome</c>, <c>sql_state</c>,
+    /// <c>elapsed_ms</c>) — rather than string-interpolated in the caller
+    /// (<see cref="DarlingWorker.TriggerRawPurgeCoreAsync"/>), so nothing this statement writes ever passes
+    /// through a hand-built JSON string. <c>||</c> merge, same discipline as <see cref="ConvergeRawArmedStateSql"/>
+    /// and <see cref="RawRepairEpochStampSql"/> — an unconditional <c>config =</c> would drop every other key
+    /// already there.
     /// </summary>
     public static string SetRawLastPurgeOutcomeSql(string relation)
-        => $@"SELECT alter_job(j.job_id, config => j.config || jsonb_build_object('darling_last_purge', $1::jsonb))
+        => $@"SELECT alter_job(j.job_id, config => j.config || jsonb_build_object('darling_last_purge', jsonb_build_object('at', now(), 'outcome', $1::text, 'sql_state', $2::text, 'elapsed_ms', $3::bigint)))
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
@@ -6150,13 +6153,10 @@ AND   j.hypertable_name = '{relation}'";
 
         try
         {
-            var record = $"{{\"at\":\"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\",\"outcome\":\"{outcome}\"" +
-                (sqlState is null ? ",\"sql_state\":null" : $",\"sql_state\":\"{sqlState}\"") +
-                (elapsedMs is long ms ? $",\"elapsed_ms\":{ms}" : ",\"elapsed_ms\":null") +
-                "}";
-
             await using var write = new NpgsqlCommand(SetRawLastPurgeOutcomeSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
-            write.Parameters.AddWithValue(record);
+            write.Parameters.AddWithValue(outcome);
+            write.Parameters.AddWithValue((object?)sqlState ?? DBNull.Value);
+            write.Parameters.AddWithValue((object?)elapsedMs ?? DBNull.Value);
             await write.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -7187,6 +7187,24 @@ AND   j.hypertable_name = '{relation}'";
                     wasScheduled = flag is bool b ? b : null;
                 }
 
+                /* #4299/#4391: for a raw relation wasScheduled above carries darling_armed, NOT the schedule
+                   flag, so it is the wrong signal for detecting a DBA's alter_job(scheduled => true) - that is
+                   a converge event, not a re-hold, and gets its own line here rather than reusing the
+                   armed/re-held lines below, which never fire for a raw relation's schedule flag at all. */
+                bool rawWasScheduled = false;
+                if (isRawRelation)
+                {
+                    using var rawSchedulePriorRead = new NpgsqlCommand(RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds };
+                    var rawSchedulePriorFlag = await rawSchedulePriorRead.ExecuteScalarAsync(cancellationToken);
+                    rawWasScheduled = rawSchedulePriorFlag is true;
+                    if (rawWasScheduled)
+                    {
+                        logger?.LogInformation(
+                            "Raw retention job for {Relation} was scheduled outside the service (alter_job scheduled => true); set back to unscheduled. The service runs raw purges itself (#4299); re-arming the job does not change coverage (#3812).",
+                            relation);
+                    }
+                }
+
                 var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
                 if (verdict == RetentionCoverage.Covered)
                 {
@@ -7292,8 +7310,12 @@ AND   j.hypertable_name = '{relation}'";
                        darling_armed key alone that an indeterminate probe must not touch, so a DBA's
                        alter_job(scheduled => true) is reverted here too, even on a pass that could not judge
                        coverage. */
-                    if (isRawRelation)
+                    if (isRawRelation && rawWasScheduled)
                     {
+                        /* Guarded the same way ConvergeRawArmedStateSql is: an indeterminate pass must still
+                           revert a DBA's alter_job(scheduled => true), but writing scheduled => false to a job
+                           that is ALREADY false every hour is catalog churn with nothing to show for it.
+                           rawWasScheduled (read above, before the verdict) already answered that. */
                         using var rawScheduleOnly = new NpgsqlCommand(SetRetentionScheduleSql(relation, scheduled: false), connection) { CommandTimeout = SetupTimeoutSeconds };
                         await rawScheduleOnly.ExecuteNonQueryAsync(cancellationToken);
                     }

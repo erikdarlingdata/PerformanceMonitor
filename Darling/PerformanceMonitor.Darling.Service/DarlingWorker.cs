@@ -702,6 +702,12 @@ public sealed class DarlingWorker : BackgroundService
        Periodic tick from launching a second overlapping repair while one it started is still running. */
     private volatile bool _materializationHoleRepairRunning;
 
+    /* #4299/#4391 L2: the Periodic pass's own launch of RunMaterializationHoleRepairAsync, kept so the same
+       shutdown drain that awaits the start-path launch (holeRepair, above) also awaits this one — before
+       this field existed the Periodic launch was fired with a bare "_ = ", neither drained on shutdown nor
+       observed for a fault, so an exception it threw after the calling tick returned would go unlogged. */
+    private Task? _periodicHoleRepair;
+
     /* #2138 phase 1: the auto force-plan bot, constructed by RunCollectionLoopAsync alongside the
        analysis pieces. Null until then. It holds no executor and this build ships none, so its whole
        output is journal rows — see PlanForceBot and PlanForceNoWritePathTests. */
@@ -3186,6 +3192,21 @@ public sealed class DarlingWorker : BackgroundService
             try
             {
                 await holeRepair;
+            }
+            catch (OperationCanceledException)
+            {
+                /* Expected on shutdown. */
+            }
+        }
+
+        /* #4299/#4391 L2: the Periodic pass's own repair launch, same drain as the start-path one above —
+           a repair the Periodic tick started is awaited here too, so shutdown does not race it and any fault
+           it throws is observed rather than lost with the task. */
+        if (_periodicHoleRepair is not null)
+        {
+            try
+            {
+                await _periodicHoleRepair;
             }
             catch (OperationCanceledException)
             {
@@ -7141,30 +7162,40 @@ LIMIT 1";
                to wire a return value through. */
             await TriggerRawPurgeAsync(connection, budget.Token);
 
-            /* #4299 L2: the relaunch — when the epoch does not match the CURRENT postmaster start on ANY raw
-               job and no repair this process launched is still running, start a new one. Checked against the
-               FIRST raw relation only: RunMaterializationHoleRepairAsync stamps all three under the SAME
-               postmaster-start value in the same pass, so once one carries the current epoch all three do —
-               and a store that has never had a repair run under this start (every key null) reads the same
-               "no match" as a store whose repair is simply stale. _materializationHoleRepairRunning is this
-               PROCESS's own guard against launching a second overlapping repair; the epoch stamp in the store
-               is the separate guard (RawRepairEpochStampSql's IS DISTINCT FROM) that stops a SECOND SERVICE
-               from repeating the work — the two are independent and both are checked here because either alone
-               is not enough: two processes each with the flag clear would otherwise both launch. */
+            /* #4299/#4391 L2: the relaunch — when the epoch does not match the CURRENT postmaster start on
+               ANY raw job and no repair this process launched is still running, start a new one. Checked
+               against ALL THREE raw relations, not just the first: RunMaterializationHoleRepairAsync stamps
+               all three under the SAME postmaster-start value in the same pass ON A CLEAN COMPLETION, but a
+               repair that failed on (or was cancelled during) the second or third relation stamps only the
+               ones it reached, leaving the rest stale — reading only relation zero would then miss that and
+               never relaunch. A store that has never had a repair run under this start (every key null) reads
+               the same "no match" as a store whose repair is simply stale. _materializationHoleRepairRunning is
+               this PROCESS's own guard against launching a second overlapping repair; the epoch stamp in the
+               store is the separate guard (RawRepairEpochStampSql's IS DISTINCT FROM) that stops a SECOND
+               SERVICE from repeating the work — the two are independent and both are checked here because
+               either alone is not enough: two processes each with the flag clear would otherwise both launch. */
             if (!_materializationHoleRepairRunning && TimescaleSupport.RawRelations.Count > 0)
             {
-                bool epochCurrent;
-                await using (var epochCheck = new NpgsqlCommand(
-                    TimescaleSupport.RawRepairEpochMatchesSql(TimescaleSupport.RawRelations[0]), connection))
+                bool epochCurrent = true;
+                var staleRelations = new List<string>();
+                foreach (var relation in TimescaleSupport.RawRelations)
                 {
+                    await using var epochCheck = new NpgsqlCommand(
+                        TimescaleSupport.RawRepairEpochMatchesSql(relation), connection);
                     var value = await epochCheck.ExecuteScalarAsync(budget.Token);
-                    epochCurrent = value is bool b && b;
+                    var relationCurrent = value is bool b && b;
+                    epochCurrent &= relationCurrent;
+                    if (!relationCurrent)
+                    {
+                        staleRelations.Add(relation);
+                    }
                 }
 
                 if (ShouldLaunchMaterializationHoleRepair(_materializationHoleRepairRunning, epochCurrent) && _postgres is not null)
                 {
                     _logger.LogInformation(
-                        "Retention re-evaluation: the repair epoch is stale under the current postmaster start and no repair is running in this process — launching one now (Periodic pass only).");
+                        "Retention re-evaluation: the repair epoch is stale under the current postmaster start for {StaleRelations} and no repair is running in this process — launching one now (Periodic pass only).",
+                        string.Join(", ", staleRelations));
 
                     /* Deliberately NOT awaited, the same posture the start path takes for the identical call:
                        a capped repair on the heaviest aggregate is a policy run's worth of work, and this pass
@@ -7173,7 +7204,7 @@ LIMIT 1";
                        sees it running and does not launch a second one; TriggerRawPurgeAsync above already saw
                        the stale epoch this tick and skipped the purge, which is correct — the repair this
                        launches has not finished yet, so nothing this tick should have purged. */
-                    _ = RunMaterializationHoleRepairAsync(_postgres, cancellationToken);
+                    _periodicHoleRepair = RunMaterializationHoleRepairAsync(_postgres, cancellationToken);
                 }
             }
         }
