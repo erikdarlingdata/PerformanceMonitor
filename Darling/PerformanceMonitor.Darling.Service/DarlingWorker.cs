@@ -6756,8 +6756,6 @@ LIMIT 1";
             var cadenceReadings = await TimescaleSupport.ReadJobCadenceReadingsAsync(
                 connection, _logger, cancellationToken);
             readClock.Restart();
-            await _selfAlerts!.EvaluateStoreJobCadenceAsync(cadenceReadings, cancellationToken);
-            readClock.Restart();
 
             /* #2813: the Retention Held check rides the same connection and hourly cadence. A retention
                policy the #1680/#1877 coverage gate has paused reports total_failures = 0 and a plausible
@@ -6768,15 +6766,45 @@ LIMIT 1";
             var retentionHolds = await TimescaleSupport.ReadRetentionHoldReadingsAsync(
                 connection, _logger, cancellationToken);
             readClock.Restart();
+
+            /* #4299 L3c: the three raw jobs are excluded from JobCadenceReadSql (they are never
+               timescaledb_information.jobs.scheduled, so job_stats carries no meaningful last_run_duration
+               for them) and take their #2136 cadence from the SERVICE'S OWN trigger instead — the ruling is
+               "the #2136 cadence check takes its cadence from the trigger". The duration is the last RECORDED
+               "ran" outcome's elapsed_ms (TimescaleSupport.RawLastPurgeRecord, read below via the SAME
+               rawPurgeOverHorizon reading the over-horizon check judges — reused, not re-read); the interval
+               is the worker's own hourly Periodic pass, s_compressionCheckInterval, because that pass is the
+               ONLY caller of the raw trigger (TriggerRawPurgeCoreAsync). No record, or a last outcome other
+               than "ran", yields no cadence reading — being over horizon with no successful run is the #4299
+               L3b alert's job, not cadence's; a raw job that has never run at all must not read as running at
+               0% of its interval, and a job whose last recorded attempt failed must not be graded on a
+               duration that never happened. Merged into the list #2136's evaluator already iterates rather
+               than a parallel check, so the raw jobs share JobOverCadence's exact firing, cooldown and
+               resolution machinery instead of a second copy of it. */
+            var rawPurgeOverHorizon = await TimescaleSupport.ReadRawPurgeOverHorizonReadingsAsync(
+                connection, retentionHolds, _logger, cancellationToken);
+            readClock.Restart();
+
+            var rawCadenceReadings = rawPurgeOverHorizon
+                .Where(reading => reading.LastPurge is { Outcome: "ran", ElapsedMs: long })
+                .Select(reading => new StoreJobCadenceReading(
+                    reading.JobId,
+                    $"policy_retention {reading.HypertableName}",
+                    reading.LastPurge!.ElapsedMs,
+                    (long)s_compressionCheckInterval.TotalMilliseconds))
+                .ToList();
+
+            await _selfAlerts!.EvaluateStoreJobCadenceAsync(
+                cadenceReadings.Concat(rawCadenceReadings).ToList(), cancellationToken);
+            readClock.Restart();
+
             await _selfAlerts!.EvaluateRetentionHoldsAsync(retentionHolds, cancellationToken);
             readClock.Restart();
 
             /* #4299 L3b (M1): the raw purge over-horizon check rides the SAME connection, hourly cadence and
-               retentionHolds reading as the check just above — reused, not re-read, so this tick's raw rows
-               are the exact ones EvaluateRetentionHoldsAsync just judged. */
-            var rawPurgeOverHorizon = await TimescaleSupport.ReadRawPurgeOverHorizonReadingsAsync(
-                connection, retentionHolds, _logger, cancellationToken);
-            readClock.Restart();
+               retentionHolds/rawPurgeOverHorizon readings as the checks just above — reused, not re-read, so
+               this tick's raw rows are the exact ones EvaluateRetentionHoldsAsync and the cadence merge just
+               judged. */
             await _selfAlerts!.EvaluateRawPurgeOverHorizonAsync(rawPurgeOverHorizon, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
