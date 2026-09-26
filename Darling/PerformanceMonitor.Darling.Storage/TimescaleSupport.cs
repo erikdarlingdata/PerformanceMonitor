@@ -6556,11 +6556,15 @@ AND   j.hypertable_name = '{relation}'";
     /// anything, so a purge left armed across a long enough stop drops the chunk holding the seam before the
     /// walk ever gets a turn (#4299, pre-existing — 3.8.0 loses the same chunk on the same schedule). Once the
     /// repair does run, every detectable hole is closed and this gate's fallback releases — automatically
-    /// within the hour on a store that keeps running (#3812), but only from the SECOND start after an outage
-    /// that crosses the upgrade: the walk skips a successor with nothing materialized yet, so the seam does
-    /// not exist for it to find until the successor's own first refresh has run, and nothing re-runs the walk
-    /// between starts (#4300). Once it does run, release is bounded only by the repair's own per-start cap —
-    /// a seam wider than one start's cap takes more than one start to close in full, but every start makes
+    /// within the hour on a store that keeps running (#3812), and within the hour even across the upgrade
+    /// itself, with no second start needed (#4300): the FIRST start still skips a successor with nothing
+    /// materialized yet (the seam does not exist for the walk to find until the successor's own first refresh
+    /// has run), but the next hourly Periodic pass runs a seam-only repair — the same per-target body, the
+    /// same cap, restricted to legacy-paired targets and their seam window — before it re-judges coverage, so
+    /// a seam that opened across the upgrade closes on the first tick after the successor's own first refresh
+    /// rather than waiting for a restart that a store which seldom stops may not see for a long time. Release
+    /// is bounded only by the repair's own per-pass cap —
+    /// a seam wider than one pass's cap takes more than one pass to close in full, but every pass makes
     /// progress on it. GAPS LEFT BY EARLIER VERSIONS' PURGES BELOW THE RAW FLOOR CANNOT BE DETECTED OR
     /// REPAIRED; FROM THIS VERSION THE PURGE HOLDS UNTIL EVERY DETECTABLE HOLE IS REPAIRED.</para>
     ///

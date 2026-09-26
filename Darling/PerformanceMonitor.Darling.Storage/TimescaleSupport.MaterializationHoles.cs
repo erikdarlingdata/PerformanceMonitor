@@ -550,8 +550,39 @@ ORDER BY c.bucket";
     /// Failure-isolated per aggregate; a store without the extension, or an aggregate that is a plain fallback
     /// view, is skipped with a Debug line. See the type summary for the design.
     /// </summary>
-    public static async Task<MaterializationHoleRepairSummary> RepairMaterializationHolesAsync(
+    public static Task<MaterializationHoleRepairSummary> RepairMaterializationHolesAsync(
         NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+        => RepairMaterializationTargetsAsync(connection, logger, utcNow, MaterializationHoleTargets, seamOnly: false, cancellationToken);
+
+    /// <summary>
+    /// #4300: the SEAM-ONLY repair the hourly Periodic pass runs (<c>DarlingWorker.ReevaluateRetentionPoliciesAsync</c>),
+    /// so a legacy/successor seam an outage opened across the upgrade closes within the hour on a store that keeps
+    /// running, with no second service start. Reuses the exact per-target body <see cref="RepairMaterializationHolesAsync"/>
+    /// runs at start — same cap, same source filter, same failure isolation — restricted to targets with a frozen
+    /// legacy (<see cref="LegacyOf"/> non-null) and, within each, to the seam window alone: a target with only an
+    /// ordinary interior hole (no legacy pairing) is never touched here, and a legacy-paired target whose seam is
+    /// already closed (seamFloor no longer below its own floor) is skipped rather than re-scanning its ordinary
+    /// window, which the retention sweep's own coverage read already covers. The first start after a long outage
+    /// still runs the full walk (this method changes nothing about that path); this method exists for every hour
+    /// AFTER it, while the successor's own first refresh has run but nothing else has re-launched the full repair.
+    /// </summary>
+    public static Task<MaterializationHoleRepairSummary> RepairMaterializationSeamsAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, CancellationToken cancellationToken = default)
+    {
+        var legacyPaired = MaterializationHoleTargets.Where(t => LegacyOf(t.View) is not null).ToList();
+        return RepairMaterializationTargetsAsync(connection, logger, utcNow, legacyPaired, seamOnly: true, cancellationToken);
+    }
+
+    /// <summary>
+    /// THE shared per-target walk <see cref="RepairMaterializationHolesAsync"/> and <see cref="RepairMaterializationSeamsAsync"/>
+    /// both run — factored out rather than duplicated so the seam-only path can never drift from the start path's
+    /// cap, source filter, or failure isolation. <paramref name="seamOnly"/> restricts each target's scan to its
+    /// seam window alone (skipping the ordinary window and its horizon computation entirely) and skips a target
+    /// with no seam left to close; <c>false</c> is the unrestricted start-path walk, unchanged from before this
+    /// method existed.
+    /// </summary>
+    private static async Task<MaterializationHoleRepairSummary> RepairMaterializationTargetsAsync(
+        NpgsqlConnection connection, ILogger? logger, DateTime utcNow, IReadOnlyList<MaterializationHoleTarget> targets, bool seamOnly, CancellationToken cancellationToken)
     {
         if (connection is null)
         {
@@ -578,13 +609,13 @@ ORDER BY c.bucket";
         if (!await DetectAsync(connection, cancellationToken))
         {
             logger?.LogDebug("Materialization-hole repair (#3653): no TimescaleDB on this store, nothing to scan.");
-            return new MaterializationHoleRepairSummary(0, MaterializationHoleTargets.Count, 0, 0, 0, 0, 0, 0, 0, 0, 0, passClock.Elapsed);
+            return new MaterializationHoleRepairSummary(0, targets.Count, 0, 0, 0, 0, 0, 0, 0, 0, 0, passClock.Elapsed);
         }
 
         var disclosure = new RefreshDisclosure(message => logger?.LogWarning(
             "Materialization-hole repair (#3653): {Message}", message));
 
-        foreach (var target in MaterializationHoleTargets)
+        foreach (var target in targets)
         {
             try
             {
@@ -646,6 +677,17 @@ ORDER BY c.bucket";
                     }
                 }
 
+                if (seamOnly && seamFloor >= floor.Value)
+                {
+                    /* #4300: this target's seam is already closed (or it never had one this pass) — the
+                       hourly seam-only repair has nothing to do for it, and skips WITHOUT the ordinary
+                       window's horizon probe below (RawFloorHorizonAsync/MaterializationHoleScanSpanFor):
+                       the retention sweep's own coverage read is what judges the ordinary window; this pass
+                       only exists to close the seam. */
+                    skipped++;
+                    continue;
+                }
+
                 /* #4299: for a raw-sourced target the old time horizon (utcNow - MaterializationHoleScanSpanFor)
                    assumed raw purges on ITS OWN schedule, so nothing older than that span could still be sitting
                    in raw unrepaired. The service-triggered purge stops scheduling the three raw jobs at all —
@@ -654,10 +696,17 @@ ORDER BY c.bucket";
                    indefinitely. For raw-sourced targets the lower bound is instead the RAW FLOOR actually still
                    present (min(SourceTimeColumn) in the source table itself), so the scan reaches every bucket
                    raw genuinely still holds; a raw table with nothing in it yet (fresh install) falls back to the
-                   old time horizon, which is harmless there since there is nothing to scan either way. */
-                var horizon = IsRawSourced(target.Source)
-                    ? await RawFloorHorizonAsync(connection, target, utcNow, cancellationToken)
-                    : AlignDown(utcNow - MaterializationHoleScanSpanFor(target.Source), target.BucketWidth);
+                   old time horizon, which is harmless there since there is nothing to scan either way.
+
+                   #4300: seamOnly skips this probe and clamps the horizon ABOVE the ceiling instead, so
+                   MaterializationHoleScanWindows below never emits the ordinary window — the seam-only pass
+                   spends nothing on the ordinary window's own horizon, which is the retention sweep's business,
+                   not this repair's. */
+                var horizon = seamOnly
+                    ? ceiling.Value + target.BucketWidth
+                    : IsRawSourced(target.Source)
+                        ? await RawFloorHorizonAsync(connection, target, utcNow, cancellationToken)
+                        : AlignDown(utcNow - MaterializationHoleScanSpanFor(target.Source), target.BucketWidth);
                 var windows = MaterializationHoleScanWindows(floor.Value, ceiling.Value, horizon, seamFloor, target.BucketWidth);
                 if (windows.Count == 0)
                 {

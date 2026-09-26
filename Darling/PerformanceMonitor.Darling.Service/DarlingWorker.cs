@@ -7152,6 +7152,41 @@ LIMIT 1";
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+
+            /* #4300: the seam-only repair runs BEFORE the coverage sweep below, on the SAME connection and
+               the SAME budget token, so a seam it closes this tick is already gone by the time
+               EnsureRetentionPoliciesAsync re-judges coverage a moment later — the gate can release in this
+               very tick rather than waiting for next hour's pass to notice. It reuses the exact per-target
+               body the start-path walk runs (TimescaleSupport.RepairMaterializationSeamsAsync), restricted to
+               legacy-paired targets and their seam window alone; a target with an already-closed seam is a
+               cheap skip (one span read, one raw-floor read), which is the probe the brief calls for — there
+               is no heavier scan to avoid running twice. Failure-isolated: a throw here must not stop the
+               coverage sweep or the purge trigger below, both of which are the pass's other, independent jobs. */
+            try
+            {
+                var seamSummary = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, _logger, DateTime.UtcNow, budget.Token);
+                if (seamSummary.BucketsRepaired > 0 || seamSummary.BucketsDeferred > 0)
+                {
+                    _logger.LogInformation(
+                        "Retention re-evaluation: seam repair closed {BucketsRepaired} bucket(s) across {HolesRepaired} hole(s) this pass, {BucketsDeferred} bucket(s) left for a later pass (past this pass's per-aggregate cap), {Failures} isolated failure(s).",
+                        seamSummary.BucketsRepaired, seamSummary.HolesRepaired, seamSummary.BucketsDeferred, seamSummary.Failures);
+                }
+                else
+                {
+                    _logger.LogDebug("Retention re-evaluation: seam repair found nothing to close this pass.");
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    "Retention re-evaluation: the seam repair could not run this pass — any legacy/successor seam a prior outage opened stands until a later pass retries: {Message}",
+                    ex.Message);
+            }
+
             await TimescaleSupport.EnsureRetentionPoliciesAsync(
                 connection, _logger, TimescaleSupport.RetentionSweepPass.Periodic, budget.Token);
 

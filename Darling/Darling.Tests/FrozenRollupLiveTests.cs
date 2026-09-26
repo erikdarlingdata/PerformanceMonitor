@@ -543,6 +543,184 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
+    /// #4300: the SAME seam shape as
+    /// <see cref="Outage_SeamBetweenFrozenLegacyAndSuccessor_HoleWalkRepairsItAndGateReleases"/>, but for the
+    /// SINGLE-start case that method does not exercise: only ONE start's repair runs (it skips the successor
+    /// while it is still empty, exactly as the first start after the outage does), the successor's first
+    /// refresh then happens on the running service (no restart), and the gate is expected to release from the
+    /// hourly Periodic pass's seam-only repair alone — <see cref="TimescaleSupport.RepairMaterializationSeamsAsync"/>,
+    /// the exact method <c>DarlingWorker.ReevaluateRetentionPoliciesAsync</c> calls every hour. Before #4300
+    /// this pin is RED: the gate still reads Short after the seam-only call, because nothing except a SECOND
+    /// full <see cref="TimescaleSupport.RepairMaterializationHolesAsync"/> (a second start) ever re-ran the
+    /// walk once the successor had materialized anything.
+    /// </summary>
+    [Fact]
+    public async Task Outage_SeamBetweenFrozenLegacyAndSuccessor_SingleStart_HourlySeamRepairReleasesTheGate()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Same seam shape as the two-day twin: S is the stop, the legacy is refreshed through S-2h, raw
+               carries the [S-1h, S] tail plus a rejected interval-0 restart row, then a genuine 2-day outage
+               before the successor's first post-upgrade refresh at U = S+2d. */
+            var s = D0.AddDays(3);
+
+            for (var hour = 0; hour <= 6; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"seam1_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await InsertProcedureStatsAsync(connection, s.AddMinutes(30), "seam1_proc_restart", 0, 0, 0, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-6), s.AddHours(-1), ct);
+
+            /* ONE start's repair, at a clock BEFORE the successor's first refresh — the successor is still
+               empty, so this walk skips it ("has materialized nothing yet"), exactly as the real first start
+               after the outage does. */
+            var firstStart = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, s.AddHours(1), ct);
+            Assert.Equal(0, firstStart.BucketsRepaired);
+
+            var u = s.AddDays(2);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seam1_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            /* The seam holds raw rows the stitch cannot see through unconditionally — Short, not Covered —
+               with no second start anywhere in this sequence. */
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            /* The hourly Periodic pass's own seam-only repair — ONE call, ONE tick, no restart. */
+            var seamOnly = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(7, seamOnly.BucketsRepaired);
+
+            await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
+            {
+                var newFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
+                Assert.Equal(s.AddHours(-6), newFloor);
+            }
+
+            /* The seam is now empty — Covered, from the hourly tick alone, no second start. */
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4300: the seam-only repair touches only legacy-paired targets and only their seam window — an ordinary
+    /// interior hole on a target with NO legacy (a plain continuous aggregate) is never repaired by the
+    /// seam-only call, even when the ordinary window would otherwise find it. Proven against a real
+    /// non-legacy-paired baseline aggregate: a hole is opened inside its span, the seam-only repair runs and
+    /// reports it scanned nothing for that target (skipped), and the hole is still there afterward — the full
+    /// start-path walk (<see cref="TimescaleSupport.RepairMaterializationHolesAsync"/>) is what closes it.
+    /// </summary>
+    [Fact]
+    public async Task SeamOnlyRepair_NeverTouchesAnOrdinaryInteriorHoleOnANonLegacyTarget()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* A plain (non-legacy-paired) target: query_stats_baseline is a BaselineAggregates member,
+               never a SupersededHourlyRollups successor, so LegacyOf returns null for it. Materialize an
+               OLDER and a NEWER hour, leaving a hole in between, then refresh only the newer one — the
+               classic interior hole an outage under HourlyRefreshStartOffset opens. */
+            var older = D0.AddDays(3);
+            var newer = older.AddHours(3);
+
+            await InsertQueryStatsAsync(connection, older, "interior_older", 900, 9, 3600, ct);
+            await InsertQueryStatsAsync(connection, newer, "interior_newer", 900, 9, 3600, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsBaselineView, older.AddHours(-1), older, ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsBaselineView, newer, newer.AddHours(1), ct);
+
+            var seamOnly = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, newer.AddHours(2), ct);
+            Assert.Equal(0, seamOnly.BucketsRepaired);
+
+            await using (var holeCheck = new NpgsqlCommand($"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsBaselineView} WHERE bucket = $1", connection))
+            {
+                holeCheck.Parameters.AddWithValue(DateTime.SpecifyKind(older.AddHours(1), DateTimeKind.Unspecified));
+                var stillAHole = Convert.ToInt64(await holeCheck.ExecuteScalarAsync(ct)) == 0;
+                Assert.True(stillAHole, "the seam-only repair must not touch an ordinary interior hole on a non-legacy-paired target");
+            }
+
+            /* The full start-path walk DOES close it — confirming this is a real hole, not a fixture mistake. */
+            var fullWalk = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, newer.AddHours(2), ct);
+            Assert.True(fullWalk.BucketsRepaired > 0, "the full walk should have closed the interior hole the seam-only call left standing");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
     /// #4186 follow-up: the same seam shape as
     /// <see cref="Outage_SeamBetweenFrozenLegacyAndSuccessor_HoleWalkRepairsItAndGateReleases"/>, but the outage
     /// outlasts the raw retention horizon itself (<see cref="TimescaleSupport.MaterializationHoleScanSpanFor"/>:
