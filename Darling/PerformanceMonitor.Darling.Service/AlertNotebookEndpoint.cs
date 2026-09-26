@@ -358,7 +358,7 @@ internal static class AlertNotebookEndpoint
     /// by hand instead of listing reads. <c>BuildCells</c> takes exactly what <see cref="Map"/> already has in
     /// scope for the mechanical path, so an authored template is a drop-in alternative at the same call
     /// site.</summary>
-    private readonly record struct AuthoredTemplateEntry(
+    internal readonly record struct AuthoredTemplateEntry(
         string Id,
         int Version,
         Func<string?, string?, string?, DateTime, DateTime, AlertIncident?, DarlingAlertReader.AlertHistoryReadRow?, string, JsonArray> BuildCells);
@@ -373,7 +373,10 @@ internal static class AlertNotebookEndpoint
     /// conversion — every metric NOT named here keeps the byte-identical mechanical path. Keyed on the EXACT
     /// alert-engine <c>MetricName</c> strings (the same literals <see cref="DarlingTriageEndpoint.SectionsByMetric"/>
     /// keys on), case-insensitively, matching every other metric lookup on this endpoint.</summary>
-    private static AuthoredTemplateEntry? AuthoredTemplate(string? metric)
+    /// <summary>Made <c>internal</c> (not private) so <see cref="Darling.Tests.AlertNotebookAuthoredTemplateTests"/>
+    /// can call it directly via <c>InternalsVisibleTo</c> instead of reflection — the same visibility
+    /// <see cref="MatchAlert"/> and <see cref="StatusFromHistory"/> already use for their own pins.</summary>
+    internal static AuthoredTemplateEntry? AuthoredTemplate(string? metric)
     {
         if (string.IsNullOrWhiteSpace(metric))
         {
