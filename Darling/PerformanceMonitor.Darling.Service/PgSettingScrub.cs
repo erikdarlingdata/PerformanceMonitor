@@ -394,7 +394,7 @@ AND   t.server_id = $11";
                     serverId, day, ex.SqlState ?? (ex.InnerException is TimeoutException ? "timeout" : "client"));
                 failedServerIds.Add(serverId);
 
-                /* S2: a timed-out command whose own cancel request also fails can leave the connector
+                /* A timed-out command whose own cancel request also fails can leave the connector
                    broken. The next server's BeginTransactionAsync would then throw InvalidOperationException,
                    which is not an NpgsqlException and is not caught here — that would end the whole run
                    rather than just skipping this one server. Reopen in place so the remaining servers this
