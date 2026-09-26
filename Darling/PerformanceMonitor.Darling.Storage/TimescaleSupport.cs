@@ -6050,6 +6050,57 @@ AND   j.hypertable_name = '{relation}'
 AND   (j.config->>'drop_after')::interval IS DISTINCT FROM $1::interval";
 
     /// <summary>
+    /// #4299 (d′): the three raw retention jobs (<see cref="RawTierCoverage"/> — <c>query_stats</c>,
+    /// <c>procedure_stats</c>, <c>query_store_stats</c>) are NEVER scheduled by TimescaleDB's own job
+    /// runner. Every evaluation of this statement forces <c>scheduled = false</c> unconditionally (not
+    /// converged, not conditional — the job simply never runs on the scheduler's own clock again) and
+    /// records the coverage gate's verdict in <c>config-&gt;&gt;'darling_armed'</c> instead, so the service
+    /// can decide when to trigger the purge itself via <c>CALL run_job(id)</c> from the hourly Periodic pass
+    /// (never Startup).
+    ///
+    /// <para><b>Why <c>config =&gt; j.config || jsonb_build_object(...)</c> and not <c>config =</c>.</b> The
+    /// job's config already carries <c>drop_after</c> (set by <see cref="AddRetentionPolicySql"/> and moved
+    /// by <see cref="ConvergeRetentionHorizonSql"/>) and may carry other keys a future feature adds. Using
+    /// <c>||</c> merges <c>darling_armed</c> in without touching anything else already there — the same
+    /// discipline <see cref="ConvergeRetentionHorizonSql"/> already follows with <c>jsonb_set</c>. A bare
+    /// <c>config =</c> assignment would replace the whole object and silently drop <c>drop_after</c>.</para>
+    ///
+    /// <para><c>$1</c> is the armed verdict as a boolean (<c>true</c> = the coverage gate says covered,
+    /// <c>false</c> = held). This statement does not itself decide the verdict — the caller measures
+    /// coverage the same way <see cref="ArmRetentionPolicySql"/>'s caller does and passes the result in.</para>
+    /// </summary>
+    public static string ConvergeRawArmedStateSql(string relation)
+        => $@"SELECT alter_job(j.job_id, scheduled => false, config => j.config || jsonb_build_object('darling_armed', $1::boolean))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
+    /// #4299 (d′): the shared read for a raw job's armed verdict under the never-scheduled design — a
+    /// missing <c>darling_armed</c> key (a store that has not converged yet, or a job TimescaleDB just
+    /// created with none of this project's keys) reads as HELD, never armed. <c>COALESCE</c> over a
+    /// boolean cast is fail-closed by construction: a key that is present but not parseable as boolean
+    /// would raise rather than silently reading armed, and a key that is simply absent reads
+    /// <c>false</c> — the same fail-closed posture <see cref="MeasureRetentionCoverageAsync"/> already
+    /// takes for an indeterminate coverage probe.
+    /// </summary>
+    public const string RawArmedReadExpression = "COALESCE((j.config->>'darling_armed')::boolean, false)";
+
+    /// <summary>
+    /// Reads <paramref name="relation"/>'s raw-job armed verdict through <see cref="RawArmedReadExpression"/>
+    /// — the query the service's Periodic trigger uses to decide whether a run of <c>CALL run_job(id)</c> is
+    /// due. Zero rows when the policy does not exist, same convention as
+    /// <see cref="RetentionPolicyScheduledSql"/>.
+    /// </summary>
+    public static string RawArmedStateSql(string relation)
+        => $@"SELECT {RawArmedReadExpression}
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'";
+
+    /// <summary>
     /// Re-holds a retention policy that is ALREADY ARMED (#1877). The mirror of
     /// <see cref="ArmRetentionPolicySql"/>, and the statement that closes the arm-only gap: a policy created
     /// paused stays paused by itself, but <c>add_retention_policy(if_not_exists =&gt; true)</c> returns -1 for a
