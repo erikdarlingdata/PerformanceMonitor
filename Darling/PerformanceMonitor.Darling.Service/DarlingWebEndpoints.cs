@@ -67,6 +67,18 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public static class DarlingWebEndpoints
 {
+    /// <summary>#4442 scope 2: the process-lifetime read-latency accumulator, set once from <see cref="MapAll"/>'s
+    /// DI singleton. Static because <see cref="RunComposedPanelAsync"/> is shared, unchanged, with the MCP
+    /// run_custom_view_panel tool -- a static field is the seam that lets this recording land without adding a
+    /// parameter to that shared, static method's signature (and touching its MCP call site, which is a later,
+    /// separate change). Null in any context that never calls <see cref="MapAll"/> (a unit test exercising
+    /// RunComposedPanelAsync directly), so recording is always optional, never required.</summary>
+    private static ReadLatencyAccumulator? s_readLatency;
+
+    /// <summary>The logger recording failures are reported through, at Debug -- never at a level an operator
+    /// would see, since a recording failure is never a request failure.</summary>
+    private static ILogger? s_readLatencyLogger;
+
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
     /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
     /// is the compute-heavy plan-analysis phase-2 work; the Custom Views tools (#1599) are served by their OWN
@@ -261,8 +273,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null)
     {
+        /* #4442 scope 2: RunComposedPanelAsync is a static method shared with the MCP run_custom_view_panel
+           tool (Mcp/DarlingMcpCustomViewTools.cs) and carries no instance state, so it cannot take the
+           accumulator as an ordinary parameter without touching that MCP call site too -- out of scope for
+           this change (MCP recording is a later step). A process-lifetime static set once here, from the
+           one DI singleton, is the seam: every MapAll call (there is exactly one, at host startup) sets it
+           before any route can be hit. Null-safe throughout, so a caller that never sets it up (a test that
+           builds MapAll's routes directly) simply records nothing. */
+        s_readLatency = readLatency;
+        s_readLatencyLogger = logger;
+
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
            actual verdict instead of a hardcoded "ok". See DescribePing for the four states and their status
@@ -342,8 +364,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        routing this through FormatError first would make ToHttpResult's classifier re-derive
                        from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
+                    RecordWebReadLatency(name, ReadOutcomeClassifier.Classify(ex, context.RequestAborted), stopwatch.ElapsedMilliseconds);
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
+
+                /* #4442 scope 2: recorded on BOTH arms of this loop -- here for a tool result that made it
+                   back as a string (success, or a tool's own caught-and-formatted failure), above for a
+                   binding-layer throw the try/catch above answers directly. ClassifyToolResponse's
+                   ServerError arm is the only shape that can carry a 57014 sentence (a tool that caught its
+                   own statement_timeout and formatted it); everything else that reaches here is Ok. */
+                var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
+                    ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
+                    : ReadOutcome.Ok;
+                RecordWebReadLatency(name, webOutcome, stopwatch.ElapsedMilliseconds);
 
                 return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
             });
@@ -1017,6 +1050,80 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// client-abort, exactly as the endpoint has always done.
     /// </summary>
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
+        NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken)
+    {
+        /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
+           run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
+           'compose' sample each, never two. The route label is the panel's source measure key when the body
+           parses far enough to have one, else the fixed label below; both are bounded-cardinality (the
+           catalog's own measure keys), never the caller's raw JSON. Recording never throws into the caller:
+           a bucket update is the only work in the try, and any failure there is swallowed and logged at
+           Debug, exactly like the web loop's own recording. */
+        var stopwatch = Stopwatch.StartNew();
+        var outcome = await RunComposedPanelCoreAsync(postgres, body, cancellationToken);
+        RecordComposeLatency(body, outcome, cancellationToken, stopwatch.ElapsedMilliseconds);
+        return outcome;
+    }
+
+    /// <summary>The composed-panel route label recorded against <see cref="ReadLatencyAccumulator"/>: the
+    /// panel's own measure key when the body parsed that far, else a fixed catch-all -- bounded cardinality
+    /// either way (the compose catalog's own measure keys, never the caller's free text).</summary>
+    private const string ComposeUnknownRouteLabel = "compose:unknown";
+
+    /// <summary>Records one <c>/api/read/&lt;name&gt;</c> sample under the <c>web</c> surface -- <paramref
+    /// name="name"/> is already a bounded-cardinality route label (the dispatch table's own tool name, never
+    /// caller-supplied text). Never throws into the request: swallowed and logged at Debug, exactly like the
+    /// compose path's own recording.</summary>
+    private static void RecordWebReadLatency(string name, ReadOutcome outcome, long elapsedMs)
+    {
+        try
+        {
+            s_readLatency?.Record(ReadSurface.Web, name, outcome, elapsedMs);
+        }
+        catch (Exception ex)
+        {
+            s_readLatencyLogger?.LogDebug(ex, "Read-latency recording failed for /api/read/{Route}.", name);
+        }
+    }
+
+    private static void RecordComposeLatency(JsonObject body, ComposeRunOutcome outcome, System.Threading.CancellationToken cancellationToken, long elapsedMs)
+    {
+        try
+        {
+            var measureKey = body["panel"] is JsonObject panel && panel["source"] is JsonValue sourceValue
+                && sourceValue.TryGetValue<string>(out var source) && !string.IsNullOrEmpty(source)
+                ? "compose:" + source
+                : ComposeUnknownRouteLabel;
+
+            /* Payload => Ok. outcome.Fault carries the real PostgresException for a store fault the panel
+               author could not have caused -- classified the same way the web loop classifies any exception.
+               outcome.AuthorSqlState is set only for an author-actionable PostgresException (#4283 M1/#4293
+               R2), and that allow-list includes 57014 -- a panel query hitting the store's own
+               statement_timeout is a Timeout sample even though it answers the caller at 400, not 500.
+               Anything else that did not produce a payload (a validation BadRequest with no exception at
+               all, or the generic-Exception ServerError arm) is Error, unless the caller's own token already
+               explains it. */
+            var readOutcome = outcome.Payload is not null
+                ? ReadOutcome.Ok
+                : outcome.AuthorSqlState == CollectorFaultCancelOrigin.QueryCanceled
+                    ? ReadOutcome.Timeout
+                    : outcome.Fault is not null
+                        ? ReadOutcomeClassifier.Classify(outcome.Fault, cancellationToken)
+                        : cancellationToken.IsCancellationRequested
+                            ? ReadOutcome.Cancelled
+                            : ReadOutcome.Error;
+
+            s_readLatency?.Record(ReadSurface.Compose, measureKey, readOutcome, elapsedMs);
+        }
+        catch (Exception ex)
+        {
+            s_readLatencyLogger?.LogDebug(ex, "Read-latency recording failed for a composed-panel run.");
+        }
+    }
+
+    /// <summary>The compile-and-run body <see cref="RunComposedPanelAsync"/> wraps with latency recording --
+    /// unchanged from before #4442 scope 2 added the wrapper.</summary>
+    private static async Task<ComposeRunOutcome> RunComposedPanelCoreAsync(
         NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken)
     {
         if (body["panel"] is not JsonObject panel)

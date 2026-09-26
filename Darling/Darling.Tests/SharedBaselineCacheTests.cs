@@ -142,7 +142,7 @@ public sealed class SharedBaselineCacheTests
         Assert.Contains("new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache)", mcp, StringComparison.Ordinal);
 
         var web = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
-        Assert.Contains("DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig);", web, StringComparison.Ordinal);
+        Assert.Contains("DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency);", web, StringComparison.Ordinal);
         var endpoints = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
         Assert.Contains("new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache)", endpoints, StringComparison.Ordinal);
 

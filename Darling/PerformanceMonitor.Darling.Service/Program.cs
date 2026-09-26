@@ -451,6 +451,11 @@ builder.Services.AddSingleton<CollectorRuntimeState>();
    30-day buckets instead, and a series is read from the store once per analysis hour between them. */
 builder.Services.AddSingleton<BaselineCache>();
 
+/* #4442 scope 2: the read-latency histogram accumulator, shared between the web host's /api/read/* dispatch
+   loop and RunComposedPanelAsync -- a singleton for the same reason CollectorCostAccumulator is: the worker's
+   flush and the web host's recording are separate hosted services in the one process. */
+builder.Services.AddSingleton<ReadLatencyAccumulator>();
+
 builder.Services.AddHostedService<DarlingWorker>();
 
 /* AN4: the analysis MCP tools over Streamable HTTP — registered always, self-gating on
