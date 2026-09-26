@@ -4530,6 +4530,220 @@ internal sealed class DarlingSelfAlertEvaluator
         return (shortMessage, sb.ToString());
     }
 
+    /* ---------------- managed store settings needing attention (fleet-level, polled — #4215) ---------------- */
+
+    /// <summary>
+    /// What DarlingWorker knows, once per sweep tick, about this managed store's <c>darling-managed.conf</c>
+    /// outcome (#4215). <paramref name="IsManagedStore"/> false means a bring-your-own store or a non-Windows host:
+    /// nothing here was ever written by this service, so the alert never fires and every other field is
+    /// meaningless. <paramref name="UsedLastGoodConf"/> and <paramref name="HandEdited"/> are THIS START's
+    /// in-process facts (<see cref="DarlingManagedPostgres.LastStartUsedLastGoodManagedConf"/> and
+    /// <see cref="ManagedConfWriteResult.HandEdited"/>) — nothing persists them, so they are re-derived from
+    /// the writer every start, the same way <see cref="StoreUpgradeReport"/> already is.
+    /// <paramref name="RejectedSettingNames"/> is the one fact that IS store-backed: every
+    /// <see cref="HostSettingVerdict.RejectedValue"/> row <c>collect.managed_conf_verdicts</c> (V146) is
+    /// currently holding, read fresh each tick since a rejected value fixed by a later start replaces that
+    /// row without this process restarting. <c>null</c> means the read FAILED this tick — unknown, not
+    /// empty — so the evaluator neither fires nor resolves on this condition alone and instead keeps
+    /// whatever the family's rejected-settings state already was (the read's
+    /// own worker-side catch used to collapse a failure to an empty list, which made one bad read able to
+    /// write a false "Store Settings Resolved" when rejected settings were the only condition standing).
+    /// </summary>
+    internal sealed record StoreSettingsReport(
+        bool IsManagedStore,
+        bool UsedLastGoodConf,
+        bool HandEdited,
+        IReadOnlyList<string>? RejectedSettingNames,
+        ManagedConfMigrationOutcome? Verification = null);
+
+    private readonly ConcurrentDictionary<string, bool> _activeStoreSettings = new();
+    private readonly ConcurrentDictionary<string, DateTime> _lastStoreSettingsAlert = new();
+
+    /// <summary>The fixed key for the fleet-level store-settings edge (not a real server); non-numeric so the
+    /// deliverer's #1236 int.TryParse override no-ops on it, like <see cref="StaleMuteKey"/>.</summary>
+    private const string StoreSettingsKey = "storesettings";
+
+    /// <summary>The alert metric name the store-settings self-alert fires under (#4215). A WEBHOOK AUTOMATION
+    /// KEY like its siblings, so it is a const and must stay stable across releases. Classified as a count
+    /// metric by <c>AlertMetricClassifier</c> (the value is the number of conditions in force).</summary>
+    internal const string StoreSettingsMetric = "Store Settings Need Attention";
+
+    /// <summary>The resolution title recorded when none of the four conditions holds any more. Carries a
+    /// recognized resolution suffix ("Resolved") so the shared <c>AlertMetricClassifier.IsResolution</c>
+    /// styles it green.</summary>
+    internal const string StoreSettingsResolvedMetric = "Store Settings Resolved";
+
+    /// <summary>How often a standing store-settings condition re-states itself — the <see cref="StaleMuteRefire"/>
+    /// reasoning exactly: none of the four facts moves inside a run (only a restart changes any of them), so
+    /// re-stating on the shared per-cycle cooldown would just repeat the same sentence every sweep.</summary>
+    internal static readonly TimeSpan StoreSettingsRefire = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// Isolating wrapper for the fleet-level store-settings self-alert (#4215), mirroring
+    /// <see cref="EvaluateStaleMuteRulesAsync"/>. The worker calls THIS; tests call the isolated
+    /// <see cref="ApplyStoreSettingsAsync"/> directly.
+    /// </summary>
+    public async Task EvaluateStoreSettingsAsync(StoreSettingsReport report, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyStoreSettingsAsync(report, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the report is a parameter DarlingWorker already
+               built (its one store read, the rejected-verdict list, is isolated at its own call site); this
+               method performs no store read of its own. */
+            _logger?.LogError("Store settings self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Edge-applies the "a managed store's settings need an operator's attention" condition (#4215, plus
+    /// #4336's failed-verification condition): fires while any of four independent facts about THIS start holds — <paramref
+    /// name="report"/>'s <c>UsedLastGoodConf</c> (the freshly rendered file failed <c>postgres -C</c>
+    /// validation, or the write itself failed, and this start ran on the last file that proved it could start
+    /// PostgreSQL), <c>HandEdited</c> (an operator's hand edit of <c>darling-managed.conf</c> is kept in
+    /// force rather than overwritten), one or more stored verdicts being <see
+    /// cref="HostSettingVerdict.RejectedValue"/> (PostgreSQL itself refused a value this host's own formula
+    /// derived), or <c>Verification</c>'s <c>Status</c> being <see cref="ManagedConfVerificationStatus.Failed"/>
+    /// (the after-write snapshot did not match <c>pg_file_settings</c>, and the backup or previous verified
+    /// <c>darling-managed.conf</c> was restored). <see cref="HostSettingVerdict.PendingRestart"/> and
+    /// <see cref="HostSettingVerdict.StaleAfterHardwareChange"/> do NOT fire this — a value waiting on a
+    /// restart it will cleanly apply, or one merely different from what today's hardware would now derive, is
+    /// not evidence anything is WRONG the way a fallback, a kept override or an outright rejection is.
+    /// <see cref="ManagedConfVerificationStatus.Unknown"/> does not fire this alone either, by the same rule
+    /// as a null <c>RejectedSettingNames</c>.
+    ///
+    /// <para>Never fires on a bring-your-own store or off Windows (<paramref name="report"/>'s
+    /// <c>IsManagedStore</c> false): nothing here was ever written by this service, so there is no fact to
+    /// report.</para>
+    ///
+    /// <para>A STANDING condition like its siblings: fire on entry, re-state per
+    /// <see cref="StoreSettingsRefire"/> while any fact still holds — the CURRENT set is rendered every
+    /// re-fire, so a rejected value fixed by a later start clears from the very next tick's report — and ONE
+    /// resolution when none does. Gated on the master alerts switch. Internal so it pins directly with a
+    /// recording deliverer and a controllable clock.</para>
+    /// </summary>
+    internal async Task ApplyStoreSettingsAsync(StoreSettingsReport report, CancellationToken cancellationToken)
+    {
+        if (report is null || !_settings.AlertsEnabled || !report.IsManagedStore)
+        {
+            return;
+        }
+
+        var now = _utcNow();
+        var reasons = new List<string>();
+        if (report.UsedLastGoodConf)
+        {
+            reasons.Add(
+                "this start ran PostgreSQL on the last-good copy of darling-managed.conf because the freshly "
+                + "rendered file failed postgres -C validation (or could not be written)");
+        }
+
+        if (report.HandEdited)
+        {
+            reasons.Add("darling-managed.conf is hand-edited, and the edit is being kept in force rather than overwritten");
+        }
+
+        /* #4336: a failed verification is a fourth, independent condition. Failed means a
+           mismatch was found between the after-snapshot and pg_file_settings and the restore already ran
+           (postgresql.conf when a backup path exists, otherwise the previous verified darling-managed.conf).
+           This condition always states plainly when Status is Failed; Unknown is handled below with the
+           other unknown-read fact. */
+        if (report.Verification is { Status: ManagedConfVerificationStatus.Failed } verification)
+        {
+            var mismatchedList = string.Join(", ", verification.MismatchedKeys);
+            var restoredFrom = verification.BackupPath is not null
+                ? FormattableString.Invariant($"postgresql.conf was restored from {verification.BackupPath}")
+                : "the previous verified darling-managed.conf was restored";
+            var runningNote = verification.Step == ManagedConfMigrationStep.B
+                ? "; the running server keeps the new values until its next restart"
+                : string.Empty;
+            reasons.Add(FormattableString.Invariant(
+                $"verifying darling-managed.conf failed (step {verification.Step}): {mismatchedList} did not match pg_file_settings; {restoredFrom}{runningNote}"));
+        }
+
+        /* #4215, extended to the verification read (#4336): null means the rejected-settings read FAILED this tick, and Verification's
+           Status being Unknown means the before/after snapshot itself could not be taken — both UNKNOWN, not
+           empty. An unknown condition neither fires nor resolves on its own; it keeps the family's CURRENT
+           state and lets the other conditions decide. If any of those is already true, the family is firing
+           regardless of what the unknown read says, so fall through to the normal fire/re-state path below
+           without ever stating a fact we didn't read. If none is true, there is nothing else to decide this
+           tick: return without touching _activeStoreSettings or _lastStoreSettingsAlert, so an active alert
+           stays active (no resolve, no stale re-fire) and an inactive family stays inactive (no fire). A
+           successful read — including one that comes back empty — always states exactly what it found. */
+        var otherConditionsActive = reasons.Count > 0;
+        var anyUnknown = report.RejectedSettingNames is null
+            || report.Verification?.Status == ManagedConfVerificationStatus.Unknown;
+
+        if (report.RejectedSettingNames is null)
+        {
+            if (!otherConditionsActive)
+            {
+                return;
+            }
+        }
+        else if (report.RejectedSettingNames.Count > 0)
+        {
+            var rejectedList = string.Join(", ", report.RejectedSettingNames);
+            reasons.Add(string.Create(CultureInfo.InvariantCulture,
+                $"PostgreSQL rejected the managed value for {report.RejectedSettingNames.Count} owned setting(s): {rejectedList}"));
+        }
+
+        if (anyUnknown && reasons.Count == 0)
+        {
+            return;
+        }
+
+        if (reasons.Count == 0)
+        {
+            if (_activeStoreSettings.TryRemove(StoreSettingsKey, out var was) && was)
+            {
+                _lastStoreSettingsAlert.TryRemove(StoreSettingsKey, out _);
+                await RecordResolutionAsync(new AlertResolution(
+                    StoreKey(StoreSettingsKey), _storeLabel, StoreSettingsMetric, StoreSettingsResolvedMetric,
+                    "darling-managed.conf started clean, carries no kept-in-force hand edit, and PostgreSQL "
+                    + "rejects none of its owned settings"), cancellationToken);
+            }
+
+            return;
+        }
+
+        _activeStoreSettings[StoreSettingsKey] = true;
+
+        /* Standing condition: fire on entry, re-state only per StoreSettingsRefire while any fact still
+           holds — its OWN interval rather than the shared cooldown, the StaleMuteRefire reasoning: none of
+           these four facts moves faster than a restart. */
+        if (_lastStoreSettingsAlert.TryGetValue(StoreSettingsKey, out var lastFired)
+            && now - lastFired < StoreSettingsRefire)
+        {
+            return;
+        }
+
+        _lastStoreSettingsAlert[StoreSettingsKey] = now;
+
+        var detail = string.Join(". ", reasons) + ". Run --check-settings for the full picture.";
+        var shortMessage = FormattableString.Invariant($"{reasons.Count} managed-store setting condition(s) need attention");
+
+        await FireAsync(
+            StoreKey(StoreSettingsKey), _storeLabel, StoreSettingsMetric,
+            currentValue: reasons.Count.ToString(CultureInfo.InvariantCulture),
+            thresholdValue: "0",
+            detail: detail,
+            severity: AlertSeverityLevel.Warning,
+            shortMessage: shortMessage,
+            /* The count of conditions in force is a genuine whole number; the healthy bound is 0 — the
+               "Custom Alert Rules Unhealthy" / "Stale Mute Rules" shape. */
+            numericCurrentValue: reasons.Count,
+            numericThresholdValue: 0,
+            cancellationToken);
+    }
+
     /* ---------------- compression-job self-heal (fleet-level, polled — #1581) ---------------- */
 
     /// <summary>

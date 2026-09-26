@@ -1130,6 +1130,367 @@ public sealed class DarlingSelfAlertTests
         Assert.Contains("never expires", fired.DetailText);
     }
 
+    /* ---------------- managed store settings needing attention (#4215) ---------------- */
+
+    private static DarlingSelfAlertEvaluator.StoreSettingsReport BuildStoreSettingsReport(
+        bool isManagedStore = true, bool usedLastGood = false, bool handEdited = false,
+        ManagedConfMigrationOutcome? verification = null,
+        params string[] rejected) =>
+        new(isManagedStore, usedLastGood, handEdited, rejected, verification);
+
+    [Fact]
+    public async Task StoreSettings_UsedLastGoodConf_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(usedLastGood: true), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsMetric, fired.MetricName);
+        Assert.Equal("storesettings", fired.ServerKey);        // fleet sentinel key, not a real server_id
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreServerLabel, fired.ServerName);
+        Assert.Contains("last-good copy", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_HandEdited_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("hand-edited", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_RejectedValue_Fires_AndNamesTheSetting()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("shared_buffers", fired.DetailText);
+        Assert.Contains("rejected", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_Fires_AndNamesTheFileAndKeys()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("darling-managed.conf", fired.DetailText);
+        Assert.Contains("shared_buffers", fired.DetailText);
+        Assert.Contains("restored", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_Active_DoesNotResolve()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, [], unknown), Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire
+        Assert.Empty(h.History.Records);       // and no resolve
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_Inactive_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, [], unknown), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_WithHandEdit_Fires_HandEditReasonOnly()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, true, [], unknown), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("hand-edited", fired.DetailText);
+        Assert.DoesNotContain("pg_file_settings", fired.DetailText);
+        Assert.DoesNotContain("rejected", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_ThenClears_Resolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);       // unchanged: no re-fire on the resolving sweep
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>Fixes commit 9ae7410c: a Step B Failed verification's reason names that the running server
+    /// keeps the new values until its next restart; a Step A Failed reason does not carry that note (Step A
+    /// never leaves a mismatched write running -- the restore already happened before the server started on
+    /// it).</summary>
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_StepB_ReasonNamesRunningServerKeepsNewValues()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.B);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("the running server keeps the new values until its next restart", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_StepA_ReasonDoesNotNameRunningServer()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.DoesNotContain("the running server keeps the new values until its next restart", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_AllFourConditions_CurrentValueIsFour()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, true, true, ["work_mem"], verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("4", fired.CurrentValue);
+        Assert.Equal(4d, fired.NumericCurrentValue);
+    }
+
+    [Fact]
+    public async Task StoreSettings_ExternalStore_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        // Every condition true, but IsManagedStore is false — a BYO store never raises this.
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(false, true, true, ["shared_buffers"]), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StoreSettings_Resolves_WhenEveryConditionClears()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);       // unchanged: no re-fire on the resolving sweep
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task StoreSettings_Disabled_DoesNothing()
+    {
+        var h = new Harness();
+        h.Settings.AlertsEnabled = false;
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    /* ---------------- #4215: a failed rejected-settings read must not false-resolve ---------------- */
+
+    /// <summary>
+    /// The rule this pins (#4215): an active alert whose ONLY
+    /// standing condition is a rejected setting must stay active — never resolve, and never re-fire with
+    /// stale names — when the next tick's read of the rejected-verdict names fails (<c>RejectedSettingNames</c>
+    /// null). Null means UNKNOWN, not empty: the rejected condition neither fires nor resolves on its own,
+    /// and with the other two conditions also false, the family keeps its CURRENT state exactly as it stood.
+    /// Before the fix, <c>ReadRejectedManagedConfSettingNamesAsync</c> collapsed a failed read to an empty
+    /// list, which made <c>RejectedSettingNames.Count == 0</c> read as "no rejected settings" —
+    /// indistinguishable from a genuine clear — and this test would have shown a false "Store Settings
+    /// Resolved" on the failed-read tick.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_RejectedValue_StaysActive_WhenTheNextReadFails()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        // Tick 1: a rejected setting is the ONLY condition standing. Fires.
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        // Tick 2 (past the refire interval): the read FAILED (null), not empty. Must stay active with
+        // NEITHER a resolve NOR a stale re-fire — the family's current state holds untouched.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire on unknown-name data
+        Assert.Empty(h.History.Records);       // no resolution written
+    }
+
+    /// <summary>
+    /// The other half of the pin: the family DOES resolve, but only once a SUCCESSFUL read comes back with
+    /// no rejected rows — a failed read in between must not have resolved it, and must not have re-fired it
+    /// either.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_RejectedValue_Resolves_OnlyAfterASuccessfulEmptyRead()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // A failed read in between: still active, still not resolved, and not re-fired.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // A successful read that comes back empty: NOW it resolves.
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>
+    /// NEW pin (a): the hand-edit case. An alert active ONLY because of the hand-edit condition, with the
+    /// last good rejected read empty (no rejected names ever recorded). The hand edit clears AND the
+    /// rejected read fails in the same tick — this must NOT resolve, because the rejected
+    /// condition's unknown state can't decide anything either way and the family must keep its current
+    /// (active) state. The next tick, a SUCCESSFUL empty rejected read alongside the still-clear hand edit
+    /// resolves it.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_HandEditClears_ButRejectedReadFails_StaysActive_ThenResolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        // Tick 1: hand-edited only, rejected read succeeded empty. Fires.
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        // Tick 2: the hand edit is gone AND the rejected read failed (null). Must NOT resolve.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+        Assert.Empty(h.History.Records);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        // Tick 3: the hand edit is still gone and a SUCCESSFUL empty rejected read arrives. Resolves.
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    /// <summary>
+    /// NEW pin (b): no stale re-fire. An active alert (rejected-only), then consecutive FAILED rejected
+    /// reads across multiple refire intervals, must give no new fire or re-fire rows at all: unknown data
+    /// must never be re-stated as if it were current.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_RejectedValue_ConsecutiveFailedReads_NeverReFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(rejected: ["shared_buffers"]), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        for (var i = 0; i < 3; i++)
+        {
+            h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+            await e.ApplyStoreSettingsAsync(
+                new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+        }
+
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire across any of the failed-read ticks
+        Assert.Empty(h.History.Records);
+    }
+
+    /// <summary>
+    /// NEW pin (c): inactive stays inactive. A family with NOTHING standing (no last-good-conf fallback, no
+    /// hand edit) and a FAILED rejected read must not fire — unknown rejected names can't manufacture a
+    /// condition that was never there.
+    /// </summary>
+    [Fact]
+    public async Task StoreSettings_Inactive_RejectedReadFails_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, null), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
     /* ---------------- web dashboard TLS certificate expiry (#3514) ---------------- */
 
     private static readonly DateTime CertClock = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);

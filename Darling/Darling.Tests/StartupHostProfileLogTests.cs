@@ -152,7 +152,9 @@ public sealed class StartupHostProfileLogTests
         var body = CSharpSourceWalker.StripCommentsAndStrings(
             StartupCommandTimeoutTests.SerialLoopMemberBody("DarlingWorker.cs", "RunCollectionLoopAsync"));
 
-        var callSite = body.IndexOf("LogStoreHostProfileAsync(config, postgres, stoppingToken)", StringComparison.Ordinal);
+        /* #4215's managed-conf verdicts work widened the call's own argument list (managedDataDirectory,
+           managedConfWriteResult), not its position, so the locator matches on the call target alone. */
+        var callSite = body.IndexOf("LogStoreHostProfileAsync(config, postgres,", StringComparison.Ordinal);
         var loopStart = body.IndexOf("while (!stoppingToken.IsCancellationRequested)", StringComparison.Ordinal);
 
         Assert.True(callSite >= 0, "RunCollectionLoopAsync no longer calls LogStoreHostProfileAsync");

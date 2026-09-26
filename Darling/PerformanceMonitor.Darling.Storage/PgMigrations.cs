@@ -225,6 +225,7 @@ public static class PgMigrations
         new Migration(143, "query-store-interval-latest", V143Sql),
         new Migration(144, "raw-chunk-interval-rung-history", V144Sql),
         new Migration(145, "query-store-interval-wide", V145Sql),
+        new Migration(146, "managed-conf-verdicts", V146Sql),
     };
 
     /// <summary>
@@ -2219,6 +2220,63 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending
     failure text,
     CONSTRAINT pk_query_store_interval_wide_pending PRIMARY KEY (server_id, collection_time, database_name)
 );";
+
+    /// <summary>
+    /// V146 — <c>collect.managed_conf_verdicts</c> (#4215, #4251's managed-store part): the per-key
+    /// verdict a managed store's OWNER connection computes once at every service-owned start, replacing the
+    /// previous start's rows. <c>DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync</c> is the
+    /// only writer.
+    ///
+    /// <para><b>Why a table instead of <c>collect.collector_state</c>'s existing key/value shape</b> (the
+    /// <c>PgSelfAlertDeliveryStampStore</c>/#3580 precedent). That table holds ONE opaque text value per
+    /// (server, collector, key) — right for a stamp or a token, wrong here: a verdict row carries nine
+    /// distinct fields a reader filters and displays independently (current value, derived value, source,
+    /// file, line, verdict, detail), and cramming them into one text column would mean every reader,
+    /// including a remote MCP caller, parses app-defined JSON instead of running SQL against typed columns.</para>
+    ///
+    /// <para><b>Why the owner must compute and store it, not a live per-read check</b> (#4215). The
+    /// <c>mcp</c> and <c>viewer</c> roles get a NULL <c>pg_settings.sourcefile</c> and cannot read
+    /// <c>pg_file_settings</c> at all (superuser/<c>pg_read_all_settings</c> only) — see
+    /// <c>DarlingStoreMetricsReader.JobExecutionLoggingSql</c>'s remarks for the same wall on a different GUC.
+    /// The owner (<c>darling</c>, the managed store's bootstrap superuser) computes the verdict once, right
+    /// after start, and every other reader — <c>--check-settings</c> included, which is why it prints
+    /// <c>computed_at</c> rather than a fresh timestamp — reads these rows back instead of re-deriving
+    /// something it cannot see.</para>
+    ///
+    /// <para><b>Keyed on <c>setting_name</c> alone, replaced wholesale each start.</b> One managed store has
+    /// exactly one owner connection computing exactly one verdict set; there is no <c>server_id</c> to key on
+    /// (this is the store's own settings, not a monitored target's), and the write is DELETE-then-INSERT in
+    /// one round trip rather than an UPSERT so a key a future version stops owning does not linger as a stale
+    /// row forever: a future version that stops owning a key must not leave a stale row behind.</para>
+    ///
+    /// <para><b><c>collect</c>-qualified, plain table, not a hypertable</b> — like <c>collector_state</c> and
+    /// <c>analysis_state</c>, not like the catalog-driven collector tables: <c>TimescaleSupport.HypertableTables</c>
+    /// is <c>CollectorCatalog.All</c>, and this is service-written state about the store's own conf file, not a
+    /// collector's payload. No <c>v_</c> passthrough view: the <c>collect</c> schema's existing blanket
+    /// <c>GRANT SELECT ON ALL TABLES</c> to <c>admin</c>, <c>viewer</c> and <c>mcp</c> (<c>provision-roles.sql</c>)
+    /// already covers a bare table, the same grant every other <c>collect</c> table added since V44 has relied
+    /// on without restating it.</para>
+    ///
+    /// <para><c>computed_at</c>/<c>postmaster_start_time</c> are naive UTC, written
+    /// <c>AT TIME ZONE 'UTC'</c> like every other postmaster-start column since V139 — never a bare cast, which
+    /// renders in the writer's session zone.</para>
+    /// </summary>
+    private const string V146Sql = @"
+CREATE TABLE IF NOT EXISTS collect.managed_conf_verdicts
+(
+    setting_name text NOT NULL,
+    current_value text NOT NULL,
+    derived_value text NOT NULL,
+    source_description text NOT NULL,
+    source_file text,
+    source_line integer,
+    verdict text NOT NULL,
+    detail text,
+    computed_at timestamp NOT NULL,
+    postmaster_start_time timestamp NOT NULL,
+    CONSTRAINT pk_managed_conf_verdicts PRIMARY KEY (setting_name)
+);";
+
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
