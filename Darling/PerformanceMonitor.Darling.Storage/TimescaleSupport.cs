@@ -6878,13 +6878,26 @@ AND   j.hypertable_name = '{relation}'";
                 else
                 {
                     /* Coverage could not be MEASURED, which is not the same as measuring a shortfall. Leave the
-                       policy in whatever state it is already in: a new one is paused (fail-closed, as always),
-                       and one this store already armed keeps running. Disarming here instead would let a single
-                       bad probe stop purging across every tier at once and grow disk without bound — the
-                       failure mode that kept #1877 unfixed rather than fixed badly. Counted as UNCHANGED in the
-                       tally (it is), and as indeterminate beside it so the summary can say how many verdicts
-                       were never reached. Stays a WARNING on both passes: a probe that cannot answer is a store
-                       fault, not a steady state an operator has already been told about. */
+                       ARMED VERDICT in whatever state it is already in: a new one is paused (fail-closed, as
+                       always), and one this store already armed keeps running. Disarming here instead would let
+                       a single bad probe stop purging across every tier at once and grow disk without bound —
+                       the failure mode that kept #1877 unfixed rather than fixed badly.
+
+                       For a raw relation, though, the SCHEDULED flag still converges to false on this pass
+                       (per the ruling: the hourly converge runs every pass, unconditionally) — it is the
+                       darling_armed key alone that an indeterminate probe must not touch, so a DBA's
+                       alter_job(scheduled => true) is reverted here too, even on a pass that could not judge
+                       coverage. */
+                    if (isRawRelation)
+                    {
+                        using var rawScheduleOnly = new NpgsqlCommand(SetRetentionScheduleSql(relation, scheduled: false), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await rawScheduleOnly.ExecuteNonQueryAsync(cancellationToken);
+                    }
+
+                    /* Counted as UNCHANGED in the tally (it is), and as indeterminate beside it so the summary
+                       can say how many verdicts were never reached. Stays a WARNING on both passes: a probe
+                       that cannot answer is a store fault, not a steady state an operator has already been
+                       told about. */
                     indeterminate++;
                     unchanged++;
                     logger?.LogWarning(
