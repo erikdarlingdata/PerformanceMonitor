@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -61,8 +62,10 @@ internal static class ManagedConfMigration
         /// carried into the new managed file (design rule 2).</summary>
         Ours,
 
-        /// <summary>Failed the rebuild test, the form test, or sits outside every managed block. Moves
-        /// verbatim below the new include line (design rule 3).</summary>
+        /// <summary>Failed the rebuild test, the form test, or sits outside every managed block. Stays
+        /// exactly where it is UNLESS it is the currently-effective assignment (the last one anywhere in
+        /// the file) of a key the managed file will own — that one line moves, verbatim, below the new
+        /// include line, under a comment (design rule 3).</summary>
         HandEdit,
 
         /// <summary>Inside a block version this classifier does not cover yet, or is itself an uncovered
@@ -943,29 +946,52 @@ internal static class ManagedConfMigration
         IReadOnlyList<RewriteLogEntry> Log,
         IReadOnlySet<string> ExcludedKeys);
 
+    /// <summary>The comment written above every operator line this rewrite moves below the include, so a
+    /// reader of the result finds them explained rather than orphaned (design §3 rule 3).</summary>
+    internal const string MovedOperatorLinesComment = "# operator settings kept from the previous postgresql.conf (#4215)";
+
     /// <summary>
-    /// Rewrites an existing <c>postgresql.conf</c> (#4336 lane mig-b, design §3 "What moves"):
+    /// Rewrites an existing <c>postgresql.conf</c> (#4336 lane mig-b, corrected under rule 3 by #4336 lane
+    /// rewrite2; design §3 "What moves"):
     /// <list type="bullet">
     /// <item>every line <see cref="ClassifyLines"/> marks <see cref="ConfLineClassification.Ours"/> is
-    /// removed (rule 3's "the operator's line still wins" pairs with this: the product's own copy of a key
-    /// goes away so the include, not a stale block, is what a reader sees);</item>
-    /// <item>every <see cref="ConfLineClassification.HandEdit"/> line (and every <see cref="ConfLineClassification.Unclassified"/>
-    /// one, per this class's own doc comment: unproven is treated as a hand edit) is KEPT, moved below the
-    /// include line, in original relative order (rule 3);</item>
-    /// <item>exactly one <see cref="ManagedConfFile.IncludeLine"/> is written, once, right after the surviving
-    /// non-block content and before the moved hand edits (design §2 "where the line goes: the end"; if one
-    /// is already present and un-migrated — review L5, "no opt-out" — it is treated as ordinary text like any
-    /// other line outside a covered span, and a fresh one is still appended, so re-running this function is
-    /// idempotent per rule 6 rather than leaving two includes only on a first run);</item>
-    /// <item>every other line — comments, blank lines, stock PostgreSQL defaults, anything outside a managed
-    /// span — is left exactly where it is, byte for byte.</item>
+    /// removed (rule 2 pairs with this: the product's own copy of a key goes away so the effective value
+    /// comes only from the last service line, never from a stale block);</item>
+    /// <item>a non-Ours line (<see cref="ConfLineClassification.HandEdit"/> or
+    /// <see cref="ConfLineClassification.Unclassified"/>, per this class's own "unproven is never ours"
+    /// rule) that assigns a key <paramref name="managedKeys"/> owns AND is the LAST assignment of that key
+    /// anywhere in the original file (i.e. it is currently effective) moves, verbatim, below the include
+    /// line, under <see cref="MovedOperatorLinesComment"/>, in original relative order — rule 3, "keep
+    /// operator lines winning": moving it below the include is what keeps it in force once the managed
+    /// file's own copy of that key is included above it;</item>
+    /// <item>a non-Ours line that assigns a managed key but is NOT the last assignment (a later line
+    /// overrides it) stays exactly where it is, still overridden, same as before this rewrite touched the
+    /// file — rule 3's "a line that was already overridden stays where it is and stays overridden";</item>
+    /// <item>every other non-Ours line — an unowned key, a comment, a blank line, a stock PostgreSQL
+    /// default — stays exactly where it is, byte for byte;</item>
+    /// <item>exactly one <see cref="ManagedConfFile.IncludeLine"/> is written, once, right after the
+    /// surviving non-block content and before the moved operator lines (design §2 "where the line goes: the
+    /// end"; if one is already present and un-migrated — review L5, "no opt-out" — it is treated as ordinary
+    /// text like any other line outside a covered span, and a fresh one is still appended, so re-running
+    /// this function is idempotent on a file WITH markers left; rule 6 covers the no-marker case below);</item>
+    /// <item>rule 6: if <paramref name="postgresqlConf"/> has no product marker left at all (nothing any
+    /// <see cref="ClassifyLines"/> span or uncovered-marker scan finds) AND already carries the include
+    /// line, this returns the input completely unchanged, with an empty log — a second run is a genuine
+    /// no-op, not just byte-identical output from re-doing the same work.</item>
     /// </list>
-    /// <paramref name="managedKeys"/> is the key set the managed file will set (<see cref="ManagedConfFile.RenderBody"/>'s
-    /// output, reduced to keys) — used only for the classify ruling's item 4 log line below, never to decide
-    /// what moves; that decision is <see cref="ClassifyLines"/>'s alone.
+    /// <paramref name="managedValues"/> is the managed file's own key/value pairs (<see cref="ManagedConfFile.RenderBody"/>'s
+    /// output, parsed back) — used for the classify ruling's item 4 log line (the derived value the moved
+    /// operator line overrides) and to decide which non-Ours lines are candidates to move; <see cref="ClassifyLines"/>
+    /// alone still decides Ours vs. not.
     /// </summary>
-    internal static RewriteResult Rewrite(string postgresqlConf, IReadOnlySet<string> managedKeys, int? configuredPort = null)
+    internal static RewriteResult Rewrite(string postgresqlConf, IReadOnlyDictionary<string, string> managedValues, int? configuredPort = null)
     {
+        if (HasNoProductMarkers(postgresqlConf) && HasIncludeLine(postgresqlConf))
+        {
+            /* Rule 6: nothing left to migrate and the include is already there — a genuine no-op. */
+            return new RewriteResult(postgresqlConf, Array.Empty<RewriteLogEntry>(), new HashSet<string>(StringComparer.Ordinal));
+        }
+
         var classified = ClassifyLines(postgresqlConf, configuredPort);
         var normalized = postgresqlConf.Replace("\r\n", "\n", StringComparison.Ordinal);
         var hadTrailingNewline = normalized.EndsWith('\n');
@@ -975,10 +1001,24 @@ internal static class ManagedConfMigration
             rawLines = rawLines[..^1];
         }
 
+        var managedKeys = managedValues.Keys.ToArray();
+
+        /* Rule 3's "currently effective" test needs the LAST assignment of each managed key anywhere in the
+           ORIGINAL file, Ours or not — an Ours line can be the effective one just as easily as a hand edit,
+           and only the line index matters here, not its classification. */
+        var lastAssignmentLineByKey = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (line, key, _) in DarlingManagedPostgres.ParseConfText(normalized))
+        {
+            if (managedKeys.Contains(key))
+            {
+                lastAssignmentLineByKey[key] = line;
+            }
+        }
+
         var kept = new List<string>();
-        var handEdits = new List<string>();
+        var movedOperatorLines = new List<string>();
         var log = new List<RewriteLogEntry>();
-        var alreadyIncluded = false;
+        var excluded = new HashSet<string>(StringComparer.Ordinal);
 
         for (var i = 0; i < rawLines.Length; i++)
         {
@@ -993,71 +1033,99 @@ internal static class ManagedConfMigration
                 continue; /* dropped: the product's own line, superseded by the managed file's include. */
             }
 
-            /* HandEdit and Unclassified both survive, unchanged, per this class's own "unproven is never
-               ours" rule. A pre-existing, un-migrated include of the managed file is ordinary text here —
-               it is outside every covered span, so ClassifyLines already called it a HandEdit; skip re-adding
-               it below so a second run of this function does not duplicate the include line. */
+            /* A pre-existing, un-migrated include of the managed file is ordinary text here — it is outside
+               every covered span, so ClassifyLines already called it a HandEdit; drop it so a second run of
+               this function does not duplicate the include line (the fresh one below still gets written). */
             if (string.Equals(rawLines[i], ManagedConfFile.IncludeLine, StringComparison.Ordinal))
             {
-                alreadyIncluded = true;
                 continue;
             }
 
-            if (IsBelowSomeIncludeAlready(rawLines, i))
+            var lineNumber = i + 1;
+            if (TryFindEffectiveManagedAssignment(rawLines[i], managedKeys, lastAssignmentLineByKey, lineNumber, out var effectiveKey))
             {
-                handEdits.Add(rawLines[i]);
+                /* Rule 3: this is the line currently in force for a key the managed file will own. It moves
+                   below the include, verbatim, so it keeps winning once the managed file's own copy of that
+                   key is included above it. */
+                movedOperatorLines.Add(rawLines[i]);
+                excluded.Add(effectiveKey);
+                var derivedValue = managedValues[effectiveKey];
+                var (_, _, operatorValue) = DarlingManagedPostgres.ParseConfText(rawLines[i]).First(a => string.Equals(a.Name, effectiveKey, StringComparison.OrdinalIgnoreCase));
+                log.Add(new RewriteLogEntry(
+                    FormattableString.Invariant($"{effectiveKey}: derived {derivedValue}, overridden by operator line below the include ({operatorValue}), not applied"),
+                    OverriddenKey: effectiveKey));
+                continue;
             }
-            else
-            {
-                kept.Add(rawLines[i]);
-            }
-        }
 
-        _ = alreadyIncluded; /* re-added unconditionally below either way — rule 6's no-op case is proved by
-                                 byte-identical output on a second run, not by skipping the append. */
-
-        /* Classify ruling item 4: for every managedKeys entry a surviving hand-edit line still sets, log the
-           override and exclude it from later verification. Scan the ORIGINAL hand-edit lines (both those kept
-           above the include and those already below it) rather than the reduced `kept`/`handEdits` split,
-           since either position still wins over the managed file per design section 4. */
-        var excluded = new HashSet<string>(StringComparer.Ordinal);
-        var overriddenValueByKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var rawLine in kept)
-        {
-            RecordOverrideIfManaged(rawLine, managedKeys, overriddenValueByKey);
-        }
-
-        foreach (var rawLine in handEdits)
-        {
-            RecordOverrideIfManaged(rawLine, managedKeys, overriddenValueByKey);
-        }
-
-        foreach (var (key, value) in overriddenValueByKey)
-        {
-            excluded.Add(key);
-            log.Add(new RewriteLogEntry(
-                FormattableString.Invariant($"{key}: derived <new>, overridden by operator line below the include ({value}), not applied"),
-                OverriddenKey: key));
+            /* Not Ours, not the effective assignment of an owned key (either an unowned key, or a managed
+               key's line that a LATER line already overrides) — stays exactly where it is (rule 3's "a line
+               that was already overridden stays where it is and stays overridden"). */
+            kept.Add(rawLines[i]);
         }
 
         var newLines = new List<string>(kept);
         newLines.Add(ManagedConfFile.IncludeLine);
-        newLines.AddRange(handEdits);
+        if (movedOperatorLines.Count > 0)
+        {
+            newLines.Add(MovedOperatorLinesComment);
+            newLines.AddRange(movedOperatorLines);
+        }
 
         var newText = string.Join('\n', newLines) + "\n";
         return new RewriteResult(newText, log, excluded);
     }
 
-    /// <summary>Whether physical line <paramref name="index"/> (0-based, into <paramref name="rawLines"/>)
-    /// sits after SOME already-present <c>include 'darling-managed.conf'</c> line earlier in the file — the
-    /// first-run case where an operator (or a half-applied earlier attempt) already added the include and a
-    /// hand edit already sits below it. Kept distinct from "HandEdit below the NEW include this run writes"
-    /// so a first run's ordering decision does not depend on where this run happens to place its own include.</summary>
-    private static bool IsBelowSomeIncludeAlready(string[] rawLines, int index)
+    /// <summary>Whether <paramref name="rawLine"/> is the line currently in force for SOME key in
+    /// <paramref name="managedKeys"/> — it assigns a managed key, and <paramref name="lastAssignmentLineByKey"/>
+    /// (built once, over the whole file, before this loop runs) says <paramref name="lineNumber"/> is that
+    /// key's last assignment anywhere. A line assigning more than one key (never emitted by any covered
+    /// builder or by PostgreSQL's own <c>key = value</c> grammar) is not a case this needs to handle; the
+    /// first managed, currently-effective key on the line wins.</summary>
+    private static bool TryFindEffectiveManagedAssignment(
+        string rawLine,
+        IReadOnlyCollection<string> managedKeys,
+        Dictionary<string, int> lastAssignmentLineByKey,
+        int lineNumber,
+        out string effectiveKey)
     {
-        for (var j = 0; j < index; j++)
+        foreach (var (_, name, _) in DarlingManagedPostgres.ParseConfText(rawLine))
         {
-            if (string.Equals(rawLines[j], ManagedConfFile.IncludeLine, StringComparison.Ordinal))
+            if (managedKeys.Contains(name) &&
+                lastAssignmentLineByKey.TryGetValue(name, out var lastLine) &&
+                lastLine == lineNumber)
+            {
+                effectiveKey = name;
+                return true;
+            }
+        }
+
+        effectiveKey = string.Empty;
+        return false;
+    }
+
+    /// <summary>Rule 6's cheap marker check: whether ANY managed marker (covered or not — a pending upgrade
+    /// to a newer version still counts as "markers left") still appears anywhere in <paramref name="conf"/>.
+    /// A file with none has nothing left for this rewrite to do.</summary>
+    private static bool HasNoProductMarkers(string conf)
+    {
+        foreach (var marker in DarlingManagedPostgres.AllManagedConfMarkers)
+        {
+            if (conf.Contains(marker, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether <paramref name="conf"/> already carries the managed-file include line, on some line
+    /// of its own (rule 6's other half: no markers left AND already included means nothing to do).</summary>
+    private static bool HasIncludeLine(string conf)
+    {
+        foreach (var rawLine in conf.Split('\n'))
+        {
+            if (string.Equals(TrimTrailingCarriageReturn(rawLine), ManagedConfFile.IncludeLine, StringComparison.Ordinal))
             {
                 return true;
             }
@@ -1066,17 +1134,4 @@ internal static class ManagedConfMigration
         return false;
     }
 
-    /// <summary>If <paramref name="rawLine"/> assigns a key in <paramref name="managedKeys"/>, records its
-    /// value keyed by name (classify ruling item 4) — last one wins if more than one surviving hand edit sets
-    /// the same managed key, matching how PostgreSQL itself would apply them.</summary>
-    private static void RecordOverrideIfManaged(string rawLine, IReadOnlySet<string> managedKeys, Dictionary<string, string> overriddenValueByKey)
-    {
-        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(rawLine))
-        {
-            if (managedKeys.Contains(name))
-            {
-                overriddenValueByKey[name] = value;
-            }
-        }
-    }
 }
