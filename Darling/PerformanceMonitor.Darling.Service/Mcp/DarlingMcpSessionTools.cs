@@ -41,16 +41,17 @@ public sealed class DarlingMcpSessionTools
     [McpServerTool(Name = "get_session_stats"), Description("Gets connection and session statistics grouped by application. Shows connection counts, running/sleeping/dormant breakdown, and aggregate resource usage per application. LATEST IS A TIME: this reads the newest session snapshot, not a window, and captured_at is the instant it was collected - the connection counts are what was connected AT that stamp, not a peak or an average over anything.")]
     public static async Task<string> GetSessionStats(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var rows = await DarlingSessionReader.GetLatestSessionStatsAsync(postgres, resolved.ServerId);
+            var rows = await DarlingSessionReader.GetLatestSessionStatsAsync(postgres, resolved.ServerId, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "session_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "session_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No session statistics available. The session collector may not have run yet.");
 
             var totalConnections = rows.Sum(r => r.ConnectionCount);
@@ -87,7 +88,7 @@ public sealed class DarlingMcpSessionTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_session_stats", ex);
         }
@@ -275,9 +276,10 @@ public sealed class DarlingMcpSessionTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1.")] int hours_back = 1,
         [Description("Maximum rows to return, newest capture first. Default 30. This is what bounds the page — read truncated to know whether the window held more.")] int limit = 30,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -291,9 +293,9 @@ public sealed class DarlingMcpSessionTools
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the observed truncation
                signal. The reader's LIMIT 500 was invisible, and the envelope stated no bound at all. */
             var rows = await DarlingSessionReader.GetWaitingTasksAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "waiting_tasks", cancellationToken)
                     ?? McpHelpers.Status("empty", "No waiting tasks captured in the specified time range.");
 
             var truncated = rows.Count > limit;
@@ -324,7 +326,7 @@ public sealed class DarlingMcpSessionTools
                 tasks = result
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_waiting_tasks", ex);
         }
