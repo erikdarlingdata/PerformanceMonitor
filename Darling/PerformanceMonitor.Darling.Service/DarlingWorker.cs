@@ -1819,6 +1819,13 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
+        /* #4348 S1b: the one-time scrub of secrets an older collector build stored in plain text (a
+           standby's replication password inside primary_conninfo, most notably). Launched here, right
+           after migrations confirm collect.pg_server_config and collect.collector_state exist, and NOT
+           gated on TimescaleDB — the scrub works the same on plain PostgreSQL, it just has fewer chunks to
+           reason about. Drained with the other background startup work below. */
+        var settingScrub = RunPgSettingScrubAsync(postgres, stoppingToken);
+
         /* #4214 ruling 9: the once-per-start store host/settings profile log — host facts, pg_settings and
            the managed conf files only, never the store-size/chunk-total reads --check-settings and the MCP
            read own. Its own short deadline and its own catch: a bad conf file, a permission problem or a
@@ -3079,6 +3086,17 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
+        /* And the setting scrub (#4348 S1b): a run cut short by shutdown left its marker unwritten (the
+           marker is only written after every batch completes), so the next start tries again from the top. */
+        try
+        {
+            await settingScrub;
+        }
+        catch (OperationCanceledException)
+        {
+            /* Expected on shutdown. */
+        }
+
         _logger.LogInformation("PerformanceMonitor Darling collection loop stopped");
     }
 
@@ -3412,6 +3430,43 @@ public sealed class DarlingWorker : BackgroundService
         {
             _logger.LogWarning(
                 "Materialization-hole repair could not run — any pre-outage tail the refresh policies skipped stays unmaterialized until the next start retries: {Message}",
+                ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="PgSettingScrub.RunAsync"/> once (#4348 S1b), concurrently with the rest of startup.
+    /// Its own connection and its own catch, the same isolation as <see cref="RunMaterializationHoleRepairAsync"/>:
+    /// a store this cannot reach degrades to whatever plaintext it already had, never to a service that did
+    /// not start. One INFORMATION line whatever the run found, so "nothing to do" (already scrubbed) is
+    /// visibly different from "never ran" in the log.
+    /// </summary>
+    private async Task RunPgSettingScrubAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await PgSettingScrub.RunAsync(postgres, _logger, stoppingToken);
+            if (summary.AlreadyDone)
+            {
+                _logger.LogInformation("Postgres setting scrub (#4348): already scrubbed at the current rules version — nothing to do.");
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Postgres setting scrub (#4348): {Candidates} candidate row(s) read, {Updated} row(s) redacted across {Days} day(s).",
+                    summary.CandidatesRead, summary.RowsUpdated, summary.DaysTouched);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation(
+                "Postgres setting scrub (#4348) was cancelled before it could report — at shutdown that is expected, and the next start retries from the top because the marker is only written after every batch completes.");
+            throw;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Postgres setting scrub (#4348) could not run — any row an older collector build stored unredacted stays as it is until the next start retries: {Message}",
                 ex.Message);
         }
     }
