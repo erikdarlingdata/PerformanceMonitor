@@ -554,7 +554,7 @@ public sealed class MaterializationHoleRepairTests
     }
 
     /// <summary>
-    /// #4300 item 3, pure pin for <see cref="TimescaleSupport.ChainedDailyRange"/>: which part, if any, of a
+    /// #4300, pure pin for <see cref="TimescaleSupport.ChainedDailyRange"/>: which part, if any, of a
     /// just-repaired successor-hourly seam range the dependent successor daily should be chased over.
     /// </summary>
     [Fact]

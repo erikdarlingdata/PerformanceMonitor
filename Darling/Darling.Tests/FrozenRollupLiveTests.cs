@@ -625,7 +625,7 @@ public sealed class FrozenRollupLiveTests
                 Assert.Equal(s.AddHours(-6), newFloor);
             }
 
-            /* The seam is now empty — Covered, from the hourly tick alone, no second start. */
+            /* The raw gate releases once the seam closes, independent of the daily — no second start. */
             Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
 
             bodySucceeded = true;
@@ -644,7 +644,7 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
-    /// #4300 item 3: the SAME single-start seam-repair story as <see
+    /// #4300: the SAME single-start seam-repair story as <see
     /// cref="Outage_SeamBetweenFrozenLegacyAndSuccessor_SingleStart_HourlySeamRepairReleasesTheGate"/>, but
     /// with the outage widened to 5 days so the repaired seam sits entirely OLDER than the successor daily's
     /// own 3-day refresh window (<see cref="TimescaleSupport.DailyRefreshStartSpan"/>). The daily's ordinary
@@ -731,7 +731,7 @@ public sealed class FrozenRollupLiveTests
             }
 
             /* The successor DAILY's own floor must now reach back to the repaired hourly day too — the
-               whole reason for #4300 item 3's chase. */
+               whole reason for #4300's chase. */
             var dailyFloorAfter = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
             Assert.NotNull(dailyFloorAfter);
             Assert.True(dailyFloorAfter!.Value <= TimescaleSupport.AlignDown(s.AddHours(-6), TimeSpan.FromDays(1)));
@@ -756,7 +756,7 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
-    /// #4300 item 3: the CATCH-UP path, not the event path — a successor hourly whose own seam is already
+    /// #4300: the CATCH-UP path, not the event path — a successor hourly whose own seam is already
     /// CLOSED (no legacy/successor gap this pass), but whose dependent successor daily was left behind by an
     /// earlier chase that never ran (the shape a thrown chase, a budget-cut chase, or a restart between the
     /// hourly's floor moving and the daily catching up all leave behind). Seeded directly rather than through
@@ -2386,7 +2386,7 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $8, $9, $10)", connection);
     }
 
     /// <summary>The successor daily's own <c>min(bucket)</c> — <c>null</c> when it has materialized nothing
-    /// yet, matching the probe #4300 item 3's catch-up/chase itself reads.</summary>
+    /// yet, matching the probe #4300's catch-up/chase itself reads.</summary>
     private static async Task<DateTime?> ProcedureStatsIntervalDailyFloorAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalDailyView}", connection);
