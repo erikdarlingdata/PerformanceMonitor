@@ -835,7 +835,12 @@ public sealed class ServerEpochTests
 
     /* ---------------- helpers ---------------- */
 
-    /// <summary>A pg_statement_stats reader row in ordinal order, the statements epoch at 27.</summary>
+    /// <summary>
+    /// A pg_statement_stats reader row in ordinal order, the statements epoch at 27. Since #4428, ordinal
+    /// 28 is <c>stats_since</c> (NULL here — these tests are about the epoch forget, not the row-coherent
+    /// restart placement, which <c>Darling.Tests</c> covers separately) and ordinal 29 is <c>target_now</c>,
+    /// defaulted to the same moment as <paramref name="statsReset"/> when it is a <see cref="DateTime"/>.
+    /// </summary>
     private static object[] StatementRow(long queryId, long calls, object statsReset) => new object[]
     {
         queryId, 1L, 1L, true, calls, 100d,
@@ -846,6 +851,8 @@ public sealed class ServerEpochTests
         0L, 0L, 0L,
         DBNull.Value, DBNull.Value,
         statsReset,
+        DBNull.Value,
+        statsReset is DateTime resetTime ? resetTime : new DateTime(2026, 9, 19, 3, 59, 0, DateTimeKind.Utc),
     };
 
     /// <summary>Reaches the protected restart-seed hook, to stage the host-restart case.</summary>

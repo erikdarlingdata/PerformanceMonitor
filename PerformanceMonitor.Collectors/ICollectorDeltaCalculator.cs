@@ -116,6 +116,25 @@ public interface ICollectorDeltaCalculator
         => default;
 
     /// <summary>
+    /// #4428: rolls a caller-named pass window forward when <paramref name="observedTime"/> is new for
+    /// (<paramref name="serverId"/>, <paramref name="group"/>), and returns the PREVIOUS value of that
+    /// window — the same bookkeeping <see cref="DecideRow"/> already keeps on the collector's own clock
+    /// (<c>collectionTime</c>), exposed generically so a definition that must place a restart on a
+    /// DIFFERENT clock — a source's own <c>now()</c>, captured in the same read, rather than the collector
+    /// host's — can track that clock's own previous pass without a second cache of its own.
+    ///
+    /// <para><paramref name="group"/> is a caller-chosen namespace. It shares nothing with any
+    /// <c>collectorName</c> a delta family uses elsewhere — the point of the method is that a target-clock
+    /// window and a collector-clock window never mix, so a caller MUST pick a name no ordinary delta call
+    /// also passes as its <c>collectorName</c>.</para>
+    ///
+    /// <para>Default-implemented to return null, like every other member here, so an implementer that
+    /// tracks no such window — every test double in this repo until it opts in — keeps compiling.</para>
+    /// </summary>
+    DateTime? PreviousPass(int serverId, string group, DateTime observedTime)
+        => null;
+
+    /// <summary>
     /// Forgets every baseline and every pass window cached for <paramref name="serverId"/>, because the
     /// counters behind that id are no longer the counters the baselines were read from (#3653 A5, the
     /// identity-epoch item of #3540).

@@ -30,8 +30,9 @@ namespace Lite.Tests;
 /// </para>
 ///
 /// <para>
-/// The ordinals are the load-bearing detail. Both queries select the same 28 columns in the same order (the
-/// 28th, appended by #3653 A5, is the statements epoch <c>stats_reset</c>, read and not stored) — the
+/// The ordinals are the load-bearing detail. Both queries select the same 30 columns in the same order (the
+/// 28th, appended by #3653 A5, is the statements epoch <c>stats_reset</c>, read and not stored; the 29th and
+/// 30th, appended by #4428, are <c>stats_since</c> and <c>target_now</c>, also read and not stored) — the
 /// vanilla one fills Aurora's six with typed NULL literals — so <c>ReadAsync</c>, <c>PayloadColumns</c> and
 /// <c>WritePayload</c> stay single implementations. A shorter vanilla SELECT would have meant a second reader
 /// whose ordinals could drift from this one, which is exactly the failure the per-major column naming in this
@@ -110,10 +111,13 @@ public class PgStatementStatsFlavorTests
 
         Assert.Equal(aurora, vanilla);
         /* The SELECT list is the payload minus the four columns computed on the client (the three deltas
-           and, since V128 (#3540), the interval they accrued over) PLUS the one column read and not stored:
-           the statements epoch stats_reset (#3653 A5), last, so every stored ordinal is where it was. */
-        Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 4 + 1, aurora.Count);
-        Assert.Equal("statements_stats_reset", aurora[^1]);
+           and, since V128 (#3540), the interval they accrued over) PLUS the three columns read and not
+           stored: the statements epoch stats_reset (#3653 A5), and — since #4428 — stats_since and
+           target_now, last, so every stored ordinal is where it was. */
+        Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 4 + 3, aurora.Count);
+        Assert.Equal("statements_stats_reset", aurora[^3]);
+        Assert.Equal("stats_since", aurora[^2]);
+        Assert.Equal("target_now", aurora[^1]);
     }
 
     /// <summary>
