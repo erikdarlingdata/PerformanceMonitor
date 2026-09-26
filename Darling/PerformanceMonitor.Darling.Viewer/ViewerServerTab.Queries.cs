@@ -196,7 +196,11 @@ public partial class ViewerServerTab
     private async Task LoadQueryStoreAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        /* #3953 clause 4: only a genuine custom range is a literal end the gate must honor against
+           applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
+           the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
+           ordinary read (M1) — null tells the gate this end is open. */
+        var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
         UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc);
@@ -320,7 +324,8 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetQueryStoreWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            /* #3953 clause 4: a slicer selection is always a literal, user-drawn sub-range, never a preset. */
+            var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: e.EndUtc);
             _queryStoreFilterMgr!.UpdateData(rows);
             UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, e.StartUtc);
             await RefreshQueryStoreComparisonAsync(e.StartUtc, e.EndUtc);

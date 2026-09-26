@@ -1976,7 +1976,7 @@ ORDER BY object_kind, object_name, metric_time DESC";
     }
 
     /// <summary>
-    /// #4251's managed-store part: the store's own settings, from <c>collect.managed_conf_verdicts</c> (V144,
+    /// #4251's managed-store part: the store's own settings, from <c>collect.managed_conf_verdicts</c> (V146,
     /// #4215 ruling M2) rather than a live <c>pg_settings.pending_restart</c> read — the same connection this
     /// reader already uses (<c>mcp</c> role in managed mode) cannot see <c>pg_file_settings</c> or a
     /// <c>sourcefile</c> at all, and <c>pending_restart</c> itself reads <c>f</c> from any connection opened

@@ -142,18 +142,26 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.Contains("FROM v_wait_stats", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("wait_type LIKE 'LCK%'", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         ViewerLatchSpinlockSqlTests.AssertStoredIntervalIdiom(ViewerDataService.LockWaitTrendSql, "wait_type");
-        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        /* #4349: bucketed into a rated CTE, same idiom as WaitStatsTrendsSql — the per-second rate is now
+           time-weighted (summed rated wait time over summed rated seconds) rather than a per-row
+           delta/interval division, so a wide bucket that merges collections never averages per-collection
+           rates. For a singleton bucket (one collection) this is the same number as the pre-#4349 division. */
+        Assert.Contains("CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_wait_ms) AS double precision) / SUM(rated_seconds) AS wait_time_ms_per_second", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
     }
 
-    /// <summary>#3540: the latency reads drop rows whose stored interval is 0 — the calculator's "no delta
-    /// knowable" marker — so a restart renders as an absent point, never "0.00 ms". IS DISTINCT FROM 0 keeps
-    /// pre-V127 rows (NULL). Both the File I/O tab's read and the tempdb tab's file read.</summary>
+    /// <summary>#3540: the latency reads null out rows whose stored interval is 0 — the calculator's "no
+    /// delta knowable" marker — so a restart renders as an absent point, never "0.00 ms". IS DISTINCT FROM 0
+    /// keeps pre-V127 rows (NULL). Both the File I/O tab's read and the tempdb tab's file read (#4234:
+    /// bucketed, so both null the marker out of a <c>rated</c> CTE rather than filtering the row out of the
+    /// FROM clause — the row still counts toward <c>collection_count</c>).</summary>
     [Fact]
     public void FileIoLatencyReads_DropTheUnknowableMarker_KeepPreV127Rows()
     {
         Assert.Contains("CASE WHEN f.sample_interval_seconds IS DISTINCT FROM 0 THEN f.delta_reads END AS rated_reads", ViewerDataService.FileIoLatencyTrendSql, StringComparison.Ordinal);
-        Assert.Contains("AND   sample_interval_seconds IS DISTINCT FROM 0", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN sample_interval_seconds IS DISTINCT FROM 0 THEN delta_reads END AS rated_reads", ViewerDataService.TempDbFileIoTrendSql, StringComparison.Ordinal);
     }
 
     [Fact]

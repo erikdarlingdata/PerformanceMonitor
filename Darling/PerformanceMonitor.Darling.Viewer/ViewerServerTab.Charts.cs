@@ -121,15 +121,15 @@ public partial class ViewerServerTab : IDisposable
         /* Both reads run concurrently — NpgsqlDataSource pools a connection for each. */
         using var readFanOut = ViewerReadFanOut.Of(2);
         var trendTask = _dataService.GetTempDbTrendAsync(_server.ServerId, startUtc);
-        var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc);
+        var fileIoTask = _dataService.GetTempDbFileIoTrendAsync(_server.ServerId, startUtc, endUtc);
         var trend = await trendTask;
         var fileIo = await fileIoTask;
 
-        /* Start-only reads; bound the end for a custom range (collection_time is naive UTC). */
+        /* trend is a start-only read; bound the end for a custom range (collection_time is naive UTC).
+           fileIo is bucketed (#4234) and already windowed server-side on endUtc. */
         if (IsCustomRange)
         {
             trend = trend.Where(t => t.CollectionTime <= endUtc).ToList();
-            fileIo = fileIo.Where(f => f.CollectionTime <= endUtc).ToList();
         }
 
         RenderTempDbUsageChart(trend, startUtc, endUtc);

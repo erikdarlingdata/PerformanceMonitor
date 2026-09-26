@@ -1439,6 +1439,12 @@ public sealed class TsqlConventionGuardTests
         "Darling/PerformanceMonitor.Darling.Service/Hosting/DarlingWebFailureLog.cs IsStatementTimeout",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs ToSettings",
         "Darling/PerformanceMonitor.Darling.Service/DarlingConfig.cs IsConfigured",
+        /* #4253: an expression-bodied member whose body opens with a property pattern
+           (`marker is { State: ... }`) before the rest of the expression. The walk's brace match closes the
+           range at the pattern's own closing brace, stranding the trailing `&& !cancellationToken.
+           IsCancellationRequested`, a boolean check on the token, not T-SQL and not a tempdb label, so no
+           census reads a site of that kind here. */
+        "Darling/PerformanceMonitor.Darling.Service/DarlingManagedPostgres.cs ShouldFallBackToHeaderOnly",
         "Darling/PerformanceMonitor.Darling.Service/HypotheticalIndexRequest.cs IsComplete",
         /* #4214: an expression-bodied one-liner, same shape as the pairs elsewhere in this list — it strands
            only its own ternary, not T-SQL or a tempdb label, so no census reads a site of that kind here. */

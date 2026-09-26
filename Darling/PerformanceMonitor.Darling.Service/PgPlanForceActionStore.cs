@@ -9,10 +9,13 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Mcp;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -137,10 +140,12 @@ public sealed class PgPlanForceActionStore : IPlanForceActionStore
     public const string OutcomeWithheld = "withheld";
 
     private readonly NpgsqlDataSource _postgres;
+    private readonly ILogger? _logger;
 
-    public PgPlanForceActionStore(NpgsqlDataSource postgres)
+    public PgPlanForceActionStore(NpgsqlDataSource postgres, ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _logger = logger;
     }
 
     /// <summary>Appends one row and returns its <c>action_id</c> so a follow-up row can reference it.</summary>
@@ -311,7 +316,11 @@ SELECT
         }
         catch (Exception ex)
         {
-            return (null, $"the forcing and automatic-plan-correction state read failed ({ex.GetType().Name}: {ex.Message})");
+            /* #4316 round 1 (M1): the same redaction as DarlingForcePlanTargetStateReader.TryReadAsync. This
+               reason lands in collect.plan_force_actions.detail, which get_plan_force_actions will serve, so it
+               carries only the type and SQLSTATE; the full exception goes to the service log once. */
+            _logger?.LogWarning(ex, "The plan-force bot's forcing and automatic-plan-correction state read failed for server {ServerId}.", serverId);
+            return (null, $"the forcing and automatic-plan-correction state read failed ({CollectionFailure.Describe(ex, CollectionFailureOutcome.Error)})");
         }
     }
 
@@ -344,6 +353,12 @@ SELECT
     /// that calls it because these two shapes — and the grace window that separates an orphan from a
     /// force still being written — are properties of the TABLE, and the only place they can be shown
     /// to hold is against a live store, which is what <c>PlanForceActionStoreTests</c> does.</para>
+    ///
+    /// <para>#4346: every row's <c>detail</c> is passed through <see cref="SanitizeDetailForAudit"/> before
+    /// it leaves this method too, on the same reasoning as <see cref="GetRecentActionsAsync"/> — this read
+    /// has no caller today, but a row written before #4326 sits in the table regardless, and the day a
+    /// review surface calls this it must not be the day someone notices the exception text it has been
+    /// quietly carrying since before this method had a caller.</para>
     /// </summary>
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetPendingReviewsAsync(
         int serverId, DateTime nowUtc, CancellationToken ct)
@@ -394,13 +409,99 @@ LIMIT 16", connection)
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            rows.Add(ReadRecord(reader));
+            var record = ReadRecord(reader);
+            rows.Add(record with { Detail = SanitizeDetailForAudit(record.Detail) });
         }
 
         return rows;
     }
 
-    /// <summary>The audit read behind <c>get_plan_force_actions</c> — newest first, optional server scope.</summary>
+    /// <summary>
+    /// Matches the THREE evidence shapes <see cref="ForcePlanBotPolicy.Blockers"/> can put in a
+    /// <c>state_unavailable</c> block, and only those: the #4326 read-failure line (parenthesized reason
+    /// is exactly a type name, optionally with a SQLSTATE, followed by one of
+    /// <see cref="CollectionFailure.Describe"/>'s two fixed log notes); the null-state "returned no row"
+    /// line; and the empty-state "ran and observed nothing" line — both written straight from
+    /// <c>target</c>/<c>state</c> fields, never from an exception. Never <c>ex.Message</c>: a build before
+    /// #4326 put the exception's own message in the read-failure line's position
+    /// (<c>PgPlanForceActionStore.TryGetTargetStatesAsync</c>'s old catch), and a real error message from
+    /// PostgreSQL or the driver essentially never happens to match any of these three exact templates, so
+    /// failing the match is the signal that a row is legacy. Every OTHER blocker's evidence line
+    /// (<c>parameter_sensitivity_cofired</c>, <c>secondary_replica_evidence</c>, <c>apc_owns_it</c>,
+    /// <c>apc_enabled_for_database</c>) has never carried exception text on any build, so this pattern only
+    /// ever needs to gate the one blocker that did.
+    /// </summary>
+    private static readonly Regex SafeStateUnavailableLine = new(
+        @"\Astate_unavailable: (?:" +
+        @"the forcing and automatic-plan-correction state read failed \([A-Za-z][A-Za-z0-9]*(?:, SQLSTATE [0-9A-Z]{5})?; (?:the log has the full error|a table or column the read needs is missing, logged only at Debug level)\) — an unattended force cannot proceed on an unknown engine state" +
+        @"|the forcing and automatic-plan-correction state read returned no row for plan -?[0-9]+ of query -?[0-9]+ in [^\r\n\u2028\u2029]{1,256}; an unattended force cannot proceed on an unknown engine state" +
+        @"|the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last [0-9]+ hours: no query_store_stats row for plan -?[0-9]+, no forced sibling plan of query -?[0-9]+, no plan_correction recommendation, and no plan_correction capture for [^\r\n\u2028\u2029]{1,256} at all — FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown" +
+        @")\z",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The fixed sentence for a null-state read failure BEFORE #4326 fixed it (see
+    /// <see cref="PgPlanForceActionStore.TryGetTargetStatesAsync"/>'s old catch and
+    /// <see cref="DarlingForcePlanTargetStateReader.TryReadAsync"/>'s), so a legacy row's evidence line
+    /// carries no exception text either — it says the SAME thing #4326 says now, minus the exception.
+    /// </summary>
+    private const string LegacyStateUnavailableLine =
+        "state_unavailable: the forcing and automatic-plan-correction state read failed — an unattended force cannot proceed on an unknown engine state";
+
+    /// <summary>
+    /// Matches the whole <c>state_unavailable</c> BLOCK — from its prefix to the END of the string, not to
+    /// the next sibling blocker's line. <see cref="ForcePlanBotPolicy.Blockers"/> always adds
+    /// <c>state_unavailable</c> LAST: it fires only when <c>state</c> is null or empty
+    /// (<c>PgPlanForceActionStore.cs</c>, this file), while <c>apc_owns_it</c> and
+    /// <c>apc_enabled_for_database</c> both require a non-null, non-empty <c>state</c>
+    /// (<c>FactRemediation.ForcePlanBlockers</c>, <c>PerformanceMonitor.Analysis/FactRemediation.cs</c>
+    /// ~1019-1043, checked via <c>if (state is null || state.IsEmpty) return blockers;</c> before either
+    /// APC blocker can be added; <c>ForcePlanBotPolicy.Blockers</c>,
+    /// <c>PerformanceMonitor.Analysis/ForcePlanBotPolicy.cs</c> ~291-317, adds
+    /// <c>apc_enabled_for_database</c> only under <c>state is { ApcIsOn: true }</c> and
+    /// <c>state_unavailable</c> only under <c>state is null</c> or <c>state.IsEmpty</c>). So the two APC
+    /// blockers can never co-occur with <c>state_unavailable</c>, and it is always the final block — a
+    /// sibling-prefix LOOKAHEAD is not needed and is actively unsafe: a pre-#4326 row's raw exception
+    /// message is free text and can itself contain <c>"\n" + "apc_owns_it:"</c> (or any other sibling's
+    /// exact prefix) by coincidence or by an attacker who controls part of the upstream error message, and
+    /// a lookahead-bounded block would end there, leaving everything after it — unredacted — outside the
+    /// match and passed through verbatim. Anchoring to <c>\z</c> instead removes that seam: nothing after
+    /// <c>state_unavailable:</c> can end the block early, because there is no more string in which the next
+    /// blocker legitimately fires.
+    ///
+    /// <para><see cref="RegexOptions.Singleline"/> makes <c>.</c> match a newline so the body can span one;
+    /// <see cref="RegexOptions.Multiline"/> anchors <c>^</c> right after a <c>\n</c> (which also covers a
+    /// <c>\r\n</c> pair, since the position immediately after <c>\n</c> is the same either way) so the
+    /// block is found even when it is not the first line in <c>detail</c>.</para>
+    /// </summary>
+    private static readonly Regex StateUnavailableBlock = new(
+        @"^state_unavailable:.*\z",
+        RegexOptions.Compiled | RegexOptions.Singleline | RegexOptions.Multiline);
+
+    /// <summary>
+    /// Rewrites <paramref name="detail"/>: every <see cref="StateUnavailableBlock"/> span that does not
+    /// match <see cref="SafeStateUnavailableLine"/> is replaced whole with
+    /// <see cref="LegacyStateUnavailableLine"/>; every other blocker's line (this row's other named
+    /// blockers — <c>parameter_sensitivity_cofired</c>, <c>secondary_replica_evidence</c>, <c>apc_owns_it</c>,
+    /// <c>apc_enabled_for_database</c>) passes through unchanged, because none of them has ever carried
+    /// exception text on any build. Null and non-<c>state_unavailable</c> shapes (the withheld-force
+    /// sentence, would_force's null) are untouched — only a <c>state_unavailable</c> block is ever redacted.
+    /// </summary>
+    internal static string? SanitizeDetailForAudit(string? detail)
+    {
+        if (detail is null)
+        {
+            return null;
+        }
+
+        return StateUnavailableBlock.Replace(detail, m =>
+            SafeStateUnavailableLine.IsMatch(m.Value) ? m.Value : LegacyStateUnavailableLine);
+    }
+
+    /// <summary>The audit read behind <c>get_plan_force_actions</c> — newest first, optional server scope.
+    /// #4346: every row's <c>detail</c> is passed through <see cref="SanitizeDetailForAudit"/> before it
+    /// leaves this method, so a row written before #4326 (which put the read failure's own exception
+    /// message here) cannot reach an MCP or web caller through this read.</summary>
     public async Task<IReadOnlyList<PlanForceActionRecord>> GetRecentActionsAsync(
         int? serverId, DateTime sinceUtc, int limit, CancellationToken ct)
     {
@@ -427,7 +528,8 @@ LIMIT $3", connection)
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            rows.Add(ReadRecord(reader));
+            var record = ReadRecord(reader);
+            rows.Add(record with { Detail = SanitizeDetailForAudit(record.Detail) });
         }
 
         return rows;

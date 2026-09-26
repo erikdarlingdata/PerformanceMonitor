@@ -16,6 +16,7 @@ using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -98,6 +99,13 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     public const string RuntimeBlockedFileName = "pg-runtime.blocked";
 
+    /// <summary>
+    /// The pre-upgrade postgresql.auto.conf, kept beside the new data directory (#4253) after
+    /// <see cref="CarryAutoConfAsync"/> runs — the operator's own record of exactly what ALTER SYSTEM had
+    /// set, whether or not every setting in it carried across.
+    /// </summary>
+    public const string PreUpgradeAutoConfFileName = "postgresql.auto.conf.pre-upgrade";
+
     /// <summary>Suffix on the runtime root holding the rescued previous runtime (pg_upgrade's --old-bindir).</summary>
     public const string PreviousRuntimeSuffix = "-prev";
 
@@ -151,6 +159,14 @@ internal sealed class DarlingStoreUpgrade
     private static readonly TimeSpan s_toolTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan s_bridgeTimeout = TimeSpan.FromHours(1);
     private static readonly TimeSpan s_analyzeTimeout = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// One <c>postgres -C</c> probe (#4253) reads config files and exits — no server is left running — so
+    /// this is generous only against a wedged disk, not against real work. Kept far short of
+    /// <see cref="s_toolTimeout"/> so a run with many carried settings does not turn one bad probe into a
+    /// multi-minute stall of an upgrade the store is already offline for.
+    /// </summary>
+    private static readonly TimeSpan s_confProbeTimeout = TimeSpan.FromSeconds(30);
 
     private readonly ILogger _logger;
 
@@ -1708,8 +1724,9 @@ internal sealed class DarlingStoreUpgrade
     /* ---- the quiesced update ---- */
 
     /// <summary>
-    /// The file that exists while <see cref="UpdateTimescaleQuiescedAsync"/> may have a server running on its
-    /// private port, holding that port. See <see cref="StopQuiescedUpdateOrphanAsync"/>.
+    /// The file that exists while a quiesced start (<see cref="UpdateTimescaleQuiescedAsync"/>'s TimescaleDB
+    /// update, or <see cref="CarryAutoConfAsync"/>'s auto.conf trial) may have a server running on its private
+    /// port, holding that port. See <see cref="StopQuiescedUpdateOrphanAsync"/>.
     /// </summary>
     internal const string QuiescedUpdateMarkerFileName = "darling-timescaledb-update.port";
 
@@ -1862,12 +1879,13 @@ internal sealed class DarlingStoreUpgrade
     }
 
     /// <summary>
-    /// Stops a server <see cref="UpdateTimescaleQuiescedAsync"/> left on its private port (#3908), which happens
-    /// only when the process died, or the stop failed, between that start and its confirmed stop. The marker
-    /// holds the port, and the running postmaster must be on it (<c>postmaster.pid</c>'s fourth line): a server
-    /// on any other port was started by someone else after the marker was left, and is adopted as usual. Without
-    /// this the normal start would adopt the orphan (<c>pg_ctl status</c> answers "running" for a postmaster on
-    /// any port), then fail to reach it on the configured port, and every runtime update would be deferred behind
+    /// Stops a server a quiesced start (<see cref="UpdateTimescaleQuiescedAsync"/>'s TimescaleDB update, or
+    /// <see cref="CarryAutoConfAsync"/>'s auto.conf trial) left on its private port, which happens only when the
+    /// process died, or the stop failed, between that start and its confirmed stop. The marker holds the port,
+    /// and the running postmaster must be on it (<c>postmaster.pid</c>'s fourth line): a server on any other
+    /// port was started by someone else after the marker was left, and is adopted as usual. Without this the
+    /// normal start would adopt the orphan (<c>pg_ctl status</c> answers "running" for a postmaster on any
+    /// port), then fail to reach it on the configured port, and every runtime update would be deferred behind
     /// it. Returns false only when such an orphan is running and will not stop.
     /// </summary>
     internal async Task<bool> StopQuiescedUpdateOrphanAsync(string binDirectory, string dataDirectory)
@@ -1882,7 +1900,7 @@ internal sealed class DarlingStoreUpgrade
         if (string.Equals(TryReadPostmasterPort(dataDirectory), markedPort, StringComparison.Ordinal))
         {
             _logger.LogWarning(
-                "Found the store on private port {Port}, where a TimescaleDB update this service started left it (#3908). Stopping it before the normal start.",
+                "Found the store on private port {Port}, where a quiesced start (TimescaleDB update or auto.conf trial) this service started left it. Stopping it before the normal start.",
                 markedPort);
             if (!await StopClusterConfirmedAsync(binDirectory, dataDirectory))
             {
@@ -2162,7 +2180,7 @@ internal sealed class DarlingStoreUpgrade
 
     /// <summary>
     /// Retries <paramref name="action"/> on a TRANSPORT fault only (a backend that lost the post-start
-    /// shared-memory race, #2185), the same classification <c>EnsureDatabaseAsync</c> uses. Every caller wraps a
+    /// shared-memory race, #2185), the same classification <c>OpenProbedMaintenanceConnectionAsync</c> uses. Every caller wraps a
     /// connection OPEN in it and nothing else, so what a retry repeats is a connection attempt, never a
     /// statement. Any PostgreSQL error is an answer, not a transient, and propagates at once.
     /// </summary>
@@ -2575,7 +2593,701 @@ internal sealed class DarlingStoreUpgrade
         int OldMajor,
         int NewMajor,
         string BundledTimescaleVersion,
-        Action<string> AppendManagedConf);
+        Action<string> AppendManagedConf,
+        Func<string> SslServerOptions);
+
+    /* ============================ postgresql.auto.conf carry (#4253) ============================ */
+
+    /// <summary>
+    /// One <c>name = value</c> assignment read from a postgresql.auto.conf. <see cref="RawLine"/> is the
+    /// exact source line, carried through unchanged rather than re-serialized from <see cref="DisplayValue"/>,
+    /// so a value this reader decodes imperfectly still reaches the new cluster byte-for-byte for UTF-8
+    /// content — the source file is read as UTF-8, so a byte sequence that is not valid UTF-8 is already
+    /// replaced with U+FFFD before RawLine is ever built from it (round-1 security review, #4280 doc note —
+    /// not itself a security finding). Only the GOOD/BAD verdict depends on the decode; never the log line —
+    /// a carried or rejected setting's value is never repeated there (round-1 review, Medium 1).
+    /// </summary>
+    internal readonly record struct AutoConfSetting(string Name, string DisplayValue, string RawLine);
+
+    /// <summary>
+    /// A valid PostgreSQL GUC name: a bare identifier, or an extension-qualified one like
+    /// <c>timescaledb.max_background_workers</c>. <see cref="ParseAutoConf"/> skips any line whose name does
+    /// not match this, rather than carry it — <see cref="CarryAutoConfAsync"/> embeds the name inside one
+    /// double-quoted <c>-C "{name}"</c> argument string, and only a hand-edited postgresql.auto.conf (ALTER
+    /// SYSTEM never writes one) could put a quote or other character there that splits that argument.
+    /// </summary>
+    private static readonly Regex s_validGucName =
+        new("^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Parses postgresql.auto.conf's own restricted grammar: one <c>name = value</c> or <c>name value</c>
+    /// assignment per non-blank, non-comment line — PostgreSQL's own grammar makes the <c>=</c> optional
+    /// (round-1 security review, #4280 parse note); ALTER SYSTEM always writes one, but a hand-edited file
+    /// need not. The two header lines ALTER SYSTEM itself writes ("Do not edit this file manually!" / "It
+    /// will be overwritten by the ALTER SYSTEM command.") are '#' comments like any other — not
+    /// special-cased, just skipped by the same rule.
+    ///
+    /// <para>ALTER SYSTEM always single-quotes the value, whatever the GUC's type — confirmed against a live
+    /// write for #4253, where a plain boolean and an integer came back quoted exactly like a string — and
+    /// escapes an embedded quote by doubling it ('') and an embedded backslash by doubling it (\\), the same
+    /// pair <c>guc-file.l</c> reads back. An unquoted bare token (a hand-edited line, not one ALTER SYSTEM
+    /// wrote) is accepted too, matching postgresql.conf's general syntax.</para>
+    ///
+    /// <para>A name assigned more than once keeps only the LAST occurrence — matching how PostgreSQL itself
+    /// resolves repeated assignments within one config file, and how this class already describes its own
+    /// v1-v5 postgresql.conf blocks ("last-occurrence-wins override").</para>
+    ///
+    /// <para>A line whose name fails <see cref="s_validGucName"/> is skipped, and so is a <c>name value</c>
+    /// line (the <c>=</c>-less form) with no space or tab to split on — either way, only the 1-based line
+    /// number (never its text) is returned in <paramref name="skippedLines"/>, for
+    /// <see cref="CarryAutoConfAsync"/> to log as not carried. Line number, not name: with the <c>=</c>
+    /// optional, the text before the point this parser treats as the name/value boundary can actually be
+    /// part of the VALUE, so nothing about a skipped line's own text is safe to log (round-1 security
+    /// review, #4280 Medium 1).</para>
+    /// </summary>
+    internal static IReadOnlyList<AutoConfSetting> ParseAutoConf(string content, out IReadOnlyList<int> skippedLines)
+    {
+        var order = new List<string>();
+        var byName = new Dictionary<string, AutoConfSetting>(StringComparer.OrdinalIgnoreCase);
+        var skipped = new List<int>();
+
+        using var reader = new StringReader(content);
+        string? line;
+        var lineNumber = 0;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            lineNumber++;
+            /* PostgreSQL's guc-file.l tokenizer treats only ' ' and '\t' as whitespace — NOT the full
+               Unicode set string.Trim() strips (e.g. U+00A0 NBSP). Matching that keeps a line PostgreSQL
+               itself would not split on from being mis-split here (#4280 round-2 Low 2). */
+            var trimmed = line.Trim(' ', '\t');
+            if (trimmed.Length == 0 || trimmed[0] == '#')
+            {
+                continue;
+            }
+
+            /* The '=' is optional in PostgreSQL's own grammar (guc-file.l) — ALTER SYSTEM always writes one,
+               a hand-edited "name value" line need not. With none, the name is the first whitespace run and
+               everything after it is the value; with one, it is the boundary, exactly as before. Either way
+               this only decides where the NAME ends — never assumed safe to log; see the method summary. */
+            string name;
+            string valueField;
+            var eq = trimmed.IndexOf('=');
+            if (eq < 0)
+            {
+                var ws = 0;
+                while (ws < trimmed.Length && trimmed[ws] != ' ' && trimmed[ws] != '\t')
+                {
+                    ws++;
+                }
+
+                if (ws >= trimmed.Length)
+                {
+                    /* A bare token with nothing after it — no space/tab for guc-file.l to split on, so
+                       there is no value to carry. Not a silent continue: the line could not be parsed,
+                       so it is reported the same way an invalid name is (line number only). */
+                    skipped.Add(lineNumber);
+                    continue;
+                }
+
+                name = trimmed[..ws];
+                valueField = trimmed[(ws + 1)..].Trim(' ', '\t');
+            }
+            else
+            {
+                name = trimmed[..eq].Trim(' ', '\t');
+                valueField = trimmed[(eq + 1)..].Trim(' ', '\t');
+            }
+
+            if (!s_validGucName.IsMatch(name))
+            {
+                skipped.Add(lineNumber);
+                continue;
+            }
+
+            var display = DecodeAutoConfValue(valueField);
+            if (display is null)
+            {
+                continue;
+            }
+
+            if (!byName.ContainsKey(name))
+            {
+                order.Add(name);
+            }
+
+            byName[name] = new AutoConfSetting(name, display, line);
+        }
+
+        skippedLines = skipped;
+        return order.Select(n => byName[n]).ToList();
+    }
+
+    /// <summary>
+    /// Decodes one auto.conf value: single-quoted with '' and \\ escapes, or an unquoted bare token.
+    /// Returns null for a value this cannot make sense of (an unterminated quote), so the caller skips that
+    /// line rather than carrying a guess.
+    /// </summary>
+    private static string? DecodeAutoConfValue(string rawValue)
+    {
+        if (rawValue.Length == 0)
+        {
+            return null;
+        }
+
+        if (rawValue[0] != '\'')
+        {
+            var end = 0;
+            while (end < rawValue.Length && !char.IsWhiteSpace(rawValue[end]) && rawValue[end] != '#')
+            {
+                end++;
+            }
+
+            return end == 0 ? null : rawValue[..end];
+        }
+
+        var builder = new StringBuilder();
+        var i = 1;
+        while (i < rawValue.Length)
+        {
+            var c = rawValue[i];
+            if (c == '\'')
+            {
+                if (i + 1 < rawValue.Length && rawValue[i + 1] == '\'')
+                {
+                    builder.Append('\'');
+                    i += 2;
+                    continue;
+                }
+
+                /* The closing quote. Anything after it (a trailing comment) is not part of the value —
+                   ALTER SYSTEM never writes one, so there is nothing meaningful to keep. */
+                return builder.ToString();
+            }
+
+            if (c == '\\' && i + 1 < rawValue.Length)
+            {
+                var next = rawValue[i + 1];
+                builder.Append(next switch
+                {
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    'b' => '\b',
+                    'f' => '\f',
+                    _ => next,
+                });
+                i += 2;
+                continue;
+            }
+
+            builder.Append(c);
+            i++;
+        }
+
+        /* Unterminated quote — malformed; the caller drops the line rather than carrying a guess. */
+        return null;
+    }
+
+    /// <summary>What <see cref="CarryAutoConfAsync"/> did, for the caller's own summary line and for tests.</summary>
+    internal readonly record struct AutoConfCarryResult(
+        IReadOnlyList<string> CarriedNames,
+        IReadOnlyList<string> RejectedNames);
+
+    /// <summary>The header postgresql.auto.conf always carries, even with nothing else in it — ALTER SYSTEM's
+    /// own two lines. The one place this literal is written; every header-only reset uses this constant
+    /// rather than restating it (#4280 round-2 part 2, item 2).</summary>
+    internal const string AutoConfHeaderOnly =
+        "# Do not edit this file manually!\n# It will be overwritten by the ALTER SYSTEM command.\n";
+
+    /// <summary>
+    /// The file that records where <see cref="CarryAutoConfAsync"/>'s carry is, across a crash between its own
+    /// steps or between this start and the next (#4280 items 2 and 4). Line 1 is the state —
+    /// <see cref="AutoConfCarryStateCarrying"/> while candidates are still being tried, or
+    /// <see cref="AutoConfCarryStateTrialPassed"/> once the trial WITH the carried settings has started — then
+    /// the carried setting NAMES, one per line, never a value. Deleted at every reset back to header-only, and
+    /// after the first good real start.
+    /// </summary>
+    internal const string AutoConfCarryStateMarkerFileName = "darling-autoconf-carry.state";
+
+    internal const string AutoConfCarryStateCarrying = "carrying";
+    internal const string AutoConfCarryStateTrialPassed = "trial-passed";
+
+    /// <summary>One state/names read of <see cref="AutoConfCarryStateMarkerFileName"/>.</summary>
+    internal readonly record struct AutoConfCarryMarker(string State, IReadOnlyList<string> Names);
+
+    /// <summary>The marker's state and names, or null when it is missing or unreadable — a no-op read (#4280
+    /// items 2 and 4): a marker this cannot make sense of must never block a start.</summary>
+    internal AutoConfCarryMarker? TryReadAutoConfCarryMarker(string dataDirectory)
+    {
+        var path = Path.Combine(dataDirectory, AutoConfCarryStateMarkerFileName);
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var lines = File.ReadAllLines(path);
+            return lines.Length == 0 ? null : new AutoConfCarryMarker(lines[0], lines[1..]);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not read the auto.conf carry-state marker at {Path} ({Message}) — treated as absent.",
+                path, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>Writes <see cref="AutoConfCarryStateMarkerFileName"/>: <paramref name="state"/> on line 1, then
+    /// <paramref name="names"/> one per line, never a value.</summary>
+    private static void WriteAutoConfCarryMarker(string dataDirectory, string state, IEnumerable<string> names)
+        => File.WriteAllText(
+            Path.Combine(dataDirectory, AutoConfCarryStateMarkerFileName),
+            state + "\n" + string.Join("\n", names));
+
+    /// <summary>Deletes <see cref="AutoConfCarryStateMarkerFileName"/> if present. Every exit that no longer
+    /// needs it — a good real start, the already-running path, or as part of
+    /// <see cref="ResetAutoConfCarryAsync"/> — calls this rather than deleting the file a new way.</summary>
+    internal static void TryDeleteAutoConfCarryMarker(string dataDirectory)
+        => TryDeleteFile(Path.Combine(dataDirectory, AutoConfCarryStateMarkerFileName));
+
+    /// <summary>Resets postgresql.auto.conf to header-only, logs <paramref name="marker"/>'s names as dropped
+    /// (never their values — only names ever reach this log), and deletes the marker. Shared by
+    /// <see cref="DarlingManagedPostgres"/>'s item 2 real-start fallback and item 4 leftover-"carrying"
+    /// recovery, so neither restates the header literal or the drop-and-delete sequence a new way. Returns
+    /// false only when the header-only write itself failed: then neither the "NOT carried" warning nor the
+    /// delete runs, the marker is left in place so the next start retries the reset, and the caller must not
+    /// claim the carry was dropped or retry a start against the same unwritable file. True otherwise.</summary>
+    internal async Task<bool> ResetAutoConfCarryAsync(string dataDirectory, AutoConfCarryMarker marker, string reason)
+    {
+        var autoConfPath = Path.Combine(dataDirectory, "postgresql.auto.conf");
+        try
+        {
+            await File.WriteAllTextAsync(autoConfPath, AutoConfHeaderOnly, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(
+                "Could not reset {Path} to header-only ({Message}); the carry-state marker is kept so the next start tries again.",
+                autoConfPath, ex.Message);
+            return false;
+        }
+
+        if (marker.Names.Count > 0)
+        {
+            _logger.LogWarning(
+                "NOT carried: {Names} — {Reason}. postgresql.auto.conf reset to header-only.",
+                string.Join(", ", marker.Names), reason);
+        }
+
+        TryDeleteAutoConfCarryMarker(dataDirectory);
+        return true;
+    }
+
+    /// <summary>
+    /// Carries the pre-upgrade postgresql.auto.conf into the new cluster (#4253). pg_upgrade does not copy
+    /// this file, and initdb starts the new cluster with none, so every ALTER SYSTEM setting an operator
+    /// made is silently lost on a major upgrade unless something restores it — Tier 1 evidence: a store's
+    /// operator-raised shared_buffers reverted to the service's default with no word said.
+    ///
+    /// <para>Call this AFTER pg_upgrade and the data-directory swap have committed, and BEFORE anything gives
+    /// the new cluster its first real start. That "anything" is not only <see cref="StartClusterAsync"/>: the
+    /// quiesced TimescaleDB update (#3908) that commonly runs right after an upgrade also starts the live new
+    /// data directory, on its way to moving the extension to the runtime's version, so the carry has to be
+    /// done and validated before that start too, not just before the operator-visible one.</para>
+    ///
+    /// <para>Each candidate setting is checked against the NEW binaries before it is kept: <c>postgres -C
+    /// &lt;name&gt; -D &lt;newDataDirectory&gt;</c> parses the whole config the way a real start would,
+    /// including whatever this call has just written to postgresql.auto.conf for the probe, and exits
+    /// non-zero on an unrecognized name or an out-of-range value — exactly the two ways a setting good for
+    /// the OLD major can be bad for the NEW one (both confirmed live for #4253). A setting that fails this is
+    /// left out and logged by name.</para>
+    ///
+    /// <para><c>-C</c> exits right after it reads the config files though — before the checks between
+    /// settings, <c>shared_preload_libraries</c>, and SSL/certificate setup a real start also runs (round-1
+    /// security review, #4280 Medium 2: a carried <c>ssl = on</c> with no certificate files passes <c>-C
+    /// ssl</c> fine and then stops the very next start). So once every candidate has passed its own probe,
+    /// this also does a real start and stop of the NEW cluster on loopback (<see cref="StartClusterAsync"/>
+    /// with <see cref="QuiescedUpdateServerOptions"/>, then <see cref="StopClusterAsync"/>) before returning.
+    /// If THAT fails, every carried name is dropped, logged as such, and postgresql.auto.conf is left at the
+    /// header only. No setting this method carries ever gets to hold the store down (the fix this issue
+    /// exists for must not trade one silent loss for a new way to brick the store).</para>
+    ///
+    /// <para>The untouched original is always kept at <see cref="PreUpgradeAutoConfFileName"/> beside the new
+    /// data directory (its parent, matching where this class already keeps the pg-upgrade password file and
+    /// the retained pre-upgrade data directory) whenever there was a source file to read — whether or not
+    /// anything in it was rejected. It is the operator's own record, not just this method's summary of it.</para>
+    ///
+    /// <para>If a probe THROWS instead of returning a bad exit code — <c>TimeoutException</c> past
+    /// <see cref="s_confProbeTimeout"/>, or a rethrown <c>OperationCanceledException</c> on a service stop —
+    /// the loop cannot finish, and postgresql.auto.conf may hold one candidate line nothing has verified. The
+    /// post-commit handler wrapped around this call finishes the upgrade regardless of that exception (its
+    /// own comment: "keeps the store running on the new major regardless"), so whatever this call leaves on
+    /// disk IS what the next start reads. So on ANY exception the file is put back to the same
+    /// empty-but-safe header the combined-check failure path below already uses, before the exception is
+    /// rethrown: the caller must still see the failure, but never by way of a store that will not start.</para>
+    /// </summary>
+    internal Task<AutoConfCarryResult> CarryAutoConfAsync(
+        string oldDataDirectory,
+        string newDataDirectory,
+        string newBinDirectory,
+        CancellationToken cancellationToken,
+        Func<string>? sslServerOptions = null)
+        => CarryAutoConfAsync(
+            oldDataDirectory, newDataDirectory, newBinDirectory,
+            (exePath, arguments, timeout, token) => DarlingManagedPostgres.RunToolAsync(exePath, arguments, timeout, token),
+            cancellationToken,
+            sslServerOptions);
+
+    /// <summary>
+    /// <see cref="CarryAutoConfAsync(string, string, string, CancellationToken, Func{string})"/> with the
+    /// per-setting <c>postgres -C</c> probe substitutable, so a test can make one throw without a real
+    /// postgres.exe or a real 30-second wait. Production always uses the four-argument overload above, which
+    /// wires <see cref="DarlingManagedPostgres.RunToolAsync"/> unchanged. The belt-and-braces real start near
+    /// the end (round-2 review, #4280 Medium 1) uses its own private loopback port from
+    /// <see cref="FindFreeLoopbackPort"/>, never the store's eventual configured port, which this call cannot
+    /// assume is free. <paramref name="sslServerOptions"/> rides the SAME trial start (#4280 round-2 part 2,
+    /// item 2): null (every existing caller) means no SSL options, same as before this parameter existed.
+    /// </summary>
+    internal async Task<AutoConfCarryResult> CarryAutoConfAsync(
+        string oldDataDirectory,
+        string newDataDirectory,
+        string newBinDirectory,
+        Func<string, string, TimeSpan, CancellationToken, Task<(int ExitCode, string Output)>> probe,
+        CancellationToken cancellationToken,
+        Func<string>? sslServerOptions = null)
+    {
+        var none = new AutoConfCarryResult(Array.Empty<string>(), Array.Empty<string>());
+
+        var sourcePath = Path.Combine(oldDataDirectory, "postgresql.auto.conf");
+        if (!File.Exists(sourcePath))
+        {
+            _logger.LogInformation(
+                "No postgresql.auto.conf in the pre-upgrade data directory — nothing to carry into the upgraded store.");
+            return none;
+        }
+
+        var content = await File.ReadAllTextAsync(sourcePath, cancellationToken);
+        var settings = ParseAutoConf(content, out var skippedLines);
+
+        var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(newDataDirectory)))!;
+        var preUpgradeCopy = Path.Combine(parent, PreUpgradeAutoConfFileName);
+        File.Copy(sourcePath, preUpgradeCopy, overwrite: true);
+        try
+        {
+            DarlingFileSecurity.HardenFile(preUpgradeCopy, allowInteractiveRead: false);
+        }
+        catch (Exception ex)
+        {
+            /* Best-effort, like DarlingManagedPostgres.TryHardenCredentialFile this mirrors — a failure here
+               must not cost the carry itself, only get logged so it can be fixed by hand. */
+            _logger.LogWarning(
+                "Could not restrict {Path} to the store's own ACL ({Message}) — it may be readable more " +
+                "broadly than the data directory it was copied from.",
+                preUpgradeCopy, ex.Message);
+        }
+
+        _logger.LogInformation(
+            "Pre-upgrade postgresql.auto.conf saved to {Path} — kept until the NEXT major upgrade replaces " +
+            "it, not deleted with the rest of the pre-upgrade data directory.",
+            preUpgradeCopy);
+
+        if (skippedLines.Count > 0)
+        {
+            _logger.LogWarning(
+                "NOT carried: {Count} line(s) of the pre-upgrade postgresql.auto.conf skipped (line(s) " +
+                "{Lines}) — not a valid PostgreSQL setting name, so skipped rather than risk one splitting " +
+                "the \"-C\" probe's argument or logging part of a value. The original file is kept at {Path}.",
+                skippedLines.Count, string.Join(", ", skippedLines), preUpgradeCopy);
+        }
+
+        if (settings.Count == 0)
+        {
+            _logger.LogInformation(
+                "The pre-upgrade postgresql.auto.conf has no ALTER SYSTEM settings to carry (kept at {Path} for reference).",
+                preUpgradeCopy);
+            return none;
+        }
+
+        var postgresExe = Path.Combine(newBinDirectory, "postgres.exe");
+        var newAutoConfPath = Path.Combine(newDataDirectory, "postgresql.auto.conf");
+
+        var carried = new List<string>();
+        var rejected = new List<string>();
+        var goodLines = new List<string>();
+
+        try
+        {
+            /* "carrying" before the first candidate write (#4280 item 2/4): the ONLY names known at this
+               point are every candidate about to be tried, so that is what a crash mid-loop reports as
+               dropped — conservative, matching the combined-check failure path below, which also drops
+               everything together rather than guess which ones would have passed. */
+            WriteAutoConfCarryMarker(newDataDirectory, AutoConfCarryStateCarrying, settings.Select(s => s.Name));
+
+            foreach (var setting in settings)
+            {
+                /* One setting at a time: postgres -C fails the WHOLE file on any one bad line (confirmed live —
+                   it cannot tell the caller which line without being handed just that line), so isolating each
+                   candidate is the only way to identify which ones are bad rather than losing all of them to one. */
+                await File.WriteAllTextAsync(newAutoConfPath, AutoConfHeaderOnly + setting.RawLine + "\n", cancellationToken);
+
+                var (exitCode, output) = await probe(
+                    postgresExe,
+                    $"-C \"{setting.Name}\" -D \"{newDataDirectory}\"",
+                    s_confProbeTimeout,
+                    cancellationToken);
+
+                if (exitCode == 0)
+                {
+                    carried.Add(setting.Name);
+                    goodLines.Add(setting.RawLine);
+                    /* Name only — the value stays out of every log (round-1 security review, #4280 Medium 1).
+                       A reader who needs the value has it at preUpgradeCopy, which only SYSTEM, Administrators
+                       and the service account can read; this log can reach more accounts than that. */
+                    _logger.LogInformation(
+                        "Carried {Name} from the pre-upgrade postgresql.auto.conf. Value kept at {Path}.",
+                        setting.Name, preUpgradeCopy);
+                }
+                else
+                {
+                    rejected.Add(setting.Name);
+                    if (NameMayHoldASecret(setting.Name) || setting.Name.Contains('.'))
+                    {
+                        /* PostgreSQL's own reject reason often repeats the offending value verbatim, so a
+                           setting name that looks like it carries a credential gets no reason logged at all —
+                           and neither does any extension-qualified name (anything with a dot): we cannot
+                           enumerate every extension's own reject-reason wording well enough to know none of
+                           them ever echoes a value either (#4280 round-2 Q3 hardening). */
+                        _logger.LogWarning(
+                            "NOT carried: {Name} — the new PostgreSQL binaries reject it (reason withheld: " +
+                            "the name suggests it may hold a credential, or names an extension setting whose " +
+                            "reason could). The original setting is kept at {Path}.",
+                            setting.Name, preUpgradeCopy);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "NOT carried: {Name} — the new PostgreSQL binaries reject it: {Reason}. " +
+                            "The original setting is kept at {Path}.",
+                            setting.Name, output, preUpgradeCopy);
+                    }
+                }
+            }
+
+            var finalContent = AutoConfHeaderOnly + string.Join(string.Empty, goodLines.Select(l => l + "\n"));
+            await File.WriteAllTextAsync(newAutoConfPath, finalContent, cancellationToken);
+
+            if (goodLines.Count == 0)
+            {
+                /* Nothing passed its own probe, so there is nothing pending to protect — the "carrying"
+                   marker above is now stale rather than in-progress. Clear it so a later crash-recovery read
+                   (#4280 item 4) never reports these same rejected names a second time as though the carry
+                   itself had been interrupted. */
+                TryDeleteAutoConfCarryMarker(newDataDirectory);
+            }
+
+            if (goodLines.Count > 0)
+            {
+                /* Belt-and-braces over the per-setting probes above, but a REAL start and stop, not another
+                   -C probe: -C exits right after it reads the config files, before the checks between
+                   settings, shared_preload_libraries, and SSL/certificate setup a real start also runs
+                   (round-1 security review, #4280 Medium 2 — ssl = on with no certificate files is the
+                   concrete case: it passes -C ssl fine and then stops the very next start). A private port,
+                   never the store's configured one (round-2 review, #4280 Medium 1): the configured port may
+                   still be held by whatever this upgrade is replacing, and a trial proving only the SETTINGS
+                   must not fail over a port collision that says nothing about them. */
+                if (!await TryStartTrialAsync())
+                {
+                    /* Header-only FIRST (item 3, round-2 review Medium 2) — the same empty file every other
+                       failure path here resets to — so the retry just below starts on nothing the carried
+                       settings touched, and proves whether THEY were the cause or something else was.
+                       CancellationToken.None: this write is what keeps the store bootable, and a cancellation
+                       landing right here must not be able to skip it. Marker deleted here too (#4280 item 2):
+                       from this point on nothing this call still holds is unverified. */
+                    await File.WriteAllTextAsync(newAutoConfPath, AutoConfHeaderOnly, CancellationToken.None);
+                    TryDeleteAutoConfCarryMarker(newDataDirectory);
+
+                    var pgLogPath = Path.Combine(
+                        Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(newDataDirectory)))!,
+                        DarlingManagedPostgres.ServerLogFileName);
+
+                    if (await TryStartTrialAsync())
+                    {
+                        /* The empty-file retry started: the settings really were the cause. Never either
+                           attempt's own exception message: it can embed the server log tail, and PostgreSQL's
+                           own startup error can echo a failing setting's value — logging it here would reopen
+                           Medium 1 through this new path (TryStartTrialAsync already swallows it for exactly
+                           this reason). Names, and pg.log for whoever wants the detail, only. */
+                        _logger.LogWarning(
+                            "The carried settings did not let the new cluster start, even though each passed " +
+                            "alone — leaving postgresql.auto.conf EMPTY rather than risk the store not starting. " +
+                            "Dropped: {Names}. See {Log} for the failing start. The originals are kept at {Path}.",
+                            string.Join(", ", carried), pgLogPath, preUpgradeCopy);
+
+                        return new AutoConfCarryResult(Array.Empty<string>(), settings.Select(s => s.Name).ToList());
+                    }
+
+                    /* The empty-file retry ALSO failed — nothing about the carried settings explains that, so
+                       this is not a reason to drop or blame them; something else about this cluster will not
+                       start (round-2 review, #4280 Medium 2, Q3). The file is already header-only. A NEW,
+                       fixed message, never either attempt's own exception (same reasoning as above): thrown so
+                       the post-commit handler around this call reports a warning on the upgrade's outcome
+                       instead of a silent success. This throw passes through the catch below on its way out,
+                       which re-runs the same (idempotent) header-only reset and logs its own line again —
+                       accepted rather than special-cased around. */
+                    throw new InvalidOperationException(
+                        $"The new PostgreSQL cluster at {newDataDirectory} would not start even with an empty " +
+                        $"postgresql.auto.conf, so this is unrelated to the carried settings — see {pgLogPath} " +
+                        "for the failing start.");
+                }
+
+                /* Reached only when the FIRST trial (the one WITH the carried settings) started — #4280 item 2:
+                   the real start further down this call chain may still fail for a reason the trial's own
+                   scope did not cover, and its fallback needs to know these exact names survived an isolated
+                   verification, not just that a carry was attempted. */
+                WriteAutoConfCarryMarker(newDataDirectory, AutoConfCarryStateTrialPassed, carried);
+            }
+
+            /* One private-port start, confirmed-stopped, using the SAME marker/orphan lifecycle
+               UpdateTimescaleQuiescedAsync uses (:1769, #3908) — so a trial this call cannot stop is picked up
+               and stopped by the next start's StopQuiescedUpdateOrphanAsync call, the same as an interrupted
+               TimescaleDB update, rather than left running under a data directory nothing else expects a live
+               server on. The marker is written BEFORE the start, so a crash between them still leaves a
+               record. A failed stop after a SUCCESSFUL start is never rethrown and never reaches the outer
+               catch below: that catch drops the settings this trial just verified, and the leftover marker
+               is what carries the failure instead (round-2 review, #4280 Medium 1). A local function, not a
+               private method, so a caller that needs to try it more than once still gets one attempt's state
+               (trialPort, marker) fully scoped to that attempt. */
+            async Task<bool> TryStartTrialAsync()
+            {
+                var trialPort = FindFreeLoopbackPort();
+                var marker = Path.Combine(newDataDirectory, QuiescedUpdateMarkerFileName);
+                var started = false;
+                try
+                {
+                    File.WriteAllText(marker, trialPort.ToString(CultureInfo.InvariantCulture));
+                    /* QuiescedStartWaitSeconds (900s), not the default 120s (item 3, round-2 review Medium 2):
+                       this can be the retry below, on a cluster whose first start already used up part of any
+                       generous wait, and a short timeout here would misreport an unrelated slow start as a
+                       settings failure. */
+                    /* sslServerOptions rides EVERY attempt this local function makes, the header-only retry
+                       included (#4280 round-2 part 2, item 2) — the real start further down the call chain
+                       always carries it too, so a trial that omitted it could pass on settings the real start
+                       would not. Null (every caller before item 2) contributes nothing, same as before. */
+                    await StartClusterAsync(
+                        newBinDirectory, newDataDirectory, trialPort, cancellationToken,
+                        QuiescedUpdateServerOptions + (sslServerOptions?.Invoke() ?? string.Empty), QuiescedStartWaitSeconds);
+                    started = true;
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    /* A cancellation (service stop mid-trial) is not a failed start — swallowing it here
+                       would fall through to the header-only retry and then the fixed "would not start even
+                       with an empty postgresql.auto.conf" message, both wrong for a stop that has nothing to
+                       do with the carried settings (#4280 round-2 part 2, item 0b). Letting it propagate
+                       still runs this finally, which stops the trial server the same as any other exit. */
+                    started = false;
+                }
+                finally
+                {
+                    if (await StopClusterConfirmedAsync(newBinDirectory, newDataDirectory))
+                    {
+                        TryDeleteFile(marker);
+                    }
+                    else
+                    {
+                        _logger.LogCritical(
+                            "The server started on private port {Port} to verify carried postgresql.auto.conf settings would not stop. {Marker} is kept, so the next start recognizes it and stops it rather than adopting it as the store.",
+                            trialPort, marker);
+                    }
+                }
+
+                return started;
+            }
+        }
+        catch (Exception original)
+        {
+            /* A probe threw instead of returning a bad exit code — TimeoutException past s_confProbeTimeout, or
+               OperationCanceledException on a service stop mid-loop — or one of the writes above faulted, or
+               the verification start/stop above did. Whatever the cause, postgresql.auto.conf may hold one
+               unverified candidate line right now, and the post-commit handler around this call finishes the
+               upgrade regardless (see this method's own summary above), so whatever is on disk when this
+               throws IS what the next start reads. Put it back to the same empty-but-safe header the
+               combined-check failure path above uses. CancellationToken.None, not cancellationToken: the
+               caller's own token may already be the reason this threw, and a cancelled token must not be able
+               to block the one write that keeps the store bootable. */
+            try
+            {
+                await File.WriteAllTextAsync(newAutoConfPath, AutoConfHeaderOnly, CancellationToken.None);
+                _logger.LogWarning(
+                    "postgresql.auto.conf carry did not finish — reset to empty rather than leave an unverified " +
+                    "setting in place for the next start. The pre-upgrade original is kept at {Path}.",
+                    preUpgradeCopy);
+            }
+            catch (Exception resetEx)
+            {
+                /* The reset write itself failed. PostgreSQL treats postgresql.auto.conf as an optional file,
+                   so deleting it is just as safe as emptying it — try that before giving up. */
+                try
+                {
+                    File.Delete(newAutoConfPath);
+                    _logger.LogWarning(
+                        "postgresql.auto.conf carry did not finish, and resetting {Path} to empty also failed " +
+                        "({ResetReason}) — deleted it instead; PostgreSQL treats a missing postgresql.auto.conf " +
+                        "as empty. The pre-upgrade original is kept at {OriginalPath}.",
+                        newAutoConfPath, resetEx.Message, preUpgradeCopy);
+                }
+                catch (Exception deleteEx)
+                {
+                    /* original.Message joins the other two reasons (round-2 review, Low 1) so this exception's
+                       own text is self-contained — an operator, or a log that only shows the top-level
+                       message, still sees WHY the carry itself did not finish, not just why the two cleanup
+                       attempts after it also failed. Safe here specifically: every exception that can reach
+                       this catch (a probe timeout/cancellation, a file I/O fault, item 3's own fixed-message
+                       throw — StopClusterConfirmedAsync never throws) is already one this class never lets
+                       carry a setting's value or the server log tail, the same guarantee TryStartTrialAsync's
+                       own swallow relies on above. */
+                    throw new InvalidOperationException(
+                        $"postgresql.auto.conf carry did not finish ({original.Message}), and neither resetting " +
+                        $"{newAutoConfPath} to empty ({resetEx.Message}) nor deleting it ({deleteEx.Message}) " +
+                        "succeeded. It may hold an unverified setting — delete or empty this file by hand before " +
+                        "the next start.",
+                        original);
+                }
+            }
+
+            /* Unconditional (#4280 item 2): whichever of the two paths above ran, this call's own carry did
+               not finish, so any marker it left behind — "carrying" from the loop above, or "trial-passed"
+               from a trial that started before something else in this try block threw — is stale either way. */
+            TryDeleteAutoConfCarryMarker(newDataDirectory);
+
+            throw;
+        }
+
+        _logger.LogInformation(
+            "postgresql.auto.conf carried: {Carried} of {Total} pre-upgrade setting(s) kept, {Rejected} rejected. Originals kept at {Path}.",
+            carried.Count, settings.Count, rejected.Count, preUpgradeCopy);
+
+        return new AutoConfCarryResult(carried, rejected);
+    }
+
+    /// <summary>
+    /// Whether a GUC name might hold a credential or other secret in its value — <c>primary_conninfo</c> can
+    /// carry a password, <c>archive_command</c>/<c>restore_command</c> often carry a storage token, and
+    /// <c>ssl_passphrase_command</c> can carry a passphrase (round-1 security review, #4280 Medium 1).
+    /// PostgreSQL's own reject reason for an out-of-range value often repeats the value verbatim, so a name
+    /// that matches here gets no reason logged at all — matched loosely and case-insensitively against the
+    /// whole name, extension-qualified names included, erring toward withholding more than strictly needed.
+    /// </summary>
+    private static bool NameMayHoldASecret(string name)
+        => s_secretNameFragments.Any(fragment => name.Contains(fragment, StringComparison.OrdinalIgnoreCase));
+
+    private static readonly string[] s_secretNameFragments =
+        { "conninfo", "command", "password", "passphrase", "secret", "key", "token", "credential", "auth" };
 
     /// <summary>
     /// The in-place major upgrade, start to finish. Each step is labelled, and ANY failure before the commit
@@ -2778,6 +3490,15 @@ internal sealed class DarlingStoreUpgrade
                UNBOOTABLE. Everything after this is bookkeeping, and bookkeeping must never be able to undo
                a completed upgrade. */
             swapped = true;
+
+            /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) — BEFORE anything gives the new
+                    cluster its first real start, the quiesced TimescaleDB update just below included. Read
+                    from `retained`: the old data directory's content now lives there, since the swap above
+                    already moved it. Any failure here is caught by the post-commit handler below, which
+                    keeps the store running on the new major regardless — never a reason to brick it. */
+            step = "carry-auto-conf";
+            await CarryAutoConfAsync(
+                retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions);
 
             if (mode == FileTransferMode.Link)
             {

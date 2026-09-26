@@ -223,7 +223,9 @@ public static class PgMigrations
         new Migration(141, "collection-caveats", V141Sql),
         new Migration(142, "index-object-stats-server-time", V142Sql),
         new Migration(143, "query-store-interval-latest", V143Sql),
-        new Migration(144, "managed-conf-verdicts", V144Sql),
+        new Migration(144, "raw-chunk-interval-rung-history", V144Sql),
+        new Migration(145, "query-store-interval-wide", V145Sql),
+        new Migration(146, "managed-conf-verdicts", V146Sql),
     };
 
     /// <summary>
@@ -2044,7 +2046,183 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
 );";
 
     /// <summary>
-    /// V144 — <c>collect.managed_conf_verdicts</c> (#4215 ruling M2, #4251's managed-store part): the per-key
+    /// V144 (#4211) — the rung history <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalReconciler"/>
+    /// both writes to and reads <c>IntervalLastChangedUtc</c> back from, plus a small per-run record of WAL
+    /// volume (ruling decision 8, review finding L4: stage 1 records WAL volume so a later stage can correlate
+    /// it against interval moves). Two engine-plain tables, the <c>collect.store_log_events</c> /
+    /// <c>collect.store_log_captures</c> shape (V111): plain tables, no serial id, a time index, naive-UTC
+    /// <c>timestamp</c> columns per the store's cross-engine contract. Neither table is purged — the run
+    /// table gains one row per daily pass (about 365 a year) and the history one row per move, and the
+    /// history has to keep at least
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.MinimumDaysBetweenMoves"/> days
+    /// anyway, because the next pass reads <c>MAX(changed_at)</c> from it. Like store_log's tables, these are
+    /// self-telemetry about the store's OWN tuning, not collected monitoring data, so they are deliberately
+    /// outside <c>CollectorCatalog.All</c>.
+    ///
+    /// <para><b><c>raw_chunk_interval_rung_history</c></b>: one row per rung CHANGE (not per table per run) —
+    /// table, when, the interval it moved from and to, the reason text
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.Decision"/> already built, and the
+    /// three inputs the decision was made from (ingest rate, budget B, the store-wide open-chunk total). The
+    /// reconciler's own <c>MAX(changed_at)</c> per table is what feeds
+    /// <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.TableInput.IntervalLastChangedUtc"/>
+    /// back into the next run, which is what makes <see cref="PerformanceMonitor.Darling.Storage.RawChunkIntervalPlanner.MinimumDaysBetweenMoves"/>
+    /// hold across restarts and not just within one process's lifetime.</para>
+    ///
+    /// <para><b><c>raw_chunk_interval_reconcile_runs</c></b>: one row per reconcile RUN, whether or not it
+    /// changed anything — <c>wal_bytes</c> is <c>numeric</c> because that is <c>pg_stat_wal.wal_bytes</c>'s own
+    /// type (a lifetime counter PostgreSQL does not bound to bigint).</para>
+    /// </summary>
+    private const string V144Sql = @"
+CREATE TABLE IF NOT EXISTS collect.raw_chunk_interval_rung_history
+(
+    changed_at timestamp NOT NULL,
+    table_name text NOT NULL,
+    from_interval_hours integer NOT NULL,
+    to_interval_hours integer NOT NULL,
+    reason text NOT NULL,
+    ingest_bytes_per_hour double precision NOT NULL,
+    budget_bytes double precision NOT NULL,
+    store_total_bytes double precision NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_chunk_interval_rung_history_table_time
+    ON collect.raw_chunk_interval_rung_history(table_name, changed_at DESC);
+
+CREATE TABLE IF NOT EXISTS collect.raw_chunk_interval_reconcile_runs
+(
+    run_at timestamp NOT NULL,
+    wal_bytes numeric
+);
+
+CREATE INDEX IF NOT EXISTS idx_raw_chunk_interval_reconcile_runs_time
+    ON collect.raw_chunk_interval_reconcile_runs(run_at);";
+
+    /// <summary>
+    /// V145 — the wide latest-snapshot-per-interval table beside V143's (#3953, review D4R + F1 measurement,
+    /// ruled issuecomment-5836972848): every outcome (Regular, Aborted, Exception), every raw column the three new
+    /// reads need except <c>collection_id</c>, <c>server_name</c> and <c>query_plan_text</c> (57 columns). V143's
+    /// own table, coverage and pending tables are untouched — this is three MORE tables, the same shape as V143's
+    /// three, engine-plain, with no backfill. Kept 9 days (F1: the 7-day preset plus a day of margin for an
+    /// interval that can span a day) by the service's retention sweep, on <c>first_execution_time</c>, not this
+    /// migration's concern.
+    ///
+    /// <para><b><c>collect.query_store_interval_wide</c></b>: identity is V143's identity plus
+    /// <c>execution_type_desc</c>, because two outcomes can share every other key. <c>first_execution_time</c>
+    /// stays <c>NOT NULL</c> (M2, ruled) even though this table carries every outcome. <c>fillfactor = 50</c>,
+    /// same as V143's and measured the same way. NO secondary index: F1 measured a window index on this shape
+    /// taking HOT updates to 0%, and every read that would use one is slower on it than the split's plain scan.</para>
+    ///
+    /// <para><b><c>collect.query_store_interval_wide_coverage</c></b> and
+    /// <b><c>collect.query_store_interval_wide_pending</c></b>: column-for-column copies of V143's coverage and
+    /// pending tables, so a later gate can parametrize V143's own decision on the table rather than duplicate it
+    /// (ruling, item 5).</para>
+    ///
+    /// </summary>
+    private const string V145Sql = @"
+/* One row per Query Store interval identity, every outcome. Types and nullability mirror query_store_stats except
+   first_execution_time, which stays NOT NULL here (M2, ruled): the writer's IS NOT NULL filter and coverage-reset
+   safeguard mean the table never silently drops a row raw accepted. fillfactor 50 keeps the open interval's
+   refreshes HOT, as V143's. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide
+(
+    collection_time timestamp NOT NULL,
+    server_id integer NOT NULL,
+    database_name text,
+    query_id bigint,
+    plan_id bigint,
+    execution_type_desc text,
+    first_execution_time timestamp NOT NULL,
+    last_execution_time timestamp,
+    module_name text,
+    query_text text,
+    query_hash text,
+    execution_count bigint,
+    avg_duration_us bigint,
+    min_duration_us bigint,
+    max_duration_us bigint,
+    avg_cpu_time_us bigint,
+    min_cpu_time_us bigint,
+    max_cpu_time_us bigint,
+    avg_logical_io_reads bigint,
+    min_logical_io_reads bigint,
+    max_logical_io_reads bigint,
+    avg_logical_io_writes bigint,
+    min_logical_io_writes bigint,
+    max_logical_io_writes bigint,
+    avg_physical_io_reads bigint,
+    min_physical_io_reads bigint,
+    max_physical_io_reads bigint,
+    avg_clr_time_us bigint,
+    min_clr_time_us bigint,
+    max_clr_time_us bigint,
+    min_dop bigint,
+    max_dop bigint,
+    avg_query_max_used_memory bigint,
+    min_query_max_used_memory bigint,
+    max_query_max_used_memory bigint,
+    avg_rowcount bigint,
+    min_rowcount bigint,
+    max_rowcount bigint,
+    avg_num_physical_io_reads bigint,
+    min_num_physical_io_reads bigint,
+    max_num_physical_io_reads bigint,
+    avg_log_bytes_used bigint,
+    min_log_bytes_used bigint,
+    max_log_bytes_used bigint,
+    avg_tempdb_space_used bigint,
+    min_tempdb_space_used bigint,
+    max_tempdb_space_used bigint,
+    plan_type text,
+    plan_forcing_type text,
+    is_forced_plan boolean,
+    force_failure_count bigint,
+    last_force_failure_reason text,
+    compatibility_level integer,
+    query_plan_hash text,
+    replica_role text,
+    runtime_stats_interval_id bigint,
+    interval_start_time_utc timestamp
+)
+WITH (fillfactor = 50);
+
+/* NULLS NOT DISTINCT, same reason as V143's: replica_role is NULL off an availability group. execution_type_desc
+   joins the identity because this table, unlike V143's, holds every outcome. No secondary index (F1, measured). */
+CREATE UNIQUE INDEX IF NOT EXISTS ux_query_store_interval_wide
+ON collect.query_store_interval_wide
+(
+    server_id,
+    database_name,
+    runtime_stats_interval_id,
+    plan_id,
+    query_id,
+    replica_role,
+    first_execution_time,
+    execution_type_desc
+)
+NULLS NOT DISTINCT;
+
+/* Column-for-column copy of V143's coverage table: this table's own claim, independent of V143's. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_coverage
+(
+    server_id integer NOT NULL,
+    filled_since timestamp NOT NULL,
+    applied_through timestamp NOT NULL,
+    CONSTRAINT pk_query_store_interval_wide_coverage PRIMARY KEY (server_id)
+);
+
+/* Column-for-column copy of V143's pending table: one row per raw batch whose apply to THIS table failed. */
+CREATE TABLE IF NOT EXISTS collect.query_store_interval_wide_pending
+(
+    server_id integer NOT NULL,
+    collection_time timestamp NOT NULL,
+    database_name text NOT NULL,
+    recorded_at timestamp NOT NULL,
+    failure text,
+    CONSTRAINT pk_query_store_interval_wide_pending PRIMARY KEY (server_id, collection_time, database_name)
+);";
+
+    /// <summary>
+    /// V146 — <c>collect.managed_conf_verdicts</c> (#4215 ruling M2, #4251's managed-store part): the per-key
     /// verdict a managed store's OWNER connection computes once at every service-owned start, replacing the
     /// previous start's rows. <c>DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync</c> is the
     /// only writer.
@@ -2055,7 +2233,7 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
     /// distinct fields a reader filters and displays independently (current value, derived value, source,
     /// file, line, verdict, detail), and cramming them into one text column would mean every reader,
     /// including a remote MCP caller, parses app-defined JSON instead of running SQL against typed columns.
-    /// The coordinator's dispatch for this lane pre-approved exactly one migration for this shape.</para>
+    /// The dispatch for this change pre-approved exactly one migration for this shape.</para>
     ///
     /// <para><b>Why the owner must compute and store it, not a live per-read check</b> (#4215 ruling M2). The
     /// <c>mcp</c> and <c>viewer</c> roles get a NULL <c>pg_settings.sourcefile</c> and cannot read
@@ -2084,7 +2262,7 @@ CREATE TABLE IF NOT EXISTS collect.query_store_interval_latest_pending
     /// <c>AT TIME ZONE 'UTC'</c> like every other postmaster-start column since V139 — never a bare cast, which
     /// renders in the writer's session zone.</para>
     /// </summary>
-    private const string V144Sql = @"
+    private const string V146Sql = @"
 CREATE TABLE IF NOT EXISTS collect.managed_conf_verdicts
 (
     setting_name text NOT NULL,
@@ -2099,6 +2277,7 @@ CREATE TABLE IF NOT EXISTS collect.managed_conf_verdicts
     postmaster_start_time timestamp NOT NULL,
     CONSTRAINT pk_managed_conf_verdicts PRIMARY KEY (setting_name)
 );";
+
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

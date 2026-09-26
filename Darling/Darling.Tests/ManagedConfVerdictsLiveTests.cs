@@ -26,7 +26,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Live coverage for #4215's stored verdicts (<c>collect.managed_conf_verdicts</c>, V144) and #4251's restart
+/// Live coverage for #4215's stored verdicts (<c>collect.managed_conf_verdicts</c>, V146) and #4251's restart
 /// check — <see cref="DarlingStoreHostProfile.ComputeAndStoreManagedConfVerdictsAsync"/> and
 /// <see cref="DarlingStoreHostProfile.ReadStoredManagedConfVerdictsAsync"/>, which no test reached against a
 /// real PostgreSQL before lane A1e (PR #4336's body). Gated on DARLING_TEST_PGRUNTIME exactly like

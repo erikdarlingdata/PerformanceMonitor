@@ -1211,23 +1211,10 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
-    /// Returns per-second rates grouped by wait type.
-    ///
-    /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
-    /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
-    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
-    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
-    /// this read windows on the UTC bounds.</para>
+    /// The bucketed statement text (#4349, matching #4234/#4340's shape), pulled out of
+    /// <see cref="GetLockWaitTrendAsync"/> so its shape is checkable without a live DuckDB.
     /// </summary>
-    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
-    {
-        using var connection = await OpenConnectionAsync();
-        using var command = connection.CreateCommand();
-
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
-
-        command.CommandText = @"
+    internal static readonly string LockWaitTrendSql = $@"
 WITH raw AS
 (
     SELECT
@@ -1245,34 +1232,84 @@ WITH raw AS
     AND   wait_type LIKE 'LCK%'
     AND   collection_time >= $2
     AND   collection_time <= $3
+),
+rated AS
+(
+    SELECT
+        collection_time,
+        wait_type,
+        CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms,
+        CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds
+    FROM raw
 )
 SELECT
-    collection_time,
     wait_type,
-    CASE WHEN interval_seconds > 0 THEN CAST(delta_wait_time_ms AS DOUBLE PRECISION) / interval_seconds END AS wait_time_ms_per_second
-FROM raw
-WHERE delta_wait_time_ms >= 0
-ORDER BY collection_time, wait_type";
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    SUM(rated_wait_ms) / SUM(rated_seconds) AS wait_time_ms_per_second,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM rated
+GROUP BY wait_type, 2
+HAVING COUNT(rated_seconds) > 0
+ORDER BY wait_type, 2";
+
+    /// <summary>
+    /// Gets lock wait stats trend data (LCK% wait types) for the blocking trends chart.
+    /// Returns per-second rates grouped by wait type.
+    ///
+    /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
+    /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
+    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
+    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
+    /// this read windows on the UTC bounds.</para>
+    /// <para>#4349: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (wait type), matching
+    /// #4234/#4340's shape — <c>seriesCount</c> is always 1 into <see cref="TrendBuckets.AutoMinutes"/>. When
+    /// every bucket the call returns holds exactly one physical collection, every point is stamped at its own
+    /// raw collection time instead of the <c>time_bucket</c> grid line.</para>
+    /// </summary>
+    public async Task<List<LockWaitTrendPoint>> GetLockWaitTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
+    {
+        using var connection = await OpenConnectionAsync();
+        using var command = connection.CreateCommand();
+
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = LockWaitTrendSql;
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<LockWaitTrendPoint>();
+        var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, double Rate)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* A NULL rate is an unknowable interval (#3540): the row is dropped, not read as 0. */
-            if (reader.IsDBNull(2))
+            if (Convert.ToInt64(reader.GetValue(4)) != 1)
             {
-                continue;
+                everyBucketSingleton = false;
             }
 
+            rows.Add((
+                reader.IsDBNull(0) ? string.Empty : reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(3),
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))));
+        }
+
+        var items = new List<LockWaitTrendPoint>();
+        foreach (var row in rows)
+        {
             items.Add(new LockWaitTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                WaitType = reader.IsDBNull(1) ? string.Empty : reader.GetString(1),
-                WaitTimeMsPerSecond = reader.GetDouble(2)
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                WaitType = row.WaitType,
+                WaitTimeMsPerSecond = row.Rate
             });
         }
         return items;

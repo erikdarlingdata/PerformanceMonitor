@@ -23,10 +23,9 @@ namespace Darling.Tests;
 /// (<see cref="QueryStoreIntervalLatestWriterTests"/>, <see cref="PlanRegressionIntervalTableEquivalenceTests"/>);
 /// this file is the RUNG: the ladder, the DDL, and the viewer probe.
 ///
-/// <para>This file carries the "I am the top rung" claims that moved off <see cref="CollectionCaveatsRungTests"/>
-/// (V141) when this rung landed: a fully-migrated store must map to EXACTLY this version, or the viewer's connect-time
-/// gate refuses a store that is actually current. When the next rung lands they move on again, and what stays is
-/// everything true of this rung wherever it sits.</para>
+/// <para>This file took over the "I am the top rung" claims that moved off <see cref="CollectionCaveatsRungTests"/>
+/// (V141) when this rung landed, and hands them on to <see cref="RawChunkIntervalRungHistoryRungTests"/> (V144,
+/// #4211) when that one did.</para>
 /// </summary>
 public sealed class QueryStoreIntervalLatestRungTests
 {
@@ -46,7 +45,10 @@ public sealed class QueryStoreIntervalLatestRungTests
         Assert.Equal("query-store-interval-latest", V143.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped
+           being true when V144 landed. The invariant that outlives the handoff is that the LADDER's top and
+           the declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -84,13 +86,11 @@ public sealed class QueryStoreIntervalLatestRungTests
     }
 
     /// <summary>
-    /// The viewer probe's three sites carry this rung's sentinel, and the map treats it as the TOP arm: a missing top
-    /// arm maps a fully-migrated store one rung short, permanently, because <c>RequiredStoreSchemaVersion</c> is
-    /// <c>StorageVersion.SchemaVersion</c>. The viewer runs no analysis, so this banner is the rung's only viewer
-    /// effect.
+    /// The viewer probe's three sites carry this rung's sentinel at its own ordinal, and the map's arm for it
+    /// returns 143 — a position within the signature, not its end, now that V144 has appended its own.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeMapsAStoreStoppedHereToThisRung()
     {
         Assert.Contains(
             "table_name = 'query_store_interval_latest_pending'",
@@ -98,28 +98,37 @@ public sealed class QueryStoreIntervalLatestRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
+        Assert.Contains("hasQueryStoreIntervalLatest", viewer, StringComparison.Ordinal);
 
         Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
+
+        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
+           NEWEST sentinel, which stopped being true the moment V144 appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasQueryStoreIntervalLatest", method.GetParameters()[ProbeOrdinal].Name);
 
-        var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
+        var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
+        Assert.Equal(RungVersion, (int)method.Invoke(null, atThisRung)!);
 
-        var behind = (object[])all.Clone();
+        var behind = (object[])atThisRung.Clone();
         behind[ProbeOrdinal] = false;
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
+        /* In the source, this rung's arm sits ABOVE the previous rung's and BELOW V144's, and returns this
+           rung's own version. */
         var thisArm = viewer.IndexOf("if (hasQueryStoreIntervalLatest)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasCollectionCaveats)", StringComparison.Ordinal);
+        var nextArm = viewer.IndexOf("if (hasRawChunkIntervalRungHistory)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V143 sentinel arm — a fully-migrated store would map one rung low");
+        Assert.True(previousArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
+        Assert.True(nextArm >= 0, "the V144 arm is gone, so the handoff this file claims never happened");
         Assert.True(thisArm < previousArm, "the V143 arm sits below the previous rung's, so a current store maps one rung low");
+        Assert.True(nextArm < thisArm, "the V144 arm sits below the V143 arm, so a current V144 store maps one rung low");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
 
         /* The V71 finding: the tables are named in the probe line and nowhere in the arm's prose. */

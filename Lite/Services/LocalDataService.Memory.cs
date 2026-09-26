@@ -16,6 +16,10 @@ namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
 {
+    /// <summary>#4234: TTL memoization for <see cref="GetDistinctMemoryClerkTypesForPickerAsync"/> — see
+    /// <see cref="LiteNameListCache"/>.</summary>
+    private readonly LiteNameListCache _distinctMemoryClerkTypesCache = new();
+
     /// <summary>
     /// Gets the most recent memory stats snapshot for a server.
     /// </summary>
@@ -187,6 +191,9 @@ LIMIT 1";
 
     /// <summary>
     /// Gets the distinct memory clerk types collected for a server, ordered by total memory descending.
+    /// <para>Uncached: MCP shares no read with the clerk picker today, but this stays uncached on the same
+    /// footing as <see cref="GetDistinctWaitTypesAsync"/> so an MCP caller added later never sees a stale
+    /// answer. The picker's memoized entry point is <see cref="GetDistinctMemoryClerkTypesForPickerAsync"/>.</para>
     /// </summary>
     public async Task<List<string>> GetDistinctMemoryClerkTypesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
@@ -219,12 +226,73 @@ ORDER BY SUM(memory_mb) DESC";
     }
 
     /// <summary>
-    /// Fetches the memory clerk trend for ALL selected clerk types in ONE query
-    /// (replacing an N+1 query-per-clerk loop), grouped by clerk type.
+    /// Picker-only entry point for <see cref="GetDistinctMemoryClerkTypesAsync"/>: checks
+    /// <see cref="_distinctMemoryClerkTypesCache"/> first, falls back to the shared uncached read, then
+    /// memoizes it.
+    /// <para>#4234: keyed on (server, window length) for <see cref="LiteNameListCache.Ttl"/>, so the
+    /// full-window read behind this runs at most once per 15 minutes rather than on every 1-minute
+    /// auto-refresh. Only <c>ServerTab</c>'s clerk picker goes through this cache.
+    /// <paramref name="nowUtc"/> is the cache's clock seam — null uses the wall clock; a test passes an
+    /// explicit time to fast-forward past the TTL without sleeping.</para>
+    /// </summary>
+    public async Task<List<string>> GetDistinctMemoryClerkTypesForPickerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? nowUtc = null)
+    {
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
+
+        var effectiveNow = nowUtc ?? DateTime.UtcNow;
+        var windowLength = endTime - startTime;
+        if (_distinctMemoryClerkTypesCache.TryGet(serverId, windowLength, endTime, effectiveNow, out var cached))
+        {
+            return cached;
+        }
+
+        var items = await GetDistinctMemoryClerkTypesAsync(serverId, hoursBack, fromDate, toDate);
+
+        _distinctMemoryClerkTypesCache.Set(serverId, windowLength, endTime, items, effectiveNow);
+        return items;
+    }
+
+    /// <summary>
+    /// The bucketed batched-trend statement text (#4234), pulled out of <see cref="GetMemoryClerkTrendsByTypesAsync"/>
+    /// so its shape (the bucket width in its own trailing parameter, after the dynamic <c>clerk_type IN (...)</c>
+    /// list so that list's numbering does not shift) is checkable without a live DuckDB.
+    /// </summary>
+    internal static string MemoryClerkTrendsSql(int clerkTypeCount)
+    {
+        var typeParams = string.Join(", ", Enumerable.Range(0, clerkTypeCount).Select(i => "$" + (i + 4)));
+        var widthParam = "$" + (clerkTypeCount + 4);
+        return $@"
+SELECT
+    clerk_type,
+    GREATEST(time_bucket(to_minutes(CAST({widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    AVG(memory_mb) AS memory_mb,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM v_memory_clerks
+WHERE server_id = $1
+AND   collection_time >= $2
+AND   collection_time <= $3
+AND   clerk_type IN ({typeParams})
+GROUP BY clerk_type, 2
+ORDER BY clerk_type, 2";
+    }
+
+    /// <summary>
+    /// Batched sibling of the removed per-clerk loop: fetches the trend for ALL selected clerk types in ONE
+    /// query, grouped by clerk type.
+    /// <para>#4234: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (<c>seriesCount</c>
+    /// always 1 into <see cref="TrendBuckets.AutoMinutes"/>, the ruling's own wording). A clerk's memory is a
+    /// GAUGE, not a counter, so a bucket's value is the plain average of the collections inside it — there is
+    /// no unrated-row concept here (#3540 only marks delta rows), so every row in the window counts and no
+    /// <c>HAVING</c> is needed to drop a bucket. When EVERY bucket the whole call returned holds exactly one
+    /// physical collection, each point is stamped at its bucket's raw <c>first_collection_time</c> instead of
+    /// the <c>time_bucket</c> grid line; a single merged bucket anywhere (any clerk type) keeps
+    /// <c>bucket_start</c> throughout — the same rule <see cref="WaitTrendsSql"/> and <c>PerfmonTrendsSql</c>
+    /// use.</para>
     /// </summary>
     public async Task<Dictionary<string, List<MemoryClerkTrendPoint>>> GetMemoryClerkTrendsByTypesAsync(int serverId, List<string> clerkTypes, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null)
     {
-        using var _q = TimeQuery("GetMemoryClerkTrendsByTypesAsync", "v_memory_clerks trends batched by type");
+        using var _q = TimeQuery("GetMemoryClerkTrendsByTypesAsync", "v_memory_clerks trends batched by type, bucketed");
         var result = new Dictionary<string, List<MemoryClerkTrendPoint>>();
         if (clerkTypes.Count == 0) return result;
 
@@ -232,39 +300,52 @@ ORDER BY SUM(memory_mb) DESC";
         using var command = connection.CreateCommand();
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabUtcOffsetMinutes);
-        var typeParams = string.Join(", ", clerkTypes.Select((_, i) => "$" + (i + 4)));
 
-        command.CommandText = $@"
-SELECT
-    clerk_type,
-    collection_time,
-    memory_mb
-FROM v_memory_clerks
-WHERE server_id = $1
-AND   collection_time >= $2
-AND   collection_time <= $3
-AND   clerk_type IN ({typeParams})
-ORDER BY clerk_type, collection_time";
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = MemoryClerkTrendsSql(clerkTypes.Count);
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var ct in clerkTypes)
             command.Parameters.Add(new DuckDBParameter { Value = ct });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
+
+        var rows = new List<(string ClerkType, DateTime BucketStart, DateTime FirstCollectionTime, double MemoryMb)>();
+        var everyBucketSingleton = true;
 
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            var ct = reader.GetString(0);
-            if (!result.TryGetValue(ct, out var list))
+            if (reader.GetInt64(4) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(3),
+                /* ToDouble, not GetDouble: DuckDB's AVG over a DECIMAL column can hand back a boxed value
+                   GetDouble does not accept — see GetWaitStatsTrendsByTypesAsync's own sum columns for the
+                   same guard. */
+                reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))));
+        }
+
+        foreach (var row in rows)
+        {
+            if (!result.TryGetValue(row.ClerkType, out var list))
             {
                 list = new List<MemoryClerkTrendPoint>();
-                result[ct] = list;
+                result[row.ClerkType] = list;
             }
+
             list.Add(new MemoryClerkTrendPoint
             {
-                CollectionTime = reader.GetDateTime(1),
-                MemoryMb = reader.IsDBNull(2) ? 0 : ToDouble(reader.GetValue(2))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                MemoryMb = row.MemoryMb
             });
         }
 

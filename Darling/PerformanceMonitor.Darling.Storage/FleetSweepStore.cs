@@ -651,13 +651,14 @@ ORDER BY server_id, item_key;";
 
     /// <summary>
     /// One sweep's per-server verdicts for the ENGINE's diff — the same statement as
-    /// <see cref="GetServerVerdictsAsync"/> with the opposite fault posture, and the split is the
-    /// point: this read is sweep N's join target for previous-band and transition computation, and a
-    /// fault swallowed into empty would make every server read as NEW to the sweep — a diff that
-    /// restates absolutes because the store failed, the same misreading <see cref="GetLatestSweepAsync"/>
-    /// throws to prevent. The presentation read keeps its log-and-degrade posture for the surfaces
-    /// that have their own degraded rendering; the engine has none, so it throws and the sweep fails
-    /// loudly instead of publishing a wrong document.
+    /// <see cref="GetServerVerdictsAsync"/>, kept as its own method rather than merged into it: this
+    /// read is sweep N's join target for previous-band and transition computation, and a fault
+    /// swallowed into empty would make every server read as NEW to the sweep — a diff that restates
+    /// absolutes because the store failed, the same misreading <see cref="GetLatestSweepAsync"/>
+    /// throws to prevent. The engine has no degraded rendering to fall back to, so it throws and the
+    /// sweep fails loudly instead of publishing a wrong document — since #4315 the presentation read
+    /// throws too (its own reason: a document with a section silently missing), so the two methods'
+    /// fault posture no longer splits, only their callers do.
     /// </summary>
     public static async Task<List<FleetSweepServerVerdict>> GetServerVerdictsForEngineAsync(
         NpgsqlDataSource postgres, long sweepId, CancellationToken cancellationToken)
@@ -684,13 +685,14 @@ ORDER BY server_id, item_key;";
 
     /// <summary>
     /// The runs inside a span for the DAILY ROLLUP (#3466 lane 4) — the same statement as
-    /// <see cref="GetSweepsBySpanAsync"/> with the opposite fault posture, the
-    /// <see cref="GetServerVerdictsForEngineAsync"/> split restated for delivery: the rollup posts
-    /// NOTHING on an empty day by design, so a store fault swallowed into an empty list would
-    /// convert an unreadable store into a permanently quiet channel with no artifact anywhere — the
-    /// quiet-is-not-clean misreading, applied to delivery. The throw lands in the evaluator's catch,
-    /// which counts it on the swallowed-read surface (#3013) and skips the tick without consuming
-    /// the daily interval, so the next tick asks again.
+    /// <see cref="GetSweepsBySpanAsync"/>, kept as its own method rather than merged into it: the
+    /// rollup posts NOTHING on an empty day by design, so a store fault swallowed into an empty list
+    /// would convert an unreadable store into a permanently quiet channel with no artifact anywhere —
+    /// the quiet-is-not-clean misreading, applied to delivery. The throw lands in the evaluator's
+    /// catch, which counts it on the swallowed-read surface (#3013) and skips the tick without
+    /// consuming the daily interval, so the next tick asks again. Since #4315 the presentation read
+    /// throws too (its own reason: an empty timeline reading as a quiet span), so the two methods'
+    /// fault posture no longer splits, only their callers do.
     /// </summary>
     public static async Task<List<FleetSweepRun>> GetSweepsBySpanForRollupAsync(
         NpgsqlDataSource postgres,
@@ -826,40 +828,36 @@ ORDER BY server_id, item_key;";
     }
 
     /// <summary>
-    /// The runs inside a span, newest first — the web feed's read (lane 3). Logs and returns empty
-    /// on a fault, the presentation-read discipline (PgFindingStore): the surfaces this serves have
-    /// their own degraded rendering, and an exception here would take the whole page with it.
+    /// The runs inside a span, newest first — the web feed's timeline and <c>get_sweep_reports</c>'s
+    /// timeline half. THROWS on a store fault (#4315): this used to log-and-degrade to an empty list,
+    /// which the timeline could not tell apart from a genuinely quiet span — the page rendered "No
+    /// sweeps in this span" and the tool answered an empty timeline, both reading healthier than a
+    /// store the collector cannot reach. The caller's own backstop now answers the loud shape (the
+    /// web pipeline's #4276 handler, or <c>get_sweep_reports</c>'s catch); nothing here swallows a
+    /// fault into a list that looks like a clean answer.
     /// </summary>
     public static async Task<List<FleetSweepRun>> GetSweepsBySpanAsync(
         NpgsqlDataSource postgres,
         DateTime spanStartUtc,
         DateTime spanEndUtc,
-        ILogger? logger,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var runs = new List<FleetSweepRun>();
 
-        try
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetRunsBySpanSql, connection)
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(GetRunsBySpanSql, connection)
-            {
-                CommandTimeout = CommandTimeoutSeconds,
-            };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanStartUtc) });
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanEndUtc) });
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanStartUtc) });
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = AsNaive(spanEndUtc) });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                runs.Add(ReadRun(reader));
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            logger?.LogError("[FleetSweepStore] GetSweepsBySpanAsync failed: {Message}", ex.Message);
+            runs.Add(ReadRun(reader));
         }
 
         return runs;
@@ -888,131 +886,115 @@ ORDER BY server_id, item_key;";
         return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadRun(reader) : null;
     }
 
-    /// <summary>One sweep's per-server verdicts — presentation read, logs and degrades.</summary>
+    /// <summary>One sweep's per-server verdicts — the sweep document's presentation read. THROWS on a
+    /// store fault (#4315): a verdicts read that failed used to degrade its section to an empty list
+    /// while the rest of the document rendered clean — the "quiet is not clean" misreading the
+    /// sweep's own instrument-liveness block warns readers about, applied to the store read itself.
+    /// The caller now fails the whole document rather than publish one with a section silently
+    /// missing.</summary>
     public static async Task<List<FleetSweepServerVerdict>> GetServerVerdictsAsync(
-        NpgsqlDataSource postgres, long sweepId, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, long sweepId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var verdicts = new List<FleetSweepServerVerdict>();
 
-        try
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetVerdictsSql, connection)
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(GetVerdictsSql, connection)
-            {
-                CommandTimeout = CommandTimeoutSeconds,
-            };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sweepId });
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sweepId });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                verdicts.Add(ReadVerdict(reader));
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            logger?.LogError("[FleetSweepStore] GetServerVerdictsAsync failed: {Message}", ex.Message);
+            verdicts.Add(ReadVerdict(reader));
         }
 
         return verdicts;
     }
 
-    /// <summary>One sweep's would-have-paged ledger — presentation read, logs and degrades.</summary>
+    /// <summary>One sweep's would-have-paged ledger — presentation read. THROWS on a store fault
+    /// (#4315), the <see cref="GetServerVerdictsAsync"/> posture: an unreadable ledger used to
+    /// degrade to an empty list, which on a muted sweep is indistinguishable from the honest "nothing
+    /// would have paged" — the one answer this ledger must never give by accident.</summary>
     public static async Task<List<FleetSweepWouldHavePagedEntry>> GetWouldHavePagedAsync(
-        NpgsqlDataSource postgres, long sweepId, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, long sweepId, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var entries = new List<FleetSweepWouldHavePagedEntry>();
 
-        try
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetWouldHavePagedSql, connection)
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(GetWouldHavePagedSql, connection)
-            {
-                CommandTimeout = CommandTimeoutSeconds,
-            };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sweepId });
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Bigint, Value = sweepId });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                entries.Add(new FleetSweepWouldHavePagedEntry(
-                    reader.GetInt32(0),
-                    reader.GetString(1),
-                    reader.GetString(2)));
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            logger?.LogError("[FleetSweepStore] GetWouldHavePagedAsync failed: {Message}", ex.Message);
+            entries.Add(new FleetSweepWouldHavePagedEntry(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.GetString(2)));
         }
 
         return entries;
     }
 
-    /// <summary>Watch items in one state — presentation read, logs and degrades. The state names
-    /// are <see cref="FleetSweepWatchStateMachine"/>'s constants; an unknown state matches nothing,
-    /// which is the honest answer for it.</summary>
+    /// <summary>Watch items in one state — presentation read. THROWS on a store fault (#4315): a
+    /// failed read used to degrade to an empty list, which a caller reads as "nothing in this state"
+    /// rather than "the store could not answer". The state names are
+    /// <see cref="FleetSweepWatchStateMachine"/>'s constants; an unknown state still matches nothing,
+    /// which stays the honest answer for it.</summary>
     public static async Task<List<FleetSweepWatchItem>> GetWatchItemsByStateAsync(
-        NpgsqlDataSource postgres, string state, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, string state, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
         ArgumentNullException.ThrowIfNull(state);
 
         var items = new List<FleetSweepWatchItem>();
 
-        try
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetWatchItemsByStateSql, connection)
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(GetWatchItemsByStateSql, connection)
-            {
-                CommandTimeout = CommandTimeoutSeconds,
-            };
-            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = state });
+            CommandTimeout = CommandTimeoutSeconds,
+        };
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Text, Value = state });
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                items.Add(ReadWatchItem(reader));
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            logger?.LogError("[FleetSweepStore] GetWatchItemsByStateAsync failed: {Message}", ex.Message);
+            items.Add(ReadWatchItem(reader));
         }
 
         return items;
     }
 
-    /// <summary>Watch items open or carried — the "open right now" default view. Presentation read:
-    /// logs and degrades to empty, the <see cref="GetWatchItemsByStateAsync"/> posture.</summary>
+    /// <summary>Watch items open or carried — the "open right now" default view. THROWS on a store
+    /// fault (#4315), the <see cref="GetWatchItemsByStateAsync"/> posture: this is the worklist's
+    /// default view, so degrading it to empty on a fault used to read as "nothing open", the same
+    /// misreading a fault must never resemble.</summary>
     public static async Task<List<FleetSweepWatchItem>> GetOpenAndCarriedWatchItemsAsync(
-        NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(postgres);
 
         var items = new List<FleetSweepWatchItem>();
 
-        try
+        await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = new NpgsqlCommand(GetOpenAndCarriedWatchItemsSql, connection)
         {
-            await using var connection = await postgres.OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
-            await using var command = new NpgsqlCommand(GetOpenAndCarriedWatchItemsSql, connection)
-            {
-                CommandTimeout = CommandTimeoutSeconds,
-            };
+            CommandTimeout = CommandTimeoutSeconds,
+        };
 
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                items.Add(ReadWatchItem(reader));
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            logger?.LogError("[FleetSweepStore] GetOpenAndCarriedWatchItemsAsync failed: {Message}", ex.Message);
+            items.Add(ReadWatchItem(reader));
         }
 
         return items;

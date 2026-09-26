@@ -4521,7 +4521,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="ManagedConfWriteResult.HandEdited"/>) — nothing persists them, so they are re-derived from
     /// the writer every start, the same way <see cref="StoreUpgradeReport"/> already is.
     /// <paramref name="RejectedSettingNames"/> is the one fact that IS store-backed: every
-    /// <see cref="HostSettingVerdict.RejectedValue"/> row <c>collect.managed_conf_verdicts</c> (V144) is
+    /// <see cref="HostSettingVerdict.RejectedValue"/> row <c>collect.managed_conf_verdicts</c> (V146) is
     /// currently holding, read fresh each tick since a rejected value fixed by a later start replaces that
     /// row without this process restarting. <c>null</c> means the read FAILED this tick — unknown, not
     /// empty — so the evaluator neither fires nor resolves on this condition alone and instead keeps

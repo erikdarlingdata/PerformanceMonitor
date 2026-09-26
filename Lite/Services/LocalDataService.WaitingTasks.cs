@@ -11,6 +11,8 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 
+using PerformanceMonitor.Common;
+
 namespace PerformanceMonitorLite.Services;
 
 public partial class LocalDataService
@@ -109,6 +111,12 @@ LIMIT 1";
 
     /// <summary>
     /// Gets waiting task duration trend grouped by wait type for charting.
+    /// <para>#4349: bucketed (matching #4234/#4340's shape). A waiting-task snapshot carries no delta or
+    /// sample interval, so unlike the #3540 trend family every row is unconditionally "rated" — a bucket's
+    /// total is the SUM of its rows' durations, and <c>collection_count</c> is a plain <c>COUNT(*)</c>.
+    /// Buckets to <see cref="TrendBudget.Chart"/>'s point budget per wait type; when every bucket the call
+    /// returns holds exactly one physical collection, every point is stamped at its own raw collection time
+    /// instead of the <c>time_bucket</c> grid line.</para>
     /// </summary>
     public async Task<List<WaitingTaskTrendPoint>> GetWaitingTaskTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
@@ -117,14 +125,19 @@ LIMIT 1";
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
 
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
         /* #1240 parity: exclude the user's ignored (benign) wait types at DISPLAY time (mirrors the
            wait-stats reads) so the Current Waits duration chart matches the Wait Stats tab. */
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
 SELECT
-    collection_time,
     wait_type,
-    SUM(wait_duration_ms) AS total_wait_ms
+    GREATEST(time_bucket(to_minutes(CAST($4 AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    SUM(wait_duration_ms) AS total_wait_ms,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
 FROM v_waiting_tasks
 WHERE server_id = $1
 AND   collection_time >= $2
@@ -132,25 +145,41 @@ AND   collection_time <= $3
 AND   wait_type IS NOT NULL
 {exclude}
 GROUP BY
-    collection_time,
-    wait_type
+    wait_type, 2
 ORDER BY
-    collection_time,
-    wait_type";
+    wait_type, 2";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<WaitingTaskTrendPoint>();
+        var rows = new List<(string WaitType, DateTime BucketStart, DateTime FirstCollectionTime, long TotalWaitMs)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            if (Convert.ToInt64(reader.GetValue(4)) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(3),
+                reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2))));
+        }
+
+        var items = new List<WaitingTaskTrendPoint>();
+        foreach (var row in rows)
+        {
             items.Add(new WaitingTaskTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                WaitType = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                TotalWaitMs = reader.IsDBNull(2) ? 0 : ToInt64(reader.GetValue(2))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                WaitType = row.WaitType,
+                TotalWaitMs = row.TotalWaitMs
             });
         }
         return items;
@@ -158,6 +187,13 @@ ORDER BY
 
     /// <summary>
     /// Gets blocked session count trend grouped by database for charting.
+    /// <para>#4349: bucketed (matching #4234/#4340's shape). A blocked-session count is a PER-SNAPSHOT
+    /// gauge, not a delta — a bucket's value is the AVERAGE of the per-collection counts it covers
+    /// (rounded, matching the CPU tab's gauge-averaging idiom), never their SUM: summing would double (or
+    /// N-tuple) the count purely because a wide bucket merged N snapshots, with no more blocking having
+    /// happened. The inner per-collection subquery keeps the pre-bucket per-collection count exactly as the
+    /// un-bucketed read computed it; <c>collection_count</c> is the number of distinct physical collections
+    /// the bucket merged.</para>
     /// </summary>
     public async Task<List<BlockedSessionTrendPoint>> GetBlockedSessionTrendAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
@@ -166,40 +202,73 @@ ORDER BY
 
         var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
+        var widthParam = 4 + dbValues.Count;
 
-        command.CommandText = @"
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
+
+        command.CommandText = $@"
+WITH per_collection AS
+(
+    SELECT
+        collection_time,
+        database_name,
+        COUNT(*) AS blocked_count
+    FROM v_waiting_tasks
+    WHERE server_id = $1
+    AND   blocking_session_id > 0
+    AND   collection_time >= $2
+    AND   collection_time <= $3" + dbClause + $@"
+    AND   database_name IS NOT NULL
+    GROUP BY
+        collection_time,
+        database_name
+)
 SELECT
-    collection_time,
     database_name,
-    COUNT(*) AS blocked_count
-FROM v_waiting_tasks
-WHERE server_id = $1
-AND   blocking_session_id > 0
-AND   collection_time >= $2
-AND   collection_time <= $3" + dbClause + @"
-AND   database_name IS NOT NULL
+    GREATEST(time_bucket(to_minutes(CAST(${widthParam} AS INTEGER)), collection_time, {TrendBuckets.OriginSql}), $2) AS bucket_start,
+    ROUND(AVG(blocked_count)) AS blocked_count,
+    MIN(collection_time) AS first_collection_time,
+    COUNT(*) AS collection_count
+FROM per_collection
 GROUP BY
-    collection_time,
-    database_name
+    database_name, 2
 ORDER BY
-    collection_time,
-    database_name";
+    database_name, 2";
 
         command.Parameters.Add(new DuckDBParameter { Value = serverId });
         command.Parameters.Add(new DuckDBParameter { Value = startTime });
         command.Parameters.Add(new DuckDBParameter { Value = endTime });
         foreach (var db in dbValues)
             command.Parameters.Add(new DuckDBParameter { Value = db });
+        command.Parameters.Add(new DuckDBParameter { Value = bucketMinutes });
 
-        var items = new List<BlockedSessionTrendPoint>();
+        var rows = new List<(string DatabaseName, DateTime BucketStart, DateTime FirstCollectionTime, int BlockedCount)>();
+        var everyBucketSingleton = true;
+
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
+            if (Convert.ToInt64(reader.GetValue(4)) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.GetDateTime(3),
+                reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2))));
+        }
+
+        var items = new List<BlockedSessionTrendPoint>();
+        foreach (var row in rows)
+        {
             items.Add(new BlockedSessionTrendPoint
             {
-                CollectionTime = reader.GetDateTime(0),
-                DatabaseName = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                BlockedCount = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2))
+                CollectionTime = everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                DatabaseName = row.DatabaseName,
+                BlockedCount = row.BlockedCount
             });
         }
         return items;

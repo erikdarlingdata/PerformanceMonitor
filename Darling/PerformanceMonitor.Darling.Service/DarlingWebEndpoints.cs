@@ -121,6 +121,109 @@ public static class DarlingWebEndpoints
         "get_tool_guide",
     };
 
+    /// <summary>
+    /// #4203: every read-only tool NOT yet converted to observe cancellation all the way to Npgsql — the
+    /// ratchet <c>WebReadCancellationPinTests</c> holds in both directions, the same shape
+    /// <c>LiveCleanupConversionRatchetTests</c> uses for its own conversion sweep. A name here may only be
+    /// REMOVED, on the PR that finishes threading its <see cref="ReadToolHandler"/> entry AND its
+    /// <c>[McpServerTool]</c> method's own <c>CancellationToken</c> parameter down to every store call — never
+    /// added, because every tool on the <c>/api/read/*</c> surface is in scope for the same fix and none is
+    /// meant to stay uncancellable. First slice (this lane): <c>audit_config</c> (the tool #4191 measured) plus
+    /// every other tool the web viewer's Configuration tab calls. Later lanes take the rest, about 20 a lane,
+    /// against this same allowlist, until it is empty and #4203 closes.
+    /// </summary>
+internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "compare_analysis",
+        "get_analysis_facts",
+        "get_analysis_findings",
+        "get_session_stats",
+        "get_waiting_tasks",
+        "get_alert_history",
+        "get_alert_settings",
+        "get_mute_rules",
+        "get_notification_routes",
+        "get_sweep_reports",
+        "get_collection_health",
+        "get_collection_log",
+        "get_current_waits_trend",
+        "get_blocking_stats",
+        "get_cpu_utilization",
+        "get_file_io_stats",
+        "get_memory_clerks",
+        "get_memory_stats",
+        "get_perfmon_stats",
+        "get_query_store_top",
+        "get_tempdb_trend",
+        "get_pg_top_queries",
+        "get_pg_plans",
+        "get_pg_plan_capture_readiness",
+        "get_pg_logging_audit",
+        "get_pg_wraparound_risk",
+        "get_pg_xmin_horizon",
+        "get_pg_replication_slots",
+        "get_pg_autovacuum_health",
+        "get_pg_io_stats",
+        "get_pg_wait_stats",
+        "get_pg_cpu_utilization",
+        "get_pg_wait_sampling",
+        "get_pg_kernel_stats",
+        "get_pg_predicate_stats",
+        "get_pg_index_bloat",
+        "get_pg_column_stats",
+        "get_pg_buffer_usage",
+        "get_pg_extensions",
+        "get_pg_lock_stats",
+        "get_pg_write_stats",
+        "get_pg_server_config",
+        "get_pg_server_config_changes",
+        "get_pg_deadlocks",
+        "get_pg_deadlock_detail",
+        "get_pg_log_events",
+        "get_pg_wait_trend",
+        "get_pg_query_duration_trend",
+        "get_pg_io_trend",
+        "get_pg_database_trend",
+        "get_pg_replication_stats",
+        "get_pg_blocking",
+        "get_pg_database_stats",
+        "get_pg_index_usage",
+        "get_pg_table_bloat",
+        "get_pg_session_states",
+        "get_wait_stats",
+        "get_wait_trend",
+        "get_wait_types",
+        "list_servers",
+        "get_file_io_trend",
+        "get_memory_trend",
+        "get_perfmon_trend",
+        "get_server_summary",
+        "get_daily_summary",
+        "get_daily_summary_range",
+        "get_fleet_overview",
+        "get_ag_health",
+        "get_store_metrics",
+        "get_store_log",
+        "get_store_query_stats",
+        "get_store_host",
+        "get_collector_cost",
+        "get_collector_stall_probes",
+        "get_oversized_plan_backlog",
+        "get_latch_stats",
+        "get_spinlock_stats",
+        "get_memory_grants",
+        "get_memory_pressure_events",
+        "get_resource_semaphore",
+
+        "get_pvs_stats",
+
+        "get_cpu_scheduler_pressure",
+        "get_plan_cache_bloat",
+        "get_running_jobs",
+        "get_plan_xml",
+        "get_default_trace_events",
+    };
+
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>
     private const int DefaultFleetHours = 1;
 
@@ -261,9 +364,10 @@ public static class DarlingWebEndpoints
 
         /* The four analysis-READ tools take a DarlingAnalysisService; the web host does not register one, so
            build it once here from the same VIEWER-role pool (its read methods — fact collection, period compare,
-           persisted-finding read — need only the store; the optional plan fetcher / logger are for the excluded
-           analyze/drill path). Shared across requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres, baselineCache: baselineCache);
+           persisted-finding read — need only the store; the optional plan fetcher is for the excluded
+           analyze/drill path, but the logger is also the analysis service's own logger (#4316)). Shared across
+           requests, like the MCP host's singleton. */
+        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache);
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
@@ -318,24 +422,25 @@ public static class DarlingWebEndpoints
                 }
                 catch (Exception ex)
                 {
-                    /* The tools swallow their own exceptions into McpHelpers.FormatError's envelope (the common
-                       case, ToHttpResult's ServerError arm below still answers that shape -- #4283, pending a
-                       design decision); this catch is only a backstop for a binding-layer throw. #4276: also the
-                       one log line this surface was missing. #4281 review, finding 2: this used to fall through
-                       to ToHttpResult too, which put ex.Message on the wire -- answer with the SAME body and
-                       status the top-of-pipeline backstop gives, so the wording and the timeout/error split
-                       cannot drift between the two call sites. */
+                    /* #4276/#4283: a binding-layer throw (the tools normally swallow their own into
+                       McpHelpers.FormatError's envelope and return normally, so this is only a backstop).
+                       Reported and answered directly from the real Exception here — ServerErrorResult's
+                       sentence-based classifier is for the FAR more common case below, where the exception is
+                       already gone by the time a tool's own catch handed back its envelope. Answering here
+                       too, rather than falling through to ToHttpResult, keeps the ONE log line #4276 added:
+                       routing this through FormatError first would make ToHttpResult's classifier re-derive
+                       from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
 
-                return ToHttpResult(result);
+                return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
             });
         }
 
-        MapCustomViews(app, postgres);
-        MapCustomAlerts(app, postgres);
-        MapMuteRules(app, postgres);
+        MapCustomViews(app, postgres, logger);
+        MapCustomAlerts(app, postgres, logger);
+        MapMuteRules(app, postgres, logger);
 
         /* The fleet sweep feed (#3466 lane 3): dedicated read routes like /api/fleet, over the same
            FleetSweepStore presentation reads lane 4's get_sweep_reports tool will serve — see
@@ -345,7 +450,12 @@ public static class DarlingWebEndpoints
 
         /* The per-alert triage page's assembly endpoint (#2710): everything it serves is already reachable
            through the /api/read mirror above — it adds assembly (alert match + anchored sections), not reach. */
-        DarlingTriageEndpoint.Map(app, postgres, analysis);
+        DarlingTriageEndpoint.Map(app, postgres, analysis, logger);
+
+        /* The alert-notebook binding endpoint (#4222 slice C): the mechanical conversion of a firing into a
+           read-only notebook definition. Same reach as the triage page it sits beside - everything it
+           serves is already reachable through /api/read/*. */
+        AlertNotebookEndpoint.Map(app, postgres, analysis, logger);
     }
 
     /* ─────────────────────────── #1563 custom views: session, catalog, CRUD ─────────────────────────── */
@@ -361,7 +471,7 @@ public static class DarlingWebEndpoints
     /// <see cref="ValidateDefinition"/> (the authority) before any write; the store adds optimistic concurrency +
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
-    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres)
+    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
         var store = new CustomViewStore(postgres);
 
@@ -415,23 +525,18 @@ public static class DarlingWebEndpoints
                 return ErrorResult(validation.Error!, StatusCodes.Status400BadRequest);
             }
 
-            try
+            /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
+               the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
+            var result = await store.CreateAsync(
+                request.Name, request.Description, request.DefinitionJson,
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            return result switch
             {
-                var result = await store.CreateAsync(
-                    request.Name, request.Description, request.DefinitionJson,
-                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
-                return result switch
-                {
-                    CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
-                    CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
-                    CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
-                    _ => ErrorResult("Could not create the view.", StatusCodes.Status500InternalServerError),
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error saving view: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+                CustomViewResult.Ok ok => CreatedResult(context, $"/api/views/{ok.View!.Id}", BuildFullViewNode(ok.View)),
+                CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                _ => ErrorResult("Could not create the view.", StatusCodes.Status500InternalServerError),
+            };
         });
 
         /* Update — 200 on success; 400 bad body/definition, 404 gone, 409 stale-version OR duplicate name.
@@ -461,24 +566,18 @@ public static class DarlingWebEndpoints
                 return ErrorResult(validation.Error!, StatusCodes.Status400BadRequest);
             }
 
-            try
+            /* #4283: no local catch — see the create route's comment above. */
+            var result = await store.UpdateAsync(
+                id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            return result switch
             {
-                var result = await store.UpdateAsync(
-                    id, request.Name, request.Description, request.DefinitionJson, expectedVersion,
-                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
-                return result switch
-                {
-                    CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
-                    CustomViewResult.NotFound => NotFoundResult(),
-                    CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
-                    CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
-                    _ => ErrorResult("Could not update the view.", StatusCodes.Status500InternalServerError),
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error saving view: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+                CustomViewResult.Ok ok => JsonNodeResult(BuildFullViewNode(ok.View!)),
+                CustomViewResult.NotFound => NotFoundResult(),
+                CustomViewResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                CustomViewResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                _ => ErrorResult("Could not update the view.", StatusCodes.Status500InternalServerError),
+            };
         });
 
         /* Delete — 204 on success, 404 when missing. Any authenticated seat; application/json required. */
@@ -489,15 +588,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            try
-            {
-                var result = await store.DeleteAsync(id, context.RequestAborted);
-                return result is CustomViewResult.Ok ? Results.NoContent() : NotFoundResult();
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error deleting view: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+            /* #4283: no local catch — see the create route's comment above. */
+            var result = await store.DeleteAsync(id, context.RequestAborted);
+            return result is CustomViewResult.Ok ? Results.NoContent() : NotFoundResult();
         });
 
         /* Compile-and-run a single composed panel spec (Custom Views v2, #1563) against the least-privilege
@@ -530,11 +623,20 @@ public static class DarlingWebEndpoints
 
             /* The compile-and-run itself lives in the shared RunComposedPanelAsync (the ONE runner behind both
                this endpoint and the MCP run_custom_view_panel tool); this route only adds the web concerns —
-               content-type gate, stream parse — then maps the discriminated outcome onto HTTP status. */
+               content-type gate, stream parse — then maps the discriminated outcome onto HTTP status.
+               RunComposedPanelAsync's outward text is UNCHANGED by #4283: its outcome.Error keeps carrying the
+               real "Error running query: {ex.Message}" sentence, because run_custom_view_panel's MCP caller
+               (DarlingMcpCustomViewTools) reads that same field and #4283 does not touch what an MCP client
+               sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
+               the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
+            var stopwatch = Stopwatch.StartNew();
             var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted);
-            return outcome.Payload is not null
-                ? JsonNodeResult(outcome.Payload)
-                : ErrorResult(outcome.Error!, outcome.IsServerError ? StatusCodes.Status500InternalServerError : StatusCodes.Status400BadRequest);
+            if (outcome.Payload is not null)
+            {
+                return JsonNodeResult(outcome.Payload);
+            }
+
+            return ComposeRunFailureResult(outcome, "/api/compose/run", logger, stopwatch.ElapsedMilliseconds);
         });
     }
 
@@ -556,7 +658,7 @@ public static class DarlingWebEndpoints
     /// naming the gate. The store/evaluator run on the host's least-privilege VIEWER pool (the same
     /// <paramref name="postgres"/> the reads and <c>/api/compose/run</c> use — never the owner pool).
     /// </summary>
-    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres)
+    private static void MapCustomAlerts(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
         var store = new CustomAlertRuleStore(postgres);
 
@@ -598,23 +700,18 @@ public static class DarlingWebEndpoints
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
-            try
+            /* #4283: no local catch — an unexpected throw here (never ex.Message on the wire) is exactly what
+               the #4281 top-of-pipeline backstop exists to answer, and MapAll wires this route after it. */
+            var result = await store.CreateAsync(
+                request.Name, request.Description, request.DefinitionJson, request.Enabled,
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            return result switch
             {
-                var result = await store.CreateAsync(
-                    request.Name, request.Description, request.DefinitionJson, request.Enabled,
-                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
-                return result switch
-                {
-                    CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
-                    CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
-                    CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
-                    _ => ErrorResult("Could not create the alert rule.", StatusCodes.Status500InternalServerError),
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error saving alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+                CustomAlertRuleResult.Ok ok => CreatedResult(context, $"/api/alerts/{ok.Rule!.Id}", BuildFullRuleNode(ok.Rule)),
+                CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                _ => ErrorResult("Could not create the alert rule.", StatusCodes.Status500InternalServerError),
+            };
         });
 
         /* Update — 200 on success; 400 bad body/definition, 404 gone, 409 stale-version OR duplicate name. A
@@ -644,24 +741,18 @@ public static class DarlingWebEndpoints
                 return ErrorResult(definitionError ?? "definition is invalid.", StatusCodes.Status400BadRequest);
             }
 
-            try
+            /* #4283: no local catch — see the create route's comment above. */
+            var result = await store.UpdateAsync(
+                id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
+                updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
+            return result switch
             {
-                var result = await store.UpdateAsync(
-                    id, request.Name, request.Description, request.DefinitionJson, request.Enabled, expectedVersion,
-                    updatedBy: DarlingWebSeat.FromContext(context).EditorPrincipal, context.RequestAborted);
-                return result switch
-                {
-                    CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
-                    CustomAlertRuleResult.NotFound => AlertNotFoundResult(),
-                    CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
-                    CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
-                    _ => ErrorResult("Could not update the alert rule.", StatusCodes.Status500InternalServerError),
-                };
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error saving alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+                CustomAlertRuleResult.Ok ok => JsonNodeResult(BuildFullRuleNode(ok.Rule!)),
+                CustomAlertRuleResult.NotFound => AlertNotFoundResult(),
+                CustomAlertRuleResult.Conflict conflict => ErrorResult(conflict.Message, StatusCodes.Status409Conflict),
+                CustomAlertRuleResult.Invalid invalid => ErrorResult(invalid.Message, StatusCodes.Status400BadRequest),
+                _ => ErrorResult("Could not update the alert rule.", StatusCodes.Status500InternalServerError),
+            };
         });
 
         /* Delete — 204 on success, 404 when missing. application/json required. Routes through
@@ -678,22 +769,20 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            try
-            {
-                var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, id, logger: null, context.RequestAborted);
-                return result is CustomAlertRuleResult.Ok ? Results.NoContent() : AlertNotFoundResult();
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                return ErrorResult($"Error deleting alert rule: {ex.Message}", StatusCodes.Status500InternalServerError);
-            }
+            /* #4283: no local catch — see the create route's comment above. */
+            var result = await CustomAlertEvaluator.ResolveAndDeleteRuleAsync(postgres, id, logger: null, context.RequestAborted);
+            return result is CustomAlertRuleResult.Ok ? Results.NoContent() : AlertNotFoundResult();
         });
 
         /* The starter templates (#3325): the SAME code-defined set the list_custom_alert_templates MCP tool
            returns, byte-identical (wraps that tool), mapped through the shared ToHttpResult exactly as the
            /api/read/* tool endpoints map their string results. Read-only, touches no store; open to any seat. */
         app.MapGet("/api/alert-templates", async () =>
-            ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.ListCustomAlertTemplates()));
+        {
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpCustomAlertTools.ListCustomAlertTemplates();
+            return ToHttpResult(result, "/api/alert-templates", logger, stopwatch.ElapsedMilliseconds);
+        });
 
         /* Validate — dry-run a definition WITHOUT persisting; returns {valid, error}. The definition rides as an
            embedded JSON object (same as create/update bodies), validated by the SAME
@@ -743,7 +832,9 @@ public static class DarlingWebEndpoints
                 return ErrorResult(bodyError, StatusCodes.Status400BadRequest);
             }
 
-            return ToHttpResult(await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpCustomAlertTools.TestCustomAlertRule(postgres, ruleId, definitionJson);
+            return ToHttpResult(result, "/api/alerts/test", logger, stopwatch.ElapsedMilliseconds);
         });
     }
 
@@ -794,7 +885,7 @@ public static class DarlingWebEndpoints
     /// <c>{"enabled": bool}</c> sub-resource, the reversible flag flip that never touches another field. The id
     /// is the rule's GUID string from <c>get_mute_rules</c> / create's response.</para>
     /// </summary>
-    private static void MapMuteRules(WebApplication app, NpgsqlDataSource postgres)
+    private static void MapMuteRules(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
     {
         var store = new PgMuteRuleStore(postgres);
 
@@ -809,9 +900,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context)),
-                StatusCodes.Status201Created);
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.CreateMuteRuleCore(store, await ReadBodyAsync(context));
+            return MuteRuleToolResult(result, "/api/mute-rules", logger, stopwatch.ElapsedMilliseconds, StatusCodes.Status201Created);
         });
 
         /* Update — PARTIAL, the merged update_mute_rule semantics verbatim: the body carries ONLY the fields to
@@ -826,8 +917,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context)));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.UpdateMuteRuleCore(store, id, await ReadBodyAsync(context));
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
 
         /* Set-enabled — the reversible flag flip that keeps the rule's id, scope, reason and creation date (the
@@ -860,8 +952,9 @@ public static class DarlingWebEndpoints
                     StatusCodes.Status400BadRequest);
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.SetMuteRuleEnabledCore(store, id, enabled);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}/enabled", logger, stopwatch.ElapsedMilliseconds);
         });
 
         /* Delete — 200 with the verb's {status:"deleted", rule_id} envelope rather than the views surface's
@@ -875,8 +968,9 @@ public static class DarlingWebEndpoints
                 return UnsupportedMediaTypeResult();
             }
 
-            return MuteRuleToolResult(
-                await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id));
+            var stopwatch = Stopwatch.StartNew();
+            var result = await Mcp.DarlingMcpAlertTools.DeleteMuteRuleCore(store, id);
+            return MuteRuleToolResult(result, "/api/mute-rules/{id}", logger, stopwatch.ElapsedMilliseconds);
         });
     }
 
@@ -935,13 +1029,24 @@ public static class DarlingWebEndpoints
 
     /// <summary>The envelope pass-through the mute-rule routes share: the verb's own body, verbatim, under the
     /// status <see cref="MuteRuleEnvelopeStatus"/> assigns — a refusal (<c>invalid</c>) included, which is the
-    /// shape the read surface adopted from here in #3739 — except an error (the caught-exception envelope or a
-    /// bare non-JSON string), which is wrapped as <c>{"error": sentence}</c> exactly as <see cref="ToHttpResult"/>
-    /// wraps the read surface's.</summary>
-    private static IResult MuteRuleToolResult(string result, int successStatus = StatusCodes.Status200OK)
+    /// shape the read surface adopted from here in #3739.
+    ///
+    /// <para><b>#4283: the ServerError arm never puts the tool's caught-exception text on the wire.</b> Classified
+    /// FIRST, before <see cref="MuteRuleEnvelopeStatus"/> ever runs, and answered through
+    /// <see cref="ServerErrorResult"/> exactly as <see cref="ToHttpResult"/> answers the read surface's — logged
+    /// ONCE, the body a fixed message, 503 when the sentence carries a caught statement_timeout's 57014 token,
+    /// 500 otherwise. Any other error (a bare non-JSON string) is still wrapped as <c>{"error": sentence}</c>.</para>
+    /// </summary>
+    internal static IResult MuteRuleToolResult(string result, string route, ILogger logger, long elapsedMs, int successStatus = StatusCodes.Status200OK)
     {
+        var kind = ClassifyToolResponse(result);
+        if (kind is ToolResponseKind.ServerError)
+        {
+            return ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs);
+        }
+
         var httpStatus = MuteRuleEnvelopeStatus(result, successStatus);
-        return ClassifyToolResponse(result) is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
+        return kind is ToolResponseKind.JsonPassthrough or ToolResponseKind.Refusal
             ? Results.Text(result, "application/json", statusCode: httpStatus)
             : ErrorResult(McpHelpers.ErrorMessageOf(result), httpStatus);
     }
@@ -950,15 +1055,43 @@ public static class DarlingWebEndpoints
     /// annotations}</c> payload on success, or an error the caller maps onto its own surface (HTTP status /
     /// MCP envelope). <see cref="IsServerError"/> distinguishes a client-correctable error — a bad spec or a
     /// bounded query failure (statement_timeout / Postgres error), i.e. HTTP 400 — from an unexpected internal
-    /// failure (HTTP 500).</summary>
-    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError)
+    /// failure (HTTP 500). <see cref="Fault"/> (#4283 review round 1, M1) rides along on a BadRequest for a
+    /// PostgresException the panel author cannot act on — the real exception, so the WEB endpoint mapping can
+    /// answer it through the same backstop as an uncaught one; <see cref="Error"/>/<see cref="IsServerError"/>
+    /// stay what they always were either way, so run_custom_view_panel's MCP answer never changes.
+    /// <see cref="AuthorSqlState"/> (#4293 round 2) is set only on the author-actionable PostgresException arm,
+    /// so the web log line can name the SQLSTATE without re-deriving it.</summary>
+    internal readonly record struct ComposeRunOutcome(JsonObject? Payload, string? Error, bool IsServerError, PostgresException? Fault = null, string? AuthorSqlState = null)
     {
         internal static ComposeRunOutcome Ok(JsonObject payload) => new(payload, null, false);
 
         internal static ComposeRunOutcome BadRequest(string error) => new(null, error, false);
 
+        internal static ComposeRunOutcome BadRequest(string error, PostgresException fault) => new(null, error, false, fault);
+
+        internal static ComposeRunOutcome AuthorQueryError(string error, string? sqlState) => new(null, error, false, null, sqlState);
+
         internal static ComposeRunOutcome ServerError(string error) => new(null, error, true);
     }
+
+    /// <summary>#4283 review round 1 (M1): the PostgresException SQLSTATEs a Custom Views panel author can act
+    /// on by editing their own panel — a statement_timeout cancel, or a class-22/class-42 error other than
+    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel). Everything else (28P01
+    /// auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...) is a STORE
+    /// fault the author cannot fix.</summary>
+    internal static bool IsComposeRunAuthorActionable(string? sqlState) =>
+        sqlState == "57014"
+        || (sqlState is { Length: 5 } && sqlState.StartsWith("22", StringComparison.Ordinal))
+        || (sqlState is { Length: 5 } && sqlState.StartsWith("42", StringComparison.Ordinal) && sqlState != "42501");
+
+    /// <summary>#4293 round 2 (R2-L1, R2-L2): the compose runner's PostgresException decision, pulled out of the
+    /// catch so a test runs it. <see cref="IsComposeRunAuthorActionable"/>'s SQLSTATEs count only at ERROR
+    /// severity: a FATAL or PANIC is a connection-level store fault whatever its class (a startup parameter the
+    /// server rejects answers FATAL 22023 or 42704, which names the configured setting and its value).</summary>
+    internal static ComposeRunOutcome FromPostgresException(PostgresException ex) =>
+        IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+            ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
+            : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
     /// <summary>
     /// Compile-and-run a single composed panel spec (Custom Views v2, #1563) against <paramref name="postgres"/>
@@ -1106,13 +1239,58 @@ public static class DarlingWebEndpoints
         }
         catch (PostgresException ex)
         {
-            /* A statement_timeout cancel (57014) or any bounded query error — client-correctable. */
-            return ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}");
+            /* #4283 review round 1 (M1): 57014 / class 22 / class 42 except 42501 are what a panel author
+               can act on — kept as Query failed: {MessageText} under 400, verbatim. Anything else (28P01
+               auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...)
+               is a STORE fault the author cannot fix; the real exception rides back on Fault so the WEB
+               endpoint (which has the logger) can answer through the same backstop shape #4276 gives an
+               uncaught one. outcome.Error/IsServerError stay exactly what they always were either way, so
+               run_custom_view_panel's MCP answer does not change.
+               #4293 round 2: the decision (including the FATAL/PANIC override) lives in FromPostgresException,
+               so a test can run it without a live Postgres round trip. */
+            return FromPostgresException(ex);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
         }
+    }
+
+    /// <summary>Maps a failed (non-<see cref="ComposeRunOutcome.Payload"/>) <see cref="ComposeRunOutcome"/> onto
+    /// its HTTP answer — factored out of the <c>/api/compose/run</c> route (the <see cref="ToHttpResult"/> /
+    /// <see cref="MuteRuleToolResult"/> shape) so the three arms are directly testable without a live Postgres
+    /// round trip. <see cref="ComposeRunOutcome.Fault"/> (#4283 M1) is checked first: a STORE fault the panel
+    /// author could not have caused answers through the same fixed-body backstop #4276 gives an uncaught
+    /// exception, logged once, no role/host text on the wire — even though the outcome that carried it is
+    /// itself a BadRequest shape (<see cref="ComposeRunOutcome.IsServerError"/> false), it still needs the
+    /// 500-class backstop treatment, not a 400. Absent a Fault, <see cref="ComposeRunOutcome.IsServerError"/>
+    /// false is a bad spec or #4283's allow-listed "Query failed: {ex.MessageText}" (a Custom Views author
+    /// needs that syntax error, statement_timeout cancel included, to fix their own panel) — that text STAYS;
+    /// true is the generic-Exception catch's "Error running query: {ex.Message}", reclassified here exactly as
+    /// <see cref="ToHttpResult"/>'s ServerError arm reclassifies a tool's envelope, since by this point the
+    /// real Exception is equally gone — only the sentence survived the round trip through
+    /// <see cref="ComposeRunOutcome"/>.</summary>
+    internal static IResult ComposeRunFailureResult(ComposeRunOutcome outcome, string route, ILogger logger, long elapsedMs)
+    {
+        if (outcome.Fault is not null)
+        {
+            DarlingWebFailureLog.Report(logger, route, elapsedMs, outcome.Fault);
+            return Results.Json(DarlingWebFailureLog.Body(outcome.Fault), statusCode: DarlingWebFailureLog.StatusCode(outcome.Fault));
+        }
+
+        if (!outcome.IsServerError && outcome.AuthorSqlState is { } sqlState)
+        {
+            /* #4293 round 2 (R2-L1): a panel's own query error still answers its text at 400 so the author can fix
+               the panel, but it is logged once too, so store drift (42P01/42703 after a migration that did not
+               finish) reaches the service log, not only one author's browser. */
+            logger.LogWarning(
+                "{Route} answered a Custom View panel's query error at 400 after {ElapsedMs} ms (SQLSTATE {SqlState}): {Error}",
+                route, elapsedMs, sqlState, outcome.Error);
+        }
+
+        return outcome.IsServerError
+            ? ServerErrorResult(outcome.Error!, route, logger, elapsedMs)
+            : ErrorResult(outcome.Error!, StatusCodes.Status400BadRequest);
     }
 
     /// <summary>Default compose-run window (hours) when the request omits one.</summary>
@@ -1606,20 +1784,9 @@ public static class DarlingWebEndpoints
                     return DefinitionValidation.Fail($"panel {i} is missing 'read' or 'source'.");
                 }
 
-                if (!reads.ContainsKey(read))
+                if (ValidateReadPanelSpec(panel, read, reads, $"panel {i}") is string readPanelError)
                 {
-                    return DefinitionValidation.Fail($"panel {i} references unknown read '{read}'.");
-                }
-
-                var viz = TryGetString(panel, "viz");
-                if (string.IsNullOrEmpty(viz))
-                {
-                    return DefinitionValidation.Fail($"panel {i} is missing 'viz'.");
-                }
-
-                if (!KnownViz.Contains(viz))
-                {
-                    return DefinitionValidation.Fail($"panel {i} has unknown viz '{viz}'.");
+                    return DefinitionValidation.Fail(readPanelError);
                 }
             }
 
@@ -1655,6 +1822,89 @@ public static class DarlingWebEndpoints
         }
 
         return DefinitionValidation.Valid;
+    }
+
+    /// <summary>The extra keys a notebook READ cell carries beyond the shared v1 read-panel keys (design D7,
+    /// #4222): the cell discriminator plus a title, mirroring <see cref="s_notebookPanelCellExtraKeys"/>'s shape
+    /// for the composed arm.</summary>
+    private static readonly IReadOnlySet<string> s_notebookReadCellExtraKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "title",
+    };
+
+    /// <summary>
+    /// PURE structural validation of a v1 READ panel spec (<c>{read, params, viz}</c>) — the SAME rules a
+    /// dashboard read panel is checked against, shared here so a notebook <c>read</c> cell (design D7, #4222)
+    /// runs through one authority instead of a second copy that would decay. Checks, in order: <c>read</c> names
+    /// an entry on the <paramref name="reads"/> allowlist (<see cref="BuildReadDispatch"/>); <c>viz</c> is present
+    /// and in <see cref="KnownViz"/>; every key inside <c>params</c> is a declared <see cref="CatalogParam"/> for
+    /// that read; every REQUIRED param for that read is present in <c>params</c> with a non-null, non-empty value.
+    /// Returns the first caller-facing error (already prefixed with <paramref name="label"/>, e.g. "panel 0" or
+    /// "cell 2 (read)"), or null when the spec is valid.
+    /// </summary>
+    private static string? ValidateReadPanelSpec(JsonObject spec, string read, IReadOnlyDictionary<string, ReadToolHandler> reads, string label)
+    {
+        if (!reads.ContainsKey(read))
+        {
+            return $"{label} references unknown read '{read}'.";
+        }
+
+        var viz = TryGetString(spec, "viz");
+        if (string.IsNullOrEmpty(viz))
+        {
+            return $"{label} is missing 'viz'.";
+        }
+
+        if (!KnownViz.Contains(viz))
+        {
+            return $"{label} has unknown viz '{viz}'.";
+        }
+
+        if (!CatalogDescriptors.TryGetValue(read, out var descriptor))
+        {
+            /* Every dispatch entry has a catalog entry (a test pins CatalogDescriptors.Keys ==
+               BuildReadDispatch().Keys), so this is unreachable in practice; treat it as no declared params
+               rather than throwing, so a validator never 500s on a data-shape it cannot itself produce. */
+            return null;
+        }
+
+        var declaredParams = descriptor.Params.ToDictionary(p => p.Name, StringComparer.Ordinal);
+
+        if (spec["params"] is JsonObject paramsObject)
+        {
+            foreach (var property in paramsObject)
+            {
+                if (!declaredParams.ContainsKey(property.Key))
+                {
+                    return $"{label} has an unknown parameter '{property.Key}' for read '{read}'.";
+                }
+            }
+
+            foreach (var param in descriptor.Params)
+            {
+                if (param.Required)
+                {
+                    var value = paramsObject[param.Name];
+                    var isEmpty = value is null
+                        || (value is JsonValue paramValue && paramValue.TryGetValue<string>(out var s) && string.IsNullOrEmpty(s));
+                    if (isEmpty)
+                    {
+                        return $"{label} is missing the required parameter '{param.Name}'.";
+                    }
+                }
+            }
+        }
+        else if (spec["params"] is not null)
+        {
+            return $"{label} 'params' must be an object.";
+        }
+        else if (descriptor.Params.Any(p => p.Required))
+        {
+            var missing = descriptor.Params.First(p => p.Required);
+            return $"{label} is missing the required parameter '{missing.Name}'.";
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -1797,9 +2047,34 @@ public static class DarlingWebEndpoints
 
                     break;
 
+                case "read":
+                    /* Strict keys first (#2733): a read cell is FLAT, same shape as a dashboard v1 read panel
+                       (design D7, #4222) — its discriminator plus title/read/params/viz, nothing else. v1 read
+                       panels are deliberately not key-checked beyond this (see the note on the key sets above),
+                       so the walk only closes off keys a read cell cannot carry at all. */
+                    if (ComposeSpec.UnknownKeyError(cell, s_notebookReadCellExtraKeys.Concat(new[] { "read", "params", "viz" }).ToHashSet(StringComparer.Ordinal), $"cell {i} (read)") is string readKeyError)
+                    {
+                        return DefinitionValidation.Fail(readKeyError);
+                    }
+
+                    var read = TryGetString(cell, "read");
+                    if (string.IsNullOrEmpty(read))
+                    {
+                        return DefinitionValidation.Fail($"cell {i} (read) is missing 'read'.");
+                    }
+
+                    /* The SAME v1 read-panel rules a dashboard read panel is checked against (#4222) — shared,
+                       not copied, so a rename that reds the dashboard path reds this one too. */
+                    if (ValidateReadPanelSpec(cell, read, BuildReadDispatch(), $"cell {i} (read)") is string readCellError)
+                    {
+                        return DefinitionValidation.Fail(readCellError);
+                    }
+
+                    break;
+
                 default:
                     return DefinitionValidation.Fail(
-                        $"cell {i} has an unknown type '{type}'; expected 'markdown' or 'panel'.");
+                        $"cell {i} has an unknown type '{type}'; expected 'markdown', 'panel', or 'read'.");
             }
         }
 
@@ -2743,17 +3018,17 @@ public static class DarlingWebEndpoints
         return new Dictionary<string, ReadToolHandler>(StringComparer.Ordinal)
         {
             /* ── analysis reads (take the DarlingAnalysisService) ── */
-            ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c)),
+            ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c), c.RequestAborted),
             ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryInt(c, "baseline_hours_back", null, 28), as_of: AsOf(c)),
             ["get_analysis_facts"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFacts(an, pg, Server(c), Hours(c, 4), Str(c, "source"), QueryDouble(c, "min_severity", 0), as_of: AsOf(c)),
             // #4198: the tool's own default (limit 18, previews) is sized for a chat caller's token budget.
             // The viewer's two "Analysis Findings" tables render no preview-cut field and never asked for a
             // budget, so this row keeps asking for what dev always returned: every chain, full text. See
             // DarlingWebEndpointsTests.GetAnalysisFindingsRow_PassesTheOldViewerDefaults_EveryChainFullText.
-            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c)),
+            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger),
 
             /* ── sessions ── */
-            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c)),
+            ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c), c.RequestAborted),
             ["get_session_stats"] = (c, pg, an) => DarlingMcpSessionTools.GetSessionStats(pg, Server(c)),
             ["get_waiting_tasks"] = (c, pg, an) => DarlingMcpSessionTools.GetWaitingTasks(pg, Server(c), Hours(c, 1), Rows(c, "limit", 30), as_of: AsOf(c)),
 
@@ -2768,30 +3043,32 @@ public static class DarlingWebEndpoints
                routes, and the 1:1 read surface carries the tool like every other read. The captured
                logger is the tool's logger seat — the web host's SERVICE logger when MapAll built this
                dispatch, the same instance the MCP host injects with AddSingleton<ILogger> (#3473
-               review) — so the mirror's child reads log-and-degrade into the same service log both
-               hosts' other paths use, instead of the hardcoded null this entry carried while the
+               review) — so on a store fault the mirror's child reads throw (#4315), the tool's own
+               catch logs the exception once and answers the error envelope, and this entry's
+               ToHttpResult classifies that envelope and answers the fixed body through
+               ServerErrorResult, instead of the hardcoded null this entry carried while the
                dashboard app's provider-less factory was the only alternative. Closure, not a fourth
                ReadToolHandler seat: widening the shared delegate would touch every entry in this
                table for the one tool that logs. */
             ["get_sweep_reports"] = (c, pg, an) => DarlingMcpFleetSweepTools.GetSweepReports(pg, logger, Hours(c, 1), AsOf(c), Str(c, "sweep_id"), Str(c, "watch_state")),
 
             /* ── blocking / deadlocks ── */
-            ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c)),
+            ["get_blocked_process_xml"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockedProcessXml(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4198: the internal overload, not the MCP tool wrapper — pins the OLD row limit (30) and the
                OLD 2000-char text cap (WebSqlTextPreviewLength) explicitly, so this page does not change even
                though the tool's own MCP defaults (limit 15, 150-char preview) did. Same shape #3897's trend
                tools use to pass TrendBudget.Chart here instead of their own MCP point budget. */
-            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength),
-            ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_blocking"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlocking(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), null, false, AsOf(c), DarlingMcpBlockingTools.WebSqlTextPreviewLength, c.RequestAborted),
+            ["get_blocking_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetBlockingTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4254: full_graph defaults false on the MCP signature (a preview keeps a busy production
                store's tools/list-driven call under the shared response budget), but the web viewer has
                always shown the whole graph. The row pins its OWN default to true so #4198's MCP-side
                budget cut does not silently shrink what the viewer renders. */
-            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c)),
-            ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
-            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
+            ["get_deadlock_detail"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockDetail(pg, Server(c), Hours(c, 24), Rows(c, "limit", 5), full_graph: QueryBool(c, "full_graph", true), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_deadlock_trend"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlockTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_deadlocks"] = (c, pg, an) => DarlingMcpBlockingTools.GetDeadlocks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_lock_wait_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                ? DarlingMcpBlockingTools.GetLockWaitTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
 
             /* ── automatic plan correction (#2028) ── */
@@ -2799,17 +3076,17 @@ public static class DarlingWebEndpoints
                keeps a busy production server's default call under the shared response budget), but the
                web viewer has always shown the whole query text. The row pins its OWN default to true so
                #4198's MCP-side budget cut does not silently truncate what the viewer renders. */
-            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), full_text: QueryBool(c, "full_text", true)),
+            ["get_plan_corrections"] = (c, pg, an) => DarlingMcpPlanCorrectionTools.GetPlanCorrections(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), full_text: QueryBool(c, "full_text", true), cancellationToken: c.RequestAborted),
 
             /* ── config (current + history) ── */
-            ["get_database_config"] = (c, pg, an) => DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), Str(c, "database_name")),
-            ["get_server_config"] = (c, pg, an) => DarlingMcpConfigTools.GetServerConfig(pg, Server(c)),
-            ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c)),
-            ["get_database_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c)),
-            ["get_database_scoped_config"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseScopedConfig(pg, Server(c), Str(c, "database_name")),
-            ["get_query_store_health"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), Str(c, "database_name")),
-            ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c)),
-            ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c)),
+            ["get_database_config"] = (c, pg, an) => DarlingMcpConfigTools.GetDatabaseConfig(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
+            ["get_server_config"] = (c, pg, an) => DarlingMcpConfigTools.GetServerConfig(pg, Server(c), c.RequestAborted),
+            ["get_trace_flags"] = (c, pg, an) => DarlingMcpConfigTools.GetTraceFlags(pg, Server(c), c.RequestAborted),
+            ["get_database_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_database_scoped_config"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetDatabaseScopedConfig(pg, Server(c), Str(c, "database_name"), cancellationToken: c.RequestAborted),
+            ["get_query_store_health"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetQueryStoreHealth(pg, Server(c), Str(c, "database_name"), c.RequestAborted),
+            ["get_server_config_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetServerConfigChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_trace_flag_changes"] = (c, pg, an) => DarlingMcpConfigHistoryTools.GetTraceFlagChanges(pg, Server(c), Hours(c, 168), as_of: AsOf(c), cancellationToken: c.RequestAborted),
 
             /* ── core data reads ── */
             /* #4198: full_detail=true keeps the web viewer's payload exactly what it was before the default
@@ -2836,25 +3113,25 @@ public static class DarlingWebEndpoints
             ["get_memory_clerks"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryClerks(pg, Server(c)),
             ["get_memory_stats"] = (c, pg, an) => DarlingMcpDataTools.GetMemoryStats(pg, Server(c)),
             ["get_perfmon_stats"] = (c, pg, an) => DarlingMcpDataTools.GetPerfmonStats(pg, Server(c), Str(c, "counter_name"), Str(c, "instance_name")),
-            ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c)),
+            ["get_query_heatmap"] = (c, pg, an) => DarlingMcpQueryHeatmapTools.GetQueryHeatmap(pg, Server(c), Hours(c, 24), Str(c, "metric"), Str(c, "database_name"), QueryInt(c, "bucket_minutes", null, 5), Rows(c, "limit", 500), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             /* #4198: full_text defaults false on the MCP signature (a 240-character preview keeps a busy
                production store's default call under the shared response budget), but the web viewer has
                always shown the whole query text. The row pins its OWN default to true so the MCP-side
                budget cut does not silently shrink what the viewer renders. */
-            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c)),
-            ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c)),
+            ["get_query_store_regressions"] = (c, pg, an) => DarlingMcpQueryStoreRegressionTools.GetQueryStoreRegressions(pg, Server(c), Hours(c, 24), Str(c, "database_name"), Rows(c, "limit", 50), full_text: QueryBool(c, "full_text", true), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_query_store_clutter"] = (c, pg, an) => DarlingMcpQueryStoreClutterTools.GetQueryStoreClutter(pg, Server(c), Hours(c, 24), Rows(c, "limit", DarlingMcpQueryStoreClutterTools.DefaultLimit), QueryBool(c, "include_fleet_median", false), AsOf(c), c.RequestAborted),
             /* #4198: query_text already had a 2000-character cap before this tool had a full_text opt-in at
                all, so the viewer keeps that exact number through the previewLength overload -- QueryBool
                still lets an operator ask for the whole statement via ?full_text=true, but the default (no
                query override) reproduces the page exactly as it always rendered. */
             ["get_query_store_top"] = (c, pg, an) => DarlingMcpDataTools.GetQueryStoreTop(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), execution_type: Str(c, "execution_type"), module_name: Str(c, "module_name"), full_text: QueryBool(c, "full_text", false), previewLength: 2000),
-            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c)),
-            ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c)),
+            ["get_long_query_completions"] = (c, pg, an) => DarlingMcpLongQueryTools.GetLongQueryCompletions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 30), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_server_properties"] = (c, pg, an) => DarlingMcpDataTools.GetServerProperties(pg, Server(c), c.RequestAborted),
             ["get_tempdb_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpDataTools.GetTempDbTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
                 : UnparseableParam("bucket_minutes"),
-            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c)),
-            ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c)),
+            ["get_top_procedures_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopProceduresByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_top_queries_by_cpu"] = (c, pg, an) => DarlingMcpDataTools.GetTopQueriesByCpu(pg, Server(c), Hours(c, 24), Rows(c, "top", 20), Str(c, "database_name"), QueryBool(c, "parallel_only", false), QueryInt(c, "min_dop", null, 0), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_pg_top_queries"] = (c, pg, an) => DarlingMcpPgStatementTools.GetPgTopQueries(pg, Server(c), Hours(c, 24), Rows(c, "limit", 20), as_of: AsOf(c)),
             /* query_id arrives as TEXT and is passed through as text (#2548): a queryid that made a
                round trip through a JSON number has already been rounded, and the tool rejects one it
@@ -2926,15 +3203,15 @@ public static class DarlingWebEndpoints
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                ? DarlingMcpTrendTools.GetProcedureDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_query_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                ? DarlingMcpTrendTools.GetQueryDurationTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
-            ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
+            ["get_query_store_duration_trend"] = (c, pg, an) => DarlingMcpTrendTools.GetQueryStoreDurationTrend(pg, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             ["get_query_trend"] = (c, pg, an) => RequireText(c, "query_hash", out var queryHash)
                 ? (RequireText(c, "database_name", out var db)
-                    ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c))
+                    ? DarlingMcpTrendTools.GetQueryTrend(pg, queryHash, db, Server(c), Hours(c, 24), as_of: AsOf(c), cancellationToken: c.RequestAborted)
                     : MissingParam("database_name"))
                 : MissingParam("query_hash"),
 
@@ -2966,9 +3243,9 @@ public static class DarlingWebEndpoints
             ["get_resource_semaphore"] = (c, pg, an) => DarlingMcpMemoryGrantTools.GetResourceSemaphore(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
 
             /* ── object / index stats ── */
-            ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c)),
+            ["get_database_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetDatabaseSizes(pg, Server(c), cancellationToken: c.RequestAborted),
             ["get_pvs_stats"] = (c, pg, an) => DarlingMcpPvsTools.GetPvsStats(pg, Server(c), QueryInt(c, "trend_hours_back", null, 0)),
-            ["get_index_usage"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), Str(c, "database_name"), Rows(c, "limit", 200)),
+            ["get_index_usage"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetIndexUsage(pg, Server(c), Str(c, "database_name"), Rows(c, "limit", 200), cancellationToken: c.RequestAborted),
             /* #4258: limit defaults to 75 on the MCP signature now (was an uncapped-looking 200-row hard
                fetch with no parameter at all), sized under the shared response budget. The web viewer has
                always effectively received that old 200-row fetch (there was no smaller cap anywhere in the
@@ -2976,8 +3253,8 @@ public static class DarlingWebEndpoints
                for the identical reason - rather than silently dropping to the new MCP default. 200 is well
                under both McpHelpers.MaxTop and MaxRowLimit (1000 each), so the value is never refused or
                reclamped by either validation layer. */
-            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200)),
-            ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c)),
+            ["get_object_locking"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetObjectLocking(pg, Server(c), Rows(c, "limit", 200), cancellationToken: c.RequestAborted),
+            ["get_table_index_sizes"] = (c, pg, an) => DarlingMcpObjectStatsTools.GetTableIndexSizes(pg, Server(c), cancellationToken: c.RequestAborted),
 
             /* ── plan cache / scheduler ── */
             ["get_cpu_scheduler_pressure"] = (c, pg, an) => DarlingMcpPlanCacheSchedulerTools.GetCpuSchedulerPressure(pg, Server(c), Hours(c, 24), as_of: AsOf(c)),
@@ -2995,15 +3272,15 @@ public static class DarlingWebEndpoints
             ["get_default_trace_events"] = (c, pg, an) => DarlingMcpDefaultTraceTools.GetDefaultTraceEvents(pg, Server(c), Hours(c, 24), Rows(c, "limit", 100), as_of: AsOf(c)),
 
             /* ── system_health parse-on-read family ── */
-            ["get_health_parser_cpu_tasks"] = (c, pg, an) => DarlingMcpHealthParserTools.GetCPUTasks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_io_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetIOIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_memory_broker"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryBroker(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_memory_conditions"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryConditions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_memory_node_oom"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryNodeOOM(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_scheduler_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSchedulerIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_severe_errors"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
-            ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c)),
+            ["get_health_parser_cpu_tasks"] = (c, pg, an) => DarlingMcpHealthParserTools.GetCPUTasks(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_io_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetIOIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_memory_broker"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryBroker(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_memory_conditions"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryConditions(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_memory_node_oom"] = (c, pg, an) => DarlingMcpHealthParserTools.GetMemoryNodeOOM(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_scheduler_issues"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSchedulerIssues(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_severe_errors"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSevereErrors(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_significant_waits"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSignificantWaits(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_health_parser_system_health"] = (c, pg, an) => DarlingMcpHealthParserTools.GetSystemHealth(pg, Server(c), Hours(c, 24), Rows(c, "limit", 50), as_of: AsOf(c), cancellationToken: c.RequestAborted),
         };
     }
 
@@ -3079,22 +3356,45 @@ public static class DarlingWebEndpoints
             return ToolResponseKind.ServerError;
         }
 
+        if (result.StartsWith(Mcp.DarlingServerResolver.RegistryReadFaultPrefix, StringComparison.Ordinal))
+        {
+            return ToolResponseKind.ServerError;
+        }
+
         return ToolResponseKind.ClientError;
     }
 
     /// <summary>The read surface's HTTP answer. A refusal is the envelope itself as the body under 400 — the
     /// shape the mute-rule write routes have always answered <c>invalid</c> with, so <c>status</c>, <c>message</c>
-    /// and <c>hints.parameter</c> reach a web client exactly as they reach an MCP client (#3739). The two error
-    /// arms carry the SENTENCE under <c>error</c> (<see cref="McpHelpers.ErrorMessageOf"/> unwraps the envelope;
-    /// a bare string is already the sentence), so the body a web client reads for a failure is the same
-    /// <c>{"error": "Error during get_x: ..."}</c> it read before the tools' own wire shape changed.</summary>
-    private static IResult ToHttpResult(string result) => ClassifyToolResponse(result) switch
+    /// and <c>hints.parameter</c> reach a web client exactly as they reach an MCP client (#3739).
+    ///
+    /// <para><b>#4283: the ServerError arm never puts the tool's caught-exception text on the wire.</b> A
+    /// tool's own catch turns <c>ex.Message</c> into <c>McpHelpers.ErrorMessageOf(result)</c> — a PostgreSQL
+    /// error starting with its SQLSTATE and the server's message, or a failed store connection naming its host
+    /// and port — before this method ever sees it. The sentence is logged ONCE through
+    /// <see cref="DarlingWebFailureLog.Report(ILogger,string,long,string)"/> (so the service log still names
+    /// what failed) and the body becomes <see cref="DarlingWebFailureLog.Body(string)"/>'s fixed message, under
+    /// <see cref="DarlingWebFailureLog.StatusCode(string)"/> — 503 when the sentence carries a caught
+    /// statement_timeout's 57014 token, 500 otherwise, the same split #4281's backstop gives an UNCAUGHT one.
+    /// The bare <c>"Error during "</c> arm <see cref="ClassifyToolResponse"/> keeps for an un-migrated producer
+    /// maps here too, for the same reason.</para>
+    /// </summary>
+    internal static IResult ToHttpResult(string result, string route, ILogger logger, long elapsedMs) => ClassifyToolResponse(result) switch
     {
         ToolResponseKind.JsonPassthrough => Results.Text(result, "application/json"),
         ToolResponseKind.Refusal => Results.Text(result, "application/json", statusCode: StatusCodes.Status400BadRequest),
-        ToolResponseKind.ServerError => Results.Json(new { error = McpHelpers.ErrorMessageOf(result) }, statusCode: StatusCodes.Status500InternalServerError),
+        ToolResponseKind.ServerError => ServerErrorResult(McpHelpers.ErrorMessageOf(result), route, logger, elapsedMs),
         _ => Results.Json(new { error = result }, statusCode: StatusCodes.Status400BadRequest),
     };
+
+    /// <summary>The ServerError arm's body, factored out so both <see cref="ToHttpResult"/> and the
+    /// <c>/api/read/*</c> loop's binding-layer catch (which holds the real <see cref="Exception"/>, not just
+    /// its sentence) answer with the identical fixed shape.</summary>
+    internal static IResult ServerErrorResult(string sentence, string route, ILogger logger, long elapsedMs)
+    {
+        DarlingWebFailureLog.Report(logger, route, elapsedMs, sentence);
+        return Results.Json(DarlingWebFailureLog.Body(sentence), statusCode: DarlingWebFailureLog.StatusCode(sentence));
+    }
 
     /* ─────────────────────────── query-string binding ─────────────────────────── */
 

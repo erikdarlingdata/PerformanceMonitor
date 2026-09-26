@@ -25,7 +25,7 @@
  * descriptions) reaches the DOM through el()/textContent (R4 — never innerHTML).
  */
 
-import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, relTime } from "../util.js";
+import { el, mount, apiGetFleet, loadingStrip, errorStrip, emptyStrip, relTime, localTime, fmtNum } from "../util.js";
 import { renderPanel, setPanelSignal, VIZ } from "../panels.js";
 import { renderComposedPanelCard } from "../compose.js";
 import { renderMarkdown } from "../markdown.js";
@@ -421,7 +421,7 @@ export async function renderView(main, id) {
 
   /* A notebook is the same stored row with a kind:"notebook" definition — render it as a document, not a grid. */
   if (isNotebookDefinition(def)) {
-    renderNotebookDoc(main, view, session, catalog, fleetRes);
+    renderNotebookDoc(main, { mode: "saved", view, session, catalog, fleetRes });
     return;
   }
 
@@ -495,57 +495,231 @@ export async function renderView(main, id) {
  * visible and the scope bar can't silently lie for it; server scope still applies (#2788). Export/Delete/Edit
  * are shared with the dashboard renderer; Edit points at the notebook composer route.
  */
-async function renderNotebookDoc(main, view, session, catalog, fleetRes) {
-  const def = view.definition || {};
+/**
+ * `opts`:
+ *   { mode: "saved", view, session, catalog, fleetRes }                          — an ordinary saved notebook.
+ *   { mode: "alert", definition, alert, status, notes, canEdit, provenance, isLive, onOpenLive } — #4222's
+ *     read-only alert-notebook render: an IN-MEMORY definition bound to one firing (no saved `view` row, no
+ *     /api/fleet read — the server is fixed — and no scope bar, since there is nothing to re-scope).
+ *     `provenance` is the description string "Save as notebook" writes; `onOpenLive` is called (with no args)
+ *     when the viewer clicks "Open live", and is this function's caller's job to turn into dropping the read
+ *     cells' `as_of` and re-rendering — see triage.js. `isLive` (#4368) is an optional `() => boolean` the
+ *     caller supplies to say whether its route is still the one on screen; each alert-mode read cell checks it
+ *     right before mounting its settled result, so a result that lands after a route change is dropped instead
+ *     of painted into a holder no longer attached to the visible document — the fetch and the limiter's
+ *     release still run either way. Omitted (saved mode, or an alert-mode caller that doesn't pass it) means
+ *     "always live", i.e. today's behaviour.
+ * Saved-view behaviour (mode:"saved") is UNCHANGED by this refactor: same scope bar, same Export/Edit/Delete,
+ * same panel-cell rendering. The alert mode is read-only: no scope bar (nothing to re-scope: read cells carry
+ * their own `as_of`/`hours`; there are no composed cells yet), no Export/Edit/Delete, and a header/status cell
+ * pair rendered directly from `alert`/`status` rather than through a read.
+ */
+export async function renderNotebookDoc(main, opts) {
+  const isAlert = opts.mode === "alert";
+  const def = isAlert ? (opts.definition || {}) : (opts.view.definition || {});
   const cells = Array.isArray(def.cells) ? def.cells : [];
-  const canEdit = !!session.can_edit;
+  const canEdit = isAlert ? !!opts.canEdit : !!opts.session.can_edit;
+  const catalog = isAlert ? { reads: [], compose: {} } : opts.catalog;
   const readSet = new Set((catalog.reads || []).map((r) => r.name));
   const sourceSet = new Set(((catalog.compose || {}).measures || []).map((m) => m.source));
 
   const status = el("div", { class: "view-status" });
-  const head = el("div", { class: "page-head" }, [
-    backToViews(),
-    el("h2", { text: view.name || "Notebook" }),
-    el("span", { class: "notebook-badge", text: "Notebook" }),
-    view.description ? el("div", { class: "meta", text: view.description }) : null,
-    el("div", { class: "spacer" }),
-    exportButton(view),
-    canEdit ? el("a", { class: "btn small", href: "#/notebook/" + encodeURIComponent(view.id) + "/edit", text: "Edit" }) : null,
-    canEdit ? deleteButton(view.id, status) : null,
-  ]);
+  const head = isAlert
+    ? el("div", { class: "page-head" }, [
+        el("h2", { text: "Alert notebook" }),
+        el("span", { class: "notebook-badge", text: "Notebook" }),
+        el("div", { class: "spacer" }),
+        canEdit ? saveAsNotebookButton(def, opts.provenance, status) : null,
+        openLiveButton(opts.onOpenLive),
+      ])
+    : el("div", { class: "page-head" }, [
+        backToViews(),
+        el("h2", { text: opts.view.name || "Notebook" }),
+        el("span", { class: "notebook-badge", text: "Notebook" }),
+        opts.view.description ? el("div", { class: "meta", text: opts.view.description }) : null,
+        el("div", { class: "spacer" }),
+        exportButton(opts.view),
+        canEdit ? el("a", { class: "btn small", href: "#/notebook/" + encodeURIComponent(opts.view.id) + "/edit", text: "Edit" }) : null,
+        canEdit ? deleteButton(opts.view.id, status) : null,
+      ]);
 
   if (!cells.length) {
     mount(main, [head, status, emptyStrip("This notebook has no cells yet.")]);
     return;
   }
 
-  /* Scope bar identical to a dashboard's: it only drives the panel cells (markdown is static). Skipped when a
-     notebook is prose-only (no panel cells to re-scope). */
-  const fleet = fleetOptions(fleetRes);
-  const variables = Array.isArray(def.variables) ? def.variables.filter((v) => v && v.name) : [];
-  const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
-  const hasPanels = cells.some((c) => c && c.type === "panel" && c.source != null);
-
-  const state = seedState(view.id, defaultHours, variables);
-
-  function currentScope() {
-    return {
+  /* Alert mode has no scope bar: the server is fixed to the firing, and read cells already carry as_of/hours —
+     nothing here is re-scopeable yet (no composed cells, no per-cell range pins in this shape). Saved mode keeps
+     its scope bar exactly as before. */
+  let controls = null;
+  let currentScope = () => ({ server: "All", hours: 24, variables: [], values: {} });
+  if (!isAlert) {
+    const fleet = fleetOptions(opts.fleetRes);
+    const variables = Array.isArray(def.variables) ? def.variables.filter((v) => v && v.name) : [];
+    const defaultHours = def.range && typeof def.range.hours === "number" ? def.range.hours : 24;
+    const hasPanels = cells.some((c) => c && c.type === "panel" && c.source != null);
+    const state = seedState(opts.view.id, defaultHours, variables);
+    currentScope = () => ({
       server: state.server,
       hours: state.hours,
       variables: variables.map((v) => ({ name: v.name, dimension: v.dimension, default: v.default || undefined })),
       values: { ...state.values },
-    };
+    });
+    const onChange = () => { rememberScope(opts.view.id, state); renderDoc(); };
+    controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
   }
 
   const docBox = el("div", { class: "notebook-doc" });
+  const limiter = isAlert ? new InFlightLimiter(3) : null;
   function renderDoc() {
-    mount(docBox, cells.map((cell) => renderCell(cell, readSet, sourceSet, currentScope())));
+    if (isAlert) {
+      /* Alert-mode cells load top to bottom, at most 3 in flight (#4222's cost rule) — renderCell/renderPanel
+         return synchronously with the fetch outstanding, so the limiter gates ACQUIRING a slot before the cell
+         node is even built, then releases it off renderPanel's onSettled callback. */
+      mount(docBox, cells.map((cell, i) => renderAlertCell(cell, i, readSet, opts, limiter)));
+    } else {
+      mount(docBox, cells.map((cell) => renderCell(cell, readSet, sourceSet, currentScope())));
+    }
   }
 
-  const onChange = () => { rememberScope(view.id, state); renderDoc(); };
-  const controls = hasPanels ? buildViewControls(fleet, variables, state, defaultHours, onChange) : null;
   mount(main, [head, status, controls, docBox]);
   renderDoc();
+}
+
+/* A max-N in-flight gate (#4222 cost rule) for the alert notebook's client-side cell loads. A cell asks for a
+   slot; if none is free it queues (FIFO) until release() frees one. Kept tiny and dependency-free — this is not
+   a general scheduler, just the one "at most 3 outstanding reads" rule the cost design calls for. */
+class InFlightLimiter {
+  constructor(max) {
+    this.max = max;
+    this.active = 0;
+    this.queue = [];
+  }
+  acquire() {
+    if (this.active < this.max) {
+      this.active++;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.queue.push(resolve));
+  }
+  release() {
+    const next = this.queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.active = Math.max(0, this.active - 1);
+    }
+  }
+}
+
+/* One alert-notebook cell -> a document block. header/status render directly from the endpoint's own facts (no
+   read); a read cell queues on the limiter, then renders through the SAME v1 renderPanel dashboards use —
+   explicit `viz` per cell, no derive.js guessing (#4222). A stale/empty firing (no alert, "Unknown" status, an
+   empty read) renders honest empty sections, never an error page: header/status always render (their own null
+   guards below), and renderPanel already degrades a read's own empty/error kinds to a strip, not a throw. */
+function renderAlertCell(cell, index, readSet, opts, limiter) {
+  if (!cell || typeof cell !== "object") return null;
+  if (cell.type === "header") {
+    return renderAlertHeaderCell(cell, opts);
+  }
+  if (cell.type === "status") {
+    return el("div", { class: "notebook-panel panel card" }, [
+      el("h3", {}, [cell.title || "Status"]),
+      el("div", { class: "panel-body" }, [el("span", { class: "fv", text: cell.status || "Unknown" })]),
+    ]);
+  }
+  if (cell.type === "read") {
+    if (!cell.read || !readSet.has(cell.read) || !cell.viz || !VIZ[cell.viz]) {
+      return panelErrorCard(cell.title, "Unknown read '" + (cell.read || "") + "' or visualization '" + (cell.viz || "") + "'.");
+    }
+    const holder = el("div", { class: "notebook-panel" }, [loadingStrip()]);
+    /* Cells load top to bottom: acquiring a slot is async, so a later cell's slot request cannot resolve before
+       an earlier one queued first (the limiter's queue is FIFO) — renderPanel itself is only called once the
+       slot is granted, at which point it starts the fetch and returns synchronously.
+       #4368: `opts.isLive` — set by triage.js to a `location.hash === ourHash` check, the same route-change
+       guard renderView already uses for its own await gap — is checked before mounting the settled result.
+       A route change after the slot was granted still lets the fetch finish and the limiter release (so the
+       NEXT page's own reads aren't starved by a request this page no longer owns); it only stops the result
+       from painting into a holder that is no longer attached to the visible document. */
+    limiter.acquire().then(() => {
+      /* A route change (a fresh #/triage link, or navigating off the page entirely) between queueing and the
+         slot opening: this cell's holder is no longer attached to the visible document, and its own reads
+         are for a firing nobody is looking at any more. renderPanel still runs and its own onSettled still
+         releases the limiter's slot below — the fetch and release always happen, so a superseded batch never
+         starves the page that replaced it — only the RESULT is dropped instead of painted into a dead node. */
+      const stillLive = !opts.isLive || opts.isLive();
+      const rendered = renderPanel(cell, () => limiter.release());
+      if (stillLive) mount(holder, rendered);
+    });
+    return holder;
+  }
+  return null;
+}
+
+/* The header cell: the endpoint's own alert facts, rendered directly (no read — they arrived with the envelope).
+   A null `alert` (stale/no match) renders the honest empty state instead of blank fields. */
+function renderAlertHeaderCell(cell, opts) {
+  const a = opts.alert;
+  const rows = [];
+  if (a) {
+    rows.push(["Server", a.server_name || "\u2014"]);
+    rows.push(["Metric", a.metric_name || "\u2014"]);
+    rows.push(["Fired", a.alert_time ? localTime(a.alert_time) : "\u2014"]);
+    if (a.incident_since) rows.push(["Incident since", localTime(a.incident_since)]);
+    if (a.involved_objects) rows.push(["Involved objects", a.involved_objects]);
+    if (a.database) rows.push(["Database", a.database]);
+    if (typeof a.total_occurrences === "number") rows.push(["Total occurrences", String(a.total_occurrences)]);
+    /* current_value/threshold_value (#4368): same fmtNum(_, 1) triage.js's alertFields uses for the matched
+       alert card, so the two pages format the same fields the same way. Omitted only when BOTH are absent —
+       fmtNum already renders a lone missing side as "\u2014" rather than dropping the whole line. */
+    if (typeof a.current_value === "number" || typeof a.threshold_value === "number") {
+      rows.push(["Value vs threshold", "current " + fmtNum(a.current_value, 1) + " vs threshold " + fmtNum(a.threshold_value, 1)]);
+    }
+  }
+  const body = a
+    ? [
+        el("div", { class: "detail-fields" }, rows.map(([k, v]) =>
+          el("div", { class: "detail-field" }, [el("span", { class: "fk", text: k }), el("span", { class: "fv", text: v })])
+        )),
+        /* detail_text (#4368): the same <pre class="code"> block triage.js's alertFields uses — through el()'s
+           text path (textContent), never innerHTML, since this is alert/query text the server only echoes. */
+        a.detail_text ? el("pre", { class: "code", text: a.detail_text }) : null,
+      ]
+    : emptyStrip("No matching alert history row for this link.");
+  return el("div", { class: "notebook-panel panel card" }, [
+    el("h3", {}, [cell.title || "Alert"]),
+    el("div", { class: "panel-body" }, [body]),
+  ]);
+}
+
+/* "Save as notebook" (#4222): POSTs the bound in-memory definition to /api/views, unmodified except for the
+   description carrying the provenance string ("from alert template <id> v<version>, <metric> on <server> at
+   <at>", built by the caller — triage.js — since it has the template/metric/server/at facts, not this module).
+   Only mounted when the seat can edit (canEdit gate above), matching every other edit affordance on this page. */
+function saveAsNotebookButton(definition, provenance, status) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Save as notebook" });
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    mount(status, el("div", { class: "strip loading", text: "Saving\u2026" }));
+    const name = "Alert notebook " + new Date().toISOString();
+    const res = await api.createView({ name, description: provenance || null, definition });
+    if (res.kind === "data" && res.data && res.data.id != null) {
+      location.hash = "#/notebook/" + encodeURIComponent(res.data.id);
+      return;
+    }
+    btn.disabled = false;
+    mount(status, errorStrip(res.message || "Could not save this notebook."));
+  });
+  return btn;
+}
+
+/* "Open live" (#4222): drops the absolute window pins (today: each read cell's `as_of`) so the notebook falls
+   back to a relative/live view. `onOpenLive` is the caller's (triage.js's) re-render with as_of stripped — this
+   module has no state of its own to mutate, since the definition is the caller's in-memory object. */
+function openLiveButton(onOpenLive) {
+  const btn = el("button", { class: "btn small", type: "button", text: "Open live" });
+  btn.addEventListener("click", () => { if (onOpenLive) onOpenLive(); });
+  return btn;
 }
 
 /* One notebook cell -> a document block: a markdown cell renders through renderMarkdown (XSS-safe); a panel cell
@@ -556,6 +730,12 @@ function renderCell(cell, readSet, sourceSet, scope) {
     return el("div", { class: "notebook-md markdown-body" }, [renderMarkdown(cell.text)]);
   }
   if (cell.type === "panel") {
+    return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope)]);
+  }
+  /* A `read` cell (design D7, #4222) is a v1 read panel, FLAT like a panel cell: routed through the exact same
+     panelOrError -> renderPanel path a dashboard read panel uses (its own fixed params, scope-independent).
+     Minimal routing only; renderNotebookDoc's broader refactor is a later slice's job. */
+  if (cell.type === "read") {
     return el("div", { class: "notebook-panel" }, [panelOrError(cell, readSet, sourceSet, scope)]);
   }
   return null;

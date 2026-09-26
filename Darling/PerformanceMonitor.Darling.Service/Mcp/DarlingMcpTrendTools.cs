@@ -359,9 +359,10 @@ public sealed class DarlingMcpTrendTools
         [Description("The database name the query belongs to.")] string database_name,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -376,7 +377,7 @@ public sealed class DarlingMcpTrendTools
                answered 42P01 on a plain-PostgreSQL store for any window past four days, and read an empty
                rollup while raw still held the rows on a never-backfilled one. Cached per data source and
                shared with the composer, so this is not a probe per call. */
-            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var history = await DarlingTrendReader.GetQueryHistoryAsync(
                 postgres, resolved.ServerId, database_name, query_hash, now.AddHours(-hours_back), now,
                 hourlyAvailable: rollups.QueryGrainHourly,
@@ -386,7 +387,8 @@ public sealed class DarlingMcpTrendTools
                    text HourlyRelationFor plus the bare-name alias produced), or a stitch splicing in the
                    successor past its floor. The tier above is still decided over the legacy pair, the deeper
                    of the two. */
-                hourlyRelation: coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", now.AddHours(-hours_back), RollupCoverage.StitchTier.Hourly));
+                hourlyRelation: coverage.StitchedRelationSql(TimescaleSupport.QueryStatsHourlyView, "f", now.AddHours(-hours_back), RollupCoverage.StitchTier.Hourly),
+                cancellationToken: cancellationToken);
             var rows = history.Points;
             if (rows.Count == 0)
             {
@@ -394,7 +396,7 @@ public sealed class DarlingMcpTrendTools
                    last N hours" over a span the read never covered — for a query whose history had aged out of
                    the raw tier that is a false statement, not an incomplete one, and an agent acts on it by
                    concluding the query did not run. */
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No history found for query_hash '{query_hash}' in database '{database_name}' in the " +
@@ -425,7 +427,7 @@ public sealed class DarlingMcpTrendTools
                 max_dop = aggregated ? (int?)null : r.MaxDop,
                 query_plan_hash = aggregated ? null : r.QueryPlanHash
             });
-            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
@@ -458,7 +460,7 @@ public sealed class DarlingMcpTrendTools
                 discontinuities = BaselineDiscontinuities.ToPayload(discontinuities)
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_query_trend", ex);
         }
@@ -470,15 +472,17 @@ public sealed class DarlingMcpTrendTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetQueryDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints));
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetQueryDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
 
     /// <summary>get_query_duration_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool passes
     /// its own, the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
     internal static async Task<string> GetQueryDurationTrend(
-        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -502,7 +506,7 @@ public sealed class DarlingMcpTrendTools
                 retention drops by age, never by where a point sits inside the requested window — the
                 as_of anchor decides the window, not how old its rows are.
             */
-            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var route = DarlingTrendReader.ResolveQueryDurationTrendRoute(startUtc, rollups, coverage, windowEndUtc: now);
 
             /* #3897: the hourly rollup's points are whole hours, so a width it cannot serve is refused rather than
@@ -515,11 +519,11 @@ public sealed class DarlingMcpTrendTools
                 bucketMinutes = TrendBuckets.OnHourlyTier(bucket_minutes, bucketMinutes);
             }
 
-            var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes);
+            var result = await DarlingTrendReader.GetQueryDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, cancellationToken);
 
             if (result.Points.Count == 0)
             {
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -531,19 +535,19 @@ public sealed class DarlingMcpTrendTools
                    hourly route the rollup is probed too, because a server whose raw rows have all aged out
                    is not a server nothing was ever stored for. */
                 return await EmptyRoutedTrendAsync(
-                    DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId),
+                    DarlingTrendReader.HasAnyQueryStatAsync(postgres, resolved.ServerId, cancellationToken),
                     postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, route, "query",
                     "Check that collection is running and that the server is enabled; get_top_queries_by_cpu will be equally empty until it does.",
-                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints));
+                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), cancellationToken);
             }
 
             /* The two siblings below serialize through the SAME helper, so the three Performance-Trends
                reads cannot advertise three different field sets for one shape. */
             return SerializeTrend(resolved.ServerName, hours_back, result.Points,
                 DescribeRoute(result, now, new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)),
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_query_duration_trend", ex);
         }
@@ -555,15 +559,17 @@ public sealed class DarlingMcpTrendTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints));
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetProcedureDurationTrend(postgres, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.DurationMaxPoints), cancellationToken);
 
     /// <summary>get_procedure_duration_trend under an explicit <paramref name="budget"/> (#3897) — the query
     /// trend's twin, over the procedure pair.</summary>
     internal static async Task<string> GetProcedureDurationTrend(
-        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget)
+        NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes, TrendBudget budget,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -579,7 +585,7 @@ public sealed class DarlingMcpTrendTools
 
             /* #3541 A2 — the same routing as get_query_duration_trend, over the procedure pair, and #3897 the same
                width rule on the hourly tier. */
-            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, CancellationToken.None);
+            var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
             var route = DarlingTrendReader.ResolveProcedureDurationTrendRoute(startUtc, rollups, coverage, windowEndUtc: now);
             if (route.Tier == RetentionTier.Hourly)
             {
@@ -589,28 +595,28 @@ public sealed class DarlingMcpTrendTools
                 bucketMinutes = TrendBuckets.OnHourlyTier(bucket_minutes, bucketMinutes);
             }
 
-            var result = await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes);
+            var result = await DarlingTrendReader.GetProcedureDurationTrendAsync(postgres, resolved.ServerId, startUtc, now, route, bucketMinutes, cancellationToken);
 
             if (result.Points.Count == 0)
             {
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "procedure_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
                 }
 
                 return await EmptyRoutedTrendAsync(
-                    DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId),
+                    DarlingTrendReader.HasAnyProcedureStatAsync(postgres, resolved.ServerId, cancellationToken),
                     postgres, resolved.ServerId, resolved.ServerName, hours_back, startUtc, now, route, "stored-procedure",
                     "Check that collection is running and that the server is enabled. A server that genuinely runs no stored procedures also lands here, and that is a real answer rather than a fault.",
-                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints));
+                    new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints), cancellationToken);
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, result.Points,
                 DescribeRoute(result, now, new BucketChoice(bucketMinutes, bucket_minutes is not null, budget.AutoPoints)),
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_procedure_duration_trend", ex);
         }
@@ -621,9 +627,10 @@ public sealed class DarlingMcpTrendTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -645,9 +652,9 @@ public sealed class DarlingMcpTrendTools
                 arming gate), so wherever raw is short the rollup is the tier holding the history, and a
                 raw-only route means raw is complete.
             */
-            var route = await QueryStoreTrendRouting.ResolveAsync(postgres);
+            var route = await QueryStoreTrendRouting.ResolveAsync(postgres, cancellationToken);
             var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
-                postgres, resolved.ServerId, startUtc, now, route);
+                postgres, resolved.ServerId, startUtc, now, route, cancellationToken);
             var disclosure = DescribeQueryStoreRoute(route, points, startUtc, now);
 
             if (points.Count == 0)
@@ -657,7 +664,7 @@ public sealed class DarlingMcpTrendTools
                     every database on the instance. A server with no Query Store data is not a server with
                     no slow queries, so the message names that cause first.
                 */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_store", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -677,7 +684,7 @@ public sealed class DarlingMcpTrendTools
                         disclosure);
                 }
 
-                var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId);
+                var everSampled = await DarlingTrendReader.HasAnyQueryStoreStatAsync(postgres, resolved.ServerId, cancellationToken);
                 if (!everSampled)
                 {
                     return EmptyStatus(
@@ -705,9 +712,9 @@ public sealed class DarlingMcpTrendTools
             }
 
             return SerializeTrend(resolved.ServerName, hours_back, points, disclosure,
-                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now));
+                await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, startUtc, now, cancellationToken));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_query_store_duration_trend", ex);
         }
@@ -999,11 +1006,11 @@ public sealed class DarlingMcpTrendTools
     private static async Task<string> EmptyRoutedTrendAsync(
         Task<bool> rawProbe, NpgsqlDataSource postgres, int serverId, string serverName, int hours_back,
         DateTime startUtc, DateTime windowEndUtc, DarlingTrendReader.DurationTrendRoute route,
-        string what, string checkThis, BucketChoice bucket)
+        string what, string checkThis, BucketChoice bucket, CancellationToken cancellationToken = default)
     {
         var disclosure = DescribeEmptyRoute(route, startUtc, windowEndUtc, bucket);
 
-        if (!await DarlingTrendReader.HasAnySampleOnRouteAsync(postgres, rawProbe, route, serverId))
+        if (!await DarlingTrendReader.HasAnySampleOnRouteAsync(postgres, rawProbe, route, serverId, cancellationToken))
         {
             return EmptyStatus("unavailable", NeverSampledMessage(serverName, what, checkThis), disclosure);
         }

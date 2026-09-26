@@ -10,7 +10,9 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -73,24 +75,45 @@ public sealed partial class ViewerDataService
     /// The CPU Scheduler pressure trend read: the runnable / blocked / queued task counts per collection
     /// over the window, from the <c>v_cpu_scheduler_stats</c> passthrough view. A point-in-time collector
     /// (single row per collection), so the three counts plot directly — no delta normalization.
-    /// $1 server_id, $2 window start, $3 window end (all naive UTC).
+    /// $1 server_id, $2 window start, $3 window end (all naive UTC), $4 the bucket width in minutes.
     ///
-    /// <para>#3936: <c>collection_id</c> is a secondary sort, not a filter — a same-instant collision (rare,
-    /// see <see cref="PerformanceMonitor.Collectors.CollectionTimeClock"/>) still plots both real snapshots,
-    /// just in a deterministic left-to-right order instead of whatever physical row order the plan happens
-    /// to return them in.</para>
+    /// <para>#3936: <c>collection_id</c> is a secondary sort inside the raw CTE, not a filter — a
+    /// same-instant collision (rare, see
+    /// <see cref="PerformanceMonitor.Collectors.CollectionTimeClock"/>) still plots both real snapshots
+    /// into the same bucket, just in a deterministic left-to-right order rather than whatever physical
+    /// row order the plan happens to return them in.</para>
+    ///
+    /// <para>#4234: BUCKETED. All three counts are gauges (ruling item 2, point-in-time snapshot columns,
+    /// no delta math): a bucket's value is the plain average of its collections. 10,080 rows over 7 days
+    /// at the collector's 1-minute cadence, with no cap, is the issue's own measured number.
+    /// <c>first_collection_time</c>/<c>collection_count</c> ride along so the C# reader can stamp a bucket
+    /// that merged nothing at its one collection's own raw time (ruling item 3), matching
+    /// <see cref="ViewerDataService.GetCpuUtilizationAsync"/>.</para>
     /// </summary>
-    public const string CpuSchedulerTrendSql = """
+    public static readonly string CpuSchedulerTrendSql = $"""
+        WITH raw AS
+        (
+            SELECT
+                collection_time,
+                collection_id,
+                total_runnable_tasks_count,
+                total_blocked_task_count,
+                total_queued_request_count
+            FROM v_cpu_scheduler_stats
+            WHERE server_id = $1
+            AND   collection_time >= $2
+            AND   collection_time <= $3
+        )
         SELECT
-            collection_time,
-            total_runnable_tasks_count,
-            total_blocked_task_count,
-            total_queued_request_count
-        FROM v_cpu_scheduler_stats
-        WHERE server_id = $1
-        AND   collection_time >= $2
-        AND   collection_time <= $3
-        ORDER BY collection_time, collection_id
+            GREATEST(date_bin(CAST($4 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $2) AS bucket_start,
+            AVG(COALESCE(total_runnable_tasks_count, 0)) AS total_runnable_tasks_count,
+            AVG(COALESCE(total_blocked_task_count, 0)) AS total_blocked_task_count,
+            AVG(COALESCE(total_queued_request_count, 0)) AS total_queued_request_count,
+            MIN(collection_time) AS first_collection_time,
+            COUNT(*) AS collection_count
+        FROM raw
+        GROUP BY 1
+        ORDER BY 1
         """;
 
     /// <summary>
@@ -140,23 +163,50 @@ public sealed partial class ViewerDataService
         LIMIT 1
         """;
 
-    /// <summary>The scheduler pressure trend (runnable/blocked/queued counts) over the window.</summary>
+    /// <summary>
+    /// The scheduler pressure trend (runnable/blocked/queued counts) over the window, bucketed to
+    /// <see cref="TrendBudget.Chart"/>'s point budget (#4234). A bucket holding exactly one physical
+    /// collection is stamped at that collection's own raw time rather than the bucket grid when EVERY
+    /// bucket this call returned is such a singleton (ruling item 3).
+    /// </summary>
     public async Task<List<CpuSchedulerTrendPoint>> GetCpuSchedulerTrendAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
     {
-        var result = new List<CpuSchedulerTrendPoint>();
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
+        var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         await using var command = _dataSource.CreateCommand(CpuSchedulerTrendSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         AddWindowParameters(command, serverId, startUtc, endUtc);
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
+
+        var rows = new List<(DateTime BucketStart, DateTime FirstCollectionTime, int Runnable, int Blocked, int Queued)>();
+        var everyBucketSingleton = true;
+
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            result.Add(new CpuSchedulerTrendPoint(
+            if (reader.GetInt64(5) != 1)
+            {
+                everyBucketSingleton = false;
+            }
+
+            rows.Add((
                 reader.GetDateTime(0),
-                reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
-                reader.IsDBNull(2) ? 0 : reader.GetInt32(2),
-                reader.IsDBNull(3) ? 0 : reader.GetInt32(3)));
+                reader.GetDateTime(4),
+                reader.IsDBNull(1) ? 0 : (int)Math.Round(reader.GetDouble(1)),
+                reader.IsDBNull(2) ? 0 : (int)Math.Round(reader.GetDouble(2)),
+                reader.IsDBNull(3) ? 0 : (int)Math.Round(reader.GetDouble(3))));
+        }
+
+        var result = new List<CpuSchedulerTrendPoint>(rows.Count);
+        foreach (var row in rows)
+        {
+            result.Add(new CpuSchedulerTrendPoint(
+                everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
+                row.Runnable,
+                row.Blocked,
+                row.Queued));
         }
 
         return result;

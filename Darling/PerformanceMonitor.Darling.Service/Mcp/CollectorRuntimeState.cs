@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -99,12 +100,50 @@ public sealed class CollectorRuntimeState
     }
 
     /// <summary>
+    /// The fixed <see cref="Snapshot.Detail"/> text for each step's failure (#4316). The worker used to pass
+    /// <c>ex.Message</c> straight through, but <c>Detail</c> leaves the process in <c>/api/ping</c>'s response
+    /// body. In loopback mode that reaches any local process — the whole surface needs no token there; in
+    /// network mode ping sits behind the same CIDR and sign-in gate as every other route (only logout and the
+    /// OIDC routes are exempt, <c>IsAuthFlowPath</c>) — but a signed-in caller is still not the service log,
+    /// and an exception's text was never vetted for that audience: a connection string, a file path or a
+    /// driver's inner-exception chain can all land in <c>ex.Message</c>. The LogWarning/LogCritical line beside every
+    /// <see cref="PublishRetrying"/>/<see cref="PublishStopped"/> call still logs the exception's full text to
+    /// the service log, which is where that detail belongs.
+    /// </summary>
+    private static readonly Dictionary<StartupStep, string> FailureDetailByStep =
+        new()
+        {
+            [StartupStep.Configuration] =
+                "Loading or validating the configuration failed. The service log has the full error.",
+            [StartupStep.ManagedStore] =
+                "Bootstrapping the managed PostgreSQL store failed. The service log has the full error.",
+            [StartupStep.Store] =
+                "The store connection or migration failed. The service log has the full error.",
+        };
+
+    /// <summary>The fixed, non-exception <see cref="Snapshot.Detail"/> text to publish for
+    /// <paramref name="step"/>'s failure. See <see cref="FailureDetailByStep"/> for why this replaces
+    /// <c>ex.Message</c> at every <see cref="PublishRetrying"/>/<see cref="PublishStopped"/> call site.</summary>
+    public static string FailureDetailFor(StartupStep step) => FailureDetailByStep[step];
+
+    /// <summary>
+    /// The fixed <see cref="Snapshot.Detail"/> for the one ManagedStore stand-down that is not on an
+    /// exception path (#4316 round 1 B1): <c>postgres.managed = true</c> asked for the bundled runtime and
+    /// its DPAPI-protected credential on a host that can have neither. Published by
+    /// <see cref="PublishManagedStoreNeedsWindows"/>.
+    /// </summary>
+    public const string ManagedStoreNeedsWindowsDetail =
+        "postgres.managed = true requires Windows; set postgres.managed = false and point postgres.connectionString "
+        + "at your own PostgreSQL instead.";
+
+    /// <summary>
     /// A coherent published snapshot; null until the worker first publishes.
     /// </summary>
     /// <param name="Phase">Where the collector is relative to having started collecting.</param>
     /// <param name="Step">The startup step the phase is about; null for
     /// <see cref="CollectorPhase.Collecting"/>, which is not about a step.</param>
-    /// <param name="Detail">The failure's message, as the critical/warning log line reports it; null for
+    /// <param name="Detail">The step's fixed failure sentence (<see cref="FailureDetailFor"/>), the joined
+    /// configuration problems, or the not-Windows sentence, never exception text (#4316); null for
     /// <see cref="CollectorPhase.Collecting"/>.</param>
     /// <param name="Attempt">Which attempt is in flight, and how many the budget allows — both zero
     /// outside <see cref="CollectorPhase.Retrying"/>, where an attempt number is the only one of the two
@@ -124,15 +163,49 @@ public sealed class CollectorRuntimeState
     private volatile Snapshot? _current;
 
     /// <summary>Publishes a classified-transient failure of <paramref name="step"/> that is being retried
-    /// (worker only; called from each retry arm alongside its warning line).</summary>
-    public void PublishRetrying(StartupStep step, string detail, int attempt, int attempts)
+    /// (worker only; called from each retry arm alongside its warning line). The detail is always
+    /// <see cref="FailureDetailFor"/> — an exception-path retry has no other text to publish, and (#4316
+    /// round 1 B1) there is no longer a <c>string</c> parameter here for a caller to put <c>ex.Message</c>
+    /// in instead.</summary>
+    public void PublishRetrying(StartupStep step, int attempt, int attempts)
         => _current = new Snapshot(
-            CollectorPhase.Retrying, step, FirstLineOf(detail), attempt, attempts, DateTime.UtcNow);
+            CollectorPhase.Retrying, step, FirstLineOf(FailureDetailFor(step)), attempt, attempts, DateTime.UtcNow);
 
     /// <summary>Publishes a terminal failure of <paramref name="step"/> (worker only; called from each
-    /// collection-blocking exit, before the <c>return</c> — after the critical line, so a throw here could
-    /// never cost the operator the log line).</summary>
-    public void PublishStopped(StartupStep step, string detail)
+    /// EXCEPTION-path collection-blocking exit, before the <c>return</c> — after the critical line, so a
+    /// throw here could never cost the operator the log line). The detail is always
+    /// <see cref="FailureDetailFor"/>; <see cref="PublishConfigurationProblems"/> and
+    /// <see cref="PublishManagedStoreNeedsWindows"/> are the two terminal stand-downs that are NOT exception
+    /// paths, and publish their own detail through the shared <see cref="PublishStoppedCore"/>.</summary>
+    public void PublishStopped(StartupStep step) => PublishStoppedCore(step, FailureDetailFor(step));
+
+    /// <summary>Publishes a terminal Configuration stand-down for a validated-but-rejected
+    /// <paramref name="config"/> (worker only; #2953): every problem <see cref="DarlingConfig.Validate"/>
+    /// finds against it, joined with <c>"; "</c> — all of them, not just the first, because
+    /// <c>Validate</c> is all-fatal and a ping body naming only one of several problems would send an
+    /// operator to fix a config that still would not start. Sanitized and length-capped exactly like every
+    /// other <see cref="Snapshot.Detail"/>, by <see cref="PublishStoppedCore"/>. Takes the config itself,
+    /// not a problem list (#4316 round 2 L1-r2 a): a <c>string</c>- or <c>IReadOnlyList&lt;string&gt;</c>-typed
+    /// parameter here is exactly the free-text seat a future caller could put exception text into.</summary>
+    public void PublishConfigurationProblems(DarlingConfig config)
+        => PublishStoppedCore(StartupStep.Configuration, ConfigurationProblemsDetail(config.Validate()));
+
+    /// <summary>Every problem <see cref="DarlingConfig.Validate"/> found, joined with <c>"; "</c> (#2953).
+    /// Pure, so the join is testable on its own; only <see cref="PublishConfigurationProblems"/>
+    /// publishes it.</summary>
+    internal static string ConfigurationProblemsDetail(IReadOnlyList<string> problems) => string.Join("; ", problems);
+
+    /// <summary>Publishes the terminal ManagedStore stand-down for the one config combination that reaches
+    /// neither a retry nor an exception: <c>postgres.managed = true</c> on a non-Windows host (worker
+    /// only).</summary>
+    public void PublishManagedStoreNeedsWindows()
+        => PublishStoppedCore(StartupStep.ManagedStore, ManagedStoreNeedsWindowsDetail);
+
+    /// <summary>The shared body every terminal stand-down publishes through, whatever its detail's source —
+    /// an exception's fixed sentence (<see cref="PublishStopped"/>), the joined config problems
+    /// (<see cref="PublishConfigurationProblems"/>), or the not-Windows sentence
+    /// (<see cref="PublishManagedStoreNeedsWindows"/>).</summary>
+    private void PublishStoppedCore(StartupStep step, string detail)
     {
         _current = new Snapshot(CollectorPhase.Stopped, step, FirstLineOf(detail), 0, 0, DateTime.UtcNow);
 
@@ -157,17 +230,19 @@ public sealed class CollectorRuntimeState
     /// <c>DarlingCliCommands.FirstLineOf</c> and <c>ViewerStoreUnreachableException</c> apply, for the same
     /// reason and one more.
     ///
-    /// <para>PostgreSQL errors are multi-line: a rung that cannot apply answers with the message, then a
-    /// blank line, then <c>POSITION: 30</c> — a character offset into SQL the reader of a health probe cannot
-    /// see. The first line is the whole of what is actionable there.</para>
+    /// <para>Since #4316's L3 fix, <paramref name="detail"/> is never a driver or server exception's own
+    /// message: it is one of <see cref="FailureDetailFor"/>'s fixed sentences, the not-Windows sentence, or
+    /// <see cref="ConfigurationProblemsDetail"/>'s joined configuration problems. This reduction stays a
+    /// BACKSTOP rather than dead code, because the problem list <c>DarlingConfig.Validate</c> returns has
+    /// no bound — a config with many problems, or one long problem sentence, is still possible, and either
+    /// could still be multi-line or run past the cap below.</para>
     ///
-    /// <para>The cap is the second reason, and it is about the destination rather than the reader. This text
-    /// is the only part of the log's critical line that leaves the ACL-protected file log and travels over
-    /// HTTP, so it is worth bounding what an arbitrarily long driver or server message can put in a response
-    /// body. Truncation is MARKED, so a reader can tell a shortened message from a complete one and go to the
-    /// log for the rest.</para>
+    /// <para>The cap is about the destination: this text is the only part of the published snapshot that
+    /// leaves the process and travels over HTTP, in the ping body, so what an unbounded problem list can put
+    /// there is worth bounding. Truncation is MARKED, so a reader can tell a shortened message from a
+    /// complete one and go to the log for the rest.</para>
     /// </summary>
-    private static string FirstLineOf(string detail)
+    internal static string FirstLineOf(string detail)
     {
         var line = (detail ?? string.Empty).Split('\n')[0].TrimEnd('\r');
 
@@ -175,7 +250,8 @@ public sealed class CollectorRuntimeState
     }
 
     /// <summary>How much of a failure message travels in the ping body. Generous enough for the shapes that
-    /// actually arrive — a refused connect names a host and port, a rung failure a SQLSTATE and a sentence —
-    /// and finite because neither is bounded by anything this process controls.</summary>
+    /// actually arrive — a fixed failure sentence, or a handful of joined configuration problems — and
+    /// finite because the configuration-problem list <c>DarlingConfig.Validate</c> returns has no bound, so
+    /// the cap stays a backstop rather than a limit this process would otherwise never reach.</summary>
     internal const int MaxDetailLength = 400;
 }
