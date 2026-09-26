@@ -159,6 +159,108 @@ public sealed class TopQueriesHourlyRoutingLiveTests
         }
     }
 
+    /// <summary>
+    /// #4231 stage 3a live pin (brief step 1): with <c>min_dop</c> set, or <c>group_by="host_object"</c>, an
+    /// HOURLY-routed <c>get_top_queries_by_cpu</c> MCP payload carries a <c>precision_note</c> saying the
+    /// filter/roll-up was NOT applied (the rollup has no per-group DOP and no host_object_name — see
+    /// <c>DarlingDataReader.GetTopQueriesByCpuHourlyAsync</c>'s own doc comment). A RAW-routed payload for the
+    /// same request has no such note. RED on dev: no <c>precision_note</c> field exists on dev's payload at all.
+    /// </summary>
+    [Fact]
+    public async Task GetTopQueriesByCpu_HourlyRouted_WithDopOrRollUp_CarriesPrecisionNote()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4231 stage-3a routing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #4231 stage-3a routing test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var windowEnd = WindowStart.AddDays(1);
+        var bodySucceeded = false;
+        try
+        {
+            await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600);
+            await PlantAsync(connection, ct, WindowStart.AddHours(2), "0xTOPQ2", "usp_HostA", 200_000L, 180_000L, 5L, 3600);
+
+            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+            var hoursBack = (int)Math.Ceiling((windowEnd - WindowStart).TotalHours);
+            var asOf = windowEnd.ToString("o");
+
+            /* ── raw payload for the same request shape (min_dop set) — must carry NO precision_note. ── */
+            var rawJson = await DarlingMcpDataTools.GetTopQueriesByCpu(
+                dataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 2, as_of: asOf);
+            using var rawDoc = System.Text.Json.JsonDocument.Parse(rawJson);
+            Assert.True(rawDoc.RootElement.TryGetProperty("tier_used", out var rawTier));
+            Assert.Equal("raw", rawTier.GetString());
+            Assert.True(rawDoc.RootElement.TryGetProperty("precision_note", out var rawNote));
+            Assert.Equal(System.Text.Json.JsonValueKind.Null, rawNote.ValueKind);
+
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart, windowEnd.AddHours(1), ct);
+
+            await using (var purge = new NpgsqlCommand(
+                "DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", connection))
+            {
+                purge.Parameters.AddWithValue(ServerId);
+                purge.Parameters.AddWithValue(WindowStart);
+                purge.Parameters.AddWithValue(windowEnd);
+                await purge.ExecuteNonQueryAsync(ct);
+            }
+
+            /* ── hourly-routed payload with min_dop set — must carry a precision_note (rollup ignores min_dop). ── */
+            var hourlyDopJson = await DarlingMcpDataTools.GetTopQueriesByCpu(
+                dataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 2, as_of: asOf);
+            using var hourlyDopDoc = System.Text.Json.JsonDocument.Parse(hourlyDopJson);
+            Assert.True(hourlyDopDoc.RootElement.TryGetProperty("tier_used", out var hourlyDopTier));
+            Assert.Equal("hourly", hourlyDopTier.GetString());
+            Assert.True(hourlyDopDoc.RootElement.TryGetProperty("precision_note", out var hourlyDopNote));
+            Assert.Equal(System.Text.Json.JsonValueKind.String, hourlyDopNote.ValueKind);
+            Assert.False(string.IsNullOrEmpty(hourlyDopNote.GetString()));
+
+            /* ── hourly-routed payload with group_by=host_object — must also carry a precision_note (rollup has
+               no host_object_name to roll up by). ── */
+            var hourlyRollUpJson = await DarlingMcpDataTools.GetTopQueriesByCpu(
+                dataSource, ServerName, hours_back: hoursBack, top: 10, group_by: "host_object", as_of: asOf);
+            using var hourlyRollUpDoc = System.Text.Json.JsonDocument.Parse(hourlyRollUpJson);
+            Assert.True(hourlyRollUpDoc.RootElement.TryGetProperty("tier_used", out var hourlyRollUpTier));
+            Assert.Equal("hourly", hourlyRollUpTier.GetString());
+            Assert.True(hourlyRollUpDoc.RootElement.TryGetProperty("precision_note", out var hourlyRollUpNote));
+            Assert.Equal(System.Text.Json.JsonValueKind.String, hourlyRollUpNote.ValueKind);
+            Assert.False(string.IsNullOrEmpty(hourlyRollUpNote.GetString()));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
     private static Dictionary<string, (long CpuUs, long Executions)> RollUpByHash(IEnumerable<DarlingDataReader.TopQueryRow> rows)
     {
         var totals = new Dictionary<string, (long CpuUs, long Executions)>(StringComparer.Ordinal);
