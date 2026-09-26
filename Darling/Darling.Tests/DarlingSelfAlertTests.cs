@@ -1134,8 +1134,9 @@ public sealed class DarlingSelfAlertTests
 
     private static DarlingSelfAlertEvaluator.StoreSettingsReport BuildStoreSettingsReport(
         bool isManagedStore = true, bool usedLastGood = false, bool handEdited = false,
+        ManagedConfMigrationOutcome? verification = null,
         params string[] rejected) =>
-        new(isManagedStore, usedLastGood, handEdited, rejected);
+        new(isManagedStore, usedLastGood, handEdited, rejected, verification);
 
     [Fact]
     public async Task StoreSettings_UsedLastGoodConf_Fires()
@@ -1175,6 +1176,105 @@ public sealed class DarlingSelfAlertTests
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("shared_buffers", fired.DetailText);
         Assert.Contains("rejected", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_Fires_AndNamesTheFileAndKeys()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], "C:\\pgdata\\postgresql.conf.bak",
+            ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("darling-managed.conf", fired.DetailText);
+        Assert.Contains("shared_buffers", fired.DetailText);
+        Assert.Contains("restored", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_Active_DoesNotResolve()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(handEdited: true), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        h.Now = h.Now.Add(DarlingSelfAlertEvaluator.StoreSettingsRefire).AddMinutes(1);
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, [], unknown), Ct);
+
+        Assert.Single(h.Deliverer.Outcomes);   // no re-fire
+        Assert.Empty(h.History.Records);       // and no resolve
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_Inactive_NeverFires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, false, [], unknown), Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationUnknown_WithHandEdit_Fires_HandEditReasonOnly()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var unknown = new ManagedConfMigrationOutcome(ManagedConfVerificationStatus.Unknown, [], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, false, true, [], unknown), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("hand-edited", fired.DetailText);
+        Assert.DoesNotContain("pg_file_settings", fired.DetailText);
+        Assert.DoesNotContain("rejected", fired.DetailText);
+    }
+
+    [Fact]
+    public async Task StoreSettings_VerificationFailed_ThenClears_Resolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(verification: verification), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        await e.ApplyStoreSettingsAsync(BuildStoreSettingsReport(), Ct);
+        Assert.Single(h.Deliverer.Outcomes);       // unchanged: no re-fire on the resolving sweep
+        var resolution = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.StoreSettingsResolvedMetric, resolution.MetricName);
+    }
+
+    [Fact]
+    public async Task StoreSettings_AllFourConditions_CurrentValueIsFour()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var verification = new ManagedConfMigrationOutcome(
+            ManagedConfVerificationStatus.Failed, ["shared_buffers"], null, ManagedConfMigrationStep.A);
+        await e.ApplyStoreSettingsAsync(
+            new DarlingSelfAlertEvaluator.StoreSettingsReport(true, true, true, ["work_mem"], verification), Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal("4", fired.CurrentValue);
+        Assert.Equal(4d, fired.NumericCurrentValue);
     }
 
     [Fact]
