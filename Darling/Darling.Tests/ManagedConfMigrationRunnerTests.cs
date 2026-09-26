@@ -17,7 +17,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// <see cref="ManagedConfMigrationRunner"/> (#4336 lane 5b): <c>RunStepA</c> and <c>ResumePending</c> over
+/// <see cref="ManagedConfMigrationRunner"/> (#4336): <c>RunStepA</c> and <c>ResumePending</c> over
 /// fake snapshot delegates, no database.
 /// </summary>
 public sealed class ManagedConfMigrationRunnerTests : IDisposable
@@ -324,7 +324,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
 
     private void WriteManaged(string text) => File.WriteAllText(Path.Combine(_dataDir, ManagedConfFile.FileName), text);
 
-    /// <summary>Pin (#4336 lane 6): every rendered key matches its <c>pg_file_settings</c> row — the stamp
+    /// <summary>Pin (#4336): every rendered key matches its <c>pg_file_settings</c> row — the stamp
     /// is written and <see cref="ManagedConfMigrationSteps.IsVerified"/> is true.</summary>
     [Fact]
     public void VerifyStepB_AllKeysMatch_StampsVerified()
@@ -345,7 +345,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
     }
 
-    /// <summary>Pin (#4336 lane 6): a mismatched key restores the previous file bytes exactly, and the OLD
+    /// <summary>Pin (#4336): a mismatched key restores the previous file bytes exactly, and the OLD
     /// stamp (written against <c>previousText</c> beforehand) is still verified against them.</summary>
     [Fact]
     public void VerifyStepB_Mismatch_RestoresPreviousTextAndOldStampStillVerifies()
@@ -371,7 +371,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
     }
 
-    /// <summary>Pin (#4336 lane 6): a key whose row has <c>Applied: false</c> because an operator line
+    /// <summary>Pin (#4336): a key whose row has <c>Applied: false</c> because an operator line
     /// overrides it lower down still passes, as long as its setting and value agree and it carries no error.</summary>
     [Fact]
     public void VerifyStepB_OverriddenKey_StillPasses()
@@ -391,7 +391,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
     }
 
-    /// <summary>Pin (#4336 lane 6): a fresh error row from <c>darling-managed.conf</c> on a rendered key fails
+    /// <summary>Pin (#4336): a fresh error row from <c>darling-managed.conf</c> on a rendered key fails
     /// verification even when a differently-sourced row for the same name is applied.</summary>
     [Fact]
     public void VerifyStepB_NewErrorFromManagedFile_Fails()
@@ -411,7 +411,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Contains("work_mem", outcome.MismatchedKeys);
     }
 
-    /// <summary>Pin (#4336 lane 6): the exact change-log line for two changed keys.</summary>
+    /// <summary>Pin (#4336): the exact change-log line for two changed keys.</summary>
     [Fact]
     public void FormatStepBChangeLog_TwoKeys_ExactLine()
     {

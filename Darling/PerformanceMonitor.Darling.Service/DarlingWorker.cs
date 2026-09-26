@@ -112,7 +112,7 @@ public sealed class DarlingWorker : BackgroundService
     /// itself is a field read and a date compare.</summary>
     private static readonly TimeSpan s_webTlsCheckInterval = TimeSpan.FromHours(1);
 
-    /// <summary>#4215 (lane A1d): how often the sweep re-evaluates the managed-store settings condition
+    /// <summary>How often the sweep re-evaluates the managed-store settings condition (#4215)
     /// (last-good fallback, a kept hand edit, a rejected value). Every fact behind it is fixed for the life of
     /// this process — only a restart changes any of them — so the tick exists for the RESOLUTION half, the
     /// <see cref="s_staleMuteCheckInterval"/> reasoning exactly: an operator who fixes a rejected value and
@@ -775,7 +775,7 @@ public sealed class DarlingWorker : BackgroundService
        certificate is a store-wide concept), so a single field like the stale-mute cadence above. */
     private DateTime _nextWebTlsCheckUtc = DateTime.MinValue;
 
-    /* #4215 (lane A1d): next due time for the managed store-settings self-alert. Fleet-level (a managed
+    /* Next due time for the managed store-settings self-alert (#4215). Fleet-level (a managed
        store's settings are a store-wide concept), so a single field like the stale-mute cadence above. */
     private DateTime _nextStoreSettingsCheckUtc = DateTime.MinValue;
 
@@ -1454,21 +1454,21 @@ public sealed class DarlingWorker : BackgroundService
             }
         }
 
-        /* #4215 ruling M2/H1 item 3: this start's darling-managed.conf write result, carried past the
+        /* #4215: this start's darling-managed.conf write result, carried past the
            bootstrap the same way storeUpgradeReport/storeTimescaleReport are, so LogStoreHostProfileAsync can
            fold a hand edit's changed keys into the stored verdict rows without re-reading the file. Null on a
            BYO store (managedPostgres itself is null) and on the adopted-listener path (the write never ran). */
         var managedDataDirectory = managedPostgres?.DataDirectory;
         var managedConfWriteResult = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfWriteResult : null;
 
-        /* #4215 lane A1d: whether THIS start fell back to darling-managed.conf.last-good, carried out of the
+        /* #4215: whether THIS start fell back to darling-managed.conf.last-good, carried out of the
            bootstrap the same way managedConfWriteResult already is — see
            DarlingManagedPostgres.LastStartUsedLastGoodManagedConf. False (never true) on a BYO store, off
            Windows, and on the adopted-listener path, for the same reasons managedConfWriteResult is null
            there. */
         var managedUsedLastGoodConf = OperatingSystem.IsWindows() && (managedPostgres?.LastStartUsedLastGoodManagedConf ?? false);
 
-        /* #4336 lane 6b: this start's darling-managed.conf verification outcome, carried out of the
+        /* #4336: this start's darling-managed.conf verification outcome, carried out of the
            bootstrap the same way managedConfWriteResult and managedUsedLastGoodConf already are. Null on a
            BYO store, off Windows, and on the adopted-listener path, for the same reasons those are. */
         var managedConfVerification = OperatingSystem.IsWindows() ? managedPostgres?.LastManagedConfVerification : null;
@@ -1734,9 +1734,9 @@ public sealed class DarlingWorker : BackgroundService
                 }
             }
 
-            /* #4215 ruling M2: on the OWNER connection, right after start, compute and store every owned
+            /* #4215: on the OWNER connection, right after start, compute and store every owned
                key's verdict (collect.managed_conf_verdicts, V146) so --check-settings, the MCP self-store
-               reader and (#4215's next lane) the stale-setting alert can all read it back — the mcp/viewer
+               reader and the stale-setting alert can all read it back — the mcp/viewer
                roles have neither file access nor pg_file_settings visibility to compute it themselves. Same
                budget, same try/catch as the read above: never fails or delays startup. BYO stores
                (managedDataDirectory null) and the adopted-listener path skip it — nothing this service wrote
@@ -2811,9 +2811,9 @@ public sealed class DarlingWorker : BackgroundService
                     BuildWebTlsCertReport(_webTlsCertState.Read()), stoppingToken);
             }
 
-            /* #4215 (lane A1d): the managed-store settings self-alert — darling-managed.conf fell back to the
+            /* #4215: the managed-store settings self-alert — darling-managed.conf fell back to the
                last-good copy, is hand-edited and kept in force, or PostgreSQL rejected one or more owned
-               settings outright (the adopted review's items 2 and 3, plus the RejectedValue ruling). Every
+               settings outright. Every
                fact but the rejected-setting list is this start's own in-process state, carried down from
                ExecuteAsync exactly like managedConfWriteResult already is — never re-read, because the writer
                runs on every start and the state is re-derived after a restart. The rejected list is the one
@@ -6340,14 +6340,14 @@ LIMIT 1";
     }
 
     /// <summary>
-    /// #4215 (lane A1d): builds the <see cref="DarlingSelfAlertEvaluator.StoreSettingsReport"/> and hands it to
+    /// #4215: builds the <see cref="DarlingSelfAlertEvaluator.StoreSettingsReport"/> and hands it to
     /// <see cref="DarlingSelfAlertEvaluator.EvaluateStoreSettingsAsync"/>, mirroring
     /// <see cref="EvaluateStoreDiskPressureAsync"/>'s split between "gather the facts here" and "judge them in
     /// the evaluator". <paramref name="managedConfWriteResult"/> and <paramref name="managedUsedLastGoodConf"/>
     /// are this start's own in-process facts, carried down unchanged from <c>ExecuteAsync</c>; the rejected-value
     /// list is the one genuine store read, isolated in <see cref="ReadRejectedManagedConfSettingNamesAsync"/> so
-    /// a throw there degrades to <c>null</c> (unknown) rather than stopping the fleet loop — the coordinator's
-    /// A1d ruling: unlike <see cref="UsedLastGoodConf"/>/<see cref="HandEdited"/>, a rejected-value row is one
+    /// a throw there degrades to <c>null</c> (unknown) rather than stopping the fleet loop:
+    /// unlike <see cref="UsedLastGoodConf"/>/<see cref="HandEdited"/>, a rejected-value row is one
     /// of the three conditions the alert fires on, so "empty" and "unknown" cannot share a representation.
     /// </summary>
     private async Task EvaluateStoreSettingsAsync(

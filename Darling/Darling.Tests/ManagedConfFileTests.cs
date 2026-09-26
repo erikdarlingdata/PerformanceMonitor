@@ -153,7 +153,7 @@ public sealed class ManagedConfFileTests
     [Fact]
     public void RenderBody_PreloadMerge_KeepsAnOperatorLibraryInForce()
     {
-        /* An operator's own library, already in force when this render runs (review M5): the merge must not
+        /* An operator's own library, already in force when this render runs: the merge must not
            shrink the list down to a hard-coded literal. */
         var body = ManagedConfFile.RenderBody(SampleInputs(effectivePreloadList: "auto_explain"));
 
@@ -175,7 +175,7 @@ public sealed class ManagedConfFileTests
         Assert.Contains(diffs, d => d.Key == "shared_buffers");
     }
 
-    /// <summary>#4336 lane 5b, step 1, pin 1: a snapshot value replaces the derived one.</summary>
+    /// <summary>#4336: a snapshot value replaces the derived one.</summary>
     [Fact]
     public void RenderWithValues_SnapshotValue_ReplacesTheDerivedOne()
     {
@@ -199,7 +199,7 @@ public sealed class ManagedConfFileTests
         Assert.Contains(renderedDiffs, d => d.Key == "shared_buffers" && d.RenderedValue == "9999MB");
     }
 
-    /// <summary>#4336 lane 5b, step 1, pin 2: <see cref="ManagedConfFile.IsHandEdited"/> is false on the
+    /// <summary>#4336: <see cref="ManagedConfFile.IsHandEdited"/> is false on the
     /// result — the hash is recomputed over the snapshot-valued body, so Step A's own write reads as its own
     /// write, never as an edit.</summary>
     [Fact]
@@ -214,7 +214,7 @@ public sealed class ManagedConfFileTests
         Assert.False(ManagedConfFile.IsHandEdited(rendered));
     }
 
-    /// <summary>#4336 lane 5b, step 1, pin 3: an owned key missing from the map is ABSENT from the body — it
+    /// <summary>#4336: an owned key missing from the map is ABSENT from the body — it
     /// stays at whatever default is already in force; Step A never invents a value the snapshot did not
     /// report.</summary>
     [Fact]
@@ -232,7 +232,7 @@ public sealed class ManagedConfFileTests
         Assert.Contains("maintenance_work_mem", body, StringComparison.Ordinal);
     }
 
-    /// <summary>#4336 lane 5b, step 1, pin 4 (the plan's risk 2): a value containing a quote and a backslash
+    /// <summary>#4336: a value containing a quote and a backslash
     /// round-trips exactly through <c>EscapeConfValue</c> and re-parsing.</summary>
     [Fact]
     public void RenderWithValues_QuoteAndBackslashValue_RoundTripsExactly()
