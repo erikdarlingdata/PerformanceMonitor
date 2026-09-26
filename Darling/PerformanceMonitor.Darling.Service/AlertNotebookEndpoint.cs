@@ -550,7 +550,10 @@ internal static partial class AlertNotebookEndpoint
     /// particular yet; <see cref="ResolveAuthoredPrefixed(string, (string Prefix, AuthoredContextKind Kind, AuthoredTemplateEntry Entry)[])"/>
     /// picks the LONGEST matching prefix, so table order never matters.</summary>
     internal static readonly (string Prefix, AuthoredContextKind Kind, AuthoredTemplateEntry Entry)[] s_authoredPrefixTemplates =
-        Array.Empty<(string Prefix, AuthoredContextKind Kind, AuthoredTemplateEntry Entry)>();
+    {
+        ("Custom:", AuthoredContextKind.CustomRule,
+            new AuthoredTemplateEntry("authored/custom-rule", CustomRuleTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildCustomRuleCells)),
+    };
 
     /// <summary>Exact-then-prefix resolution, with the kind the caller needs to run the right pre-fetch
     /// (<see cref="PrefetchAsync"/>) before invoking the entry. Exact names win outright (unchanged
