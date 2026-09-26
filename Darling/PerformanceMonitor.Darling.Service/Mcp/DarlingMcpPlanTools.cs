@@ -8,6 +8,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -180,22 +181,23 @@ public sealed class DarlingMcpPlanTools
         NpgsqlDataSource postgres,
         [Description("The query_hash value from get_top_queries_by_cpu.")] string query_hash,
         [Description("Server name or display name.")] string? server_name = null,
-        [Description("Optional database name to disambiguate the same query_hash across databases. Omit for the most recently captured plan.")] string? database_name = null)
+        [Description("Optional database name to disambiguate the same query_hash across databases. Omit for the most recently captured plan.")] string? database_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
             var xml = await DarlingStoredPlanReader.GetQueryStatsPlanXmlByHashAsync(
-                postgres, resolved.ServerId, query_hash, database_name);
+                postgres, resolved.ServerId, query_hash, database_name, cancellationToken);
             if (string.IsNullOrEmpty(xml))
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "query_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}.");
 
             return McpHelpers.Truncate(xml, 512_000) ?? "No plan XML available.";
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_plan_xml", ex);
         }

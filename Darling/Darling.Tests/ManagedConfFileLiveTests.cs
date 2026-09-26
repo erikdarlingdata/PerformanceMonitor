@@ -375,6 +375,13 @@ public sealed class ManagedConfFileLiveTests
         }
     }
 
+    /// <summary>
+    /// #4215 flake: the CI runner's free disk can cross a GiB rounding boundary between the two starts here,
+    /// changing only the header's display-only <c>data-volume-free-gib</c> field
+    /// (<see cref="ManagedConfFile.RenderHeader"/>). <see cref="ManagedConfFile.ShouldReplaceManagedConf"/>
+    /// compares bodies, not whole-file bytes, so that header-only drift no longer causes a rewrite and this
+    /// test is stable regardless of what the runner's disk does between the two starts.
+    /// </summary>
     [Fact]
     public async Task SecondStart_UnchangedInputs_DoesNotRewriteFile_Gated()
     {

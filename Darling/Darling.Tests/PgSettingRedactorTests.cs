@@ -518,4 +518,39 @@ public sealed class PgSettingRedactorTests
             PgSettingRedactor.MatchTimeoutForTest = null;
         }
     }
+
+    /// <summary>
+    /// #4348: every <c>Compiled</c> pattern is warmed at type initialisation, before any real
+    /// <see cref="PgSettingRedactor.Redact"/> call can return, so the first real call never pays a
+    /// first-use JIT cost against the 100ms match timeout. This pins that the warmup ran (rather than
+    /// re-deriving that fact from timing, which would be flaky by construction on a busy runner) and that a
+    /// short, well-formed value is masked in PART, not masked whole, the way a spurious timeout would
+    /// produce.
+    /// </summary>
+    [Fact]
+    public void Warmup_RanBeforeFirstRealCall_AndShortValueIsNotMaskedWhole()
+    {
+        Assert.True(PgSettingRedactor.WarmedUp);
+
+        var result = PgSettingRedactor.Redact("archive_command", "PGPASSWORD=hunter2 psql -c 'select 1'");
+
+        Assert.Equal("PGPASSWORD=******** psql -c 'select 1'", result);
+    }
+
+    /// <summary>
+    /// #4348: warmup must reach each pattern's MATCH step, not only its scan (<c>TryFindNextPossibleStartingPosition</c>
+    /// finding a candidate but <c>TryMatchAtCurrentPosition</c> never running). This pins that the warmup
+    /// sample every <see cref="PgSettingRedactor.TimeBoundPattern"/> is warmed with actually produces at
+    /// least one match for EVERY pattern in the list, so the match step is exercised, not skipped.
+    /// </summary>
+    [Fact]
+    public void WarmupSample_MatchesEveryWarmedPattern()
+    {
+        Assert.NotEmpty(PgSettingRedactor.WarmedPatterns);
+
+        foreach (var pattern in PgSettingRedactor.WarmedPatterns)
+        {
+            Assert.True(pattern.WarmupSampleMatches());
+        }
+    }
 }

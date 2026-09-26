@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -45,9 +46,10 @@ public sealed class DarlingMcpPgReplicationStatsTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -58,12 +60,12 @@ public sealed class DarlingMcpPgReplicationStatsTools
         try
         {
             var rows = await DarlingPgReplicationStatsReader.GetPgReplicationStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit, cancellationToken);
 
             if (rows.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No replica was connected to {resolved.ServerName} in the last {hours_back} "
@@ -104,7 +106,7 @@ public sealed class DarlingMcpPgReplicationStatsTools
                 replicas,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_replication_stats", ex);
         }

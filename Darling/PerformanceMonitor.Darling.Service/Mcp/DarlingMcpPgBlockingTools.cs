@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -82,9 +83,10 @@ public sealed class DarlingMcpPgBlockingTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum chains to return, worst-first by victim count. Default 50.")] int limit = 50,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -99,17 +101,17 @@ public sealed class DarlingMcpPgBlockingTools
             var startUtc = now.AddHours(-hours_back);
 
             var chains = await DarlingPgBlockingReader.GetPgBlockingChainsAsync(
-                postgres, resolved.ServerId, startUtc, now, limit);
+                postgres, resolved.ServerId, startUtc, now, limit, cancellationToken);
 
             /* The denominator comes first because it is what makes an empty answer honest. */
             var captures = await DarlingPgBlockingReader.GetPgBlockingCaptureCountsAsync(
-                postgres, resolved.ServerId, startUtc, now);
+                postgres, resolved.ServerId, startUtc, now, cancellationToken);
 
             /* Cycles are read separately and MUST be, because the chain query structurally cannot see them:
                it finds a root by absence, and in a cycle every participant is blocked. Without this the
                tool would report "no blocking" from a capture that recorded a deadlock. */
             var cycles = await DarlingPgBlockingReader.GetPgBlockingCyclesAsync(
-                postgres, resolved.ServerId, startUtc, now, limit);
+                postgres, resolved.ServerId, startUtc, now, limit, cancellationToken);
 
             var cycleEntries = BuildCycleEntries(cycles);
 
@@ -140,7 +142,7 @@ public sealed class DarlingMcpPgBlockingTools
                 if (captures.CapturesTotal == 0)
                 {
                     var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_blocking");
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_blocking", cancellationToken);
                     if (gated != null)
                     {
                         return gated;
@@ -174,7 +176,7 @@ public sealed class DarlingMcpPgBlockingTools
             return BuildBlockingChainsJson(
                 resolved.ServerName, hours_back, chains, cycleEntries, captures);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_blocking", ex);
         }

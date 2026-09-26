@@ -17,6 +17,7 @@ using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Service;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -1182,17 +1183,142 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    /// <summary>The FROM-clause placeholder <see cref="TopQueriesHourlySql"/> carries — replaced with
+    /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
+    /// <c>query_stats_interval_hourly</c> or <c>query_stats_hourly</c> in its place; see
+    /// <see cref="GetTopQueriesByCpuHourlyAsync"/>.</summary>
+    public const string TopQueriesHourlyFromPlaceholder = "$FROM$";
+
+    /// <summary>
+    /// #4231 stage 3: the hourly-tier twin of <see cref="TopQueriesSql"/>, over <c>query_stats_hourly</c> /
+    /// <c>query_stats_interval_hourly</c> — routed here ONLY through <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// (never by naming either relation directly). The rollup carries neither <c>host_object_name</c> nor
+    /// <c>query_text</c> (see <c>s_stitchColumnsByLegacy[QueryStatsHourlyView]</c>, <c>TimescaleSupport.cs</c>),
+    /// so this groups by <c>(database_name, query_hash)</c> only — a proc-hosted statement that raw would keep
+    /// split by host object COLLAPSES across host objects at this tier (a real precision loss, disclosed by
+    /// the MCP tool's <c>precision_note</c>, not hidden). Ranks by <c>SUM(worker_time_sum) DESC</c> — the same
+    /// CPU promise <see cref="TopQueriesSql"/> makes, over the rollup's pre-summed bucket columns rather than
+    /// per-collection deltas. <c>query_text</c>/<c>host_object_name</c>/<c>distinct_texts</c> are NOT projected
+    /// here — <see cref="GetTopQueriesByCpuAsync"/> resolves <c>query_text</c> with a separate follow-up LATERAL
+    /// over <c>v_query_stats</c> once the ranked rollup rows are known, mirroring <see cref="TopQueriesSql"/>'s
+    /// own LATERAL shape minus the host-object predicate the rollup has nothing to match. <c>$FROM$</c> is a
+    /// PLACEHOLDER, substituted (string.Replace, not string.Format — the SQL text otherwise contains braces)
+    /// with the FROM-clause item <see cref="RollupCoverage.StitchedRelationSql"/> returns for this window at
+    /// call time — never a literal relation name. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database
+    /// filter (NULL = all). <c>min_dop</c> filtering (#3541 A13) is Raw-tier only for this lane — the rollup
+    /// carries no per-group DOP column — so this const takes no $6.
+    /// </summary>
+    public const string TopQueriesHourlySql = """
+        WITH ranked AS (
+            SELECT
+                database_name,
+                query_hash,
+                CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
+                CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
+                CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
+                MIN(worker_time_min) AS min_worker_time,
+                MAX(worker_time_max) AS max_worker_time,
+                MIN(execution_count_min) AS min_execution_count,
+                MAX(execution_count_max) AS max_execution_count
+            FROM $FROM$
+            WHERE server_id = $1
+            AND   bucket >= $2
+            AND   bucket <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+            GROUP BY database_name, query_hash
+            HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
+            ORDER BY SUM(worker_time_sum) DESC
+            LIMIT $4
+        )
+        SELECT
+            r.database_name,
+            r.query_hash,
+            r.total_executions,
+            r.total_cpu_us,
+            r.total_elapsed_us,
+            r.min_worker_time,
+            r.max_worker_time,
+            r.min_execution_count,
+            r.max_execution_count
+        FROM ranked AS r
+        ORDER BY r.total_cpu_us DESC
+        """;
+
+    /// <summary>
+    /// The rollup-tier follow-up text lookup for a hourly-routed row (#4231 stage 3) — the same LATERAL shape
+    /// <see cref="TopQueriesSql"/> uses, minus the host-object predicate: the rollup has no host_object_name to
+    /// match against, so the representative text is the group's latest row by <c>(database_name, query_hash)</c>
+    /// alone. $1 server_id, $2 database_name, $3 query_hash.
+    /// </summary>
+    private const string TopQueriesHourlyTextLookupSql = """
+        SELECT query_text
+        FROM v_query_stats
+        WHERE server_id = $1
+        AND   database_name = $2
+        AND   query_hash = $3
+        AND   query_text IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+        """;
+
     /// <summary>
     /// The top-N groups by CPU, ranked over the population that passes every filter. <paramref name="minMaxDop"/>
     /// is the lifetime <c>max_dop</c> floor a group must reach to be ranked at all (#3541 A13): 0 for no
     /// parallelism filter, 2 for <c>parallel_only</c>, the caller's <c>min_dop</c> otherwise — see
     /// <see cref="TopQueriesSql"/>'s HAVING note. The filter is IN the statement so the page is the top-N of the
     /// filtered population, not the filtered remainder of an unfiltered top-N.
+    ///
+    /// <para>#4231 stage 3: when the window has aged past raw's floor, this routes to the hourly rollup via
+    /// <see cref="RetentionTierRouter.Resolve(DateTime,DateTime,bool,bool,TierCoverage)"/> over
+    /// <see cref="RollupCoverage.For"/>'s <c>(QueryStatsHourlyView, QueryStatsDailyView)</c> pair — Daily is out
+    /// of scope for this lane, so a Daily verdict is clamped to Hourly (a top-N-by-CPU daily rollup answer is a
+    /// separate ask). The parallelism filter (<paramref name="minMaxDop"/>) and <paramref name="rollUpByHostObject"/>
+    /// are Raw-tier-only refinements the rollup cannot answer (no per-group DOP, no host_object_name); an
+    /// hourly-routed read ignores <paramref name="rollUpByHostObject"/> (the rollup groups by hash only) and
+    /// runs unfiltered by DOP — the MCP tool discloses both via <c>tier_used</c>/<c>precision_note</c>.</para>
     /// </summary>
     public static async Task<List<TopQueryRow>> GetTopQueriesByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         bool rollUpByHostObject = false, int minMaxDop = 0, CancellationToken cancellationToken = default)
     {
+        var result = await GetTopQueriesByCpuRoutedAsync(
+            postgres, serverId, startUtc, endUtc, top, databaseName, rollUpByHostObject, minMaxDop, cancellationToken);
+        return result.Rows;
+    }
+
+    /// <summary>#4231 stage 3: which tier <see cref="GetTopQueriesByCpuRoutedAsync"/> actually read —
+    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly, this
+    /// lane's scope); the MCP tool's <c>tier_used</c> comes from here.</summary>
+    public sealed record TopQueriesReadResult(List<TopQueryRow> Rows, RetentionTier Tier);
+
+    /// <summary>
+    /// #4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, exposing the tier it read so a
+    /// caller can disclose it. Tier is decided over the LEGACY pair's coverage
+    /// (<see cref="RollupCoverage.For"/>, the deeper of the legacy/successor floors); Daily is out of scope for
+    /// this lane (query_stats_db_hourly's successor and a daily top-N answer are both separate asks) and is
+    /// clamped to Hourly. <paramref name="rollUpByHostObject"/> and <paramref name="minMaxDop"/> are Raw-tier-
+    /// only refinements the rollup cannot answer (no per-group DOP, no host_object_name) — an hourly-routed read
+    /// ignores both.
+    /// </summary>
+    public static async Task<TopQueriesReadResult> GetTopQueriesByCpuRoutedAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        bool rollUpByHostObject = false, int minMaxDop = 0, CancellationToken cancellationToken = default)
+    {
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, startUtc, rollups.QueryGrainHourly, dailyAvailable: false,
+            coverage.For(TimescaleSupport.QueryStatsHourlyView, TimescaleSupport.QueryStatsDailyView));
+        if (tier == RetentionTier.Daily)
+        {
+            tier = RetentionTier.Hourly;
+        }
+
+        if (tier == RetentionTier.Hourly)
+        {
+            var hourlyRows = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
+            return new TopQueriesReadResult(hourlyRows, RetentionTier.Hourly);
+        }
+
         var rows = new List<TopQueryRow>();
         /* #2235: same parameters, same columns, different GROUP BY — see TopQueriesByHostObjectSql. */
         await using var command = postgres.CreateCommand(rollUpByHostObject ? TopQueriesByHostObjectSql : TopQueriesSql);
@@ -1228,6 +1354,83 @@ internal static class DarlingDataReader
                 reader.IsDBNull(20) ? "" : reader.GetString(20),
                 reader.IsDBNull(21) ? 0 : reader.GetInt64(21),
                 reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetInt64(22) : 1));
+        }
+
+        return new TopQueriesReadResult(rows, RetentionTier.Raw);
+    }
+
+    /// <summary>
+    /// #4231 stage 3: the hourly-rollup arm of <see cref="GetTopQueriesByCpuRoutedAsync"/> — builds
+    /// <see cref="TopQueriesHourlySql"/>'s FROM clause ONLY through
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> (the standing gate: a raw-vs-rollup reader never names
+    /// <c>query_stats_interval_hourly</c> or <c>query_stats_hourly</c> directly), runs the ranked read, then
+    /// resolves each row's representative <c>query_text</c> with one follow-up query per row via
+    /// <see cref="TopQueriesHourlyTextLookupSql"/> (the rollup has no per-row text to project). Rows carry
+    /// <c>host_object_name = null</c> and <c>distinct_texts = 0</c> — the rollup has neither column, and the
+    /// MCP tool's <c>precision_note</c> says so; <c>min_dop</c>/<c>max_dop</c> are 0 (no per-group DOP on the
+    /// rollup).
+    /// </summary>
+    private static async Task<List<TopQueryRow>> GetTopQueriesByCpuHourlyAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
+        int top, string? databaseName, CancellationToken cancellationToken)
+    {
+        var fromClause = coverage.StitchedRelationSql(
+            TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var sql = TopQueriesHourlySql.Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal);
+
+        var rankedRows = new List<(string Database, string QueryHash, long TotalExecutions, long TotalCpuUs, long TotalElapsedUs, long MinWorkerTime, long MaxWorkerTime, long MinExecCount, long MaxExecCount)>();
+        await using (var command = postgres.CreateCommand(sql))
+        {
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            AddWindow(command, serverId, startUtc, endUtc);
+            AddInt(command, top);
+            AddNullableText(command, databaseName);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rankedRows.Add((
+                    reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                    reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                    reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                    reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                    reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                    reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                    reader.IsDBNull(8) ? 0 : reader.GetInt64(8)));
+            }
+        }
+
+        var rows = new List<TopQueryRow>(rankedRows.Count);
+        foreach (var r in rankedRows)
+        {
+            string queryText = "";
+            await using (var textCommand = postgres.CreateCommand(TopQueriesHourlyTextLookupSql))
+            {
+                textCommand.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+                AddInt(textCommand, serverId);
+                AddNullableText(textCommand, r.Database);
+                AddNullableText(textCommand, r.QueryHash);
+                var textResult = await textCommand.ExecuteScalarAsync(cancellationToken);
+                if (textResult is string text)
+                {
+                    queryText = text;
+                }
+            }
+
+            rows.Add(new TopQueryRow(
+                r.Database, r.QueryHash,
+                HostObjectName: null,   /* #4231 stage 3: the rollup has no host_object_name column. */
+                QueryPlanHash: "", SqlHandle: "", PlanHandle: "",
+                TotalExecutions: r.TotalExecutions, TotalCpuUs: r.TotalCpuUs, TotalElapsedUs: r.TotalElapsedUs,
+                TotalLogicalReads: 0, TotalLogicalWrites: 0, TotalPhysicalReads: 0, TotalRows: 0, TotalSpills: 0,
+                MinDop: 0, MaxDop: 0,
+                MinCpuUs: r.MinWorkerTime, MaxCpuUs: r.MaxWorkerTime, MinElapsedUs: 0, MaxElapsedUs: 0,
+                QueryText: queryText,
+                /* #4231 stage 3: distinct_texts is unavailable at rollup grain — 0 means "no dimension read",
+                   same reading TopQueryRow's own doc gives 0 (pre-dimension legacy rows). */
+                DistinctTexts: 0,
+                DistinctQueryHashes: 1));
         }
 
         return rows;

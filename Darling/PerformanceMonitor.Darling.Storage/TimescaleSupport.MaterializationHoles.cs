@@ -55,26 +55,31 @@ namespace PerformanceMonitor.Darling.Storage;
 /// business and are never touched here; buckets past the last materialized one are the live edge the policy
 /// owns.</para>
 ///
-/// <para><b>The seam case (#4186): a successor with a frozen legacy gets a SECOND scan window down to the
-/// LEGACY's last bucket, scanned however far below the horizon it reaches.</b> The three interval-honest
-/// successors (<c>SupersededHourlyRollups</c>) can each have an un-materialized TAIL below their own floor: an
-/// outage that outlasts <see cref="HourlyRefreshStartOffset"/> before the successor's first refresh leaves raw
-/// rows between the frozen legacy's last bucket and the successor's floor that neither side ever materialized
-/// (the outage shape worked through above). Those rows sit BELOW the successor's floor, so the ordinary "floor
-/// up to ceiling" scan never reaches them — a hole, by this pass's own definition, has to be inside the
-/// materialized span. For a successor found through <c>LegacyOf</c>, <see cref="MaterializationHoleScanWindows"/>
-/// adds a seam window down to the legacy's last bucket (plus one bucket width, so the legacy's own last bucket is
-/// not re-scanned as if it were the successor's) whenever that reaches further back than the successor's floor
+/// <para><b>The seam case (#4186), lowered to a CONTIGUOUS DOWNWARD FILL by #4301's ruling.</b> The three
+/// interval-honest successors (<c>SupersededHourlyRollups</c>) can each have an un-materialized span BELOW
+/// their own floor: an outage that outlasts <see cref="HourlyRefreshStartOffset"/> before the successor's
+/// first refresh leaves raw rows between the frozen legacy's last bucket and the successor's floor that
+/// neither side ever materialized (the outage shape worked through above) — and, separately, an outage that
+/// predates this store's freeze can leave a hole INSIDE the legacy's own already-materialized span that
+/// nothing ever re-scans, because the six frozen views are excluded from <see cref="MaterializationHoleTargets"/>.
+/// Both sit BELOW the successor's floor, so the ordinary "floor up to ceiling" scan never reaches them — a
+/// hole, by this pass's own definition, has to be inside the materialized span. For a successor found through
+/// <c>LegacyOf</c>, <see cref="MaterializationHoleScanWindows"/> adds a seam window down to RAW's own filtered
+/// floor — not merely the legacy's last bucket — whenever that reaches further back than the successor's floor
 /// already does — UNCLAMPED by the horizon that still bounds the ordinary window, because an outage longer than
 /// the horizon's own span is exactly the shape that needs repairing, not a shape to skip (an earlier cut folded
 /// the seam into that same horizon clamp, and a seam older than the horizon was silently never scanned — see
-/// <see cref="MaterializationHoleScanWindows"/>'s own doc for that history). The seam tail then reads as an
-/// ordinary hole and the existing machinery repairs it: bounded per start, oldest first, filter-aware — a seam
-/// wider than one start's cap (<see cref="MaterializationHoleRepairCapBuckets"/>) takes more than one start to
-/// close in full, but every start makes progress on it. Once repaired, the successor's floor covers the seam on
-/// its own and <see cref="RetentionArmSafetySql"/>'s seam probe — which exists because this stitch is NOT
-/// gap-free by construction — finds nothing there and releases the raw purge gate automatically, with no manual
-/// step, bounded only by that same per-start repair cap.</para>
+/// <see cref="MaterializationHoleScanWindows"/>'s own doc for that history). Filling all the way to raw's floor
+/// rather than stopping at the legacy's last bucket is the point of the #4301 ruling: <c>RollupCoverage.StitchedRelationSql</c>
+/// splits its read at the successor's own floor, so that floor has to be contiguous with everything raw still
+/// admits for the stitch to read every row exactly once. The seam window then reads as an ordinary hole and
+/// the existing machinery repairs it: bounded per start, NEWEST FIRST (the successor's own invariant — see the
+/// H1 note below), filter-aware — a span wider than one start's cap (<see cref="MaterializationHoleRepairCapBuckets"/>)
+/// takes more than one start to close in full, but every start makes progress on it, walking downward from the
+/// successor's floor toward raw's. Once repaired, the successor's floor covers the seam on its own and
+/// <see cref="RetentionArmSafetySql"/>'s seam probe — which exists because this stitch is NOT gap-free by
+/// construction — finds nothing there and releases the raw purge gate automatically, with no manual step,
+/// bounded only by that same per-start repair cap.</para>
 ///
 /// <para><b>Bounded, and the bound is stated.</b> Per aggregate per start, at most one refresh policy window's
 /// worth of buckets (<see cref="MaterializationHoleRepairCapBuckets"/>: 24 hourly, 3 daily) is refreshed,
@@ -296,6 +301,67 @@ WHERE EXISTS (
 ORDER BY c.bucket";
     }
 
+    /// <summary>
+    /// ONE hole definition for a frozen-legacy/successor pair (#4301), used by
+    /// <see cref="TimescaleSupport.RetentionArmSafetySql"/> (the gate): a bucket in
+    /// <c>[<paramref name="fromExpr"/>, <paramref name="toExpr"/>]</c> is a hole when raw admits at least one
+    /// row in <c>[bucket, bucket + width)</c> AND neither the legacy nor the successor has materialized that
+    /// bucket. <paramref name="fromExpr"/>/<paramref name="toExpr"/> are SQL expressions (a literal, a
+    /// parameter placeholder, a correlated subquery) so each caller supplies its own bounds in its own idiom.
+    /// OFFSET 0 fenced for the same #3933 reason <see cref="MaterializationHoleScanSql"/> is: written bare, the
+    /// planner pulls the per-bucket EXISTS probes up into joins that scan the whole relation instead of
+    /// probing one bucket's worth. A bucket below raw's own current floor can hold no admitted row, so it can
+    /// never be a hole under this definition and never holds the purge — a gap left below the floor by an
+    /// earlier version's purge is invisible here by construction, not merely undetected (see this member's own
+    /// callers for what that means for the gate).
+    ///
+    /// <para><b>The repair walk (#4301, the ruling lane) does NOT share this definition.</b> An earlier cut of
+    /// #4301 planned a walk branch that probed the legacy-or-successor union the same way the gate does; the
+    /// ruling replaced it with a plain successor-only fill down to raw's own filtered floor
+    /// (<see cref="RepairMaterializationHolesAsync"/>'s seam-floor block), so the walk's own hole definition
+    /// stays <see cref="MaterializationHoleScanSql"/> (successor-only) throughout — every non-empty hour below
+    /// the successor's floor simply becomes a successor bucket. The LIST-form twin this method used to have
+    /// (<c>LegacySuccessorHoleScanSql</c>) had no other caller once that ruling landed and was removed with it.
+    /// </para>
+    /// </summary>
+    public static string LegacySuccessorHoleExistsSql(
+        string relation, string sourceTimeColumn, string sourceFilter, string legacy, string successor,
+        string fromExpr, string toExpr, string bucketWidthLiteral)
+        => $"EXISTS ({LegacySuccessorHoleBodySql(relation, sourceTimeColumn, sourceFilter, legacy, successor, fromExpr, toExpr, bucketWidthLiteral)})";
+
+    /// <summary>
+    /// The body <see cref="LegacySuccessorHoleExistsSql"/> wraps in <c>EXISTS(...)</c> — kept as its own
+    /// method (#4301, H2) so a future second caller can share it without duplicating the buckets clause;
+    /// today <see cref="LegacySuccessorHoleExistsSql"/> is its only caller.
+    /// </summary>
+    private static string LegacySuccessorHoleBodySql(
+        string relation, string sourceTimeColumn, string sourceFilter, string legacy, string successor,
+        string fromExpr, string toExpr, string bucketWidthLiteral)
+    {
+        ArgumentNullException.ThrowIfNull(relation);
+        ArgumentNullException.ThrowIfNull(sourceTimeColumn);
+        ArgumentNullException.ThrowIfNull(sourceFilter);
+        ArgumentNullException.ThrowIfNull(legacy);
+        ArgumentNullException.ThrowIfNull(successor);
+        ArgumentNullException.ThrowIfNull(fromExpr);
+        ArgumentNullException.ThrowIfNull(toExpr);
+        ArgumentNullException.ThrowIfNull(bucketWidthLiteral);
+
+        var filterClause = sourceFilter.Length == 0 ? string.Empty : $"\n        AND   {sourceFilter}";
+
+        return $@"
+    SELECT hb.bucket
+    FROM generate_series({fromExpr}, {toExpr}, {bucketWidthLiteral}) AS hb(bucket)
+    WHERE NOT EXISTS (SELECT 1 FROM collect.{legacy} AS hl WHERE hl.bucket = hb.bucket OFFSET 0)
+    AND   NOT EXISTS (SELECT 1 FROM collect.{successor} AS hs WHERE hs.bucket = hb.bucket OFFSET 0)
+    AND   EXISTS (
+              SELECT 1 FROM collect.{relation} AS hr
+              WHERE hr.{sourceTimeColumn} >= hb.bucket
+              AND   hr.{sourceTimeColumn} < hb.bucket + {bucketWidthLiteral}{filterClause}
+              OFFSET 0)
+    OFFSET 0";
+    }
+
     /// <summary>The materialized span of one aggregate — its oldest and newest bucket — read off the
     /// materialization hypertable, both index-endpoint lookups. NULLs for an aggregate that has never
     /// materialized, which is the backfill's case and not this pass's.</summary>
@@ -397,8 +463,8 @@ ORDER BY c.bucket";
     /// The scan window(s) for one aggregate this start, given its own <paramref name="floor"/> and
     /// <paramref name="ceiling"/>, the horizon <see cref="MaterializationHoleScanSpanFor"/> computes for its
     /// source, and the seam bound (<paramref name="seamFloor"/>, equal to <paramref name="floor"/> when the
-    /// aggregate has no frozen legacy or the legacy's own last bucket does not reach back past the floor).
-    /// Pure, so the tests can walk it.
+    /// aggregate has no frozen legacy or raw's own filtered floor does not reach back past the successor's
+    /// floor). Pure, so the tests can walk it.
     ///
     /// <para><b>Two windows, not one (#4186 follow-up).</b> The seam fix's first cut folded the seam into the
     /// SAME <c>max(_, horizon)</c> the ordinary scan already clamps to — <c>from = max(seamFloor, horizon)</c>
@@ -414,6 +480,14 @@ ORDER BY c.bucket";
     /// below the horizon it reaches, while the ordinary window stays exactly <c>[max(floor, horizon), ceiling]</c>
     /// — the successor's own span below the horizon is the source retention's business, not this repair's, and
     /// widening it was never the fix.</para>
+    ///
+    /// <para><b>The seam now reaches raw's own filtered floor, not merely the legacy's last bucket (#4301,
+    /// per the ruling "fill the successor CONTIGUOUSLY DOWNWARD").</b> An earlier cut of this method took a
+    /// separate, oldest-first-walked third window for a hole strictly INSIDE the frozen legacy's own span —
+    /// dead code once the ruling landed: the walk fills every hole below the successor's floor down to raw's
+    /// floor in ONE newest-first descent (the seam window itself, now with its lower bound moved), because
+    /// contiguity from the successor's floor upward is the property <c>RollupCoverage.StitchedRelationSql</c>
+    /// needs, and a bucket does not care which side of the legacy's last bucket it happened to sit on.</para>
     /// </summary>
     public static IReadOnlyList<(DateTime From, DateTime To)> MaterializationHoleScanWindows(
         DateTime floor, DateTime ceiling, DateTime horizon, DateTime seamFloor, TimeSpan bucketWidth)
@@ -539,25 +613,32 @@ ORDER BY c.bucket";
                     continue;
                 }
 
-                /* #4186 seam fix: a successor whose legacy is frozen (LegacyOf, non-null only for the three
-                   SupersededHourlyRollups successors) can hold an un-materialized tail BELOW its own floor —
-                   the seam an outage opens between the legacy's last bucket and the successor's first refresh
-                   (see this class's doc, and RetentionArmSafetySql's, for the full shape). A hole is defined as
-                   a gap INSIDE the materialized span, so scanning from the successor's own floor never reaches
-                   that tail. Extend the lower bound down to the legacy's last bucket (+ one bucket width, so
-                   the legacy's own already-materialized last bucket is not rescanned) whenever that reaches
-                   further back than the successor's own floor; min() is a no-op once the successor's floor
-                   overtakes the legacy's boundary on its own, so this converges to plain floor scanning as the
-                   successor accumulates history. A legacy with nothing materialized (max(bucket) is NULL, a
-                   frozen-but-empty legacy) leaves the floor untouched. */
+                /* #4186 seam fix, lowered by #4301's ruling ("fill the successor CONTIGUOUSLY DOWNWARD"):
+                   a successor whose legacy is frozen (LegacyOf, non-null only for the three
+                   SupersededHourlyRollups successors) can hold an un-materialized span BELOW its own floor —
+                   not only the seam an outage opens between the legacy's last bucket and the successor's
+                   first refresh, but any hole INSIDE the legacy's own frozen span from an outage that predates
+                   this store's freeze (see this class's doc, and RetentionArmSafetySql's, for the full shape).
+                   A hole is defined as a gap INSIDE the materialized span, so scanning from the successor's own
+                   floor never reaches either one. Extend the lower bound down to raw's own filtered floor —
+                   the successor's admitted source floor, the SAME bound RetentionArmSafetySql's stitch probes
+                   from — whenever that reaches further back than the successor's own floor; below it raw
+                   admits no row, so no hole can exist there and the walk has nothing left to fill (this is the
+                   contiguous-downward fill: RollupCoverage.StitchedRelationSql splits its read at the
+                   successor's floor, so every row below it must already be a successor bucket once this
+                   converges). min() is a no-op once the successor's floor overtakes raw's floor on its own, so
+                   this converges to plain floor scanning as the successor accumulates history. A raw table
+                   with nothing admitted (min is NULL) leaves the floor untouched. */
                 var seamFloor = floor.Value;
                 var legacy = LegacyOf(target.View);
                 if (legacy is not null)
                 {
-                    using var legacyCeiling = new NpgsqlCommand($"SELECT max(bucket) FROM collect.{legacy}", connection) { CommandTimeout = SetupTimeoutSeconds };
-                    if (await legacyCeiling.ExecuteScalarAsync(cancellationToken) is DateTime legacyMaxBucket)
+                    var sourceFilter = MaterializationHoleSourceFilterFor(target.CreateSql);
+                    var sourceWhere = sourceFilter.Length == 0 ? string.Empty : $" WHERE {sourceFilter}";
+                    using var rawFilteredFloor = new NpgsqlCommand($"SELECT min({target.SourceTimeColumn}) FROM collect.{target.Source}{sourceWhere}", connection) { CommandTimeout = SetupTimeoutSeconds };
+                    if (await rawFilteredFloor.ExecuteScalarAsync(cancellationToken) is DateTime rawFloor)
                     {
-                        var seamBound = legacyMaxBucket + target.BucketWidth;
+                        var seamBound = AlignDown(rawFloor, target.BucketWidth);
                         if (seamBound < seamFloor)
                         {
                             seamFloor = seamBound;

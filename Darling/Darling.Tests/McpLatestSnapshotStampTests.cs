@@ -606,7 +606,7 @@ public sealed class McpLatestSnapshotStampTests
         Assert.Contains("as_of", descriptor.Params.Select(p => p.Name));
 
         var source = Strip(ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs"));
-        Assert.Matches(@"\[""get_cpu_scheduler_pressure""\] = \(c, pg, an\) => DarlingMcpPlanCacheSchedulerTools\.GetCpuSchedulerPressure\(pg, Server\(c\), Hours\(c, 24\), as_of: AsOf\(c\)\)", source);
+        Assert.Matches(@"\[""get_cpu_scheduler_pressure""\] = \(c, pg, an\) => DarlingMcpPlanCacheSchedulerTools\.GetCpuSchedulerPressure\(pg, Server\(c\), Hours\(c, 24\), as_of: AsOf\(c\), cancellationToken: c\.RequestAborted\)", source);
     }
 
     /* ───────────────────────── the pure pieces, executed ───────────────────────── */
