@@ -480,9 +480,9 @@ public sealed partial class ViewerDataService
     /// does): below this window the table's own gate round trips (a second connection, a transaction, the
     /// coverage/floor probes) cost more than they save, so the read stays raw regardless of coverage. Does NOT
     /// share <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> (the grid's 12h) — this site's query shape
-    /// measured differently. 48 hours (lane 4310s3t, rig port 55485, NULL-free 15-day seed at a field store's
+    /// measured differently. 48 hours (NULL-free 15-day seed at a field store's
     /// rate, end-to-end through <see cref="GetQueryStoreDurationTrendAsync"/>, gate-routed, 1 cold + 5 warm):
-    /// at 24h the table lost (279 ms raw vs. 370 ms table, lane 4310s3f); at 48h the table won (median of 5,
+    /// at 24h the table lost (279 ms raw vs. 370 ms table); at 48h the table won (median of 5,
     /// raw 423.0 ms vs. table 361.4 ms); at 72h the table also won (raw 515.0 ms vs. table 380.5 ms). Raw vs.
     /// table point equality was exact at 48h (46 of 46 points) on the NULL-free seed. 48h is the lower of the
     /// two measured wins, so it is the threshold — the exact crossover between 24h and 48h was not bisected.
