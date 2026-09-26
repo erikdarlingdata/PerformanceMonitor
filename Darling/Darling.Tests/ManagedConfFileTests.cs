@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Darling.Service;
@@ -217,19 +218,21 @@ public sealed class ManagedConfFileTests
             var destPath = Path.Combine(dir.FullName, ManagedConfFile.FileName);
             File.WriteAllText(destPath, "old\n");
 
-            using var blocker = new FileStream(destPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var release = Task.Run(async () =>
+            var blocker = new FileStream(destPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var releaseThread = new Thread(() =>
             {
-                await Task.Delay(200);
+                Thread.Sleep(200);
                 blocker.Dispose();
-            });
+            })
+            { IsBackground = true };
+            releaseThread.Start();
 
             var succeeded = ManagedConfFile.TryReplaceAtomic(
-                destPath, "new\n", ManagedConfFile.DefaultMaxReplaceAttempts, ManagedConfFile.DefaultReplaceRetryDelay, out var error);
+                destPath, "new\n", maxAttempts: 200, retryDelay: TimeSpan.FromMilliseconds(50), out var error);
 
-            await release;
+            releaseThread.Join();
 
-            Assert.True(succeeded);
+            Assert.True(succeeded, error?.Message);
             Assert.Equal("new\n", File.ReadAllText(destPath));
         }
         finally

@@ -1171,14 +1171,14 @@ SELECT
            Trends and Top Procedures surfaces — the banner has to fire before those do. The column and its
            tables are named only in the probe line, not this prose, per the V71 finding: the coverage
            ratchet strips information_schema lines but cannot strip a comment. */
-        /* V146 (#4215): collect.managed_conf_verdicts — the per-key verdict a managed store's owner connection
-           computes once at every service-owned start. TABLE-existence sentinel, newest-first, and now the TOP
-           rung, so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
+        /* V146 (#4215): the per-key verdict a managed store's owner connection computes once at every
+           service-owned start, one new table. TABLE-existence sentinel, newest-first, and now the TOP rung,
+           so a fully-migrated store maps to EXACTLY StorageVersion.SchemaVersion rather than falling
            through to the rung below and showing a spurious upgrade banner on a store that is current.
 
            The WPF viewer runs no analysis, so no viewer read names the new table; this arm exists so the version
-           banner stays truthful, which is the only effect the rung has on the viewer. The table is named only in
-           the probe line, not this prose, per the V71 finding: the coverage ratchet strips information_schema lines
+           banner stays truthful, which is the only effect the rung has on the viewer. Named only in the probe
+           line, not this prose, per the V71 finding: the coverage ratchet strips information_schema lines
            but cannot strip a comment. */
         if (hasManagedConfVerdicts)
         {
