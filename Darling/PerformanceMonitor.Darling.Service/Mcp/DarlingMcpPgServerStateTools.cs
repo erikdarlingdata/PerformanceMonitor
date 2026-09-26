@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -44,9 +45,10 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -57,14 +59,14 @@ public sealed class DarlingMcpPgServerStateTools
         try
         {
             var rows = await DarlingPgBufferUsageReader.GetPgBufferUsageAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit, cancellationToken);
 
             if (rows.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_buffer_usage")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_buffer_usage", cancellationToken)
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_buffer_usage")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_buffer_usage", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No buffer pool contents recorded for {resolved.ServerName} in the last "
@@ -104,7 +106,7 @@ public sealed class DarlingMcpPgServerStateTools
                 relations,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_buffer_usage", ex);
         }
@@ -118,9 +120,10 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Maximum rows to return. Default 50.")] int limit = 50,
         [Description("One database, or omit for every database. Rows are (database x extension), so a multi-database host can exceed limit. Pass this to complete one database's full slice. See the tool's reading guide.")]
             string? database_name = null,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -141,12 +144,12 @@ public sealed class DarlingMcpPgServerStateTools
             var scope = DarlingPgExtensionAvailabilityReader.NormalizeDatabaseFilter(database_name);
 
             var fetched = await DarlingPgExtensionAvailabilityReader.GetPgExtensionAvailabilityAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, limit + 1, scope);
+                postgres, resolved.ServerId, windowStart, windowEnd, limit + 1, scope, cancellationToken);
 
             if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_extension_availability")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_extension_availability", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No extension inventory for {resolved.ServerName} in the last {hours_back} "
@@ -188,7 +191,7 @@ public sealed class DarlingMcpPgServerStateTools
                put 1,632 against a complete 102-row answer and the reach classifier correctly answered
                Unreachable, telling a filtered caller they could not see what they were holding. */
             var census = await DarlingPgExtensionAvailabilityReader.GetInstallCensusAsync(
-                postgres, resolved.ServerId, windowStart, windowEnd, scope);
+                postgres, resolved.ServerId, windowStart, windowEnd, scope, cancellationToken);
 
             /* FROM THE CENSUS, not from the rows. Every row carries the same two scalars — they hang off a
                one-row relation the per-extension groups join to — so the first row is the whole answer, and
@@ -379,7 +382,7 @@ public sealed class DarlingMcpPgServerStateTools
                 extensions,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_extensions", ex);
         }
@@ -391,9 +394,10 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum rows to return. Default 25.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -407,12 +411,12 @@ public sealed class DarlingMcpPgServerStateTools
                signal. Under the old `rows.Count >= limit`, a window holding exactly `limit` contended
                (type, mode, relation) groups read as truncated and its ungranted total was withheld. */
             var fetched = await DarlingPgLockStatsReader.GetPgLockStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
 
             if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_lock_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_lock_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No lock activity sampled on {resolved.ServerName} in the last {hours_back} "
@@ -460,7 +464,7 @@ public sealed class DarlingMcpPgServerStateTools
                 locks,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_lock_stats", ex);
         }
@@ -471,9 +475,10 @@ public sealed class DarlingMcpPgServerStateTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -482,12 +487,12 @@ public sealed class DarlingMcpPgServerStateTools
         try
         {
             var row = await DarlingPgWriteStatsReader.GetPgWriteStatsAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, cancellationToken);
 
             if (row is null)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_write_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_write_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No checkpoint or WAL activity recorded for {resolved.ServerName} in the last "
@@ -513,7 +518,7 @@ public sealed class DarlingMcpPgServerStateTools
                stale copy, which is the hazard PostgresTargetFactsSql is a single statement for. Same
                discipline on both axes: a registry making no claim produces no claim here. */
             var (postgresMajor, engineKind) = await DarlingEngineCapability.PostgresTargetFactsAsync(
-                postgres, resolved.ServerId);
+                postgres, resolved.ServerId, cancellationToken);
             var backendCountersRemoved = postgresMajor >= BuffersBackendRemovedInMajor;
             var walAbsentOnAurora = MonitoredEngineKind.IsAurora(engineKind);
 
@@ -610,7 +615,7 @@ public sealed class DarlingMcpPgServerStateTools
                          : string.Empty),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_write_stats", ex);
         }
@@ -621,9 +626,10 @@ public sealed class DarlingMcpPgServerStateTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Maximum settings to return. Default 100. This is what bounds the page - read truncated to know whether the population held more; non_default_count stays the whole snapshot's whatever this is set to.")] int limit = 100,
-        [Description("When true, include settings still at their default. Default false: non-default settings, plus any pending_restart row, are the answer. See the tool's reading guide.")] bool include_defaults = false)
+        [Description("When true, include settings still at their default. Default false: non-default settings, plus any pending_restart row, are the answer. See the tool's reading guide.")] bool include_defaults = false,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var limitError = McpHelpers.ValidateTop(limit);
@@ -638,7 +644,7 @@ public sealed class DarlingMcpPgServerStateTools
                truncated: a snapshot of exactly `limit` non-session rows read as truncated, and the default
                view read as truncated on nearly every call because a server has several hundred parameters. */
             var page = await DarlingPgServerConfigReader.GetCurrentConfigPageAsync(
-                postgres, resolved.ServerId, limit + 1, include_defaults);
+                postgres, resolved.ServerId, limit + 1, include_defaults, cancellationToken);
 
             if (page.Rows.Count == 0)
             {
@@ -646,7 +652,7 @@ public sealed class DarlingMcpPgServerStateTools
                    is set and nothing is pending. SnapshotNonDefaultCount cannot tell them apart (it rides on
                    rows that did not come back), so the capability read decides as it always has. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "empty",
                         $"No configuration snapshot has been collected for {resolved.ServerName} yet. "
@@ -667,7 +673,7 @@ public sealed class DarlingMcpPgServerStateTools
                scope that has ever been given a setting, which on a real cluster is a handful and on the
                measured population is zero - and a truncated override list is worse than none, because the
                question it answers is "is my value overridden anywhere" and a cap turns a No into a maybe. */
-            var overrides = await DarlingPgServerConfigReader.GetOverridesAsync(postgres, resolved.ServerId);
+            var overrides = await DarlingPgServerConfigReader.GetOverridesAsync(postgres, resolved.ServerId, cancellationToken);
 
             /* #4251: attached like database_overrides below, from the collector's own cached verdict (no
                store read - PgFileSettingsCapability is process-wide and this Darling process is the same one
@@ -785,7 +791,7 @@ public sealed class DarlingMcpPgServerStateTools
 
             return node.ToJsonString(McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_server_config", ex);
         }
@@ -797,9 +803,10 @@ public sealed class DarlingMcpPgServerStateTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (one week).")] int hours_back = 168,
         [Description("Maximum changes to return. Default 100.")] int limit = 100,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -813,12 +820,12 @@ public sealed class DarlingMcpPgServerStateTools
             /* #3653 (the #3541 A3 class): limit + 1 as the fetch, the extra row as the observed truncation
                signal, so a week with exactly `limit` changes is not reported as holding more. */
             var fetched = await DarlingPgServerConfigReader.GetConfigChangesAsync(
-                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1);
+                postgres, resolved.ServerId, windowEnd.AddHours(-hours_back), windowEnd, limit + 1, cancellationToken);
 
             if (fetched.Count == 0)
             {
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_server_config", cancellationToken)
                     ?? McpHelpers.Status(
                         "no_changes",
                         $"No configuration parameter changed value on {resolved.ServerName} in the last "
@@ -884,7 +891,7 @@ public sealed class DarlingMcpPgServerStateTools
                 + "server-wide setting of the same name.";
             return node.ToJsonString(McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_server_config_changes", ex);
         }

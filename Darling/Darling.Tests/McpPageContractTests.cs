@@ -818,7 +818,7 @@ public sealed class McpPageContractTests
         Assert.Contains("settings_returned = rows.Count", body, StringComparison.Ordinal);
         Assert.DoesNotMatch(PostReadWhere, body.Replace(".Where(r => r.PendingRestart)", string.Empty, StringComparison.Ordinal));
         Assert.Contains("GetCurrentConfigPageAsync(", body, StringComparison.Ordinal);
-        Assert.Contains("limit + 1, include_defaults)", body, StringComparison.Ordinal);
+        Assert.Contains("limit + 1, include_defaults, cancellationToken)", body, StringComparison.Ordinal);
     }
 
     /// <summary>The description names both denominators, so an agent that cannot see the code knows which
