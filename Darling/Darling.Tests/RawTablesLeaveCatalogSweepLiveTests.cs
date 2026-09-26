@@ -303,9 +303,10 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
                 await stamp.ExecuteNonQueryAsync();
             }
 
+            var passStartUtc = DateTime.UtcNow;
             await DarlingWorker.TriggerRawPurgeCoreAsync(connection, NullLogger.Instance, default);
 
-            var report = await DarlingWorker.BuildRawTablePurgeNowReportAsync(connection, customRetentionDays: 1, null, default);
+            var report = await DarlingWorker.BuildRawTablePurgeNowReportAsync(connection, customRetentionDays: 1, passStartUtc, null, default);
 
             var rawEntry = Assert.Single(report, entry => (string)entry.GetType().GetProperty("relation")!.GetValue(entry)! == Raw);
             var outcome = (string)rawEntry.GetType().GetProperty("outcome")!.GetValue(rawEntry)!;

@@ -281,6 +281,16 @@ public static class DarlingRetention
         /* Naive-UTC storage: Npgsql 6+ rejects Kind=Utc against `timestamp` — see PgCollectorRowWriter. */
         var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
 
+        /* Decide the raw-relation skip on whether the extension is ACTUALLY installed in this store, not on
+           the worker's _timescaleAvailable latch. The latch can read false while the extension is present
+           (setup failed after CREATE EXTENSION already succeeded elsewhere, or a prior pass's failure was
+           transient) — a store the sweep would then treat as plain PostgreSQL, DELETEing raw rows the
+           service-triggered gated purge (#4299) is holding for exactly the reason the gate exists. Fail
+           toward keeping rows: a probe that cannot answer skips the three raw relations this pass rather
+           than guessing, logged once (not once per table). True plain PostgreSQL (no extension row) keeps
+           the DELETE fallback below unchanged. */
+        var rawSkipSafe = await ProbeRawSkipSafeAsync(postgres, logger, cancellationToken);
+
         try
         {
             foreach (var definition in CollectorCatalog.All)
@@ -316,7 +326,7 @@ public static class DarlingRetention
                    the normal horizon applies again, so a never-armed policy cannot mean unbounded growth. */
                 /* #4427: the three raw relations (membership from TimescaleSupport.RawRelations itself,
                    never a copied list) leave this sweep's drop path entirely on a TimescaleDB store. The
-                   floor-only check just above (IsTieredDropSafeAsync/IsRawTierDropSafeAsync) compares each
+                   floor-only check just BELOW (IsTieredDropSafeAsync/IsRawTierDropSafeAsync) compares each
                    rollup's OLDEST bucket against raw's oldest row, so it reads Covered even when a hole sits
                    INSIDE the covered span — an outage seam the repair hasn't reached, a range the repair
                    deferred, a failed repair. The service-triggered purge (#4299) already owns these three
@@ -327,8 +337,12 @@ public static class DarlingRetention
                    rows are exactly where the gated purge (or a still-running repair) means them to be; the
                    dimension GC below stays safe regardless, since its cutoff is measured from the oldest
                    surviving digest-carrying fact row. Plain-PostgreSQL mode (timescaleAvailable false) is
-                   unaffected: there are no rollups there, so the DELETE fallback below is raw's only purge. */
-                if (timescaleAvailable && TimescaleSupport.RawRelations.Contains(definition.TargetTable))
+                   unaffected: there are no rollups there, so the DELETE fallback below is raw's only purge.
+                   Because this skip runs first, no raw table can ever reach the floor check below under
+                   Timescale, so IsTieredDropSafeAsync can no longer return false for any table that reaches
+                   it there — the call stays for the tables that DO reach it (the non-raw tiered ones), and
+                   for plain-PostgreSQL mode, where it is skipped by its own timescaleAvailable guard. */
+                if (rawSkipSafe && TimescaleSupport.RawRelations.Contains(definition.TargetTable))
                 {
                     logger?.LogInformation(
                         "Retention purge for {Table} is owned by the service-triggered, gated raw purge (#4299); the sweep does not drop it.",
@@ -1213,6 +1227,35 @@ public static class DarlingRetention
                     tableName, ex.Message);
                 return null;
             }
+        }
+    }
+
+    /// <summary>
+    /// #4427 item 7: whether the three raw relations should be skipped from THIS sweep's drop path, decided
+    /// on whether the TimescaleDB extension is ACTUALLY installed in this store (<c>pg_extension</c>) rather
+    /// than on the worker's <c>_timescaleAvailable</c> latch. The latch can read false while the extension is
+    /// present — a failed setup pass, or a transient failure on a store the extension WAS created in earlier —
+    /// and the old code treated that store as plain PostgreSQL, DELETEing raw rows the service-triggered gated
+    /// purge (#4299) is holding for exactly the reason the gate exists.
+    ///
+    /// <para><c>true</c> (skip raw from this sweep) when the extension is present, AND when the probe itself
+    /// cannot answer — fail toward keeping rows, logged once at Warning rather than once per raw table.
+    /// <c>false</c> (true plain PostgreSQL, no extension row) leaves the DELETE fallback below byte-identical
+    /// to how it always ran.</para>
+    /// </summary>
+    private static async Task<bool> ProbeRawSkipSafeAsync(NpgsqlDataSource postgres, ILogger? logger, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+            return await TimescaleSupport.DetectAsync(connection, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogWarning(
+                "Could not read this store's TimescaleDB state ({Message}) — keeping the three raw tables out of this sweep's drop path rather than deleting on a guess.",
+                ex.Message);
+            return true;
         }
     }
 
