@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -32,22 +33,23 @@ public sealed class DarlingMcpJobTools
     [McpServerTool(Name = "get_running_jobs"), Description("Gets currently running SQL Agent jobs with duration comparison. Shows each job's current duration vs its historical average and p95, flagging jobs that are running longer than usual. start_time is UTC, matching the captured_at on this payload (msdb records the Agent start in the monitored server's local clock; this read de-skews it), so start_time and current_duration_seconds agree. LATEST IS A TIME: this reads the newest running-jobs snapshot, not a window, and captured_at is the instant it was collected - a job listed here was running AT that stamp, and current_duration_seconds is how long it had been running AT that stamp, not now.")]
     public static async Task<string> GetRunningJobs(
         NpgsqlDataSource postgres,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         try
         {
-            var rows = await DarlingJobReader.GetRunningJobsAsync(postgres, resolved.ServerId);
+            var rows = await DarlingJobReader.GetRunningJobsAsync(postgres, resolved.ServerId, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs", cancellationToken)
                     /* #2546: the msdb case. "No running SQL Agent jobs found" is an affirmative claim about
                        the server's Agent, and it is the wrong one when the monitoring login was refused the
                        job tables — the collector runs, is denied, and records that denial with the GRANT to
                        issue. Reporting it here is the difference between "nothing is running" and "we cannot
                        see what is running". */
-                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs")
+                    ?? await DarlingRuntimePrecondition.StatusAsync(postgres, resolved.ServerId, resolved.ServerName, "running_jobs", cancellationToken)
                     /* #2559: the case the line above cannot see. StatusAsync reports what the collector's last
                        run RECORDED, and a collector whose AppliesTo gate is off never runs — the runner returns
                        before writing any collection_log row, deliberately, because a per-cycle fake row was
@@ -66,7 +68,8 @@ public sealed class DarlingMcpJobTools
                         + "tables are not reachable to a monitoring login at all and no grant changes that. "
                         + "Since #2559 msdb access is NOT a gate — a login without it now attempts and is "
                         + "reported as a permission denial, so the grant takes effect on the next cycle "
-                        + "rather than the next reconnect.")
+                        + "rather than the next reconnect.",
+                        cancellationToken)
                     ?? McpHelpers.Status("empty", "No running SQL Agent jobs found (or the running_jobs collector has not run yet).");
 
             var jobs = rows.Select(r => new
@@ -97,7 +100,7 @@ public sealed class DarlingMcpJobTools
                 jobs
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_running_jobs", ex);
         }
