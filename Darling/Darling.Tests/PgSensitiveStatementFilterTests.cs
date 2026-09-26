@@ -117,6 +117,27 @@ public sealed class PgSensitiveStatementFilterTests
         Assert.Equal(2, CountOccurrences(query, PgSensitiveStatementFilter.PlaceholderText));
     }
 
+    /// <summary>
+    /// A literal, hard-coded expected string — not built from <see cref="PgSensitiveStatementFilter.SqlLiteral"/>
+    /// or <see cref="PgSensitiveStatementFilter.SqlPredicate"/> themselves — so a quoting bug in either shared
+    /// builder (say, a dropped doubled quote) changes what this test compares against without changing the
+    /// value under test, and fails loudly instead of passing silently the way the other tests' own
+    /// <c>Contains(SqlPredicate(...))</c> pins would (they build their expected value with the same builder
+    /// they are checking).
+    /// </summary>
+    [Fact]
+    public void SqlPredicate_MatchesTheLiteralExpectedSql()
+    {
+        const string expected =
+            "CASE WHEN c ~* '[[:<:]](create|alter)([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)+" +
+            "(role|user|group|subscription|server)[[:>:]]|[[:<:]]password[[:>:]]([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|" +
+            "--[^[:cntrl:]]*)*(=|to)?([[:space:]]|/[*]([^*]|[*]+[^*/])*[*]+/|--[^[:cntrl:]]*)*(e?''|u&''|[$][^0-9])|" +
+            "[[:<:]](pg)?password[[:space:]]*=[[:space:]]*[^$[:space:]]|[a-z][a-z0-9+.-]*://[^[:space:]/@:]+:[^[:space:]/@]+@' " +
+            "THEN '-- statement text withheld (#4348)' ELSE c END";
+
+        Assert.Equal(expected, PgSensitiveStatementFilter.SqlPredicate("c"));
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         var count = 0;

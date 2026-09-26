@@ -44,9 +44,10 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>ApplyCompressionPolicyAsync</c> — the same shape <c>collect.pg_server_config</c> gets. So its scrub
 /// reuses <see cref="PgSettingScrub"/>'s (server, day) literal-bounds batching and the guarded
 /// decompress-limit <c>set_config</c> line, for the identical reasons documented there — and the CANDIDATE
-/// read itself is scoped to one (server, day) at a time (a cheap distinct-pairs scan finds the groups
-/// first), not one unbounded scan of the whole hypertable, so the same chunk/segment exclusion applies to
-/// the read as well as the write, and one slow or failing server's group cannot hold up any other server's.</para>
+/// read itself is scoped to one (server, day) at a time (the groups come from <c>timescaledb_information.
+/// chunks</c>' range metadata crossed with the known server ids — never a scan of the hypertable), not one
+/// unbounded scan of the whole hypertable, so the same chunk/segment exclusion applies to the read as well
+/// as the write, and one slow or failing server's group cannot hold up any other server's.</para>
 ///
 /// <para><b>The marker is its own row</b>, in <c>collect.collector_state</c> under the fleet sentinel
 /// <see cref="DarlingObservability.FleetServerId"/>, with an owner name (<see cref="StateCollectorName"/>)
@@ -130,8 +131,8 @@ SELECT server_id, queryid, query_text
 FROM collect.pg_statement_text
 WHERE server_id = $1
 AND   queryid > $2
-AND   query_text ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"'
-AND   query_text <> '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"'
+AND   query_text ~* " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) + @"
+AND   query_text <> " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) + @"
 ORDER BY queryid
 LIMIT " + StatementTextBatchSize.ToString(CultureInfo.InvariantCulture);
 
@@ -141,13 +142,33 @@ SET query_text = $1
 WHERE server_id = $2
 AND   queryid = ANY($3::bigint[])";
 
-    /// <summary>The distinct (server, day) pairs the scrub needs to visit — a cheap two-column scan, so the
-    /// candidate read below (which the marked-sensitive filter and the doubled quoting both make more
-    /// expensive) never runs over the whole hypertable at once. See the type remarks.</summary>
-    private const string DistinctServerDaysSql = @"
-SELECT DISTINCT server_id, date_trunc('day', collection_time)::date AS day
+    /// <summary>The calendar days <c>collect.pg_blocking_edges</c> actually has data for, read from
+    /// <c>timescaledb_information.chunks</c>' <c>range_start</c>/<c>range_end</c> — metadata only, never a
+    /// scan of the hypertable itself, so this costs nothing that grows with retention. A chunk's range is
+    /// expanded to every calendar day it overlaps (half-open: <c>range_end</c> itself is excluded), which
+    /// also handles a chunk that is not exactly one day long. Crossed with the caller's own <c>serverIds</c>
+    /// (already read at that call site) to make the (server, day) pairs the candidate read and UPDATE both
+    /// key on — days alone are not enough, since a server can be silent on a day another server has rows
+    /// for. See <see cref="ReadDistinctServerDaysAsync"/> for the plain-table fallback this drives when the
+    /// table is not a hypertable on this store shape.</summary>
+    private const string ChunkDaysSql = @"
+SELECT DISTINCT d::date AS day
+FROM timescaledb_information.chunks ch
+CROSS JOIN LATERAL generate_series(
+    ch.range_start AT TIME ZONE 'UTC',
+    (ch.range_end AT TIME ZONE 'UTC') - INTERVAL '1 microsecond',
+    INTERVAL '1 day') AS d
+WHERE ch.hypertable_schema = 'collect'
+AND   ch.hypertable_name = 'pg_blocking_edges'";
+
+    /// <summary>The plain-table fallback (no TimescaleDB catalog entry for this hypertable, e.g. a
+    /// plain-PostgreSQL store without TimescaleDB): one server's oldest-to-newest range, bounded and served
+    /// by <c>idx_pg_blocking_edges_time</c> (<c>server_id, collection_time</c>) rather than a full scan.
+    /// </summary>
+    private const string PlainTableServerRangeSql = @"
+SELECT min(collection_time), max(collection_time)
 FROM collect.pg_blocking_edges
-ORDER BY server_id, day";
+WHERE server_id = $1";
 
     /* new_blocked_query/new_blocking_query are computed IN SQL, the same CASE WHEN ... ~* ... THEN
        placeholder ELSE column END shape PgBlockingCollector's own SensitiveTextCase applies going
@@ -164,8 +185,8 @@ SELECT
 FROM collect.pg_blocking_edges
 WHERE server_id = $1
 AND   collection_time >= $2 AND collection_time < $3
-AND ((blocked_query ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"' AND blocked_query <> '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"')
- OR (blocking_query ~* '" + PgSensitiveStatementFilter.SensitiveStatementPattern.Replace("'", "''", StringComparison.Ordinal) + @"' AND blocking_query <> '" + PgSensitiveStatementFilter.PlaceholderText.Replace("'", "''", StringComparison.Ordinal) + @"'))";
+AND ((blocked_query ~* " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) + @" AND blocked_query <> " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) + @")
+ OR (blocking_query ~* " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.SensitiveStatementPattern) + @" AND blocking_query <> " + PgSensitiveStatementFilter.SqlLiteral(PgSensitiveStatementFilter.PlaceholderText) + @"))";
 
     private const string BlockingEdgesUpdateSql = @"
 WITH batch AS (
@@ -219,7 +240,26 @@ AND   t.server_id = $6";
         }
 
         var blockingEdgesRowsUpdated = 0;
-        var serverDays = await ReadDistinctServerDaysAsync(connection, cancellationToken);
+        List<(int ServerId, DateTime Day)> serverDays;
+        try
+        {
+            serverDays = await ReadServerDaysAsync(connection, serverIds, cancellationToken);
+        }
+        catch (NpgsqlException ex)
+        {
+            /* The catalog read itself failed (never the exception TEXT — SQLSTATE only). Every server is
+               unreachable for pg_blocking_edges this run: skip the table entirely, leave the marker unset
+               so the next start retries, and let pg_statement_text's own results above still count. */
+            logger?.LogWarning(
+                "pg_statement_text_scrub: reading collect.pg_blocking_edges' chunk ranges failed with SQLSTATE {SqlState}; skipping pg_blocking_edges for this run, will retry on the next start",
+                ex.SqlState);
+            serverDays = new List<(int ServerId, DateTime Day)>();
+            foreach (var serverId in serverIds)
+            {
+                failedServerIds.Add(serverId);
+            }
+        }
+
         foreach (var (serverId, day) in serverDays)
         {
             if (failedServerIds.Contains(serverId))
@@ -311,18 +351,84 @@ AND   t.server_id = $6";
         return totalUpdated;
     }
 
-    private static async Task<List<(int ServerId, DateTime Day)>> ReadDistinctServerDaysAsync(
-        NpgsqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// The (server, day) pairs to visit: the calendar days <see cref="ChunkDaysSql"/> finds crossed with
+    /// <paramref name="serverIds"/> (an empty pair, e.g. a server silent on a day another server has rows
+    /// for, costs one bounded probe when the candidate read finds nothing — see the type remarks). A
+    /// catalog read failure propagates to the caller, which skips <c>pg_blocking_edges</c> for the whole run
+    /// rather than per server — see <see cref="RunAsync"/>. When the catalog finds no chunks at all (a
+    /// plain-PostgreSQL store without TimescaleDB, or a hypertable conversion that never ran), each server
+    /// falls back independently to its own bounded, index-served <see cref="PlainTableServerRangeSql"/>
+    /// range.
+    /// </summary>
+    private static async Task<List<(int ServerId, DateTime Day)>> ReadServerDaysAsync(
+        NpgsqlConnection connection, List<int> serverIds, CancellationToken cancellationToken)
     {
-        var pairs = new List<(int ServerId, DateTime Day)>();
-        await using var read = new NpgsqlCommand(DistinctServerDaysSql, connection) { CommandTimeout = CandidateReadTimeoutSeconds };
+        var chunkDays = await ReadChunkDaysAsync(connection, cancellationToken);
+
+        if (chunkDays.Count > 0)
+        {
+            var pairs = new List<(int ServerId, DateTime Day)>(serverIds.Count * chunkDays.Count);
+            foreach (var serverId in serverIds)
+            {
+                foreach (var day in chunkDays)
+                {
+                    pairs.Add((serverId, day));
+                }
+            }
+
+            return pairs;
+        }
+
+        /* No chunks found -- not a hypertable on this store shape (or empty). Each server's own bounded
+           range, independently, so one server's failure here does not skip another's days; the caller's
+           per-(server, day) try/catch around the candidate read/update still applies to whatever this
+           returns, so a failure surfacing there is unaffected by how the day list was built. */
+        var fallbackPairs = new List<(int ServerId, DateTime Day)>();
+        foreach (var serverId in serverIds)
+        {
+            var range = await ReadPlainTableServerRangeAsync(connection, serverId, cancellationToken);
+            if (range is null)
+            {
+                continue;
+            }
+
+            var (minDay, maxDay) = range.Value;
+            for (var day = minDay.Date; day <= maxDay.Date; day = day.AddDays(1))
+            {
+                fallbackPairs.Add((serverId, day));
+            }
+        }
+
+        return fallbackPairs;
+    }
+
+    private static async Task<List<DateTime>> ReadChunkDaysAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        var days = new List<DateTime>();
+        await using var read = new NpgsqlCommand(ChunkDaysSql, connection) { CommandTimeout = CandidateReadTimeoutSeconds };
         await using var reader = await read.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            pairs.Add((reader.GetInt32(0), reader.GetDateTime(1)));
+            days.Add(reader.GetDateTime(0));
         }
 
-        return pairs;
+        return days;
+    }
+
+    private static async Task<(DateTime, DateTime)?> ReadPlainTableServerRangeAsync(
+        NpgsqlConnection connection, int serverId, CancellationToken cancellationToken)
+    {
+        await using var read = new NpgsqlCommand(PlainTableServerRangeSql, connection) { CommandTimeout = CandidateReadTimeoutSeconds };
+        read.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+
+        await using var reader = await read.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken) || reader.IsDBNull(0) || reader.IsDBNull(1))
+        {
+            return null;
+        }
+
+        return (reader.GetDateTime(0), reader.GetDateTime(1));
     }
 
     private static async Task<List<BlockingEdgeRow>> ReadBlockingEdgesCandidatesAsync(

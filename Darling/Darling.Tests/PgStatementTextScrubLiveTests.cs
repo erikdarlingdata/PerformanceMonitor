@@ -34,6 +34,12 @@ public sealed class PgStatementTextScrubLiveTests
     private static readonly DateTime Day = DateTime.SpecifyKind(new DateTime(2026, 1, 1, 0, 0, 0), DateTimeKind.Unspecified);
     private static readonly DateTime OtherDay = DateTime.SpecifyKind(new DateTime(2026, 1, 2, 0, 0, 0), DateTimeKind.Unspecified);
 
+    /// <summary>The first of two days inside one WIDENED (2-day) chunk — proving the #4383 chunk-range
+    /// enumeration expands a chunk that is not exactly one day long to every calendar day it overlaps,
+    /// not just the one its <c>range_start</c> falls on.</summary>
+    private static readonly DateTime WideChunkDayOne = DateTime.SpecifyKind(new DateTime(2026, 2, 10, 0, 0, 0), DateTimeKind.Unspecified);
+    private static readonly DateTime WideChunkDayTwo = DateTime.SpecifyKind(new DateTime(2026, 2, 11, 0, 0, 0), DateTimeKind.Unspecified);
+
     private const string Secret = "ALTER ROLE app PASSWORD 'secret-x'";
     private const string Neighbor = "SELECT * FROM t WHERE password_changed_at > $1";
 
@@ -73,6 +79,13 @@ public sealed class PgStatementTextScrubLiveTests
             await InsertBlockingEdgeAsync(setupConnection, ServerA, OtherDay, 5, Secret, Neighbor, ct);
             await InsertBlockingEdgeAsync(setupConnection, ServerB, OtherDay, 6, Secret, Neighbor, ct);
 
+            /* Widen the chunk interval so the next two rows land in ONE chunk spanning both
+               WideChunkDayOne and WideChunkDayTwo — the #4383 chunk-range enumeration must expand that
+               single chunk's range to both calendar days, not just the day its range_start falls on. */
+            await ExecAsync(setupConnection, "SELECT set_chunk_time_interval('collect.pg_blocking_edges', INTERVAL '2 days')", ct);
+            await InsertBlockingEdgeAsync(setupConnection, ServerA, WideChunkDayOne, 7, Secret, Neighbor, ct);
+            await InsertBlockingEdgeAsync(setupConnection, ServerA, WideChunkDayTwo, 8, Secret, Neighbor, ct);
+
             await ExecAsync(setupConnection, "SELECT count(compress_chunk(c, if_not_compressed => true)) FROM show_chunks('collect.pg_blocking_edges') c", ct);
 
             Assert.True(await ContainsSecretAsync(setupConnection, ct), "seeding failed to plant the secret this test exists to catch");
@@ -83,7 +96,7 @@ public sealed class PgStatementTextScrubLiveTests
         var first = await PgStatementTextScrub.RunAsync(postgres, logger: null, ct);
         Assert.False(first.AlreadyDone);
         Assert.Equal(2, first.StatementTextRowsUpdated);
-        Assert.Equal(4, first.BlockingEdgesRowsUpdated);
+        Assert.Equal(6, first.BlockingEdgesRowsUpdated);
 
         await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
         await verifyConnection.OpenAsync(ct);
@@ -103,6 +116,10 @@ public sealed class PgStatementTextScrubLiveTests
             await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerA, 5, ct));
         Assert.Equal(PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText,
             await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerB, 6, ct));
+        Assert.Equal(PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText,
+            await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerA, 7, ct));
+        Assert.Equal(PerformanceMonitor.Collectors.PgSensitiveStatementFilter.PlaceholderText,
+            await ScalarTextAsync(verifyConnection, "SELECT blocked_query FROM collect.pg_blocking_edges WHERE server_id = $1 AND collection_id = $2", ServerA, 8, ct));
 
         /* Neighbor rows are byte-identical. */
         Assert.Equal(Neighbor,
