@@ -7,6 +7,7 @@
  */
 
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Notifications;
@@ -47,13 +48,13 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
         _dbInitializer = dbInitializer;
     }
 
-    public async Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+    public async Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
         var rules = new List<MuteRule>();
 
-        using var readLock = _dbInitializer.AcquireReadLock();
+        using var readLock = _dbInitializer.AcquireReadLock(cancellationToken);
         using var connection = _dbInitializer.CreateConnection();
-        await connection.OpenAsync();
+        await connection.OpenAsync(cancellationToken);
         using var cmd = connection.CreateCommand();
         cmd.CommandText = @"
                     SELECT id, enabled, created_at_utc, expires_at_utc, reason,
@@ -62,8 +63,8 @@ public sealed class DuckDbMuteRuleStore : IMuteRuleStore
                     FROM config_mute_rules
                     ORDER BY created_at_utc DESC";
 
-        using var reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
             rules.Add(new MuteRule
             {

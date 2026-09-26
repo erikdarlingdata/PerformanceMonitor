@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -59,9 +60,10 @@ public sealed class DarlingMcpLatchSpinlockTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to analyze. Default 24.")] int hours_back = 24,
         [Description("Number of top latch classes to return. Default 10.")] int top = 10,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -73,9 +75,9 @@ public sealed class DarlingMcpLatchSpinlockTools
         {
             var now = windowEnd;
             var rows = await DarlingLatchSpinlockReader.GetLatchStatsTopNAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "latch_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "latch_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No latch statistics available in the requested time range.");
 
             var latches = rows.Select(r => new
@@ -124,7 +126,7 @@ public sealed class DarlingMcpLatchSpinlockTools
                 latches
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_latch_stats", ex);
         }
@@ -136,9 +138,10 @@ public sealed class DarlingMcpLatchSpinlockTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of data to analyze. Default 24.")] int hours_back = 24,
         [Description("Number of top spinlocks to return. Default 10.")] int top = 10,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -150,9 +153,9 @@ public sealed class DarlingMcpLatchSpinlockTools
         {
             var now = windowEnd;
             var rows = await DarlingLatchSpinlockReader.GetSpinlockStatsTopNAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, top, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "spinlock_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "spinlock_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No spinlock statistics available in the requested time range.");
 
             var spinlocks = rows.Select(r => new
@@ -182,7 +185,7 @@ public sealed class DarlingMcpLatchSpinlockTools
                 spinlocks
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_spinlock_stats", ex);
         }

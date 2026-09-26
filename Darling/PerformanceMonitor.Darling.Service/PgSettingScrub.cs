@@ -96,6 +96,49 @@ public static class PgSettingScrub
     /// keeps each UPDATE's key-array small. See the type remarks for why a day is the outer grouping.</summary>
     internal const int MaxKeysPerUpdate = 500;
 
+    /// <summary>When one (server, day) group's coarse candidate count passes this, the day is processed as
+    /// 24 hour slices of <c>collection_time</c> instead of one range covering the whole day. The type remarks'
+    /// own estimate puts an hourly-cadence day at about 8,000 candidate rows and a 1-minute-cadence day at
+    /// about 500,000; this threshold sits comfortably above the former and well below the latter, so normal
+    /// cadences take the single-range path and only a materially faster cadence — the one that risks a
+    /// day's first UPDATE decompressing enough of the chunk to run past <see cref="UpdateBatchTimeoutSeconds"/>
+    /// — gets sliced. Slicing bounds how much of the day's compressed segment any one transaction touches,
+    /// so a restart after a mid-day failure resumes at the next unfinished hour rather than re-attempting the
+    /// whole day's decompression from scratch.</summary>
+    internal const int HourSliceCandidateThreshold = 20_000;
+
+    /// <summary>Test-only seam: overrides <see cref="HourSliceCandidateThreshold"/> so a live test can force
+    /// the hour-slicing path with a data volume far smaller than the real threshold.</summary>
+    internal static int? TestOnlyHourSliceCandidateThresholdOverride;
+
+    /// <summary>Test-only seam: when set, overrides <see cref="UpdateBatchTimeoutSeconds"/> for the UPDATE
+    /// command (not the SET LOCAL) so a live test can force a client-side command timeout without needing a
+    /// data volume that would actually run 60 seconds.</summary>
+    internal static int? TestOnlyUpdateCommandTimeoutSecondsOverride;
+
+    /// <summary>Test-only seam: when set, a <c>pg_sleep</c> for this many seconds runs, under
+    /// <see cref="TestOnlyUpdateCommandTimeoutSecondsOverride"/>'s timeout, right before each batch's
+    /// UPDATE — a genuine client-side command timeout against a real (slow) server command, not a thrown
+    /// stand-in.</summary>
+    internal static double? TestOnlyPreUpdateDelaySeconds;
+
+    /// <summary>Test-only seam: when set, <see cref="TestOnlyPreUpdateDelaySeconds"/> only applies to this
+    /// one server id's batches, so a multi-server live test can force a timeout on ONE target without
+    /// stalling every other target's batch too.</summary>
+    internal static int? TestOnlyPreUpdateDelayServerId;
+
+    /// <summary>Test-only seam: when true, <see cref="TestOnlyPreUpdateDelaySeconds"/> fires for one batch
+    /// only and then clears itself, so a live test can force exactly one timeout on a target that has more
+    /// than one day of work, and observe the target's remaining day(s) skipped rather than timed out again.
+    /// Defaults to false, leaving every-batch delay (the prior behavior) unchanged for callers that don't set
+    /// it.</summary>
+    internal static bool TestOnlyPreUpdateDelayOnce;
+
+    /// <summary>Test-only seam: invoked once after each slice's UPDATE batch commits, so a live test can force
+    /// a mid-day failure after a chosen number of slices have already committed, to prove the ones already
+    /// done stay done across a restart.</summary>
+    internal static Action? TestOnlyAfterSliceCommitted;
+
     /// <summary>What one run of the scrub found and did, for the caller's summary log line.</summary>
     public sealed class Summary
     {
@@ -136,32 +179,66 @@ ON CONFLICT (server_id, collector_name, state_key)
 DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_at";
 
     /// <summary>
-    /// The coarse filter: a superset of every row <see cref="PgSettingRedactor.Redact"/> could possibly
-    /// change, cheap enough to run over a compressed hypertable (ILIKE substring tests, no regex). See the
-    /// type remarks and <c>PgSettingRedactor</c>'s own remarks for the rule this mirrors rule-for-rule:
-    /// a libpq/URI password or an assignment/option naming PASS/SECRET/TOKEN/CREDENTIAL/PWD/KEY anywhere in a
-    /// value; <c>ssl_passphrase_command</c> by name; a dotted extension setting whose name contains one of the
-    /// whole-value markers. Over-inclusive on purpose — the fine-grained decision is
-    /// <see cref="PgSettingRedactor.Redact"/>, run per candidate row below.
+    /// The single source of ILIKE terms <see cref="CandidateSql"/> builds its <c>setting</c>/<c>boot_val</c>/
+    /// <c>reset_val</c> OR-chain from, and the same list <c>PgSettingScrubCandidateCensusTests</c> checks every
+    /// masked corpus case's VALUE against, so the two can never drift out of rule-for-rule sync again (#4348).
+    /// Each entry is a plain ILIKE pattern; <c>%</c>/<c>_</c> are literal wildcards, no escaping needed here
+    /// because none of these terms contain a literal <c>%</c> or <c>_</c> character themselves (the
+    /// percent-encoding catch-all is expressed separately in <see cref="CandidateSql"/> with its own ESCAPE
+    /// clause). This is only half of the coarse filter — <c>CandidateSql</c> also selects on the setting's
+    /// NAME (<c>ssl_passphrase_command</c> by exact name, or a dotted extension name containing one of
+    /// <see cref="CandidateNameTerms"/>), which the census test checks separately by name.
     /// </summary>
-    private const string CandidateSql = @"
+    internal static readonly string[] CandidateLikeTerms =
+    [
+        "%password%", "%passwd%", "%secret%", "%token%", "%://%@%", "%pass%", "%key%",
+        "%credential%", "%pwd%", "%-u %", "%--user%", "%-U %", "%sshpass%", "%sig=%",
+        "%signature=%", "%-u%", "%--proxy-user%",
+    ];
+
+    /// <summary>
+    /// The whole-value name markers <see cref="CandidateSql"/> tests against a dotted extension setting's
+    /// NAME (not its value) — mirrors <see cref="PgSettingRedactor"/>'s own whole-value-mask decision for
+    /// extension settings. Kept alongside <see cref="CandidateLikeTerms"/> so the census test can check both
+    /// halves of the coarse filter against the corpus.
+    /// </summary>
+    internal static readonly string[] CandidateNameTerms =
+    [
+        "%password%", "%passwd%", "%passphrase%", "%secret%", "%salt%", "%token%", "%key%",
+        "%credential%", "%pwd%", "%pass%",
+    ];
+
+    private static readonly string CandidateSql = BuildCandidateSql();
+
+    private static string BuildCandidateSql()
+    {
+        var termClauses = new List<string>();
+        foreach (var term in CandidateLikeTerms)
+        {
+            termClauses.Add(
+                $"setting ILIKE '{term}' OR reset_val ILIKE '{term}' OR boot_val ILIKE '{term}'");
+        }
+
+        var terms = string.Join("\n    OR ", termClauses);
+
+        var nameClauses = new List<string>();
+        foreach (var term in CandidateNameTerms)
+        {
+            nameClauses.Add($"name ILIKE '{term}'");
+        }
+
+        var nameTerms = string.Join("\n        OR ", nameClauses);
+
+        return $@"
 SELECT server_id, collection_time, name, database_name, role_name, setting, boot_val, reset_val
 FROM collect.pg_server_config
 WHERE
-    setting ILIKE '%password%' OR reset_val ILIKE '%password%' OR boot_val ILIKE '%password%'
-    OR setting ILIKE '%passwd%' OR reset_val ILIKE '%passwd%' OR boot_val ILIKE '%passwd%'
-    OR setting ILIKE '%secret%' OR reset_val ILIKE '%secret%' OR boot_val ILIKE '%secret%'
-    OR setting ILIKE '%token%' OR reset_val ILIKE '%token%' OR boot_val ILIKE '%token%'
-    OR setting ILIKE '%://%@%' OR reset_val ILIKE '%://%@%' OR boot_val ILIKE '%://%@%'
-    OR setting ILIKE '%pass%' OR reset_val ILIKE '%pass%' OR boot_val ILIKE '%pass%'
-    OR setting ILIKE '%key%' OR reset_val ILIKE '%key%' OR boot_val ILIKE '%key%'
-    OR setting ILIKE '%credential%' OR reset_val ILIKE '%credential%' OR boot_val ILIKE '%credential%'
-    OR setting ILIKE '%pwd%' OR reset_val ILIKE '%pwd%' OR boot_val ILIKE '%pwd%'
+    {terms}
+    OR setting LIKE '%\%%' ESCAPE '\' OR reset_val LIKE '%\%%' ESCAPE '\' OR boot_val LIKE '%\%%' ESCAPE '\'
     OR (name = 'ssl_passphrase_command' AND (setting <> '' OR boot_val <> '' OR reset_val <> ''))
     OR (name LIKE '%.%' AND (
-        name ILIKE '%password%' OR name ILIKE '%passwd%' OR name ILIKE '%passphrase%'
-        OR name ILIKE '%secret%' OR name ILIKE '%salt%' OR name ILIKE '%token%' OR name ILIKE '%key%'
-        OR name ILIKE '%credential%' OR name ILIKE '%pwd%' OR name ILIKE '%pass%'))";
+        {nameTerms}))";
+    }
 
     private const string BatchUpdateSql = @"
 WITH batch AS (
@@ -269,9 +346,14 @@ AND   t.server_id = $11";
 
             foreach (var c in dayCandidates)
             {
-                var newSetting = PgSettingRedactor.Redact(c.Name, c.Setting);
-                var newBootVal = PgSettingRedactor.Redact(c.Name, c.BootVal);
-                var newResetVal = PgSettingRedactor.Redact(c.Name, c.ResetVal);
+                // #4348: a pattern that times out on one of these three values masks it whole and warns
+                // with the setting's NAME only — never the value or any fragment of it.
+                void LogTimeout(string? name) =>
+                    logger?.LogWarning("PgSettingRedactor timed out matching setting '{Name}'; the value was masked whole.", name);
+
+                var newSetting = PgSettingRedactor.Redact(c.Name, c.Setting, LogTimeout);
+                var newBootVal = PgSettingRedactor.Redact(c.Name, c.BootVal, LogTimeout);
+                var newResetVal = PgSettingRedactor.Redact(c.Name, c.ResetVal, LogTimeout);
 
                 if (newSetting == c.Setting && newBootVal == c.BootVal && newResetVal == c.ResetVal)
                 {
@@ -293,11 +375,59 @@ AND   t.server_id = $11";
             var dayUpdated = 0;
             try
             {
-                for (var i = 0; i < changed.Count; i += MaxKeysPerUpdate)
+                if (dayCandidates.Count > (TestOnlyHourSliceCandidateThresholdOverride ?? HourSliceCandidateThreshold))
                 {
-                    var take = Math.Min(MaxKeysPerUpdate, changed.Count - i);
-                    dayUpdated += await RunBatchAsync(
-                        connection, changed, newSettings, newBootVals, newResetVals, i, take, day, serverId, cancellationToken);
+                    /* One slice per hour of collection_time within this day, each its own transaction with
+                       its own literal [start, end) bound alongside the constant server_id predicate. A slice
+                       whose changed set is still large gets MaxKeysPerUpdate sub-batching same as the
+                       single-range path below. The coarse ILIKE filter DOES re-select an already-redacted
+                       row on a restart (a masked value such as password=******** still matches %password%),
+                       but resume is still correct: PgSettingRedactor.Redact is idempotent, so a re-selected,
+                       already-redacted row's new value equals its current value, the changed-set comparison
+                       drops it, and no UPDATE is issued for it. */
+                    for (var hour = 0; hour < 24; hour++)
+                    {
+                        var sliceStart = day.AddHours(hour);
+                        var sliceEnd = sliceStart.AddHours(1);
+                        var sliceChanged = new List<CandidateRow>();
+                        var sliceSettings = new List<string?>();
+                        var sliceBootVals = new List<string?>();
+                        var sliceResetVals = new List<string?>();
+                        for (var k = 0; k < changed.Count; k++)
+                        {
+                            if (changed[k].CollectionTime >= sliceStart && changed[k].CollectionTime < sliceEnd)
+                            {
+                                sliceChanged.Add(changed[k]);
+                                sliceSettings.Add(newSettings[k]);
+                                sliceBootVals.Add(newBootVals[k]);
+                                sliceResetVals.Add(newResetVals[k]);
+                            }
+                        }
+
+                        if (sliceChanged.Count == 0)
+                        {
+                            continue;
+                        }
+
+                        for (var i = 0; i < sliceChanged.Count; i += MaxKeysPerUpdate)
+                        {
+                            var take = Math.Min(MaxKeysPerUpdate, sliceChanged.Count - i);
+                            dayUpdated += await RunBatchAsync(
+                                connection, sliceChanged, sliceSettings, sliceBootVals, sliceResetVals, i, take,
+                                sliceStart, sliceEnd, serverId, cancellationToken);
+                        }
+
+                        TestOnlyAfterSliceCommitted?.Invoke();
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < changed.Count; i += MaxKeysPerUpdate)
+                    {
+                        var take = Math.Min(MaxKeysPerUpdate, changed.Count - i);
+                        dayUpdated += await RunBatchAsync(
+                            connection, changed, newSettings, newBootVals, newResetVals, i, take, day, day.AddDays(1), serverId, cancellationToken);
+                    }
                 }
             }
             catch (NpgsqlException ex)
@@ -308,8 +438,20 @@ AND   t.server_id = $11";
                    should still be caught here rather than stopping every later target). */
                 logger?.LogWarning(
                     "pg_setting_scrub: server {ServerId} failed on {Day:yyyy-MM-dd} with SQLSTATE {SqlState}; skipping this server for the rest of the run, will retry on the next start",
-                    serverId, day, ex.SqlState);
+                    serverId, day, ex.SqlState ?? (ex.InnerException is TimeoutException ? "timeout" : "client"));
                 failedServerIds.Add(serverId);
+
+                /* A timed-out command whose own cancel request also fails can leave the connector
+                   broken. The next server's BeginTransactionAsync would then throw InvalidOperationException,
+                   which is not an NpgsqlException and is not caught here — that would end the whole run
+                   rather than just skipping this one server. Reopen in place so the remaining servers this
+                   run still get attempted; the marker stays withheld regardless. */
+                if (connection.State != System.Data.ConnectionState.Open)
+                {
+                    await connection.CloseAsync();
+                    await connection.OpenAsync(cancellationToken);
+                }
+
                 continue;
             }
 
@@ -342,7 +484,8 @@ AND   t.server_id = $11";
 
     private static async Task<int> RunBatchAsync(
         NpgsqlConnection connection, List<CandidateRow> changed, List<string?> newSettings, List<string?> newBootVals,
-        List<string?> newResetVals, int offset, int count, DateTime day, int serverId, CancellationToken cancellationToken)
+        List<string?> newResetVals, int offset, int count, DateTime rangeStart, DateTime rangeEnd, int serverId,
+        CancellationToken cancellationToken)
     {
         var serverIds = new int[count];
         var times = new DateTime[count];
@@ -376,8 +519,8 @@ AND   t.server_id = $11";
            inside this transaction. 0 disables the limit entirely for this transaction, which is safe here
            because the literal server_id + day-range predicates confine decompression to ONE target's
            segment in ONE day's chunk (settings × collections that day — ~8k rows hourly, ~500k at a
-           1-minute cadence), not the whole chunk; MaxKeysPerUpdate bounds the key array, not the
-           decompress. */
+           1-minute cadence), not the whole chunk; the literal server_id plus the day range bound the
+           decompress, not MaxKeysPerUpdate, which only bounds the key array passed to one UPDATE. */
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
         /* Guarded, not a bare SET LOCAL: a bring-your-own store on TimescaleDB older than 2.14 (the GUC
            arrived in timescale/timescaledb PR #6566) has no such setting. current_setting(name, true)
@@ -393,7 +536,26 @@ AND   t.server_id = $11";
             await setLocal.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var update = new NpgsqlCommand(BatchUpdateSql, connection, transaction) { CommandTimeout = UpdateBatchTimeoutSeconds };
+        if (TestOnlyPreUpdateDelaySeconds is { } delaySeconds &&
+            (TestOnlyPreUpdateDelayServerId is null || TestOnlyPreUpdateDelayServerId == serverId))
+        {
+            await using var delay = new NpgsqlCommand("SELECT pg_sleep($1)", connection, transaction)
+            {
+                CommandTimeout = TestOnlyUpdateCommandTimeoutSecondsOverride ?? UpdateBatchTimeoutSeconds,
+            };
+            delay.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = delaySeconds });
+            await delay.ExecuteNonQueryAsync(cancellationToken);
+
+            if (TestOnlyPreUpdateDelayOnce)
+            {
+                TestOnlyPreUpdateDelaySeconds = null;
+            }
+        }
+
+        await using var update = new NpgsqlCommand(BatchUpdateSql, connection, transaction)
+        {
+            CommandTimeout = TestOnlyUpdateCommandTimeoutSecondsOverride ?? UpdateBatchTimeoutSeconds,
+        };
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = times });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = names });
@@ -402,10 +564,11 @@ AND   t.server_id = $11";
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = settings });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = bootVals });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = resetVals });
-        /* The literal day range is what lets TimescaleDB exclude every chunk but this one — see the type
-           remarks. Redundant with the join equality on collection_time, and load-bearing anyway. */
-        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day });
-        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(1) });
+        /* The literal range is what lets TimescaleDB exclude every chunk but this one — see the type
+           remarks. Redundant with the join equality on collection_time, and load-bearing anyway. A slice
+           passes its own [start, end) hour bound here; the single-range path passes the whole day. */
+        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = rangeStart });
+        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = rangeEnd });
         /* The constant server_id predicate is what lets TimescaleDB exclude every other server's segment in
            this day's chunk — see the H1 fix note above RunAsync's grouping. */
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });

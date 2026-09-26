@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using PerformanceMonitor.Notifications;
@@ -52,7 +53,7 @@ internal sealed class ScriptedMuteRuleStore : IMuteRuleStore
         return this;
     }
 
-    public Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+    public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
     {
         Loads++;
 

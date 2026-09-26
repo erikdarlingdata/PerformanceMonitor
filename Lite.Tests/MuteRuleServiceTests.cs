@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Services;
@@ -30,7 +31,7 @@ public class MuteRuleServiceTests
 
         public FakeMuteRuleStore(bool throwOnInsert = false) => _throwOnInsert = throwOnInsert;
 
-        public Task<IReadOnlyList<MuteRule>> LoadAllAsync()
+        public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default)
         {
             if (ThrowOnLoad) throw new InvalidOperationException("store read boom");
             return Task.FromResult<IReadOnlyList<MuteRule>>(Persisted.ToList());

@@ -21,6 +21,11 @@
 # and the tab-indented continuation, so line-ending normalisation would change what it is evidence of.
 Darling/Darling.Tests/Fixtures/auto_explain_real_block.txt -text
 
+# The #4336 managed-conf rehearsal fixture holds real postgresql.conf bytes (initdb stock plus
+# product-managed blocks and hand edits) that a live PostgreSQL parses; the rewrite it exercises is also
+# LF-sensitive line-count/removal counting, so this stays LF regardless of the repo-wide eol=crlf default.
+Darling/Darling.Tests/Fixtures/ManagedConf/rehearsal-postgresql.conf text eol=lf
+
 # The PostgreSQL verification rig runs INSIDE Linux containers. A Dockerfile whose RUN lines carry a
 # trailing CR breaks the shell that executes them, and the seed is fed to psql in the container the same
 # way - so these keep LF regardless of the repo-wide eol=crlf default.

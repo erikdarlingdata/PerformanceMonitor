@@ -120,6 +120,9 @@ public static class AlertFamily
         ["Custom Alert Rules Unhealthy"] = SelfMonitor,
         ["Stale Mute Rules"] = SelfMonitor,
         ["Web TLS Certificate Expiring"] = SelfMonitor,
+        /* #4215: a managed store's darling-managed.conf fell back to the last-good copy, is
+           hand-edited and kept in force, or PostgreSQL rejected an owned setting outright. */
+        ["Store Settings Need Attention"] = SelfMonitor,
         ["Collector Cost Regression"] = SelfMonitor,
         /* #3783: the store's own TOAST slack and checkpointer pressure — informational conditions about the
            monitor's store, so self-monitor, not reports: they are entered and left and write a resolution. */

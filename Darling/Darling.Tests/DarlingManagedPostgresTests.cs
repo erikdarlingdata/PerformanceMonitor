@@ -2094,65 +2094,99 @@ public sealed class DarlingManagedPostgresTests
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
 
-            /* A real store, provisioned the normal way: exactly one CURRENT v8 block, with work_mem. */
+            /* A real store, provisioned the normal way. Step A migrates the v8 block out of
+               postgresql.conf into darling-managed.conf during this same call (#4215), so the v8 shape this
+               test needs to rewind is only available in the pre-migration BACKUP, not the live file. */
             await owner.EnsureRunningAsync(timeout.Token);
             await owner.StopIfStartedByThisProcessAsync();
 
-            var fresh = await File.ReadAllTextAsync(confPath, timeout.Token);
-            var spans = DarlingManagedPostgres.FindHardwareSizingBlockSpans(fresh);
-            Assert.Single(spans);
-            var (v8Start, v8End) = spans[0];
-            var freshBlock = fresh[v8Start..v8End];
-            var derivedWorkMem = LastSettingValue(fresh, "work_mem");
+            string? derivedWorkMem = null;
+            await RewindDataDirectoryToLegacyConfAsync(
+                dataDirectory,
+                preFixConf =>
+                {
+                    var spans = DarlingManagedPostgres.FindHardwareSizingBlockSpans(preFixConf);
+                    Assert.Single(spans);
+                    var (v8Start, v8End) = spans[0];
+                    var freshBlock = preFixConf[v8Start..v8End];
+                    derivedWorkMem = LastSettingValue(preFixConf, "work_mem");
+                    Assert.NotNull(derivedWorkMem);
+                    Assert.Contains("work_mem = " + derivedWorkMem, freshBlock, StringComparison.Ordinal);
+
+                    /* Reproduce the field shape: the same block, minus work_mem, three times over - the
+                       append-not-replace leftovers (#4225 fixed the bug; this store's blocks predate the fix)
+                       with a fingerprint that is ALREADY current, since it came straight from this run's own
+                       real (pre-migration) conf. */
+                    var legacyBlock = string.Join(
+                        '\n',
+                        freshBlock.Split('\n').Where(line => !line.StartsWith("work_mem = ", StringComparison.Ordinal)));
+                    /* Checked on the single copy, before tripling and splicing: the v3 block elsewhere in this
+                       real conf can legitimately carry the SAME derived value on a host whose RAM clamps both
+                       formulas to the same ceiling (64MB), so asserting against the whole file would be a
+                       false failure on such a host rather than a check of what THIS splice removed. */
+                    Assert.DoesNotContain("\nwork_mem = ", legacyBlock, StringComparison.Ordinal);
+
+                    /* A blank line between each copy - the separator every Build*ConfAppend leads with, and
+                       so the shape every REAL append-not-replace duplicate carried. preFixConf[..v8Start]
+                       already supplies the separator before the first copy, and preFixConf[v8End..] already
+                       supplies one after the last, so only the two seams IN BETWEEN need one inserted; without
+                       it FindHardwareSizingBlockSpans reads all three copies as a single span (nothing blank
+                       to stop it at), and the fixture would not be the three-block shape #4207 describes. */
+                    var legacyConf = preFixConf[..v8Start] + legacyBlock + '\n' + legacyBlock + '\n' + legacyBlock + preFixConf[v8End..];
+                    Assert.Equal(3, DarlingManagedPostgres.FindHardwareSizingBlockSpans(legacyConf).Count);
+                    return legacyConf;
+                },
+                timeout.Token);
             Assert.NotNull(derivedWorkMem);
-            Assert.Contains("work_mem = " + derivedWorkMem, freshBlock, StringComparison.Ordinal);
 
-            /* Reproduce the field shape: the same block, minus work_mem, three times over - the
-               append-not-replace leftovers (#4225 fixed the bug; this store's blocks predate the fix) with a
-               fingerprint that is ALREADY current, since it came straight from this run's own real start. */
-            var legacyBlock = string.Join(
-                '\n',
-                freshBlock.Split('\n').Where(line => !line.StartsWith("work_mem = ", StringComparison.Ordinal)));
-            /* Checked on the single copy, before tripling and splicing: the v3 block elsewhere in this real
-               conf can legitimately carry the SAME derived value on a host whose RAM clamps both formulas to
-               the same ceiling (64MB), so asserting against the whole file would be a false failure on such
-               a host rather than a check of what THIS splice removed. */
-            Assert.DoesNotContain("\nwork_mem = ", legacyBlock, StringComparison.Ordinal);
-
-            /* A blank line between each copy - the separator every Build*ConfAppend leads with, and so the
-               shape every REAL append-not-replace duplicate carried. fresh[..v8Start] already supplies the
-               separator before the first copy, and fresh[v8End..] already supplies one after the last, so
-               only the two seams IN BETWEEN need one inserted; without it FindHardwareSizingBlockSpans reads
-               all three copies as a single span (nothing blank to stop it at), and the fixture would not be
-               the three-block shape #4207 describes. */
-            var legacyConf = fresh[..v8Start] + legacyBlock + '\n' + legacyBlock + '\n' + legacyBlock + fresh[v8End..];
-            await File.WriteAllTextAsync(confPath, legacyConf, timeout.Token);
-
-            Assert.Equal(3, DarlingManagedPostgres.FindHardwareSizingBlockSpans(legacyConf).Count);
-
-            /* The service-owned start: EnsureConfAppended heals BEFORE pg_ctl start, so the derived value
-               is live on this very start rather than one restart later. */
+            /* The service-owned start: on a Legacy conf, EnsureConfAppended heals BEFORE pg_ctl start (so the
+               derived value is live on this very start), and Step A then migrates the healed value into
+               darling-managed.conf post-start -- postgresql.conf itself never carries the v8 marker again. */
             var healedOwner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             var healedConnectionString = await healedOwner.EnsureRunningAsync(timeout.Token);
             try
             {
-                var healedConf = await File.ReadAllTextAsync(confPath, timeout.Token);
-                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarkerV8));
-                Assert.Equal(derivedWorkMem, LastSettingValue(healedConf, "work_mem"));
+                var healedPostgresqlConf = await File.ReadAllTextAsync(confPath, timeout.Token);
+                var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+                var healedManagedConf = File.Exists(managedConfPath)
+                    ? await File.ReadAllTextAsync(managedConfPath, timeout.Token)
+                    : string.Empty;
+                var diagnostics =
+                    $"LastManagedConfVerification={healedOwner.LastManagedConfVerification}; " +
+                    $"Classify={ManagedConfMigrationState.Classify(dataDirectory)}; " +
+                    $"files=[{string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
+
+                Assert.True(
+                    !healedPostgresqlConf.Contains(DarlingManagedPostgres.ConfMarkerV8, StringComparison.Ordinal),
+                    $"postgresql.conf should carry no v8 marker after Step A migrates it out. {diagnostics}");
+
+                /* darling-managed.conf renders every value quoted ("work_mem = '64MB'"), so the healed
+                   value is read back through the product's own parser (ParseConfText) rather than matched
+                   as literal text. */
+                var migratedWorkMem = LastConfAssignment(healedManagedConf, "work_mem");
+                Assert.True(
+                    migratedWorkMem == derivedWorkMem,
+                    $"darling-managed.conf should carry the healed work_mem value (parsed={migratedWorkMem ?? "(absent)"}, expected={derivedWorkMem}). {diagnostics}");
 
                 var (live, expected) = await ReadSettingAndLiteralBytesAsync(
                     healedConnectionString, "work_mem", derivedWorkMem!, timeout.Token);
-                Assert.Equal(expected, live);
+                Assert.True(expected == live, $"work_mem was not live at the healed value. {diagnostics}");
+
+                Assert.True(
+                    ManagedConfMigrationState.Classify(dataDirectory) == ManagedConfMigrationState.Kind.Verified,
+                    $"The data directory should classify Verified after the heal start. {diagnostics}");
             }
             finally
             {
                 await healedOwner.StopIfStartedByThisProcessAsync();
             }
 
-            /* A third start must not append a second v8 block - already current, nothing left to heal. */
-            Assert.Equal(
-                1,
-                CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV8));
+            /* A third start must not re-append a v8 block into postgresql.conf -- already migrated, nothing
+               left to heal there. */
+            Assert.DoesNotContain(
+                DarlingManagedPostgres.ConfMarkerV8,
+                await File.ReadAllTextAsync(confPath, timeout.Token),
+                StringComparison.Ordinal);
         }
         finally
         {
@@ -2805,41 +2839,93 @@ public sealed class DarlingManagedPostgresTests
             Assert.True(File.Exists(credentialPath));
             var credentialBytes = File.ReadAllBytes(credentialPath);
 
+            /* #4215: by the time EnsureRunningAsync returns, Step A has already run post-start and
+               rewritten postgresql.conf to a single include line -- every v-block that rode the first-run
+               append now lives in darling-managed.conf instead. Every check below that used to read
+               postgresql.conf for a marker or a written-but-not-live value reads darling-managed.conf now;
+               a check that already reads the LIVE pg_settings value (below, against the running server) is
+               dropped here rather than duplicated against a file. */
             var conf = File.ReadAllText(Path.Combine(dataDirectory, "postgresql.conf"));
-            Assert.Contains("shared_preload_libraries = 'timescaledb'", conf, StringComparison.Ordinal);
-            Assert.Contains("listen_addresses = '127.0.0.1'", conf, StringComparison.Ordinal);
-            /* HypertableCount, not HypertableTables.Count: the product sizes workers from the TRUE
-               hypertable count (catalog + collection_log, the V23 non-catalog hypertable). */
-            Assert.Contains($"max_worker_processes = {3 + (TimescaleSupport.HypertableCount + 2) + 8}", conf, StringComparison.Ordinal);
+            var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+            var managedConf = File.ReadAllText(managedConfPath);
+            var migrationDiagnostics =
+                $"LastManagedConfVerification={owner.LastManagedConfVerification}; " +
+                $"Classify={ManagedConfMigrationState.Classify(dataDirectory)}; " +
+                $"files=[{string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
 
-            /* v3 memory sizing rode the SAME append path on first run, derived from THIS host's physical RAM
-               (the exact MB depend on the runner, so pin the marker + that the settings are present). */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV3, conf, StringComparison.Ordinal);
-            Assert.Contains("shared_buffers = ", conf, StringComparison.Ordinal);
-            Assert.Contains("work_mem = ", conf, StringComparison.Ordinal);
+            /* postgresql.conf itself: exactly one include line, no v-marker of any kind. */
+            Assert.True(
+                CountOccurrences(conf, ManagedConfFile.IncludeLine) == 1,
+                $"postgresql.conf should carry exactly one include line. {migrationDiagnostics}");
+            foreach (var marker in DarlingManagedPostgres.AllManagedConfMarkers)
+            {
+                Assert.True(
+                    !conf.Contains(marker, StringComparison.Ordinal),
+                    $"postgresql.conf should carry no v-marker text ({marker}). {migrationDiagnostics}");
+            }
 
-            /* v4 write throughput rode the same first-run append: connection headroom + WAL ceiling. */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV4, conf, StringComparison.Ordinal);
+            /* darling-managed.conf's keys, read the same way the migration itself reads them
+               (DarlingManagedPostgres.ParseConfText), rather than by matching literal rendered text — the
+               render's unit and exact value are host-dependent (#4336). Last-occurrence-wins, same as the
+               server. */
+            var managedConfKeys = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(managedConf))
+            {
+                managedConfKeys[name] = value;
+            }
+            var managedConfKeysDiagnostics =
+                $"parsed keys=[{string.Join(", ", managedConfKeys.Select(kv => $"{kv.Key}={kv.Value}"))}]";
 
-            /* v5 co-located sizing rode the same first-run append (its shared_buffers override equals the
-               v3 value on a fresh cluster, since both now derive through the same 1 GB cap). */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV5, conf, StringComparison.Ordinal);
-            Assert.Contains("max_connections = 200", conf, StringComparison.Ordinal);
-            Assert.Contains("max_wal_size = 4GB", conf, StringComparison.Ordinal);
+            /* No live check exists in this test for shared_preload_libraries or listen_addresses, so both
+               move to darling-managed.conf's rendered text rather than being dropped. ParseConfText already
+               strips the render's quoting, so the comparison is against the unquoted, comma-split, trimmed
+               list -- CONTAINS timescaledb rather than equality, since the exact list also carries
+               pg_stat_statements and may carry more (#4336). */
+            Assert.True(
+                managedConfKeys.TryGetValue("shared_preload_libraries", out var preload)
+                && preload.Split(',').Select(p => p.Trim()).Contains("timescaledb", StringComparer.Ordinal),
+                $"darling-managed.conf should carry the timescaledb preload. {migrationDiagnostics} {managedConfKeysDiagnostics}");
+            Assert.True(
+                managedConfKeys.TryGetValue("listen_addresses", out var listenAddresses) && listenAddresses == "127.0.0.1",
+                $"darling-managed.conf should carry listen_addresses. {migrationDiagnostics} {managedConfKeysDiagnostics}");
 
-            /* v6 log rotation rode the same first-run append, and the server ACCEPTED it (a bad line here
-               fails pg_ctl start outright) — the logging collector is live, proven by the weekday ring file
-               it creates under <data>\log the moment it starts (#1652). */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV6, conf, StringComparison.Ordinal);
+            /* max_worker_processes: DROPPED as a conf-text check -- reader.GetString(2) below already proves
+               this LIVE against the running server, and duplicating it against a file adds nothing. */
+
+            /* v3 memory sizing rode the same first-run append, derived from THIS host's physical RAM: presence
+               moves to darling-managed.conf (the exact MB depend on the runner); the values themselves are
+               proven LIVE below (work_mem/shared_buffers NotEqual the stock defaults). */
+            Assert.True(
+                managedConfKeys.ContainsKey("shared_buffers"),
+                $"darling-managed.conf should carry shared_buffers. {migrationDiagnostics} {managedConfKeysDiagnostics}");
+            Assert.True(
+                managedConfKeys.ContainsKey("work_mem"),
+                $"darling-managed.conf should carry work_mem. {migrationDiagnostics} {managedConfKeysDiagnostics}");
+
+            /* v4 write throughput and v5 co-located sizing: no live check of these specific values exists in
+               this test, so their settings move to darling-managed.conf rather than being dropped. max_wal_size
+               is checked for presence only -- its rendered value depends on the runner's disk size (the same
+               ladder BuildWalSizingConfAppend uses), not a fixed "4GB". */
+            Assert.True(
+                managedConfKeys.TryGetValue("max_connections", out var maxConnections) && maxConnections == "200",
+                $"darling-managed.conf should carry max_connections. {migrationDiagnostics} {managedConfKeysDiagnostics}");
+            Assert.True(
+                managedConfKeys.ContainsKey("max_wal_size"),
+                $"darling-managed.conf should carry max_wal_size. {migrationDiagnostics} {managedConfKeysDiagnostics}");
+
+            /* v6 log rotation: the logging collector is live, proven by the weekday ring file it creates
+               under <data>\log the moment it starts (#1652) -- unaffected by where the setting text lives. */
             var ringFiles = Directory.GetFiles(Path.Combine(dataDirectory, "log"), "postgresql-*.log");
             Assert.NotEmpty(ringFiles);
 
-            /* v7 compression memory (#1777) rode the same first-run append. Its value derives from THIS
-               host's RAM, so pin the marker and capture the conf's EFFECTIVE value (the last assignment,
-               which is the one the server honors) to compare against the live setting below. */
-            Assert.Contains(DarlingManagedPostgres.ConfMarkerV7, conf, StringComparison.Ordinal);
-            var confMaintenanceWorkMem = LastSettingValue(conf, "maintenance_work_mem");
-            Assert.NotNull(confMaintenanceWorkMem);
+            /* v7 compression memory (#1777): its EFFECTIVE value (the last assignment, the one the server
+               honors) now lives in darling-managed.conf, and is captured here to compare against the live
+               setting below. Through ParseConfText (via the managedConfKeys map built above), not
+               LastSettingValue's literal text match, since the render quotes every value ("'1536MB'") and
+               that literal quoting is not a byte size pg_size_bytes can parse (#4336). */
+            Assert.True(
+                managedConfKeys.TryGetValue("maintenance_work_mem", out var confMaintenanceWorkMem),
+                $"darling-managed.conf should carry maintenance_work_mem. {migrationDiagnostics} {managedConfKeysDiagnostics}");
 
             /* The derived credential really authenticates (scram, not trust) into the darling
                database — and the server started with our appended conf, so the timescaledb
@@ -2893,14 +2979,29 @@ public sealed class DarlingManagedPostgresTests
             Assert.Equal(credentialBytes, File.ReadAllBytes(credentialPath));
             Assert.Equal(connectionString, secondConnectionString);
 
+            var secondDiagnostics =
+                $"LastManagedConfVerification={second.LastManagedConfVerification}; " +
+                $"Classify={ManagedConfMigrationState.Classify(dataDirectory)}; " +
+                $"files=[{string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
+
+            /* The idempotent second run: this data directory is Verified after the first run, so the second
+               run's pre-start write (EnsureManagedConfReadyAsync) re-renders darling-managed.conf and finds
+               it byte-identical to what is already on disk -- no v-marker ever re-enters postgresql.conf,
+               and neither file changes. */
             var confAfterSecond = File.ReadAllText(Path.Combine(dataDirectory, "postgresql.conf"));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarker));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV2));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV3));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV4));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV5));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV6));
-            Assert.Equal(1, CountOccurrences(confAfterSecond, DarlingManagedPostgres.ConfMarkerV7));
+            var managedConfAfterSecond = File.ReadAllText(managedConfPath);
+            Assert.True(conf == confAfterSecond, $"postgresql.conf should be byte-identical after the idempotent second run. {secondDiagnostics}");
+            Assert.True(managedConf == managedConfAfterSecond, $"darling-managed.conf should be byte-identical after the idempotent second run. {secondDiagnostics}");
+            Assert.True(
+                CountOccurrences(confAfterSecond, ManagedConfFile.IncludeLine) == 1,
+                $"postgresql.conf should still carry exactly one include line. {secondDiagnostics}");
+
+            Assert.True(
+                ManagedConfMigrationState.Classify(dataDirectory) == ManagedConfMigrationState.Kind.Verified,
+                $"The data directory should classify Verified after the first run. {migrationDiagnostics}");
+            Assert.True(
+                ManagedConfMigrationState.Classify(dataDirectory) == ManagedConfMigrationState.Kind.Verified,
+                $"The data directory should classify Verified after the idempotent second run. {secondDiagnostics}");
 
             /* Both up/down probes below must bypass Npgsql's pool: OpenAsync on a pooled string
                can hand back an idle socket with no I/O at all, which "succeeds" against a stopped
@@ -2973,16 +3074,32 @@ public sealed class DarlingManagedPostgresTests
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
 
-            /* A real store, provisioned the normal way. */
+            /* A real store, provisioned the normal way. Step A migrates the v7 block out of
+               postgresql.conf into darling-managed.conf during this same call (#4215), so the pre-#1777
+               shape this test needs to rewind is only available in the pre-migration BACKUP. */
             await owner.EnsureRunningAsync(timeout.Token);
             await owner.StopIfStartedByThisProcessAsync();
 
-            /* Rewind the conf to its pre-#1777 shape: drop the v7 block (appended last, so the marker is a
-               clean truncation point) and put the OLD formula's 16 GB landing value in the v3 block. */
-            var fresh = await File.ReadAllTextAsync(confPath, timeout.Token);
-            var v7Index = fresh.IndexOf(DarlingManagedPostgres.ConfMarkerV7, StringComparison.Ordinal);
-            Assert.True(v7Index > 0, "The fresh conf should carry the v7 block before it is rewound.");
-            var derivedValue = LastSettingValue(fresh, "maintenance_work_mem");
+            string? derivedValue = null;
+            await RewindDataDirectoryToLegacyConfAsync(
+                dataDirectory,
+                preFixConf =>
+                {
+                    /* Rewind the conf to its pre-#1777 shape: drop the v7 block (appended last, so the marker
+                       is a clean truncation point) and put the OLD formula's 16 GB landing value in the v3
+                       block. */
+                    var v7Index = preFixConf.IndexOf(DarlingManagedPostgres.ConfMarkerV7, StringComparison.Ordinal);
+                    Assert.True(v7Index > 0, "The pre-migration conf should carry the v7 block before it is rewound.");
+                    derivedValue = LastSettingValue(preFixConf, "maintenance_work_mem");
+                    Assert.NotNull(derivedValue);
+
+                    var legacyConf = preFixConf[..v7Index]
+                        .Replace($"maintenance_work_mem = {derivedValue}", $"maintenance_work_mem = {legacyValue}", StringComparison.Ordinal);
+                    Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV7, legacyConf, StringComparison.Ordinal);
+                    Assert.Equal(legacyValue, LastSettingValue(legacyConf, "maintenance_work_mem"));
+                    return legacyConf;
+                },
+                timeout.Token);
             Assert.NotNull(derivedValue);
             /* The whole test turns on before != after. A host with ~3.2 GB RAM would derive exactly 819MB
                through the 25% guard and make the comparison vacuous — that is a property of the RUNNER,
@@ -2990,39 +3107,55 @@ public sealed class DarlingManagedPostgresTests
             Assert.SkipWhen(string.Equals(derivedValue, legacyValue, StringComparison.Ordinal),
                 $"This host derives maintenance_work_mem = {derivedValue}, the same value the test uses as the legacy reading.");
 
-            var legacyConf = fresh[..v7Index]
-                .Replace($"maintenance_work_mem = {derivedValue}", $"maintenance_work_mem = {legacyValue}", StringComparison.Ordinal);
-            await File.WriteAllTextAsync(confPath, legacyConf, timeout.Token);
-
-            Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV7, legacyConf, StringComparison.Ordinal);
-            Assert.Equal(legacyValue, LastSettingValue(legacyConf, "maintenance_work_mem"));
-
-            /* The service-owned start: EnsureConfAppended heals BEFORE pg_ctl start, so the raised value is
-               live on this very start rather than one restart later. That ordering is what makes the live
-               assertion below decisive — without the v7 append this server would have come up on the
-               rewound conf and reported the legacy 819MB. */
+            /* The service-owned start: on a Legacy conf, EnsureConfAppended heals BEFORE pg_ctl start (so the
+               raised value is live on this very start), and Step A then migrates the healed value into
+               darling-managed.conf post-start — postgresql.conf itself never carries the v7 marker again. */
             var healedOwner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             var healedConnectionString = await healedOwner.EnsureRunningAsync(timeout.Token);
             try
             {
-                var healedConf = await File.ReadAllTextAsync(confPath, timeout.Token);
-                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarkerV7));
-                Assert.Equal(derivedValue, LastSettingValue(healedConf, "maintenance_work_mem"));
-                /* Appended, never rewritten in place — the legacy line is still there, just outvoted. */
-                Assert.Contains($"maintenance_work_mem = {legacyValue}", healedConf, StringComparison.Ordinal);
+                var healedPostgresqlConf = await File.ReadAllTextAsync(confPath, timeout.Token);
+                var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+                var healedManagedConf = File.Exists(managedConfPath)
+                    ? await File.ReadAllTextAsync(managedConfPath, timeout.Token)
+                    : string.Empty;
+                var diagnostics =
+                    $"LastManagedConfVerification={healedOwner.LastManagedConfVerification}; " +
+                    $"Classify={ManagedConfMigrationState.Classify(dataDirectory)}; " +
+                    $"files=[{string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
+
+                Assert.True(
+                    !healedPostgresqlConf.Contains(DarlingManagedPostgres.ConfMarkerV7, StringComparison.Ordinal),
+                    $"postgresql.conf should carry no v7 marker after Step A migrates it out. {diagnostics}");
+
+                /* darling-managed.conf renders every value quoted ("maintenance_work_mem = '1536MB'"), so the
+                   raised value is read back through the product's own parser (ParseConfText) rather than
+                   matched as literal text. */
+                var migratedValue = LastConfAssignment(healedManagedConf, "maintenance_work_mem");
+                Assert.True(
+                    migratedValue == derivedValue,
+                    $"darling-managed.conf should carry the raised maintenance_work_mem value (parsed={migratedValue ?? "(absent)"}, expected={derivedValue}). {diagnostics}");
 
                 var (live, expected) = await ReadSettingAndLiteralBytesAsync(
-                    healedConnectionString, "maintenance_work_mem", derivedValue, timeout.Token);
-                Assert.Equal(expected, live);
-                Assert.NotEqual(819L * 1024 * 1024, live);
+                    healedConnectionString, "maintenance_work_mem", derivedValue!, timeout.Token);
+                Assert.True(expected == live, $"maintenance_work_mem was not live at the raised value. {diagnostics}");
+                Assert.True(live != 819L * 1024 * 1024, $"maintenance_work_mem was still the legacy value live. {diagnostics}");
+
+                Assert.True(
+                    ManagedConfMigrationState.Classify(dataDirectory) == ManagedConfMigrationState.Kind.Verified,
+                    $"The data directory should classify Verified after the heal start. {diagnostics}");
             }
             finally
             {
                 await healedOwner.StopIfStartedByThisProcessAsync();
             }
 
-            /* A third start must not append a second v7 block. */
-            Assert.Equal(1, CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV7));
+            /* A third start must not re-append a v7 block into postgresql.conf — already migrated, nothing
+               left to heal there. */
+            Assert.DoesNotContain(
+                DarlingManagedPostgres.ConfMarkerV7,
+                await File.ReadAllTextAsync(confPath, timeout.Token),
+                StringComparison.Ordinal);
         }
         finally
         {
@@ -3083,49 +3216,72 @@ public sealed class DarlingManagedPostgresTests
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
 
-            /* A real store, provisioned the normal way. */
+            /* A real store, provisioned the normal way. Step A migrates the v11 block out of
+               postgresql.conf into darling-managed.conf during this same call (#4215), so the pre-#3175
+               shape this test needs to rewind is only available in the pre-migration BACKUP. */
             await owner.EnsureRunningAsync(timeout.Token);
             await owner.StopIfStartedByThisProcessAsync();
 
-            /* Rewind to the pre-#3175 shape: v11 is appended last, so its marker is a clean truncation
-               point. */
-            var fresh = await File.ReadAllTextAsync(confPath, timeout.Token);
-            var v11Index = fresh.IndexOf(DarlingManagedPostgres.ConfMarkerV11, StringComparison.Ordinal);
-            Assert.True(v11Index > 0, "The fresh conf should carry the v11 block before it is rewound.");
+            await RewindDataDirectoryToLegacyConfAsync(
+                dataDirectory,
+                preFixConf =>
+                {
+                    /* Rewind to the pre-#3175 shape: v11 is appended last, so its marker is a clean
+                       truncation point. */
+                    var v11Index = preFixConf.IndexOf(DarlingManagedPostgres.ConfMarkerV11, StringComparison.Ordinal);
+                    Assert.True(v11Index > 0, "The pre-migration conf should carry the v11 block before it is rewound.");
 
-            var legacyConf = fresh[..v11Index];
-            await File.WriteAllTextAsync(confPath, legacyConf, timeout.Token);
+                    var legacyConf = preFixConf[..v11Index];
 
-            /* The rewound file is the field shape, asserted on both axes: the v1 marker IS present (so the
-               v1 check will skip, which is the whole defect) and the GUC has NO assignment anywhere — not
-               an assignment set to off, an absence. */
-            Assert.Contains(DarlingManagedPostgres.ConfMarker, legacyConf, StringComparison.Ordinal);
-            Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV11, legacyConf, StringComparison.Ordinal);
-            Assert.Null(LastSettingValue(legacyConf, StoreSelfMetrics.JobExecutionLoggingSetting));
+                    /* The rewound file is the field shape, asserted on both axes: the v1 marker IS present
+                       (so the v1 check will skip, which is the whole defect) and the GUC has NO assignment
+                       anywhere — not an assignment set to off, an absence. */
+                    Assert.Contains(DarlingManagedPostgres.ConfMarker, legacyConf, StringComparison.Ordinal);
+                    Assert.DoesNotContain(DarlingManagedPostgres.ConfMarkerV11, legacyConf, StringComparison.Ordinal);
+                    Assert.Null(LastSettingValue(legacyConf, StoreSelfMetrics.JobExecutionLoggingSetting));
+                    return legacyConf;
+                },
+                timeout.Token);
 
-            /* The service-owned start: EnsureConfAppended heals BEFORE pg_ctl start, so the setting is live
-               on this very start rather than one restart later. */
+            /* The service-owned start: on a Legacy conf, EnsureConfAppended heals BEFORE pg_ctl start (so the
+               setting is live on this very start), and Step A then migrates the healed value into
+               darling-managed.conf post-start — postgresql.conf itself never carries the v11 marker again. */
             var healedOwner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             var healedConnectionString = await healedOwner.EnsureRunningAsync(timeout.Token);
             try
             {
-                var healedConf = await File.ReadAllTextAsync(confPath, timeout.Token);
-                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarkerV11));
-                Assert.Equal("on", LastSettingValue(healedConf, StoreSelfMetrics.JobExecutionLoggingSetting));
+                var healedPostgresqlConf = await File.ReadAllTextAsync(confPath, timeout.Token);
+                var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+                var healedManagedConf = File.Exists(managedConfPath)
+                    ? await File.ReadAllTextAsync(managedConfPath, timeout.Token)
+                    : string.Empty;
+                var diagnostics =
+                    $"LastManagedConfVerification={healedOwner.LastManagedConfVerification}; " +
+                    $"Classify={ManagedConfMigrationState.Classify(dataDirectory)}; " +
+                    $"files=[{string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName))}]";
 
-                /* Appended, never rewritten in place: the v1 marker still occurs exactly once, so no part
-                   of that shared block was re-applied to heal this setting. */
-                Assert.Equal(1, CountOccurrences(healedConf, DarlingManagedPostgres.ConfMarker));
+                Assert.True(
+                    !healedPostgresqlConf.Contains(DarlingManagedPostgres.ConfMarkerV11, StringComparison.Ordinal),
+                    $"postgresql.conf should carry no v11 marker after Step A migrates it out. {diagnostics}");
+                Assert.True(
+                    !healedPostgresqlConf.Contains(DarlingManagedPostgres.ConfMarker, StringComparison.Ordinal),
+                    $"postgresql.conf should carry no v-marker at all after Step A migrates it out. {diagnostics}");
+                Assert.True(
+                    healedManagedConf.Contains(
+                        $"{StoreSelfMetrics.JobExecutionLoggingSetting} = 'on'", StringComparison.Ordinal)
+                    || string.Equals("on", LastSettingValue(healedManagedConf, StoreSelfMetrics.JobExecutionLoggingSetting), StringComparison.Ordinal),
+                    $"darling-managed.conf should carry the healed job-execution-logging setting. {diagnostics}");
 
-                /* Live ASSIGNMENTS, not substring hits: initdb's generated conf already carries a commented
-                   #shared_preload_libraries line, so a substring count reads 2 on a healthy file. That is
-                   what the first version of this assertion did, and CI is where it said so. TWO live
-                   assignments since #3899: v1's, and the v13 block's MERGED restatement, which is the effective
-                   one and still loads timescaledb. A re-applied v1 would make it three. */
-                Assert.Equal(2, CountAssignments(healedConf, "shared_preload_libraries"));
-                Assert.Equal(
-                    "timescaledb,pg_stat_statements",
-                    LastConfAssignment(healedConf, "shared_preload_libraries"));
+                /* Live ASSIGNMENTS in darling-managed.conf, not substring hits: initdb's generated
+                   postgresql.conf carries a commented #shared_preload_libraries line, but that file no
+                   longer holds any of our blocks after migration — the managed file is the only place the
+                   product's own shared_preload_libraries line can live now. */
+                Assert.True(
+                    CountAssignments(healedManagedConf, "shared_preload_libraries") == 1,
+                    $"darling-managed.conf should carry exactly one shared_preload_libraries assignment. {diagnostics}");
+                Assert.True(
+                    string.Equals("timescaledb,pg_stat_statements", LastConfAssignment(healedManagedConf, "shared_preload_libraries"), StringComparison.Ordinal),
+                    $"darling-managed.conf's shared_preload_libraries should merge timescaledb and pg_stat_statements. {diagnostics}");
 
                 /* A PRECONDITION of the reading below, not part of what the heal is judged on — and the trap
                    in this whole area. `timescaledb` in shared_preload_libraries loads the LOADER, and the
@@ -3156,21 +3312,40 @@ public sealed class DarlingManagedPostgresTests
                 Assert.Equal("off", reading.BootValue);
                 Assert.Equal("on", reading.Setting);
                 Assert.Equal("configuration file", reading.Source);
-                Assert.Equal(
-                    Path.GetFullPath(confPath),
-                    Path.GetFullPath(reading.SourceFile ?? string.Empty));
+
+                /* #4215/#4336: EnsureConfAppended's v11 heal lands the setting directly in postgresql.conf
+                   on THIS start, and Step A runs post-start and rewrites postgresql.conf to the single
+                   include line -- but Step A deliberately does not reload (see MigrateManagedConfAsync), so
+                   pg_settings.sourcefile still names postgresql.conf until the NEXT start. pg_file_settings
+                   re-parses the files at query time instead of reporting what booted, so it already shows
+                   the APPLIED row for this key resolving to darling-managed.conf; that is what this
+                   assertion reads. */
+                var appliedSourceFile = await ReadAppliedFileSettingSourceAsync(
+                    healedConnectionString, StoreSelfMetrics.JobExecutionLoggingSetting, timeout.Token);
+                Assert.True(
+                    appliedSourceFile is not null
+                        && appliedSourceFile.EndsWith(ManagedConfFile.FileName, StringComparison.Ordinal),
+                    $"sourcefile should be darling-managed.conf, was {appliedSourceFile ?? "(no applied row)"}. {diagnostics}");
 
                 /* SIGHUP-context, which is what makes "the append before pg_ctl start is enough, and no
                    reload is issued" a decision rather than a gamble. */
-                Assert.Equal("sighup", reading.Context);
+                Assert.True("sighup" == reading.Context, $"context should be sighup, was {reading.Context}. {diagnostics}");
+
+                Assert.True(
+                    ManagedConfMigrationState.Classify(dataDirectory) == ManagedConfMigrationState.Kind.Verified,
+                    $"The data directory should classify Verified after the heal start. {diagnostics}");
             }
             finally
             {
                 await healedOwner.StopIfStartedByThisProcessAsync();
             }
 
-            /* A third start must not append a second v11 block. */
-            Assert.Equal(1, CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV11));
+            /* A third start must not re-append a v11 block into postgresql.conf — already migrated, nothing
+               left to heal there. */
+            Assert.DoesNotContain(
+                DarlingManagedPostgres.ConfMarkerV11,
+                await File.ReadAllTextAsync(confPath, timeout.Token),
+                StringComparison.Ordinal);
         }
         finally
         {
@@ -3212,6 +3387,30 @@ public sealed class DarlingManagedPostgresTests
             reader.IsDBNull(2) ? null : reader.GetString(2),
             reader.IsDBNull(3) ? null : reader.GetString(3),
             reader.IsDBNull(4) ? null : reader.GetString(4));
+    }
+
+    /// <summary>
+    /// The <c>sourcefile</c> that would apply for <paramref name="name"/> if the config files were reloaded
+    /// right now, through <c>pg_file_settings</c> — which re-parses postgresql.conf and its includes at
+    /// query time rather than reporting what booted the running server, unlike <c>pg_settings.sourcefile</c>
+    /// (which lags until the next reload or restart). Reads only the row marked <c>applied</c>, since
+    /// <c>pg_file_settings</c> can carry one row per file that ever assigned the name and only the applied
+    /// one is the value PostgreSQL would actually honor.
+    /// </summary>
+    private static async Task<string?> ReadAppliedFileSettingSourceAsync(
+        string connectionString, string name, CancellationToken cancellationToken)
+    {
+        var unpooled = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString;
+        await using var connection = new NpgsqlConnection(unpooled);
+        await connection.OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand(
+            "SELECT sourcefile FROM pg_file_settings WHERE name = @name AND applied",
+            connection);
+        command.Parameters.AddWithValue("name", name);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? (reader.IsDBNull(0) ? null : reader.GetString(0))
+            : null;
     }
 
     /// <summary>
@@ -3279,6 +3478,58 @@ public sealed class DarlingManagedPostgresTests
             {
                 Thread.Sleep(500);
             }
+        }
+    }
+
+    /// <summary>
+    /// Rewinds <paramref name="dataDirectory"/> to a Legacy shape a next start will re-classify as such
+    /// (#4215/#4336): after one real provisioning start and stop, Step A has already migrated the v-blocks
+    /// out of <c>postgresql.conf</c> and into <c>darling-managed.conf</c>, so the LEGACY conf a pre-fix store
+    /// would have carried is not on disk any more as text to slice — it must be rebuilt. The first start's own
+    /// backup (<c>postgresql.conf.pre-4215.*.bak</c>) is exactly that Legacy conf, since it is the snapshot Step
+    /// A took immediately before rewriting the file; <paramref name="transform"/> applies the test's own rewind
+    /// (stripping/duplicating/truncating a block) to that text. Every migration artifact this start produced —
+    /// the managed file itself, its verified stamp, any pending file, the last-good copy, and the backup — is
+    /// then deleted, so <see cref="ManagedConfMigrationState.Classify"/> reads <see
+    /// cref="ManagedConfMigrationState.Kind.Legacy"/> again on the very next call, exactly as a real pre-fix
+    /// store would.
+    /// </summary>
+    private static async Task RewindDataDirectoryToLegacyConfAsync(
+        string dataDirectory, Func<string, string> transform, CancellationToken cancellationToken)
+    {
+        var backups = Directory.GetFiles(dataDirectory, "postgresql.conf.pre-4215.*.bak");
+        Assert.True(
+            backups.Length > 0,
+            $"No postgresql.conf.pre-4215.*.bak found in {dataDirectory} after the first provisioning start; " +
+            "Step A should have written one. Files present: " +
+            string.Join(", ", Directory.GetFiles(dataDirectory).Select(Path.GetFileName)));
+        Array.Sort(backups, StringComparer.Ordinal);
+        var preFixConf = await File.ReadAllTextAsync(backups[0], cancellationToken);
+
+        var legacyConf = transform(preFixConf);
+
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        await File.WriteAllTextAsync(confPath, legacyConf, cancellationToken);
+
+        TryDelete(Path.Combine(dataDirectory, ManagedConfFile.FileName));
+        TryDelete(Path.Combine(dataDirectory, ManagedConfMigrationSteps.StampFileName));
+        TryDelete(Path.Combine(dataDirectory, ManagedConfMigrationSteps.PendingFileName));
+        TryDelete(Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName));
+        foreach (var backup in backups)
+        {
+            TryDelete(backup);
+        }
+
+        Assert.Equal(
+            ManagedConfMigrationState.Kind.Legacy,
+            ManagedConfMigrationState.Classify(dataDirectory));
+    }
+
+    private static void TryDelete(string path)
+    {
+        if (File.Exists(path))
+        {
+            File.Delete(path);
         }
     }
 

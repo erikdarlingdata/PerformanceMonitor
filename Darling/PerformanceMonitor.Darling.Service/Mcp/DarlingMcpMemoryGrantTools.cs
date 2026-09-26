@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -45,9 +46,10 @@ public sealed class DarlingMcpMemoryGrantTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24. window[] aggregates every snapshot in these hours; grants[] is the newest snapshot in them.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -58,15 +60,15 @@ public sealed class DarlingMcpMemoryGrantTools
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
             var rows = await DarlingMemoryGrantReader.GetResourceSemaphoreLatestAsync(
-                postgres, resolved.ServerId, windowStart, now);
+                postgres, resolved.ServerId, windowStart, now, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No memory grant data available.");
 
             /* Same window bounds as the latest read, so the window's last_snapshot_at IS captured_at and the
                two halves describe one span of the same rows (#3541 A10). */
             var window = await DarlingMemoryGrantReader.GetResourceSemaphoreWindowAsync(
-                postgres, resolved.ServerId, windowStart, now);
+                postgres, resolved.ServerId, windowStart, now, cancellationToken);
 
             var grants = rows.Select(r => new
             {
@@ -111,7 +113,7 @@ public sealed class DarlingMcpMemoryGrantTools
                 window = window.Select(WindowShape)
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_resource_semaphore", ex);
         }
@@ -122,9 +124,10 @@ public sealed class DarlingMcpMemoryGrantTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 1. window[] aggregates every snapshot in these hours; grants[] is the newest snapshot in them.")] int hours_back = 1,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -135,13 +138,13 @@ public sealed class DarlingMcpMemoryGrantTools
             var now = windowEnd;
             var windowStart = now.AddHours(-hours_back);
             var rows = await DarlingMemoryGrantReader.GetMemoryGrantsLatestAsync(
-                postgres, resolved.ServerId, windowStart, now);
+                postgres, resolved.ServerId, windowStart, now, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_grant_stats", cancellationToken)
                     ?? McpHelpers.Status("unavailable", "No memory grant data available.");
 
             var window = await DarlingMemoryGrantReader.GetMemoryGrantsWindowAsync(
-                postgres, resolved.ServerId, windowStart, now);
+                postgres, resolved.ServerId, windowStart, now, cancellationToken);
 
             var grants = rows.Select(r => new
             {
@@ -168,7 +171,7 @@ public sealed class DarlingMcpMemoryGrantTools
                 window = window.Select(WindowShape)
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_memory_grants", ex);
         }
@@ -200,9 +203,10 @@ public sealed class DarlingMcpMemoryGrantTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -212,9 +216,9 @@ public sealed class DarlingMcpMemoryGrantTools
         {
             var now = windowEnd;
             var rows = await DarlingMemoryGrantReader.GetMemoryPressureEventsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
             if (rows.Count == 0)
-                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_pressure_events")
+                return await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "memory_pressure_events", cancellationToken)
                     ?? McpHelpers.Status("empty", "No memory pressure events found in the requested time range.");
 
             return JsonSerializer.Serialize(new
@@ -230,7 +234,7 @@ public sealed class DarlingMcpMemoryGrantTools
                 })
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_memory_pressure_events", ex);
         }
