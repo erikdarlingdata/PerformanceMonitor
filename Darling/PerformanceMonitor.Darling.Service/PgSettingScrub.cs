@@ -248,21 +248,16 @@ AND   t.server_id = $11";
         var changedRowCount = 0;
         var daysTouched = new HashSet<DateTime>();
         var failedServerIds = new SortedSet<int>();
-        int? currentServerId = null;
-        var currentServerFailed = false;
         foreach (var ((serverId, day), dayCandidates) in byServerDay)
         {
             /* M3 (b): catch per server and continue — see the type remarks. Once this server's batch has
                failed, skip its remaining days this run (they share the same failure mode) and move on to the
                next server; the marker withheld below (rowsUpdated < changedRowCount) makes the WHOLE run
                retry every server, including ones that already succeeded, on the next start — cheap and
-               correct, since a server whose rows are already redacted contributes nothing on a re-run. */
-            if (serverId != currentServerId)
-            {
-                currentServerId = serverId;
-                currentServerFailed = false;
-            }
-            else if (currentServerFailed)
+               correct, since a server whose rows are already redacted contributes nothing on a re-run.
+               failedServerIds already records the failure, so the skip does not depend on byServerDay's
+               iteration order grouping a server's days contiguously. */
+            if (failedServerIds.Contains(serverId))
             {
                 continue;
             }
@@ -314,7 +309,6 @@ AND   t.server_id = $11";
                 logger?.LogWarning(
                     "pg_setting_scrub: server {ServerId} failed on {Day:yyyy-MM-dd} with SQLSTATE {SqlState}; skipping this server for the rest of the run, will retry on the next start",
                     serverId, day, ex.SqlState);
-                currentServerFailed = true;
                 failedServerIds.Add(serverId);
                 continue;
             }
@@ -380,11 +374,20 @@ AND   t.server_id = $11";
            0). Scoped to this one batch's transaction only — LOCAL means it reverts at COMMIT/ROLLBACK, so it
            never leaks into any other batch, any other server, or the marker read/write, which do not run
            inside this transaction. 0 disables the limit entirely for this transaction, which is safe here
-           because MaxKeysPerUpdate already bounds how many rows a single batch's chunk segment can touch —
-           the risk the GUC guards against (an unbounded decompress) cannot occur at this batch size. */
+           because the literal server_id + day-range predicates confine decompression to ONE target's
+           segment in ONE day's chunk (settings × collections that day — ~8k rows hourly, ~500k at a
+           1-minute cadence), not the whole chunk; MaxKeysPerUpdate bounds the key array, not the
+           decompress. */
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        /* Guarded, not a bare SET LOCAL: a bring-your-own store on TimescaleDB older than 2.14 (the GUC
+           arrived in timescale/timescaledb PR #6566) has no such setting. current_setting(name, true)
+           returns NULL rather than raising when the GUC is absent, so the WHERE makes this a no-op on those
+           stores instead of a 42704 on every batch, every start, for good — set_config(..., true) is the
+           SET LOCAL equivalent (transaction-scoped, reverts at COMMIT/ROLLBACK). */
         await using (var setLocal = new NpgsqlCommand(
-            "SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0", connection, transaction)
+            "SELECT set_config('timescaledb.max_tuples_decompressed_per_dml_transaction', '0', true) " +
+            "WHERE current_setting('timescaledb.max_tuples_decompressed_per_dml_transaction', true) IS NOT NULL",
+            connection, transaction)
             { CommandTimeout = UpdateBatchTimeoutSeconds })
         {
             await setLocal.ExecuteNonQueryAsync(cancellationToken);

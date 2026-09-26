@@ -8,9 +8,12 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
@@ -149,6 +152,11 @@ public sealed class PgSettingScrubLiveTests
         await using var verifyConnection = new NpgsqlConnection(scratch.ConnectionString);
         await verifyConnection.OpenAsync(ct);
         Assert.False(await ContainsSecretAsync(verifyConnection, ct), "the raw password survived the scrub under a tight decompress cap on a single target's single day");
+
+        var markerValue = await ScalarTextAsync(verifyConnection,
+            "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",
+            0, DateTime.MinValue, ct);
+        Assert.Equal(PgSettingRedactor.RulesVersion.ToString(CultureInfo.InvariantCulture), markerValue);
     }
 
     /// <summary>
@@ -170,6 +178,11 @@ public sealed class PgSettingScrubLiveTests
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
 
+        /* badServer < goodServer is deliberate: SortedDictionary orders byServerDay by server_id first, so
+           badServer's batch runs FIRST on the connection and rolls back (see "What holds": await using
+           disposes an uncompleted transaction). goodServer's batch then runs right after that rollback on
+           the SAME connection, pinning that a failed-and-rolled-back batch never leaves the connection in a
+           state (e.g. a failed 25P02 transaction) that would poison the next server's batch. */
         const int goodServer = -444448;
         const int badServer = -444449;
 
@@ -223,6 +236,52 @@ public sealed class PgSettingScrubLiveTests
         var second = await PgSettingScrub.RunAsync(postgres, logger: null, ct);
         Assert.False(second.AlreadyDone);
         Assert.False(await ContainsSecretAsync(setupConnection, ct), "the raw password survived the retried run");
+
+        // Retry half of the claim: badServer's one row is what the second run picks up; the marker is now set.
+        Assert.Equal(1, first.RowsUpdated);
+        Assert.Equal(1, second.RowsUpdated);
+
+        var markerValueAfterRetry = await ScalarTextAsync(setupConnection,
+            "SELECT state_value FROM collect.collector_state WHERE collector_name = 'pg_setting_scrub' AND state_key = 'rules_version'",
+            0, DateTime.MinValue, ct);
+        Assert.Equal(PgSettingRedactor.RulesVersion.ToString(CultureInfo.InvariantCulture), markerValueAfterRetry);
+    }
+
+    /// <summary>
+    /// W1 text pin: a pre-2.14 TimescaleDB store (the GUC arrived in timescale/timescaledb PR #6566) has no
+    /// <c>timescaledb.max_tuples_decompressed_per_dml_transaction</c> setting at all. A bare
+    /// <c>SET LOCAL ... = 0</c> would raise 42704 on every batch on such a store, so the SET must be guarded
+    /// by a <c>current_setting(name, true) IS NOT NULL</c> check — <c>true</c> makes it non-throwing, and
+    /// <c>set_config(..., true)</c> is the SET LOCAL equivalent, scoped to the same transaction.
+    /// </summary>
+    [Fact]
+    public void TheSetLocalIsGuardedForAPre214TimescaleDbStore()
+    {
+        var source = File.ReadAllText(Path.Combine(RepoRoot(),
+            "Darling", "PerformanceMonitor.Darling.Service", "PgSettingScrub.cs"));
+
+        Assert.Contains(
+            "SELECT set_config('timescaledb.max_tuples_decompressed_per_dml_transaction', '0', true)",
+            source, StringComparison.Ordinal);
+        Assert.Contains(
+            "WHERE current_setting('timescaledb.max_tuples_decompressed_per_dml_transaction', true) IS NOT NULL",
+            source, StringComparison.Ordinal);
+
+        /* The un-guarded shape this replaces — must not come back. */
+        Assert.DoesNotContain(
+            "\"SET LOCAL timescaledb.max_tuples_decompressed_per_dml_transaction = 0\"",
+            source, StringComparison.Ordinal);
+    }
+
+    private static string RepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName ?? throw new InvalidOperationException("PerformanceMonitor.sln not found above the test output directory.");
     }
 
     private const string Mask = "********";
