@@ -550,15 +550,15 @@ internal static partial class AlertNotebookEndpoint
     }
 
     /// <summary>The collector-freshness read (arms 3/4): the newest row for this server that counts as
-    /// evidence the instrument is up. <c>SUCCESS</c> and <c>SKIPPED</c> both count — a <c>SKIPPED</c> run is a
-    /// collector that ran and found nothing to do (<c>EnumeratedCollectorDriver.FreshnessSuccessStatuses</c>
-    /// is the same pair, for the same reason: the other freshness reads in this codebase — the self-alert
-    /// evaluator's <c>last_success</c>/<c>recent_success</c> and the health reads' <c>last_success_time</c> —
-    /// all treat it as a healthy no-op, not as evidence the run never happened). An <c>ERROR</c> row must NOT
-    /// count: it is proof the collector attempted and failed, which is exactly the case this arm exists to
-    /// tell apart from a collector that never ran at all.</summary>
+    /// evidence the instrument is up. Only <c>SUCCESS</c> counts (#4378): <c>SKIPPED</c> can be written
+    /// WITHOUT the run ever contacting the target — <c>Lite/Services/RemoteCollectorService.cs</c>'s
+    /// user-cancelled-MFA catch writes <c>SKIPPED</c> before any query reaches the server — and Darling's
+    /// own per-run classifier, <c>EnumeratedCollectorDriver.ClassifyReturnedRun</c>, never returns
+    /// <c>SKIPPED</c> at all, so it proves nothing about server reachability here. An <c>ERROR</c> row must
+    /// NOT count either: it is proof the collector attempted and failed, which is exactly the case this arm
+    /// exists to tell apart from a collector that never ran at all.</summary>
     internal const string CollectorFreshnessSql =
-        "SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND status IN ('SUCCESS', 'SKIPPED') " +
+        "SELECT collection_time FROM v_collection_log WHERE server_id = $1 AND status = 'SUCCESS' " +
         "ORDER BY collection_time DESC LIMIT 1";
 
     /// <summary>

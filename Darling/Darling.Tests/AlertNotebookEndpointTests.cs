@@ -461,11 +461,12 @@ public sealed class AlertNotebookEndpointTests
     /* ═══════════════════════════ pure: the collector-freshness read's own shape ═══════════════════════════ */
 
     [Fact]
-    public void CollectorFreshnessSql_CountsOnlySuccessAndSkipped_NeverError()
+    public void CollectorFreshnessSql_CountsOnlySuccess_NeverSkippedOrError()
     {
         var sql = AlertNotebookEndpoint.CollectorFreshnessSql;
 
-        Assert.Contains("status IN ('SUCCESS', 'SKIPPED')", sql, StringComparison.Ordinal);
+        Assert.Contains("status = 'SUCCESS'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("'SKIPPED'", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("'ERROR'", sql, StringComparison.Ordinal);
     }
 
