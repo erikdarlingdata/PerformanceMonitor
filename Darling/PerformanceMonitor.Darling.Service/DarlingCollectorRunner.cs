@@ -361,6 +361,7 @@ public sealed class DarlingCollectorRunner
     /* #3953: the latest-snapshot-per-interval table's writer. One per runner, because it carries the per-server
        "coverage ensured" and "gap checked at" state that must outlive a cycle. */
     private readonly QueryStoreIntervalLatest _queryStoreIntervalLatest;
+    private readonly QueryStoreIntervalWide _queryStoreIntervalWide;
 
     /* Feeds CollectorContext.TextByteBudgetOverride on every cycle (#2164) — the query_store collector's
        per-database text budget in MB (config_service.query_store_text_budget_mb, V59). Provider-read for
@@ -670,6 +671,7 @@ public sealed class DarlingCollectorRunner
            The worker passes () => config.PlanXmlCompression == "gzip"; tests pass a constant. */
         _compressPlanContent = compressPlanContent ?? (() => true);
         _queryStoreIntervalLatest = new QueryStoreIntervalLatest(logger);
+        _queryStoreIntervalWide = new QueryStoreIntervalWide(logger);
         /* Null provider = 1 = capture a plan on every cycle, i.e. the pre-#2862 behaviour. */
         _procedureStatsPlanCycleInterval = procedureStatsPlanCycleInterval ?? (() => 1);
         /* Null provider = no scope for any collector = every database the server enumerates, which is
@@ -3410,6 +3412,12 @@ public sealed class DarlingCollectorRunner
             && await _queryStoreIntervalLatest.PrepareServerAsync(
                 pgConnection, server.ServerId, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
 
+        /* #3953 (V145): the wide interval table's own prepare, independent of V143's above — its own coverage row
+           and its own hourly gap check, on its own claim. A fault here only skips THIS table's apply. */
+        var queryStoreWidePrepared = queryStoreDatabases is not null
+            && await _queryStoreIntervalWide.PrepareServerAsync(
+                pgConnection, server.ServerId, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+
         /* Only the diverting collectors and Query Store (#3953) need a transaction; everything else keeps the
            pre-#1767 single-COPY commit and pays nothing. */
         await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null
@@ -3544,6 +3552,13 @@ public sealed class DarlingCollectorRunner
                 {
                     context.QueryStoreIntervalMisses++;
                 }
+
+                /* #3953 (V145): the wide table's apply, under its OWN savepoint (QueryStoreIntervalWide.SavepointName),
+                   beside V143's above. A fault here rolls back only to that savepoint: V143's apply just above,
+                   already released from its own savepoint, is untouched, and raw still commits either way. */
+                await _queryStoreIntervalWide.ApplyBatchAsync(
+                    pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
+                    skipApply: !queryStoreWidePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
             }
 
             await transaction.CommitAsync(cancellationToken);

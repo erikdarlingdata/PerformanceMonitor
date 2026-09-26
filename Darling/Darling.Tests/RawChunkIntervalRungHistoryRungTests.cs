@@ -23,7 +23,8 @@ namespace Darling.Tests;
 /// and writes.
 ///
 /// <para>This file took over the "I am the top rung" claim that moved off
-/// <see cref="QueryStoreIntervalLatestRungTests"/> (V143) when this rung landed.</para>
+/// <see cref="QueryStoreIntervalLatestRungTests"/> (V143) when this rung landed, and hands it on to
+/// the #3953 B4 wide-interval-table rung (V145) when that one did.</para>
 /// </summary>
 public sealed class RawChunkIntervalRungHistoryRungTests
 {
@@ -46,7 +47,10 @@ public sealed class RawChunkIntervalRungHistoryRungTests
         Assert.Equal("raw-chunk-interval-rung-history", V144.Name);
         Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
         Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.True(RungVersion <= StorageVersion.SchemaVersion);
+        /* Not `RungVersion == SchemaVersion` any more: that asserted this rung is the newest, which stopped
+           being true when V145 landed. The invariant that outlives the handoff is that the LADDER's top and
+           the declared version agree, which the two lines above already say. */
+        Assert.True(RungVersion < StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
     }
 
@@ -96,7 +100,9 @@ public sealed class RawChunkIntervalRungHistoryRungTests
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
 
-        Assert.Equal(ProbeOrdinal, arity - 1);
+        /* A position within the signature, not its end: `ProbeOrdinal == arity - 1` asserted this rung is the
+           NEWEST sentinel, which stopped being true the moment V145 appended its own. */
+        Assert.True(ProbeOrdinal < arity - 1);
         Assert.Equal("hasRawChunkIntervalRungHistory", method.GetParameters()[ProbeOrdinal].Name);
 
         var atThisRung = Enumerable.Range(0, arity).Select(i => (object)(i <= ProbeOrdinal)).ToArray();
@@ -111,6 +117,12 @@ public sealed class RawChunkIntervalRungHistoryRungTests
         Assert.True(thisArm >= 0, "the viewer has no V144 sentinel arm — a fully-migrated store would map one rung low");
         Assert.True(nextArm >= 0, "the previous rung's arm is gone, so this pin is comparing against nothing");
         Assert.True(thisArm < nextArm, "the V144 arm sits above V143's, so a current store maps to the newest rung");
+
+        /* V145 landed above this rung (#3953 B4): its arm must sit ABOVE this one (newest-first), not the
+           other way around, or a current V145 store would map one rung low. */
+        var aboveArm = viewer.IndexOf("if (hasQueryStoreIntervalWide)", StringComparison.Ordinal);
+        Assert.True(aboveArm >= 0, "the V145 arm is gone, so the handoff this file claims never happened");
+        Assert.True(aboveArm < thisArm, "the V145 arm sits below the V144 arm, so a current V145 store maps one rung low");
 
         var armProseStart = viewer.LastIndexOf("/* V144 (#4211)", thisArm, StringComparison.Ordinal);
         Assert.True(armProseStart >= 0, "the V144 arm has no comment block saying why it exists");
