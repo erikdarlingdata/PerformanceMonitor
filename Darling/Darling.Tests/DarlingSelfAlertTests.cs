@@ -3436,14 +3436,14 @@ public sealed class DarlingSelfAlertTests
     }
 
     /// <summary>
-    /// #4299: the not-scheduled WARNING for one of the three raw relations must say it is unscheduled by
+    /// #4299: the not-scheduled line for one of the three raw relations must say it is unscheduled by
     /// design (#4299), not the #1680/#1877 coverage-gate text a non-raw held policy gets — the OLD text logged
-    /// a false "detector defect" WARNING for every raw job, every hourly pass, forever. RED before this fix
-    /// (the branch on <see cref="TimescaleSupport.RawRelations"/> did not exist, so a raw job's WARNING read
-    /// exactly like the non-raw text the pin above asserts — "#1680/#1877", not "#4299").
+    /// a false "detector defect" WARNING for every raw job, every hourly pass, forever. #4391 demotes this
+    /// expected-every-pass line to Debug (it is not a WARNING-worthy condition once it is known to be
+    /// by design), so this pin now also asserts no WARNING is logged for it.
     /// </summary>
     [Fact]
-    public async Task PolicyJobs_ARawJobReportedAsStuck_WarnsUnscheduledByDesign_NotACoverageHold()
+    public async Task PolicyJobs_ARawJobReportedAsStuck_LogsUnscheduledByDesignAtDebug_NotACoverageHold()
     {
         var h = new Harness();
         var e = h.Build();
@@ -3462,11 +3462,14 @@ public sealed class DarlingSelfAlertTests
 
         var warned = Assert.Single(
             h.Log.Entries,
-            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Debug);
         Assert.Contains("#4299", warned.Message, StringComparison.Ordinal);
         Assert.Contains("unscheduled by design", warned.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("detector defect", warned.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("drop history", warned.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            h.Log.Entries,
+            x => x.Level == Microsoft.Extensions.Logging.LogLevel.Warning);
     }
 
     /// <summary>

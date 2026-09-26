@@ -3520,6 +3520,16 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
+    /// #4391: whether a materialization-hole repair pass's summary is clean enough to stamp the repair
+    /// epoch — true only when the pass had zero isolated per-aggregate failures. Deferred holes
+    /// (<see cref="TimescaleSupport.MaterializationHoleRepairSummary.HolesDeferred"/>) and holes still
+    /// remaining after repair do not disqualify a stamp: those are re-measured fresh by the Periodic raw
+    /// purge trigger's own hole scan at drop time, so a deferred-but-otherwise-clean pass may still stamp.
+    /// </summary>
+    internal static bool RepairEpochStampAllowed(TimescaleSupport.MaterializationHoleRepairSummary summary)
+        => summary.Failures == 0;
+
+    /// <summary>
     /// Scans every continuous aggregate for materialization holes and closes each with one targeted forced
     /// refresh (#3653, Q10 — <see cref="TimescaleSupport.RepairMaterializationHolesAsync"/>), concurrently with
     /// the rest of startup rather than ahead of it, for the reason <see cref="RunBaselineBackfillAsync"/> gives:
@@ -3548,16 +3558,6 @@ public sealed class DarlingWorker : BackgroundService
     /// TimescaleDB block faulting first) already writes its own line at the launch site's catch; nothing here
     /// can or should speak for that case.</para>
     /// </summary>
-    /// <summary>
-    /// #4391: whether a materialization-hole repair pass's summary is clean enough to stamp the repair
-    /// epoch — true only when the pass had zero isolated per-aggregate failures. Deferred holes
-    /// (<see cref="TimescaleSupport.MaterializationHoleRepairSummary.HolesDeferred"/>) and holes still
-    /// remaining after repair do not disqualify a stamp: those are re-measured fresh by the Periodic raw
-    /// purge trigger's own hole scan at drop time, so a deferred-but-otherwise-clean pass may still stamp.
-    /// </summary>
-    internal static bool RepairEpochStampAllowed(TimescaleSupport.MaterializationHoleRepairSummary summary)
-        => summary.Failures == 0;
-
     private async Task RunMaterializationHoleRepairAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
     {
         _materializationHoleRepairRunning = true;
