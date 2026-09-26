@@ -92,22 +92,27 @@ internal static class ManagedConfMigration
     /// <summary>One physical line's verdict. <see cref="Text"/> is the raw line, without its line
     /// terminator — CRLF and LF files classify identically because every comparison here first strips a
     /// trailing <c>\r</c>, the same convention <see cref="DarlingManagedPostgres.FindHardwareSizingBlockEnd"/>
-    /// already uses.</summary>
+    /// already uses. <see cref="Note"/> is set only for a v2/v3 line classified <see cref="ConfLineClassification.Ours"/>
+    /// by the formula-image test (#4336 lane c2b) — the caller logs it verbatim so an operator who set the
+    /// value by hand, matching the product's own formula by coincidence, is told how to actually override it.</summary>
     internal readonly record struct ClassifiedConfLine(
         int LineNumber,
         string Text,
         ConfLineClassification Classification,
         string? BlockMarker,
         string? Key,
-        HandEditReason Reason);
+        HandEditReason Reason,
+        string? Note = null);
 
     /// <summary>The markers whose blocks this classifier can rule OURS on, in file-append order. Any other
-    /// marker in <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> — v1 through v12 — is not yet
+    /// marker in <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/> — v5 and v7 — is not yet
     /// covered; its marker line and its content classify as
     /// <see cref="ConfLineClassification.Unclassified"/>.</summary>
     internal static readonly string[] CoveredMarkers =
     [
         DarlingManagedPostgres.ConfMarker,
+        DarlingManagedPostgres.ConfMarkerV2,
+        DarlingManagedPostgres.ConfMarkerV3,
         DarlingManagedPostgres.ConfMarkerV4,
         DarlingManagedPostgres.ConfMarkerV6,
         DarlingManagedPostgres.ConfMarkerV8,
@@ -221,6 +226,24 @@ internal static class ManagedConfMigration
             return new ClassifiedConfLine(lineNumber, text, ConfLineClassification.Unclassified, span.Marker, key, HandEditReason.None);
         }
 
+        if (span.Marker == DarlingManagedPostgres.ConfMarkerV2)
+        {
+            var (v2IsOurs, v2Reason) = ClassifyV2Line(key, text, span, assignments);
+            return new ClassifiedConfLine(
+                lineNumber, text, v2IsOurs ? ConfLineClassification.Ours : ConfLineClassification.HandEdit, span.Marker, key,
+                v2IsOurs ? HandEditReason.None : v2Reason,
+                v2IsOurs ? FormattableString.Invariant($"legacy v2 {key}={value}: classified as product-derived (formula image); if you set this by hand, re-apply it with ALTER SYSTEM") : null);
+        }
+
+        if (span.Marker == DarlingManagedPostgres.ConfMarkerV3)
+        {
+            var (v3IsOurs, v3Reason) = ClassifyV3Line(key, value);
+            return new ClassifiedConfLine(
+                lineNumber, text, v3IsOurs ? ConfLineClassification.Ours : ConfLineClassification.HandEdit, span.Marker, key,
+                v3IsOurs ? HandEditReason.None : v3Reason,
+                v3IsOurs ? FormattableString.Invariant($"legacy v3 {key}={value}: classified as product-derived (formula image); if you set this by hand, re-apply it with ALTER SYSTEM") : null);
+        }
+
         var (isOurs, reason) = span.Marker switch
         {
             _ when span.Marker == DarlingManagedPostgres.ConfMarker => ClassifyV1Line(key, text, configuredPort),
@@ -281,6 +304,205 @@ internal static class ManagedConfMigration
         }
 
         return ClassifyFixedLine(key, text, "default_toast_compression", "default_toast_compression = lz4");
+    }
+
+    /// <summary>
+    /// v2's block (worker sizing, introduced <c>ce45eed74</c>; today's <see cref="DarlingManagedPostgres.DeriveWorkerSettings"/>
+    /// from <c>714af66f8</c> #2845 is the same formula) (#4336 lane c2b, ruling 2026-09-26 03:19Z): the image is over
+    /// hypertable counts, not RAM. <c>timescaledb.max_background_workers = N</c> is ours only if N is an integer
+    /// &gt;= 2 (<c>hypertableCount + 2</c> for a non-negative hypertable count) read from the SAME block, and
+    /// <c>max_worker_processes = M</c> is ours only if M == N + 11 (<see cref="DarlingManagedPostgres.DeriveWorkerSettings"/>
+    /// with N-2 hypertables reproduces the same M) AND M is read from the same block as its N. Anything else —
+    /// N &lt; 2, a non-integer, a mismatched M, or a value the builder's exact form never emits (a unit suffix,
+    /// different spacing) — is a hand edit.
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV2Line(
+        string key, string text, (int StartLine, int EndLine, string Marker) span, Dictionary<int, (string Key, string Value)> assignments)
+    {
+        if (!TryFindAssignmentValue(span, assignments, "timescaledb.max_background_workers", out var backgroundWorkersText) ||
+            !int.TryParse(backgroundWorkersText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var backgroundWorkers) ||
+            backgroundWorkers < 2)
+        {
+            return (false, HandEditReason.RebuildMismatch);
+        }
+
+        if (!TryFindAssignmentValue(span, assignments, "max_worker_processes", out var workerProcessesText) ||
+            !int.TryParse(workerProcessesText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var workerProcesses) ||
+            workerProcesses != backgroundWorkers + 11)
+        {
+            return (false, HandEditReason.RebuildMismatch);
+        }
+
+        var rebuilt = DarlingManagedPostgres.DeriveWorkerSettings(backgroundWorkers - 2);
+        if (rebuilt.MaxBackgroundWorkers != backgroundWorkers || rebuilt.MaxWorkerProcesses != workerProcesses)
+        {
+            return (false, HandEditReason.RebuildMismatch);
+        }
+
+        if (string.Equals(key, "timescaledb.max_background_workers", StringComparison.OrdinalIgnoreCase))
+        {
+            return ClassifyFixedLine(
+                key, text, "timescaledb.max_background_workers",
+                FormattableString.Invariant($"timescaledb.max_background_workers = {backgroundWorkers}"));
+        }
+
+        return ClassifyFixedLine(
+            key, text, "max_worker_processes",
+            FormattableString.Invariant($"max_worker_processes = {workerProcesses}"));
+    }
+
+    /// <summary>The value text of the one assignment for <paramref name="key"/> inside <paramref name="span"/>,
+    /// read straight from the parsed assignment index rather than re-parsed here — v2's N/M rebuild rule needs
+    /// both keys from the SAME block (#4336 lane c2b).</summary>
+    private static bool TryFindAssignmentValue(
+        (int StartLine, int EndLine, string Marker) span, Dictionary<int, (string Key, string Value)> assignments, string key, out string value)
+    {
+        for (var lineNumber = span.StartLine; lineNumber < span.EndLine; lineNumber++)
+        {
+            if (assignments.TryGetValue(lineNumber, out var assignment) &&
+                string.Equals(assignment.Key, key, StringComparison.OrdinalIgnoreCase))
+            {
+                value = assignment.Value;
+                return true;
+            }
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    /// <summary>
+    /// v3's block (memory sizing, introduced <c>ce45eed74</c>) (#4336 lane c2b, ruling 2026-09-26 03:19Z): a v3
+    /// block is never rewritten once appended (<see cref="DarlingManagedPostgres.EnsureConfAppended"/> only
+    /// appends it if the marker is absent), so a store provisioned under an OLDER formula generation legitimately
+    /// still carries that generation's values. The image is the UNION over every generation's exact rounding and
+    /// units, over RAM 1 GiB-1 TiB:
+    /// <list type="bullet">
+    /// <item><c>ce45eed74</c>: <c>shared_buffers = min(ram/4, 8GB)</c>, <c>effective_cache_size = ram/4*3</c>,
+    ///   <c>maintenance_work_mem = min(ram/20, 1GB)</c>, <c>work_mem = clamp(ram/512, 16MB, 64MB)</c>.</item>
+    /// <item><c>2b67bedeb</c>: the <c>shared_buffers</c> cap drops from 8 GB to 1 GB; the other three unchanged.</item>
+    /// <item><c>f4c86ffa3</c> (#1777): <c>maintenance_work_mem = min(max(ram/20, 1536MB), ram/4, 2048MB)</c>;
+    ///   <c>shared_buffers</c>/<c>effective_cache_size</c>/<c>work_mem</c> unchanged from <c>2b67bedeb</c>.</item>
+    /// <item><c>e507aa2d1</c> (#3909): that cap becomes 2047 MB (<see cref="DarlingManagedPostgres.MaintenanceWorkMemCapMb"/>);
+    ///   this is today's <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>.</item>
+    /// </list>
+    /// <c>effective_cache_size</c> and <c>work_mem</c> never changed across all four generations, so any value
+    /// today's formula produces is also every earlier generation's value — one membership test covers all four.
+    /// <c>shared_buffers</c> and <c>maintenance_work_mem</c> each need testing against both the pre- and
+    /// post-change formula because the change altered their image. Membership is computed exactly by inverting
+    /// each formula's RAM-clamped cap/floor shape over the stated RAM range, not by testing "is this a plausible
+    /// value": see <see cref="IsInSharedBuffersImage"/> and <see cref="IsInMaintenanceWorkMemImage"/>.
+    /// </summary>
+    private static (bool IsOurs, HandEditReason Reason) ClassifyV3Line(string key, string value)
+    {
+        if (!TryParseWholeMb(value, out var valueMb))
+        {
+            return (false, HandEditReason.FormMismatch);
+        }
+
+        if (string.Equals(key, "shared_buffers", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsInSharedBuffersImage(valueMb) ? (true, HandEditReason.None) : (false, HandEditReason.RebuildMismatch);
+        }
+
+        if (string.Equals(key, "effective_cache_size", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsInEffectiveCacheSizeImage(valueMb) ? (true, HandEditReason.None) : (false, HandEditReason.RebuildMismatch);
+        }
+
+        if (string.Equals(key, "maintenance_work_mem", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsInMaintenanceWorkMemImage(valueMb) ? (true, HandEditReason.None) : (false, HandEditReason.RebuildMismatch);
+        }
+
+        if (string.Equals(key, "work_mem", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsInWorkMemImage(valueMb) ? (true, HandEditReason.None) : (false, HandEditReason.RebuildMismatch);
+        }
+
+        return (false, HandEditReason.FormMismatch);
+    }
+
+    /// <summary>The RAM domain every v3 generation's formula was defined over (#4336 lane c2b, per the brief's
+    /// "1 GiB-1 TiB" bound), in whole MB — the enumeration bound for the exact-membership tests below.</summary>
+    private const long V3MinRamMb = 1024L;
+    private const long V3MaxRamMb = 1024L * 1024L;
+
+    /// <summary><c>min(ram/4, capMb)</c>'s image over RAM in [<see cref="V3MinRamMb"/>, <see cref="V3MaxRamMb"/>]
+    /// MB, integer-MB truncating division exactly as <see cref="DarlingManagedPostgres.DeriveMemorySettings"/>
+    /// computes it (division happens in BYTES there; here in MB the same truncation applies since 4 divides MB
+    /// exactly at the byte level only when ram is a whole MB, which every enumerated RAM value in this domain
+    /// is): every whole-MB value from 256 (1024/4) up to <paramref name="capMb"/>, plus <paramref name="capMb"/>
+    /// itself for every RAM at or above 4*capMb.</summary>
+    private static bool IsInMinRamQuarterImage(long valueMb, long capMb)
+        => valueMb == capMb || (valueMb >= V3MinRamMb / 4 && valueMb <= capMb - 1 && valueMb == (valueMb * 4L));
+
+    /// <summary>Whether <paramref name="valueMb"/> is <c>min(ram/4, capMb)</c> for SOME whole-MB RAM in
+    /// [<see cref="V3MinRamMb"/>, <see cref="V3MaxRamMb"/>]: uncapped, ram/4 sweeps every integer from
+    /// V3MinRamMb/4 up (ram/4 hits every integer as ram increases by 1 MB steps, since floor division by 4
+    /// increases by 0 or 1 each MB step and never skips a value once past the first few MB) until the cap, so
+    /// the image is exactly the integers in [V3MinRamMb/4, capMb - 1] union {capMb} (capped once ram/4 >= capMb,
+    /// i.e. ram >= 4*capMb, which is well inside the domain for both cap values used here).</summary>
+    private static bool IsInSharedBuffersImage(long valueMb)
+        => IsInMinRamQuarterImage(valueMb, 8192L) || IsInMinRamQuarterImage(valueMb, 1024L);
+
+    /// <summary><c>ram/4*3</c> never changed across any v3 generation — its image over the stated RAM domain is
+    /// every multiple of 1 MB from <c>(V3MinRamMb/4)*3</c> to <c>(V3MaxRamMb/4)*3</c> that floor-division by 4
+    /// followed by *3 can land on: since ram/4 sweeps every integer as RAM increases 1 MB at a time (see
+    /// <see cref="IsInMinRamQuarterImage"/>'s reasoning), *3 sweeps every multiple of 3 in that range.</summary>
+    private static bool IsInEffectiveCacheSizeImage(long valueMb)
+    {
+        if (valueMb % 3 != 0)
+        {
+            return false;
+        }
+
+        var quarter = valueMb / 3;
+        return quarter >= V3MinRamMb / 4 && quarter <= V3MaxRamMb / 4;
+    }
+
+    /// <summary><c>clamp(ram/512, 16MB, 64MB)</c> never changed across any v3 generation — its image is exactly
+    /// the integers 16 through 64 inclusive (ram/512 sweeps every integer in range as RAM increases, same
+    /// reasoning as the other ram/N terms, and the domain 1 GiB-1 TiB easily reaches both the 16 and 64 MB
+    /// clamp bounds).</summary>
+    private static bool IsInWorkMemImage(long valueMb)
+        => valueMb is >= 16L and <= 64L;
+
+    /// <summary>The union of every v3 generation's <c>maintenance_work_mem</c> image: the pre-#1777 shape
+    /// (<c>min(ram/20, 1GB)</c>, generations <c>ce45eed74</c> and <c>2b67bedeb</c> — identical to each other for
+    /// this setting) union the post-#1777 shape (<c>min(max(ram/20, 1536MB), ram/4, capMb)</c> for capMb in
+    /// {2048 (<c>f4c86ffa3</c>), 2047 (<c>e507aa2d1</c>, today's <see cref="DarlingManagedPostgres.MaintenanceWorkMemCapMb"/>)}).</summary>
+    private static bool IsInMaintenanceWorkMemImage(long valueMb)
+        => IsInPreFloorMaintenanceImage(valueMb) ||
+           IsInPostFloorMaintenanceImage(valueMb, 2048L) ||
+           IsInPostFloorMaintenanceImage(valueMb, 2047L);
+
+    /// <summary><c>min(ram/20, 1GB)</c>'s image: every integer from V3MinRamMb/20 up to 1024 inclusive (ram/20
+    /// sweeps every integer as RAM increases by whole-MB steps once ram/20 &gt;= 1, and the 1 GiB floor of the
+    /// domain already clears that).</summary>
+    private static bool IsInPreFloorMaintenanceImage(long valueMb)
+        => valueMb >= V3MinRamMb / 20 && valueMb <= 1024L;
+
+    /// <summary><c>min(max(ram/20, 1536), ram/4, capMb)</c>'s image: the value is always either exactly 1536
+    /// (the floor, for every ram/20 &lt; 1536, i.e. ram &lt; 30720 MB, as long as ram/4 &gt;= 1536 too — true once
+    /// ram &gt;= 6144 MB, comfortably inside the domain) or, once ram/20 &gt;= 1536, sweeps every integer from 1536
+    /// up to capMb (ram/20 increases by whole integers as RAM increases, and ram/4 only binds ram/20's climb
+    /// once ram/4 &lt; ram/20, which never happens for ram &gt; 0).</summary>
+    private static bool IsInPostFloorMaintenanceImage(long valueMb, long capMb)
+        => valueMb == 1536L || (valueMb >= 1536L && valueMb <= capMb);
+
+    /// <summary>Parses a conf value of the whole-MB form <c>&lt;digits&gt;MB</c> that every v3 generation's
+    /// builder emits — no other unit form (<c>GB</c>, bare digits meaning kB, a decimal) is one any v3 builder
+    /// ever wrote, so any other form fails the form test outright.</summary>
+    private static bool TryParseWholeMb(string value, out long mb)
+    {
+        mb = 0;
+        if (!value.EndsWith("MB", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return long.TryParse(value[..^2], NumberStyles.Integer, CultureInfo.InvariantCulture, out mb);
     }
 
     /// <summary>

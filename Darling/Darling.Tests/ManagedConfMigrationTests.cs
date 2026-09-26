@@ -393,6 +393,153 @@ public sealed class ManagedConfMigrationTests
         Assert.All(wals, l => Assert.Equal(ConfLineClassification.Ours, l.Classification));
     }
 
+    /// <summary>v2's untouched block, at N = hypertableCount + 2 and M = N + 11, is Ours (#4336 lane c2b,
+    /// ruling 2026-09-26 03:19Z).</summary>
+    [Fact]
+    public void ClassifyLines_UntouchedV2Block_IsOurs()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\n" +
+            "timescaledb.max_background_workers = 30\n" +
+            "max_worker_processes = 41\n";
+
+        var lines = ClassifyLines(conf);
+        var marker = lines.First(l => l.Text == DarlingManagedPostgres.ConfMarkerV2);
+        var backgroundWorkers = FindByText(lines, "timescaledb.max_background_workers");
+        var workerProcesses = FindByText(lines, "max_worker_processes");
+
+        Assert.Equal(ConfLineClassification.Ours, marker.Classification);
+        Assert.Equal(ConfLineClassification.Ours, backgroundWorkers.Classification);
+        Assert.Equal(ConfLineClassification.Ours, workerProcesses.Classification);
+        Assert.Contains("legacy v2 timescaledb.max_background_workers=30", backgroundWorkers.Note);
+        Assert.Contains("re-apply it with ALTER SYSTEM", backgroundWorkers.Note);
+    }
+
+    /// <summary>v2's M must equal N + 11 read from the SAME block — an M that does not match its own block's N
+    /// is a hand edit even though M alone (41) would rebuild from a DIFFERENT N.</summary>
+    [Fact]
+    public void ClassifyLines_V2MismatchedNAndM_IsHandEdit_RebuildMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\n" +
+            "timescaledb.max_background_workers = 30\n" +
+            "max_worker_processes = 999\n";
+
+        var lines = ClassifyLines(conf);
+        var backgroundWorkers = FindByText(lines, "timescaledb.max_background_workers");
+        var workerProcesses = FindByText(lines, "max_worker_processes");
+
+        Assert.Equal(ConfLineClassification.HandEdit, backgroundWorkers.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, backgroundWorkers.Reason);
+        Assert.Equal(ConfLineClassification.HandEdit, workerProcesses.Classification);
+    }
+
+    /// <summary>v2's N must be an integer &gt;= 2 — an off-image N (0, below the +2 floor for a non-negative
+    /// hypertable count) is a hand edit even with a self-consistent M = N + 11.</summary>
+    [Fact]
+    public void ClassifyLines_V2OffImageN_IsHandEdit_RebuildMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV2 + "\n" +
+            "timescaledb.max_background_workers = 0\n" +
+            "max_worker_processes = 11\n";
+
+        var lines = ClassifyLines(conf);
+        var backgroundWorkers = FindByText(lines, "timescaledb.max_background_workers");
+
+        Assert.Equal(ConfLineClassification.HandEdit, backgroundWorkers.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, backgroundWorkers.Reason);
+    }
+
+    /// <summary>v3's untouched block at today's formula (<see cref="DarlingManagedPostgres.DeriveMemorySettings"/>,
+    /// generation <c>e507aa2d1</c>) is Ours (#4336 lane c2b).</summary>
+    [Fact]
+    public void ClassifyLines_UntouchedV3Block_AtCurrentGeneration_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildMemorySizingConfAppend(16L * 1024 * 1024 * 1024);
+
+        var lines = ClassifyLines(conf);
+        var sharedBuffers = FindByText(lines, "shared_buffers");
+        var effectiveCache = FindByText(lines, "effective_cache_size");
+        var maintenance = FindByText(lines, "maintenance_work_mem");
+        var workMem = FindByText(lines, "work_mem");
+
+        Assert.Equal(ConfLineClassification.Ours, sharedBuffers.Classification);
+        Assert.Equal(ConfLineClassification.Ours, effectiveCache.Classification);
+        Assert.Equal(ConfLineClassification.Ours, maintenance.Classification);
+        Assert.Equal(ConfLineClassification.Ours, workMem.Classification);
+        Assert.Contains("re-apply it with ALTER SYSTEM", sharedBuffers.Note);
+    }
+
+    /// <summary>A v3 block written under the PRE-<c>2b67bedeb</c> generation (shared_buffers capped at 8 GB) is
+    /// STILL Ours — the union rule: v3 is never rewritten, so an old, unedited block legitimately carries an
+    /// older generation's values (#4336 lane c2b).</summary>
+    [Fact]
+    public void ClassifyLines_V3Block_AtPreShrinkGeneration_SharedBuffersEightGb_IsStillOurs()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV3 + "\n" +
+            "shared_buffers = 8192MB\n" +
+            "effective_cache_size = 24576MB\n" +
+            "maintenance_work_mem = 1024MB\n" +
+            "work_mem = 64MB\n";
+
+        var lines = ClassifyLines(conf);
+        var sharedBuffers = FindByText(lines, "shared_buffers");
+
+        Assert.Equal(ConfLineClassification.Ours, sharedBuffers.Classification);
+    }
+
+    /// <summary>A v3 block written under the pre-#1777 <c>maintenance_work_mem</c> generation (no 1536 MB floor)
+    /// is still Ours — same union rule, for the OTHER setting the formula changed (#4336 lane c2b).</summary>
+    [Fact]
+    public void ClassifyLines_V3Block_AtPreFloorGeneration_MaintenanceWorkMem_IsStillOurs()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV3 + "\n" +
+            "shared_buffers = 1024MB\n" +
+            "effective_cache_size = 24576MB\n" +
+            "maintenance_work_mem = 500MB\n" +
+            "work_mem = 64MB\n";
+
+        var lines = ClassifyLines(conf);
+        var maintenance = FindByText(lines, "maintenance_work_mem");
+
+        Assert.Equal(ConfLineClassification.Ours, maintenance.Classification);
+    }
+
+    /// <summary>A value NO v3 generation's formula could ever produce (#4336 lane c2b's off-image example: a
+    /// suspiciously specific hand-tuned figure) is a hand edit — the negative half of the union rule.</summary>
+    [Fact]
+    public void ClassifyLines_V3OffImageSharedBuffers_IsHandEdit_RebuildMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV3 + "\n" +
+            "shared_buffers = 777MB\n" +
+            "effective_cache_size = 24576MB\n" +
+            "maintenance_work_mem = 2047MB\n" +
+            "work_mem = 64MB\n";
+
+        var lines = ClassifyLines(conf);
+        var sharedBuffers = FindByText(lines, "shared_buffers");
+
+        Assert.Equal(ConfLineClassification.HandEdit, sharedBuffers.Classification);
+        Assert.Equal(HandEditReason.RebuildMismatch, sharedBuffers.Reason);
+    }
+
+    /// <summary>A unit-form variant no v3 builder ever wrote (<c>1GB</c> where every generation writes whole MB,
+    /// e.g. <c>1024MB</c>) is a hand edit even though the value itself is in every generation's image — the
+    /// form test, same rule v8/v12/v13 already apply (#4336 lane c2b).</summary>
+    [Fact]
+    public void ClassifyLines_V3UnitFormVariant_IsHandEdit_FormMismatch()
+    {
+        var conf = "\n" + DarlingManagedPostgres.ConfMarkerV3 + "\n" +
+            "shared_buffers = 1GB\n" +
+            "effective_cache_size = 24576MB\n" +
+            "maintenance_work_mem = 2047MB\n" +
+            "work_mem = 64MB\n";
+
+        var lines = ClassifyLines(conf);
+        var sharedBuffers = FindByText(lines, "shared_buffers");
+
+        Assert.Equal(ConfLineClassification.HandEdit, sharedBuffers.Classification);
+        Assert.Equal(HandEditReason.FormMismatch, sharedBuffers.Reason);
+    }
+
     [Fact]
     public void ClassifyLines_CrlfFile_ClassifiesSameAsLf()
     {
