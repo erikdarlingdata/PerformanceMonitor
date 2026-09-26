@@ -177,6 +177,49 @@ public sealed class QueryStoreIntervalWideGridLiveTests
     }
 
     /// <summary>
+    /// #4310 site 3 clause 6's own pin: (a) a store the gate would otherwise route to the table
+    /// (<see cref="SeedGridAsync"/>'s tier-2 seed, forced long-covered) still lands on the table —
+    /// <c>UseTable == true</c> — and the table read equals raw exactly, over the SAME window
+    /// <see cref="QueryStoreIntervalWide.HasLegacyRowSql"/> covers; (b) the legacy twin of the SAME seed
+    /// (<see cref="SeedGridLegacyAsync"/>, every row's <c>interval_start_time_utc</c> null) makes
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/> refuse — <c>UseTable == false</c> — over a window
+    /// clauses 1-5 alone would otherwise route to the table.
+    /// </summary>
+    [Fact]
+    public async Task LegacyRowInWindow_RefusesTheTable_AndTheTier2SeedDoesNot()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #4310 site 3 clause 6 legacy-row live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        /* (a) tier-2 seed: clause 6's own probe finds no legacy row, so the gate picks the table and the table
+           read equals raw exactly, exactly like the file's own end-to-end test above. */
+        await using var scratchTier2 = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connectionTier2 = await OpenMigratedAsync(scratchTier2, ct);
+        await using var postgresTier2 = NpgsqlDataSource.Create(scratchTier2.ConnectionString);
+        var runnerTier2 = new DarlingCollectorRunner(postgresTier2, new CollectorDeltaCalculator());
+        await SeedGridAsync(runnerTier2, ServerId, WindowStart, ct);
+        await ForceFilledSinceAsync(connectionTier2, WindowStart.AddDays(-1), ct);
+        var (useTableTier2, clampTier2) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connectionTier2, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+        Assert.True(useTableTier2, "the tier-2 seed carries no legacy row; clause 6 must not refuse it");
+        await AssertRawEqualsTableAsync(connectionTier2, WindowStart, WindowEnd, clampTier2, null, TestTop, ct);
+
+        /* (b) legacy seed: the IDENTICAL rows, but every one pre-tier-2 (no interval_start_time_utc), over the
+           SAME window and coverage forcing. Clauses 1-5 alone would route this to the table (same shape as (a)
+           passed); clause 6 must refuse it instead. */
+        await using var scratchLegacy = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connectionLegacy = await OpenMigratedAsync(scratchLegacy, ct);
+        await using var postgresLegacy = NpgsqlDataSource.Create(scratchLegacy.ConnectionString);
+        var runnerLegacy = new DarlingCollectorRunner(postgresLegacy, new CollectorDeltaCalculator());
+        await SeedGridLegacyAsync(runnerLegacy, ServerId, WindowStart, ct);
+        await ForceFilledSinceAsync(connectionLegacy, WindowStart.AddDays(-1), ct);
+        var (useTableLegacy, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connectionLegacy, ServerId, WindowStart, WindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+        Assert.False(useTableLegacy, "every row in this seed is legacy (interval_start_time_utc IS NULL); clause 6 must refuse the table");
+    }
+
+    /// <summary>
     /// The clamp (review D4R H3): once raw's oldest chunk (this window's own day 0) is dropped, the table still
     /// holds those rows — its own retention is independent of raw's — so an UNCLAMPED table read would show rows
     /// raw no longer has. Bounding the table read at <see cref="QueryStoreIntervalWide.ClampedStart"/> instead
@@ -246,8 +289,23 @@ AND   hypertable_name = 'query_store_stats';";
     /// the coverage row — a caller that needs the gate to pick the table over historical data must force
     /// <c>filled_since</c> itself (<see cref="ForceFilledSinceAsync"/>'s shape), because a real apply raises it
     /// only as far as the wall clock it ran at.
+    ///
+    /// <para><b>#4310 site 3 clause 6:</b> every row here carries a real <c>RuntimeStatsIntervalId</c> AND
+    /// <c>IntervalStartTimeUtc</c> (tier 2), so <see cref="QueryStoreIntervalWide.HasLegacyRowSql"/> finds
+    /// nothing and clause 6 never refuses the table over this seed — the table-path tests below genuinely
+    /// exercise the table. <see cref="SeedGridLegacyAsync"/> is the SAME shape with
+    /// <c>IntervalStartTimeUtc</c> left null (pre-tier-2), for the refusal pins.</para>
     /// </summary>
-    internal static async Task SeedGridAsync(DarlingCollectorRunner runner, int serverId, DateTime windowStart, CancellationToken ct)
+    internal static Task SeedGridAsync(DarlingCollectorRunner runner, int serverId, DateTime windowStart, CancellationToken ct) =>
+        SeedGridCoreAsync(runner, serverId, windowStart, tier2: true, ct);
+
+    /// <summary>The legacy twin of <see cref="SeedGridAsync"/> (#4310 site 3 clause 6's own pin): the IDENTICAL
+    /// rows, but with <c>IntervalStartTimeUtc</c> left null on every one — <c>HasLegacyRowSql</c> finds every
+    /// row in this seed, so a gate that would otherwise pick the table over it must refuse instead.</summary>
+    internal static Task SeedGridLegacyAsync(DarlingCollectorRunner runner, int serverId, DateTime windowStart, CancellationToken ct) =>
+        SeedGridCoreAsync(runner, serverId, windowStart, tier2: false, ct);
+
+    private static async Task SeedGridCoreAsync(DarlingCollectorRunner runner, int serverId, DateTime windowStart, bool tier2, CancellationToken ct)
     {
         var context = new CollectorContext
         {
@@ -274,6 +332,28 @@ AND   hypertable_name = 'query_store_stats';";
             }
         }
 
+        QueryStoreCollector.Row Row(
+            string database, long queryId, long planId, long intervalId, DateTime first, DateTime last, long executions,
+            long cpuUs, string? role = null, string type = "Regular") => new()
+            {
+                DatabaseName = database,
+                QueryId = queryId,
+                PlanId = planId,
+                ExecutionTypeDesc = type,
+                FirstExecutionTime = first,
+                LastExecutionTime = last,
+                QueryHash = "0x" + queryId.ToString("X8", System.Globalization.CultureInfo.InvariantCulture),
+                QueryPlanHash = "0x" + planId.ToString("X8", System.Globalization.CultureInfo.InvariantCulture),
+                ExecutionCount = executions,
+                AvgCpuTimeUs = cpuUs,
+                AvgDurationUs = cpuUs * 2,
+                IsForcedPlan = false,
+                ForceFailureCount = 0,
+                ReplicaRole = role,
+                RuntimeStatsIntervalId = intervalId,
+                IntervalStartTimeUtc = tier2 ? first : null,
+            };
+
         var anchor = windowStart.AddDays(-45);
         await WriteAsync(anchor.AddMinutes(10), Row("qsA", 900, 9001, 9000, anchor, anchor.AddMinutes(5), 1, 50));
 
@@ -294,27 +374,6 @@ AND   hypertable_name = 'query_store_stats';";
             Row("qsB", 4, 41, 400, day2, day2.AddMinutes(39), 20, 250),
             Row("qsA", 5, 51, 401, day2.AddMinutes(30), day2.AddMinutes(39), 6, 150));
     }
-
-    private static QueryStoreCollector.Row Row(
-        string database, long queryId, long planId, long intervalId, DateTime first, DateTime last, long executions,
-        long cpuUs, string? role = null, string type = "Regular") => new()
-        {
-            DatabaseName = database,
-            QueryId = queryId,
-            PlanId = planId,
-            ExecutionTypeDesc = type,
-            FirstExecutionTime = first,
-            LastExecutionTime = last,
-            QueryHash = "0x" + queryId.ToString("X8", System.Globalization.CultureInfo.InvariantCulture),
-            QueryPlanHash = "0x" + planId.ToString("X8", System.Globalization.CultureInfo.InvariantCulture),
-            ExecutionCount = executions,
-            AvgCpuTimeUs = cpuUs,
-            AvgDurationUs = cpuUs * 2,
-            IsForcedPlan = false,
-            ForceFailureCount = 0,
-            ReplicaRole = role,
-            RuntimeStatsIntervalId = intervalId,
-        };
 
     /* ---- raw vs. table, over every returned column ------------------------------------------------------- */
 

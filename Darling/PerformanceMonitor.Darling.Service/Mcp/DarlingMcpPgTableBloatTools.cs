@@ -12,6 +12,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -234,9 +235,10 @@ public sealed class DarlingMcpPgTableBloatTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 168 (seven days), which shows whether the waste is growing or being reclaimed.")] int hours_back = 168,
         [Description("Maximum tables to return, biggest estimated waste first. Default 25. This is what bounds the page - read truncated to know whether the server held more measured tables than were returned.")] int limit = 25,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -253,12 +255,12 @@ public sealed class DarlingMcpPgTableBloatTools
                exactly `limit` measured tables as a cut page. Bound BEFORE the aggregates below, so every count and
                every estimate sum is over the page. */
             var fetched = await DarlingPgTableBloatReader.GetPgTableBloatAsync(
-                postgres, resolved.ServerId, start, end, limit + 1);
+                postgres, resolved.ServerId, start, end, limit + 1, cancellationToken);
             var (rows, truncated) = McpHelpers.BoundPage(fetched, limit);
 
             if (rows.Count == 0)
             {
-                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end);
+                return await EmptyAsync(postgres, resolved.ServerId, resolved.ServerName, hours_back, start, end, cancellationToken);
             }
 
             var suppressedCount = rows.Count(r => EstimateSuppressionReason(r) != null);
@@ -406,7 +408,7 @@ public sealed class DarlingMcpPgTableBloatTools
                 tables,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_table_bloat", ex);
         }
@@ -421,16 +423,17 @@ public sealed class DarlingMcpPgTableBloatTools
     /// under the 1 MB floor.</para>
     /// </summary>
     private static async Task<string> EmptyAsync(
-        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end)
+        NpgsqlDataSource postgres, int serverId, string serverName, int hoursBack, DateTime start, DateTime end,
+        CancellationToken cancellationToken = default)
     {
         var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-            postgres, serverId, serverName, "pg_table_bloat_stats");
+            postgres, serverId, serverName, "pg_table_bloat_stats", cancellationToken);
         if (gated != null)
         {
             return gated;
         }
 
-        var probe = await DarlingPgTableBloatReader.ProbePgTableBloatAsync(postgres, serverId, start, end);
+        var probe = await DarlingPgTableBloatReader.ProbePgTableBloatAsync(postgres, serverId, start, end, cancellationToken);
 
         var hints = new
         {

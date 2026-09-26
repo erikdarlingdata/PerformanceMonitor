@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -31,9 +32,10 @@ public sealed class DarlingMcpPgWaitTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum wait events to return, heaviest total wait first. Default 20. This is what bounds the page - read truncated to know whether the window held more; the shares stay of the whole window.")] int limit = 20,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -48,7 +50,7 @@ public sealed class DarlingMcpPgWaitTools
                signal - and the window total rides on the same statement, so the shares below have a
                denominator the cap cannot shrink. */
             var page = await DarlingPgWaitReader.GetPgWaitStatsPageAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
 
             /* An empty result is genuinely ambiguous here in a way it is not for SQL Server: it means
                either no data in the window, or that this server is not a PostgreSQL target at all. Say
@@ -62,7 +64,7 @@ public sealed class DarlingMcpPgWaitTools
                    a row whose engine_kind is NULL — and it names those rather than repeating the two the
                    capability answer has already ruled out. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_wait_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No PostgreSQL wait data for this server and window. On Aurora, the pg_wait_stats "
@@ -73,7 +75,7 @@ public sealed class DarlingMcpPgWaitTools
 
             return BuildWaitStatsJson(resolved.ServerName, hours_back, page, limit);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_wait_stats", ex);
         }

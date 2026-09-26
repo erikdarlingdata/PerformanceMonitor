@@ -11,6 +11,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -32,9 +33,10 @@ public sealed class DarlingMcpPgStatementTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze. Default 24.")] int hours_back = 24,
         [Description("Maximum query shapes to return, heaviest first. Default 20. Bounds the page: read truncated to know whether more exist; shares stay of the whole window regardless.")] int limit = 20,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -50,7 +52,7 @@ public sealed class DarlingMcpPgStatementTools
                accepts up to 1,000, and the tool's Take(limit) on top of it meant a share was computed over
                whichever of the two caps bit - never over the window. */
             var page = await DarlingPgStatementReader.GetPgTopQueriesPageAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, limit + 1, cancellationToken);
 
             if (page.Rows.Count == 0)
             {
@@ -60,7 +62,7 @@ public sealed class DarlingMcpPgStatementTools
                    cause, and a row whose engine_kind is NULL, where no claim can be made. It names those
                    two rather than repeating the ones that can no longer reach this line. */
                 return await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken)
                     /* #2546: the sentence below tells the reader to go and CHECK whether pg_stat_statements
                        is installed in the connected database. The collector has already checked — a 42P01
                        against a database where the extension was never created classifies as a non-fatal
@@ -69,7 +71,7 @@ public sealed class DarlingMcpPgStatementTools
                        mutable at runtime, so nothing decided at connect time could report it and then stop
                        reporting it when somebody acts on the advice. */
                     ?? await DarlingRuntimePrecondition.StatusAsync(
-                        postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats")
+                        postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken)
                     ?? McpHelpers.Status(
                         "unavailable",
                         "No PostgreSQL query statistics for this server and window. Check that "
@@ -84,7 +86,7 @@ public sealed class DarlingMcpPgStatementTools
 
             return BuildTopQueriesJson(resolved.ServerName, hours_back, page, limit);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* #2554: a THROW is a miss too, and until now it was the one miss the capability answer could
                not reach. The gate sat inside `if (rows.Count == 0)`, so it only ever spoke when the query
@@ -106,7 +108,7 @@ public sealed class DarlingMcpPgStatementTools
                unless the collector provably cannot run on this server's engine, so a transient error against
                an Aurora target still surfaces as an error. */
             var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats");
+                postgres, resolved.ServerId, resolved.ServerName, "pg_statement_stats", cancellationToken);
             if (gated != null)
             {
                 return gated;

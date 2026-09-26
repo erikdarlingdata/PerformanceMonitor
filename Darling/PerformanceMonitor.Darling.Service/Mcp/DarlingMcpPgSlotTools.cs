@@ -10,6 +10,7 @@ using System;
 using System.ComponentModel;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
@@ -77,9 +78,10 @@ public sealed class DarlingMcpPgSlotTools
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history to analyze, used for the WAL growth comparison. Default 24.")] int hours_back = 24,
-        [Description(McpHelpers.AsOfDescription)] string? as_of = null)
+        [Description(McpHelpers.AsOfDescription)] string? as_of = null,
+        CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -89,7 +91,7 @@ public sealed class DarlingMcpPgSlotTools
         {
             var now = windowEnd;
             var rows = await DarlingPgSlotReader.GetPgSlotsAsync(
-                postgres, resolved.ServerId, now.AddHours(-hours_back), now);
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
 
             /* No slots is the common, healthy case on most servers — say so rather than returning an
                "unavailable" envelope that reads like a collection problem.
@@ -102,7 +104,7 @@ public sealed class DarlingMcpPgSlotTools
                    real finding on a PostgreSQL target and a false one on a SQL Server target, where the
                    collector has never run and never will. */
                 var gated = await DarlingEngineCapability.NotCollectedStatusAsync(
-                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_slots");
+                    postgres, resolved.ServerId, resolved.ServerName, "pg_replication_slots", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -190,7 +192,7 @@ public sealed class DarlingMcpPgSlotTools
                 slots,
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_pg_replication_slots", ex);
         }
