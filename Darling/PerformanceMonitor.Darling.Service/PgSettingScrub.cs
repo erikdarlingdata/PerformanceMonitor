@@ -112,6 +112,12 @@ public static class PgSettingScrub
     /// data volume that would actually run 60 seconds.</summary>
     internal static int? TestOnlyUpdateCommandTimeoutSecondsOverride;
 
+    /// <summary>Test-only seam: when set, a <c>pg_sleep</c> for this many seconds runs, under
+    /// <see cref="TestOnlyUpdateCommandTimeoutSecondsOverride"/>'s timeout, right before each batch's
+    /// UPDATE — a genuine client-side command timeout against a real (slow) server command, not a thrown
+    /// stand-in.</summary>
+    internal static double? TestOnlyPreUpdateDelaySeconds;
+
     /// <summary>Test-only seam: invoked once after each slice's UPDATE batch commits, so a live test can force
     /// a mid-day failure after a chosen number of slices have already committed, to prove the ones already
     /// done stay done across a restart.</summary>
@@ -472,6 +478,16 @@ AND   t.server_id = $11";
             { CommandTimeout = UpdateBatchTimeoutSeconds })
         {
             await setLocal.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        if (TestOnlyPreUpdateDelaySeconds is { } delaySeconds)
+        {
+            await using var delay = new NpgsqlCommand("SELECT pg_sleep($1)", connection, transaction)
+            {
+                CommandTimeout = TestOnlyUpdateCommandTimeoutSecondsOverride ?? UpdateBatchTimeoutSeconds,
+            };
+            delay.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = delaySeconds });
+            await delay.ExecuteNonQueryAsync(cancellationToken);
         }
 
         await using var update = new NpgsqlCommand(BatchUpdateSql, connection, transaction)
