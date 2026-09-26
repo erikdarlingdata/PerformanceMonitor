@@ -107,6 +107,10 @@ public static class PgSettingScrub
     /// whole day's decompression from scratch.</summary>
     internal const int HourSliceCandidateThreshold = 20_000;
 
+    /// <summary>Test-only seam: overrides <see cref="HourSliceCandidateThreshold"/> so a live test can force
+    /// the hour-slicing path with a data volume far smaller than the real threshold.</summary>
+    internal static int? TestOnlyHourSliceCandidateThresholdOverride;
+
     /// <summary>Test-only seam: when set, overrides <see cref="UpdateBatchTimeoutSeconds"/> for the UPDATE
     /// command (not the SET LOCAL) so a live test can force a client-side command timeout without needing a
     /// data volume that would actually run 60 seconds.</summary>
@@ -117,6 +121,11 @@ public static class PgSettingScrub
     /// UPDATE — a genuine client-side command timeout against a real (slow) server command, not a thrown
     /// stand-in.</summary>
     internal static double? TestOnlyPreUpdateDelaySeconds;
+
+    /// <summary>Test-only seam: when set, <see cref="TestOnlyPreUpdateDelaySeconds"/> only applies to this
+    /// one server id's batches, so a multi-server live test can force a timeout on ONE target without
+    /// stalling every other target's batch too.</summary>
+    internal static int? TestOnlyPreUpdateDelayServerId;
 
     /// <summary>Test-only seam: invoked once after each slice's UPDATE batch commits, so a live test can force
     /// a mid-day failure after a chosen number of slices have already committed, to prove the ones already
@@ -320,7 +329,7 @@ AND   t.server_id = $11";
             var dayUpdated = 0;
             try
             {
-                if (dayCandidates.Count > HourSliceCandidateThreshold)
+                if (dayCandidates.Count > (TestOnlyHourSliceCandidateThresholdOverride ?? HourSliceCandidateThreshold))
                 {
                     /* One slice per hour of collection_time within this day, each its own transaction with
                        its own literal [start, end) bound alongside the constant server_id predicate. A slice
@@ -480,7 +489,8 @@ AND   t.server_id = $11";
             await setLocal.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        if (TestOnlyPreUpdateDelaySeconds is { } delaySeconds)
+        if (TestOnlyPreUpdateDelaySeconds is { } delaySeconds &&
+            (TestOnlyPreUpdateDelayServerId is null || TestOnlyPreUpdateDelayServerId == serverId))
         {
             await using var delay = new NpgsqlCommand("SELECT pg_sleep($1)", connection, transaction)
             {
