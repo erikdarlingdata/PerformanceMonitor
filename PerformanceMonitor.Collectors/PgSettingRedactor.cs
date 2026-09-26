@@ -119,13 +119,16 @@ public static class PgSettingRedactor
         @"(?<name>[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)=(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S*)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    /// <summary>A space-separated option whose name contains PASSWORD, PASSWD, SECRET or TOKEN, taking its
-    /// value from the next whitespace-delimited token rather than an <c>=</c> (round 1's M3: <c>--password
-    /// hunter2</c> and <c>--secret-access-key hunter2</c> have no <c>=</c> at all, so
+    /// <summary>A space-separated option whose name contains PASS, SECRET, TOKEN, CREDENTIAL, PWD, or a
+    /// standalone KEY segment -- the same name part as <see cref="AssignmentSecretName"/> (review round 2's
+    /// M1: the option path had fallen behind the assignment path's name list, so <c>gpg --passphrase x</c>,
+    /// <c>openssl enc -pass pass:x</c>, <c>--encryption-key x</c> and <c>--credentials x</c> still leaked),
+    /// taking its value from the next whitespace-delimited token rather than an <c>=</c> (round 1's M3:
+    /// <c>--password hunter2</c> and <c>--secret-access-key hunter2</c> have no <c>=</c> at all, so
     /// <see cref="AssignmentSecretName"/> never fires on them). <c>(?!-)</c> keeps a value-less flag such as
     /// <c>--no-password -h x</c> from swallowing the next option as its value.</summary>
     private static readonly Regex OptionSecretSpaced = new(
-        @"(?<=^|\s)(?<opt>--?[\w.-]*(?:PASSWORD|PASSWD|SECRET|TOKEN)[\w.-]*)\s+(?!-)(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S+)",
+        @"(?<=^|\s)(?<opt>--?[\w.-]*(?:PASS|SECRET|TOKEN|CREDENTIAL|PWD|(?<![A-Za-z0-9])KEY(?![A-Za-z0-9]))[\w.-]*)\s+(?!-)(?:""(?:\\[\s\S]|[^""\\])*(?:""|$)\S*|'(?:\\[\s\S]|[^'\\])*(?:'|$)\S*|\S+)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>

@@ -96,6 +96,19 @@ public sealed class PgSettingRedactorTests
     [InlineData("archive_command",
         "aws s3 cp s3://b/%f %p --secret-access-key hunter2secret",
         "aws s3 cp s3://b/%f %p --secret-access-key ********")]
+    // M1 (review round 2): the spaced-option path had fallen behind the assignment path's name list.
+    [InlineData("archive_command",
+        "gpg --passphrase S1 --decrypt %p",
+        "gpg --passphrase ******** --decrypt %p")]
+    [InlineData("archive_command",
+        "openssl enc -pass pass:S3 -d",
+        "openssl enc -pass ******** -d")]
+    [InlineData("archive_command",
+        "mycmd --encryption-key S4 %p",
+        "mycmd --encryption-key ******** %p")]
+    [InlineData("archive_command",
+        "mycmd --credentials S5 %p",
+        "mycmd --credentials ******** %p")]
     [InlineData("archive_command",
         "mycmd --no-password -h x %p",
         "mycmd --no-password -h x %p")]
