@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -1161,15 +1162,27 @@ VALUES
         return value is DBNull or null ? null : (DateTime)value;
     }
 
+    /// <summary>
+    /// #4299 (d′): a raw relation's armed verdict is <c>darling_armed</c> (never scheduled, which this
+    /// build converges to false unconditionally for the three raw jobs); every other relation keeps the
+    /// original <c>scheduled</c> read. Mirrors the product's own branch in <c>EnsureRetentionPoliciesAsync</c>
+    /// so the test and the product cannot disagree about which column answers "is this armed".
+    /// </summary>
     private static async Task<bool> IsArmedAsync(NpgsqlConnection connection, string relation, CancellationToken ct)
     {
-        await using var command = new NpgsqlCommand(@"
+        var isRawRelation = TimescaleSupport.RawRelations.Any(r => r == relation);
+        await using var command = new NpgsqlCommand(
+            isRawRelation ? TimescaleSupport.RawArmedStateSql(relation) : @"
 SELECT COALESCE(bool_or(j.scheduled), false)
 FROM timescaledb_information.jobs AS j
 WHERE j.proc_name = 'policy_retention'
 AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = $1", connection);
-        command.Parameters.AddWithValue(relation);
-        return (bool)(await command.ExecuteScalarAsync(ct))!;
+        if (!isRawRelation)
+        {
+            command.Parameters.AddWithValue(relation);
+        }
+        var value = await command.ExecuteScalarAsync(ct);
+        return value is bool flag && flag;
     }
 }
