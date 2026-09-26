@@ -1786,6 +1786,20 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         "type", "title",
     };
 
+    /// <summary>What <see cref="AlertNotebookEndpoint.HeaderCell"/> emits: its discriminator plus the alert
+    /// summary fields (#4222 slice b).</summary>
+    private static readonly IReadOnlySet<string> s_headerCellKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "title", "server", "alert_time", "incident_since", "involved_objects", "database", "total_occurrences",
+    };
+
+    /// <summary>What <see cref="AlertNotebookEndpoint.StatusCell"/> emits: its discriminator plus the status
+    /// text (#4222 slice b).</summary>
+    private static readonly IReadOnlySet<string> s_statusCellKeys = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "type", "title", "status",
+    };
+
     /// <summary>
     /// PURE structural validation of a v1 READ panel spec (<c>{read, params, viz}</c>) — the SAME rules a
     /// dashboard read panel is checked against, shared here so a notebook <c>read</c> cell (design D7, #4222)
@@ -2026,9 +2040,28 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
                     break;
 
+                case "header":
+                case "status":
+                    /* #4222: the alert-notebook's own two lead-in cells (AlertNotebookEndpoint.HeaderCell /
+                       StatusCell) — directly rendered, never compiled, so there is nothing here for the
+                       compiler-facing rules above to check. Accepted so the SAME validator the #4222 pins
+                       require ("every shipped alert template ... passes ValidateNotebookDefinition") can run
+                       against the endpoint's real output without rejecting its own lead-in cells first.
+                       Strict-key walk still applies: a header/status cell is the shape those two builders
+                       emit, nothing else. */
+                    var headerStatusKeys = string.Equals(type, "header", StringComparison.Ordinal)
+                        ? s_headerCellKeys
+                        : s_statusCellKeys;
+                    if (ComposeSpec.UnknownKeyError(cell, headerStatusKeys, $"cell {i} ({type})") is string headerStatusKeyError)
+                    {
+                        return DefinitionValidation.Fail(headerStatusKeyError);
+                    }
+
+                    break;
+
                 default:
                     return DefinitionValidation.Fail(
-                        $"cell {i} has an unknown type '{type}'; expected 'markdown', 'panel', or 'read'.");
+                        $"cell {i} has an unknown type '{type}'; expected 'markdown', 'panel', 'read', 'header', or 'status'.");
             }
         }
 
