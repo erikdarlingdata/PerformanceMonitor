@@ -81,13 +81,13 @@ totals AS
         sum(run_count)                                        AS run_count,
         sum(total_ms)                                         AS total_ms,
         max(max_ms)                                           AS max_ms,
-        sum(run_count) FILTER (WHERE outcome = 'timeout')      AS timeouts
+        coalesce(sum(run_count) FILTER (WHERE outcome = 'timeout'), 0) AS timeouts
     FROM windowed
     GROUP BY surface, route
 ),
 buckets AS
 (
-    SELECT surface, route, b.ord, sum(b.bucket_count) AS bucket_count
+    SELECT surface, route, b.ord, sum(b.bucket_count)::bigint AS bucket_count
     FROM windowed
     CROSS JOIN LATERAL unnest(windowed.bucket_counts) WITH ORDINALITY AS b(bucket_count, ord)
     GROUP BY surface, route, b.ord
