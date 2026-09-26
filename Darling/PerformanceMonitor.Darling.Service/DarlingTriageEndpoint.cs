@@ -516,11 +516,13 @@ internal static class DarlingTriageEndpoint
 
     /// <summary>How far past the firing instant each section's window END sits, so the firing itself — and
     /// its immediate aftermath — is inside the window rather than being its exclusive upper bound.</summary>
-    private static readonly TimeSpan AnchorSlack = TimeSpan.FromMinutes(15);
+    internal static readonly TimeSpan AnchorSlack = TimeSpan.FromMinutes(15);
 
     /// <summary>How far back from the anchor the alert-history match looks. Generous, because the link's
-    /// timestamp is the DELIVERY instant and per-event splits can deliver a batch minutes after the sweep.</summary>
-    private static readonly TimeSpan AlertMatchLookback = TimeSpan.FromHours(24);
+    /// timestamp is the DELIVERY instant and per-event splits can deliver a batch minutes after the sweep.
+    /// Widened to <c>internal</c> so <see cref="AlertNotebookEndpoint"/> (#4222) reuses the SAME family
+    /// lookback for its window math rather than copying the constant.</summary>
+    internal static readonly TimeSpan AlertMatchLookback = TimeSpan.FromHours(24);
 
     /// <summary>
     /// PURE: resolves the link's <c>at</c> instant into (the anchor the page is ABOUT, the <c>as_of</c> value

@@ -92,6 +92,9 @@ public static partial class PgTargetAdvice
         var hasMean = fact.Metadata.TryGetValue("mean_exec_ms", out var meanMs);
         var hasRate = fact.Metadata.TryGetValue("calls_per_sec", out var callsPerSec);
         var hasMax = fact.Metadata.TryGetValue("max_exec_ms", out var maxMs);
+        /* #3691: Aurora's per-query peak executor memory — CONTEXT only, no bar, no threshold; absent
+           (never present as 0) off Aurora, the same shape as hasMax above. */
+        var hasPeakMem = fact.Metadata.TryGetValue("max_exec_peakmem_bytes", out var peakMemBytes);
         var queryId = key[PgTargetFactKeys.BadActorKeyPrefix.Length..];
         var ownNormal = OwnNormalVerdict(factsByKey, queryId, out var anomaly);
 
@@ -106,6 +109,8 @@ public static partial class PgTargetAdvice
         if (hasMax)
             inv.Append(CultureInfo.InvariantCulture, $" with a worst single execution of {maxMs:0.#} ms");
         inv.Append('.');
+        if (hasPeakMem)
+            inv.Append(CultureInfo.InvariantCulture, $" Peak executor memory for a single execution reached {FormatBytes(peakMemBytes)} (Aurora only, context, not a threshold).");
         if (databases > 1)
             inv.Append(CultureInfo.InvariantCulture, $" The same shape ran against {databases:0} databases; the figures are the total across them.");
         if (tempBlocks > 0)
@@ -298,5 +303,15 @@ public static partial class PgTargetAdvice
         < 1_000 => string.Format(CultureInfo.InvariantCulture, "{0:0} ms", ms),
         < 60_000 => string.Format(CultureInfo.InvariantCulture, "{0:0.#} s", ms / 1_000),
         _ => string.Format(CultureInfo.InvariantCulture, "{0:0.#} min", ms / 60_000),
+    };
+
+    /// <summary>Bytes rendered at the scale a reader thinks in — the same MB/GB scale a memory grant is
+    /// usually read at. #3691: <c>max_exec_peakmem_bytes</c> is a context fact, and this is display-only;
+    /// nothing here compares against a threshold.</summary>
+    private static string FormatBytes(double bytes) => bytes switch
+    {
+        < 1_048_576 => string.Format(CultureInfo.InvariantCulture, "{0:0} KB", bytes / 1_024),
+        < 1_073_741_824 => string.Format(CultureInfo.InvariantCulture, "{0:0.#} MB", bytes / 1_048_576),
+        _ => string.Format(CultureInfo.InvariantCulture, "{0:0.#} GB", bytes / 1_073_741_824),
     };
 }

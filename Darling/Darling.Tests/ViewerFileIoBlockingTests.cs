@@ -142,7 +142,13 @@ public sealed class ViewerFileIoBlockingSqlTests
         Assert.Contains("FROM v_wait_stats", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         Assert.Contains("wait_type LIKE 'LCK%'", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         ViewerLatchSpinlockSqlTests.AssertStoredIntervalIdiom(ViewerDataService.LockWaitTrendSql, "wait_type");
-        Assert.Contains("CAST(delta_wait_time_ms AS double precision) / interval_seconds END AS wait_time_ms_per_second", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        /* #4349: bucketed into a rated CTE, same idiom as WaitStatsTrendsSql — the per-second rate is now
+           time-weighted (summed rated wait time over summed rated seconds) rather than a per-row
+           delta/interval division, so a wide bucket that merges collections never averages per-collection
+           rates. For a singleton bucket (one collection) this is the same number as the pre-#4349 division. */
+        Assert.Contains("CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN delta_wait_time_ms END AS rated_wait_ms", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CASE WHEN interval_seconds > 0 AND delta_wait_time_ms >= 0 THEN interval_seconds END AS rated_seconds", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(rated_wait_ms) AS double precision) / SUM(rated_seconds) AS wait_time_ms_per_second", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ELSE 0", ViewerDataService.LockWaitTrendSql, StringComparison.Ordinal);
     }
 

@@ -114,6 +114,10 @@ public sealed class RepoFileAdoptionTests
            its four source lines as one literal, so the guard's return is told apart from just those words
            appearing somewhere else in the file. */
         "AlertHistoryLazyRenderTests.cs",
+        /* #4368: its innerHTML-ban pin anchors renderAlertHeaderCell's own function body across the lines
+           between its declaration and the next top-level function, so the ban is scoped to real code and
+           not tripped by the file's own prose comment saying "never innerHTML". */
+        "AlertNotebookRenderClientTests.cs",
         "BuiltinAlertPersistenceRungTests.cs",
         "ChartWindowDomainTests.cs",
         "DarlingPathFilterGateTests.cs",

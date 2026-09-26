@@ -165,8 +165,14 @@ public sealed class WebFetchLayerTests
         var panels = PanelsJs;
 
         Assert.Contains("export function setPanelSignal(signal) {", panels, StringComparison.Ordinal);
-        Assert.Contains("async function loadPanel(desc, body, signal) {", panels, StringComparison.Ordinal);
-        Assert.Contains("loadPanel(desc, body, signal);", panels, StringComparison.Ordinal);
+
+        // #4368: loadPanel grew an `onSettled` param — the alert notebook's max-3 in-flight limiter
+        // (views.js's renderAlertCell) needs to know when a panel's load reaches a terminal state so it can
+        // free the slot. The render-signal capture/apply behaviour this pin protects is unchanged: renderPanel
+        // still captures panelSignal synchronously and threads it straight through to the fetch.
+        Assert.Contains("export function renderPanel(desc, onSettled) {", panels, StringComparison.Ordinal);
+        Assert.Contains("async function loadPanel(desc, body, signal, onSettled) {", panels, StringComparison.Ordinal);
+        Assert.Contains("loadPanel(desc, body, signal, onSettled);", panels, StringComparison.Ordinal);
         Assert.Contains("if (res.kind === \"aborted\" || res.kind === \"auth\") {", panels, StringComparison.Ordinal);
     }
 

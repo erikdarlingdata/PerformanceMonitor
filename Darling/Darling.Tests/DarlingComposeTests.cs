@@ -2118,6 +2118,60 @@ public sealed class DarlingComposeTests
         Assert.True(ok.IsValid, ok.Error);
     }
 
+    /* ─────────────────────────── D7: notebook 'read' cell (#4222) ─────────────────────────── */
+
+    [Fact]
+    public void ValidateDefinition_AcceptsANotebook_WithAValidReadCell()
+    {
+        var ok = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"read\",\"read\":\"get_blocking\",\"params\":{\"server\":\"S1\",\"hours\":24},\"viz\":\"table\",\"title\":\"Blocking\"}]}");
+        Assert.True(ok.IsValid, ok.Error);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsANotebookReadCell_WithAnUnknownRead_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"read\",\"read\":\"get_totally_not_a_read\",\"viz\":\"table\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("unknown read", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsANotebookReadCell_WithAnUndeclaredParam_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"read\",\"read\":\"get_blocking\",\"params\":{\"not_a_real_param\":1},\"viz\":\"table\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("unknown parameter", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsANotebookReadCell_MissingARequiredParam_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[" +
+            "{\"type\":\"read\",\"read\":\"get_wait_trend\",\"viz\":\"line\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("missing the required parameter", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ValidateDefinition_RejectsANotebookReadCell_MissingViz_NamingTheCell()
+    {
+        var result = DarlingWebEndpoints.ValidateDefinition(
+            "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"read\",\"read\":\"get_blocking\"}]}");
+        Assert.False(result.IsValid);
+        Assert.Contains("cell 0", result.Error!, StringComparison.Ordinal);
+        Assert.Contains("missing 'viz'", result.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void ValidateDefinition_AcceptsANotebook_WithVariablesRange_AndAVariableFilterPanelCell()
     {
