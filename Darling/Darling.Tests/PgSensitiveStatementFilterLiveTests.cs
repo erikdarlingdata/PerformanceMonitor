@@ -27,6 +27,9 @@ namespace Darling.Tests;
 /// every caller actually runs returns. The corpus is therefore judged the same way
 /// <c>StoreStatementStatsLiveTests</c> judges #3915's patterns: against a scratch PostgreSQL connection, with
 /// no server bootstrap or extension needed.</para>
+///
+/// <para><b>#1776 own-store</b> — mints its own scratch database (<see cref="ScratchPostgres"/>) rather than
+/// sharing the live fixture, so it is deliberately NOT in the <c>live-postgres</c> collection.</para>
 /// </summary>
 public sealed class PgSensitiveStatementFilterLiveTests
 {
