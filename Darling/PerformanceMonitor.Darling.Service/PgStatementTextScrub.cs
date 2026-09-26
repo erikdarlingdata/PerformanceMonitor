@@ -21,13 +21,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// <summary>
 /// One-time scrub of statement text collected under an older build that predates the shared sensitive-
 /// statement filter (#4348): <c>collect.pg_statement_text</c> (the store's own text lookup) and
-/// <c>collect.pg_blocking_edges</c> (a monitored target's blocked/blocking backend text, captured verbatim
-/// by <c>PgBlockingCollector</c>). Both are now filtered going forward at the fetch/collection query
-/// (<see cref="PerformanceMonitor.Darling.Storage.PgStatementText"/>, <see cref="PgBlockingCollector"/>); this
-/// is the mirror <see cref="PgSettingScrub"/> is for <c>collect.pg_server_config</c>, applied to rows a
-/// pre-#4348 build already stored.
+/// <c>collect.pg_blocking_edges</c> (the blocked/blocking backend text a monitored target reports,
+/// collected by <c>PgBlockingCollector</c>). Both are now filtered going forward at the fetch/collection
+/// query (<see cref="PerformanceMonitor.Darling.Storage.PgStatementText"/>, <see cref="PgBlockingCollector"/>);
+/// this is the mirror <see cref="PgSettingScrub"/> is for <c>collect.pg_server_config</c>, applied to rows
+/// a pre-#4348 build already stored.
 ///
-/// <para><b>A background job, not a migration</b> — same ruling <see cref="PgSettingScrub"/> follows: both
+/// <para><b>A background job, not a migration</b> — the same design <see cref="PgSettingScrub"/> uses: both
 /// target tables already exist, so this reads candidate rows with the shared
 /// <see cref="PgSensitiveStatementFilter.SensitiveStatementPattern"/>, replaces the matching text with
 /// <see cref="PgSensitiveStatementFilter.PlaceholderText"/>, and only updates rows the pattern actually
