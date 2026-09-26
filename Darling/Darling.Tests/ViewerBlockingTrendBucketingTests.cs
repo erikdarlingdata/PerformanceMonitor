@@ -89,9 +89,10 @@ public sealed class ViewerBlockingTrendBucketingSqlTests
         Assert.Contains("per_collection", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(ROUND(AVG(blocked_count)) AS bigint) AS blocked_count", sql, StringComparison.Ordinal);
 
-        var outerSelectStart = sql.IndexOf(")\n        SELECT", StringComparison.Ordinal);
+        var normalizedSql = sql.ReplaceLineEndings("\n");
+        var outerSelectStart = normalizedSql.IndexOf(")\n        SELECT", StringComparison.Ordinal);
         Assert.True(outerSelectStart > 0, "expected to find the outer SELECT after the per_collection CTE closes");
-        var outerSelect = sql[outerSelectStart..];
+        var outerSelect = normalizedSql[outerSelectStart..];
         Assert.DoesNotContain("COUNT(*) AS blocked_count", outerSelect, StringComparison.Ordinal);
     }
 }
