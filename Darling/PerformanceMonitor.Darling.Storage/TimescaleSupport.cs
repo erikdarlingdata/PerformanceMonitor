@@ -6101,6 +6101,56 @@ AND   j.hypertable_schema = 'collect'
 AND   j.hypertable_name = '{relation}'";
 
     /// <summary>
+    /// #4299 L2: the current PostgreSQL start time, as the value the repair epoch stamp and its comparison
+    /// both read — epoch MICROSECONDS (<c>floor(extract(epoch from pg_postmaster_start_time()) * 1e6)::bigint</c>),
+    /// not the ISO-text alternative the ruling also allowed. A bigint compares exactly with no locale or
+    /// timezone formatting step on either side of the round trip, and Postgres's own <c>timestamptz</c> already
+    /// carries microsecond resolution internally, so multiplying by 1e6 and flooring loses nothing the ruling's
+    /// to-the-microsecond comparison needs. Read BEFORE the repair starts (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>)
+    /// so the value stamped afterward is the postmaster start the repair actually ran under, not whatever it is
+    /// by the time the repair finishes.
+    /// </summary>
+    public const string PostmasterStartEpochMicrosecondsSql =
+        "SELECT floor(extract(epoch FROM pg_postmaster_start_time()) * 1e6)::bigint";
+
+    /// <summary>
+    /// #4299 L2: stamps <paramref name="relation"/>'s raw retention job with the repair epoch that just
+    /// finished — <c>$1</c> is the <see cref="PostmasterStartEpochMicrosecondsSql"/> value read BEFORE that
+    /// repair started. Reached ONLY from a completion that did not throw and was not cancelled
+    /// (<c>DarlingWorker.RunMaterializationHoleRepairAsync</c>): a repair cut short by shutdown or a failure
+    /// isolated per aggregate has not shown the store a clean pass, so it must not make the trigger's epoch
+    /// check pass either. Guarded with <c>IS DISTINCT FROM</c> (ruled 2026-09-26 04:26Z) rather than an
+    /// unconditional write, for the same reason <see cref="ConvergeRawArmedStateSql"/> merges via <c>||</c>
+    /// instead of restating the whole config: a repeat stamp of the SAME value must not write a row every
+    /// pass it is already true, which is what lets a second service's own re-stamp (were one ever added) stay
+    /// a no-op rather than a race. <c>||</c> merge, same discipline as <see cref="ConvergeRawArmedStateSql"/> —
+    /// <c>drop_after</c> and <c>darling_armed</c> already live in the same config object and must survive
+    /// this write untouched.
+    /// </summary>
+    public static string RawRepairEpochStampSql(string relation)
+        => $@"SELECT alter_job(j.job_id, config => j.config || jsonb_build_object('darling_repair_epoch', $1::bigint))
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   (j.config->>'darling_repair_epoch')::bigint IS DISTINCT FROM $1::bigint";
+
+    /// <summary>
+    /// #4299 L2: the trigger's epoch check — does <paramref name="relation"/>'s raw job carry a
+    /// <c>darling_repair_epoch</c> stamp equal, to the microsecond, to the CURRENT <c>pg_postmaster_start_time()</c>?
+    /// A missing key, a missing job row, or a stamp from an earlier postmaster start all read <c>false</c>
+    /// (fail-closed, the same posture <see cref="RawArmedReadExpression"/> takes for the armed key) —
+    /// only a repair that finished clean UNDER THE CURRENT START answers yes.
+    /// </summary>
+    public static string RawRepairEpochMatchesSql(string relation)
+        => $@"SELECT (j.config->>'darling_repair_epoch')::bigint = ({PostmasterStartEpochMicrosecondsSql})
+FROM timescaledb_information.jobs AS j
+WHERE j.proc_name = 'policy_retention'
+AND   j.hypertable_schema = 'collect'
+AND   j.hypertable_name = '{relation}'
+AND   j.config->>'darling_repair_epoch' IS NOT NULL";
+
+    /// <summary>
     /// #4299 (d′): <c>lock_timeout</c> for the service's OWN <c>CALL run_job(id)</c> against a raw retention
     /// job — the trigger that replaces the scheduler's own run under variant (d′), since the three raw jobs
     /// are never scheduled. Bounded, not generous, ON PURPOSE: <c>run_job</c> executes

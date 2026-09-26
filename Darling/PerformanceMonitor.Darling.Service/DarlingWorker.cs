@@ -673,6 +673,13 @@ public sealed class DarlingWorker : BackgroundService
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
 
+    /* #4299 L2: set for the lifetime of a materialization-hole repair this process launched, cleared in a
+       finally around the same call — the Periodic pass's "no repair running in this process" half of the
+       relaunch gate. A per-process flag, not a store one: the epoch stamp in the store (RawRepairEpochStampSql)
+       is what stops a SECOND service from repeating the work; this flag only stops THIS process's own
+       Periodic tick from launching a second overlapping repair while one it started is still running. */
+    private volatile bool _materializationHoleRepairRunning;
+
     /* #2138 phase 1: the auto force-plan bot, constructed by RunCollectionLoopAsync alongside the
        analysis pieces. Null until then. It holds no executor and this build ships none, so its whole
        output is journal rows — see PlanForceBot and PlanForceNoWritePathTests. */
@@ -3440,9 +3447,21 @@ public sealed class DarlingWorker : BackgroundService
     /// </summary>
     private async Task RunMaterializationHoleRepairAsync(NpgsqlDataSource postgres, CancellationToken stoppingToken)
     {
+        _materializationHoleRepairRunning = true;
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(stoppingToken);
+
+            /* #4299 L2: read BEFORE the repair runs, so the value stamped on a clean finish is the postmaster
+               start this repair actually ran under, not whatever it is by the time the repair returns. A
+               connection-open failure here throws out to the catch below with nothing stamped, which is right —
+               a repair that never ran must not make the trigger's epoch check pass. */
+            long postmasterEpoch;
+            await using (var epochRead = new NpgsqlCommand(TimescaleSupport.PostmasterStartEpochMicrosecondsSql, connection))
+            {
+                postmasterEpoch = (long)(await epochRead.ExecuteScalarAsync(stoppingToken))!;
+            }
+
             var summary = await TimescaleSupport.RepairMaterializationHolesAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
 
             /* #3756: not gated on any count — the zero-hole start is the one this line exists for. Every figure
@@ -3454,6 +3473,29 @@ public sealed class DarlingWorker : BackgroundService
                 summary.AggregatesScanned, summary.AggregatesSkipped, summary.HolesFound, summary.BucketsFound,
                 summary.HolesRepaired, summary.BucketsRepaired, summary.HolesForced, summary.HolesDeferred, summary.BucketsDeferred,
                 summary.HolesRemaining, summary.Failures, (long)summary.Elapsed.TotalMilliseconds);
+
+            /* #4299 L2: the completion stamp — reached ONLY here, past both the epoch read and the repair
+               call, neither of which threw or was cancelled. Stamped on every one of the three raw jobs
+               (TimescaleSupport.RawRelations), one statement per job, each guarded by its own
+               IS DISTINCT FROM so a repeat stamp of the same value writes nothing. A stamp failure here is
+               logged and swallowed per job — the repair itself already succeeded and reporting that success
+               is not conditional on the stamp also landing; a job whose stamp did not take simply stays
+               ungated for the Periodic trigger until the next repair tries again. */
+            foreach (var relation in TimescaleSupport.RawRelations)
+            {
+                try
+                {
+                    await using var stamp = new NpgsqlCommand(TimescaleSupport.RawRepairEpochStampSql(relation), connection);
+                    stamp.Parameters.AddWithValue(postmasterEpoch);
+                    await stamp.ExecuteNonQueryAsync(stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(
+                        "Materialization-hole repair finished, but stamping the repair epoch on {Relation}'s raw retention job failed — the Periodic trigger will not purge it until a later repair stamps it: {Message}",
+                        relation, ex.Message);
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -3469,6 +3511,10 @@ public sealed class DarlingWorker : BackgroundService
             _logger.LogWarning(
                 "Materialization-hole repair could not run — any pre-outage tail the refresh policies skipped stays unmaterialized until the next start retries: {Message}",
                 ex.Message);
+        }
+        finally
+        {
+            _materializationHoleRepairRunning = false;
         }
     }
 
