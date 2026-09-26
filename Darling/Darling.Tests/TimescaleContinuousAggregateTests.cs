@@ -1317,6 +1317,27 @@ public sealed class TimescaleContinuousAggregateTests
     }
 
     /// <summary>
+    /// PIN (#4300): when the stitched slot's fallback fires (no successor bucket above the legacy's last),
+    /// the probe's upper bound must be <c>now() - HourlyRefreshStartOffset</c>, not a bare <c>now()</c>.
+    /// A bare <c>now()</c> lets a healthy, upgrading store with an EMPTY successor read every hour back
+    /// to the legacy's freeze as unprobed and therefore Short, RE-HOLDING the raw purge for rows the
+    /// successor's own first refresh will reach within <see cref="TimescaleSupport.HourlyRefreshStartOffset"/>
+    /// anyway. RED on dev: the fallback ends at a bare <c>time_bucket(INTERVAL '1 hour', now()::timestamp))</c>
+    /// with no offset subtraction.
+    /// </summary>
+    [Fact]
+    public void RetentionArmSafetySql_StitchedSlot_FallbackUpperBoundUsesHourlyRefreshStartOffset()
+    {
+        var sql = TimescaleSupport.RetentionArmSafetySql(
+            "query_stats", "collection_time", new[] { TimescaleSupport.QueryStatsIntervalHourlyView });
+
+        Assert.Contains(
+            $"time_bucket(INTERVAL '1 hour', now()::timestamp - INTERVAL '{TimescaleSupport.HourlyRefreshStartOffset}')",
+            sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("time_bucket(INTERVAL '1 hour', now()::timestamp))", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// PIN (#4301, RED on <c>e970834ba</c> and earlier): the generated coverage SQL for a stitched slot
     /// carries the shared hole definition's <c>generate_series</c> AND its bound on the successor's first
     /// bucket above the legacy's last (<c>sa.bucket &gt; l.mx</c>), and no longer carries the old row-level
