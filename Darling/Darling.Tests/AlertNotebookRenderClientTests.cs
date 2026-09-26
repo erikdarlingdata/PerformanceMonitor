@@ -135,7 +135,24 @@ public sealed class AlertNotebookRenderClientTests
         var nextFn = lf.IndexOf("\nfunction ", start + 1, StringComparison.Ordinal);
         Assert.True(nextFn > start, "could not find the next top-level function after renderAlertHeaderCell");
         var body = lf.Substring(start, nextFn - start);
-        Assert.DoesNotContain("innerHTML", body, StringComparison.Ordinal);
+        var bodyWithoutComments = StripJsComments(body);
+        Assert.DoesNotContain(".innerHTML", bodyWithoutComments, StringComparison.Ordinal);
+        Assert.DoesNotContain("innerHTML =", bodyWithoutComments, StringComparison.Ordinal);
+        Assert.DoesNotContain("insertAdjacentHTML", bodyWithoutComments, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Strips `//` line comments and `/* ... */` block comments so a pin can check for real code use of a
+    /// pattern without tripping on prose that happens to mention it (e.g. "never innerHTML" in a comment).
+    /// Not a full JS parser — good enough for this file, which has no such pattern inside a string literal.
+    /// </summary>
+    private static string StripJsComments(string source)
+    {
+        var withoutBlockComments = System.Text.RegularExpressions.Regex.Replace(
+            source, @"/\*.*?\*/", string.Empty, System.Text.RegularExpressions.RegexOptions.Singleline);
+        var withoutLineComments = System.Text.RegularExpressions.Regex.Replace(
+            withoutBlockComments, @"//[^\n]*", string.Empty);
+        return withoutLineComments;
     }
 
     /// <summary>
