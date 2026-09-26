@@ -127,6 +127,13 @@ public static class PgSettingScrub
     /// stalling every other target's batch too.</summary>
     internal static int? TestOnlyPreUpdateDelayServerId;
 
+    /// <summary>Test-only seam: when true, <see cref="TestOnlyPreUpdateDelaySeconds"/> fires for one batch
+    /// only and then clears itself, so a live test can force exactly one timeout on a target that has more
+    /// than one day of work, and observe the target's remaining day(s) skipped rather than timed out again.
+    /// Defaults to false, leaving every-batch delay (the prior behavior) unchanged for callers that don't set
+    /// it.</summary>
+    internal static bool TestOnlyPreUpdateDelayOnce;
+
     /// <summary>Test-only seam: invoked once after each slice's UPDATE batch commits, so a live test can force
     /// a mid-day failure after a chosen number of slices have already committed, to prove the ones already
     /// done stay done across a restart.</summary>
@@ -533,6 +540,11 @@ AND   t.server_id = $11";
             };
             delay.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Double, Value = delaySeconds });
             await delay.ExecuteNonQueryAsync(cancellationToken);
+
+            if (TestOnlyPreUpdateDelayOnce)
+            {
+                TestOnlyPreUpdateDelaySeconds = null;
+            }
         }
 
         await using var update = new NpgsqlCommand(BatchUpdateSql, connection, transaction)

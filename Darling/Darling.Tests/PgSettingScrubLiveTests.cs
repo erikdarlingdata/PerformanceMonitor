@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -644,6 +645,7 @@ public sealed class PgSettingScrubLiveTests
             PgSettingScrub.TestOnlyUpdateCommandTimeoutSecondsOverride = 1;
             PgSettingScrub.TestOnlyPreUpdateDelaySeconds = 3;
             PgSettingScrub.TestOnlyPreUpdateDelayServerId = slowServer;
+            PgSettingScrub.TestOnlyPreUpdateDelayOnce = true;
 
             var capturingLogger = new CapturingTestLogger();
 
@@ -657,8 +659,10 @@ public sealed class PgSettingScrubLiveTests
                 slowServer, day, ct);
             Assert.Equal("password=hunter2", slowFirstDayValue);
 
-            /* The slow server's SECOND day is skipped too — once the first day's batch times out and the
-               server is marked failed, its remaining days are never attempted for the rest of this run. */
+            /* The slow server's SECOND day is skipped, not timed out — TestOnlyPreUpdateDelayOnce clears the
+               delay seam after the first batch, so if the second day's batch ran at all it would succeed and
+               redact. It stays plaintext only because the first day's timeout already marked the server
+               failed, per the type remarks' per-server isolation. */
             var slowSecondDayValue = await ScalarTextAsync(setupConnection,
                 "SELECT setting FROM collect.pg_server_config WHERE server_id = $1 AND collection_time = $2 AND name = 'primary_conninfo'",
                 slowServer, secondDay, ct);
@@ -675,14 +679,18 @@ public sealed class PgSettingScrubLiveTests
             Assert.Null(markerValue);
 
             /* The fixture's CapturingTestLogger records the real formatted line; assert it names the timeout
-               rather than a generic client SQLSTATE. */
-            Assert.Contains("timeout", capturingLogger.Joined, StringComparison.OrdinalIgnoreCase);
+               rather than a generic client SQLSTATE. Exactly one line, since TestOnlyPreUpdateDelayOnce
+               clears the delay seam after the first batch, so the second day's batch (skipped, not run)
+               never gets a chance to time out again. */
+            var timeoutLines = capturingLogger.Lines.Count(line => line.Contains("timeout", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(1, timeoutLines);
         }
         finally
         {
             PgSettingScrub.TestOnlyUpdateCommandTimeoutSecondsOverride = null;
             PgSettingScrub.TestOnlyPreUpdateDelaySeconds = null;
             PgSettingScrub.TestOnlyPreUpdateDelayServerId = null;
+            PgSettingScrub.TestOnlyPreUpdateDelayOnce = false;
         }
     }
 
