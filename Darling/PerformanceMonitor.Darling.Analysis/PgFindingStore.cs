@@ -616,7 +616,7 @@ ORDER BY local_bucket, story_path_hash";
     /// does not exist.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var findings = new List<AnalysisFinding>();
 
@@ -628,20 +628,20 @@ ORDER BY local_bucket, story_path_hash";
                zone-shifted. */
             var windowEnd = DateTime.SpecifyKind(asOfUtc ?? DateTime.UtcNow, DateTimeKind.Unspecified);
 
-            await using var connection = await _postgres.OpenConnectionAsync();
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
             using var command = new NpgsqlCommand(GetRecentFindingsSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds };
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(windowEnd.AddHours(-hoursBack));
             command.Parameters.AddWithValue(asOfUtc is null ? NoUpperBound : windowEnd);
             command.Parameters.AddWithValue(limit);
 
-            using var reader = await command.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
             {
                 findings.Add(ReadFinding(reader));
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger?.LogError("[PgFindingStore] GetRecentFindingsAsync failed: {Message}", ex.Message);
         }
