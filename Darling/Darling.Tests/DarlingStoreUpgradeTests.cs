@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -1486,6 +1487,123 @@ public sealed class DarlingStoreUpgradeTests
                 await StopDirectAsync(bin, runningDataDirectory, CancellationToken.None);
             }
 
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /* ---------------- #4358: CarryOperatorConfLinesAsync ---------------- */
+
+    /// <summary>
+    /// Ordering pin (#4358): the carried operator lines land AFTER the legacy blocks
+    /// <c>context.AppendManagedConf</c> already wrote into the new cluster's <c>postgresql.conf</c> (the
+    /// <c>baseline</c> this method reads), so where the same key is set by both, the operator's below-include
+    /// value wins — matching <see cref="ManagedConfMigration.Rewrite"/>'s rule 3 for the same-major case.
+    /// Parsed with <see cref="DarlingManagedPostgres.ParseConfText"/>, never a raw string/position check, so
+    /// this pin cannot be satisfied by an accidental substring match.
+    /// </summary>
+    [Fact]
+    public async Task CarryOperatorConfLinesAsync_CarriesAfterTheLegacyBlocks_OperatorValueWins()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-opconf-order-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            File.WriteAllText(
+                Path.Combine(oldDataDirectory, "postgresql.conf"),
+                "max_connections = 200\n" +
+                "include 'darling-managed.conf'\n" +
+                "# operator settings kept from the previous postgresql.conf (#4215)\n" +
+                "log_min_duration_statement = 999\n");
+
+            var newConfPath = Path.Combine(newDataDirectory, "postgresql.conf");
+            File.WriteAllText(
+                newConfPath,
+                "include 'darling-managed.conf'\n" +
+                "# legacy settings kept from the previous postgresql.conf (#4215)\n" +
+                "log_min_duration_statement = 111\n");
+
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
+            var result = await upgrade.CarryOperatorConfLinesAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir",
+                (exePath, arguments, timeout, token) => Task.FromResult((0, string.Empty)),
+                CancellationToken.None);
+
+            /* 2 carried: the comment line (unconditionally carried) plus the one probeable setting. */
+            Assert.Equal(2, result.CarriedCount);
+            Assert.Equal(0, result.RejectedCount);
+
+            var finalConf = await File.ReadAllTextAsync(newConfPath);
+            var legacyIndex = finalConf.IndexOf("legacy settings", StringComparison.Ordinal);
+            var movedIndex = finalConf.IndexOf(ManagedConfMigration.MovedOperatorLinesComment, StringComparison.Ordinal);
+            Assert.True(legacyIndex >= 0 && movedIndex > legacyIndex,
+                "expected the operator's moved-lines block to appear AFTER the legacy block");
+
+            var values = DarlingManagedPostgres.ParseConfText(finalConf)
+                .Where(a => string.Equals(a.Name, "log_min_duration_statement", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            Assert.Equal("999", values.Last().Value);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// Never-fatal pin (#4358): one operator line the new binaries reject (via the probe delegate — no real
+    /// postgres.exe needed) is skipped and logged as not carried, while the OTHER candidate lines are still
+    /// carried, and the method returns normally rather than throwing — the same "one bad line costs only
+    /// itself" posture <see cref="DarlingStoreUpgrade.CarryAutoConfAsync"/> gives auto.conf settings.
+    /// </summary>
+    [Fact]
+    public async Task CarryOperatorConfLinesAsync_RejectedLine_IsSkippedAndLogged_OthersStillCarried_NeverFatal()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-opconf-reject-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            File.WriteAllText(
+                Path.Combine(oldDataDirectory, "postgresql.conf"),
+                "max_connections = 200\n" +
+                "include 'darling-managed.conf'\n" +
+                "log_min_duration_statement = 250\n" +
+                "darling_4358_unknown_setting = 'on'\n" +
+                "work_mem = '64MB'\n");
+
+            var newConfPath = Path.Combine(newDataDirectory, "postgresql.conf");
+            File.WriteAllText(newConfPath, "include 'darling-managed.conf'\n");
+
+            Task<(int ExitCode, string Output)> Probe(string exePath, string arguments, TimeSpan timeout, CancellationToken token)
+                => Task.FromResult(arguments.Contains("darling_4358_unknown_setting", StringComparison.Ordinal)
+                    ? (1, "unrecognized configuration parameter \"darling_4358_unknown_setting\"")
+                    : (0, string.Empty));
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            var result = await upgrade.CarryOperatorConfLinesAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None);
+
+            Assert.Equal(2, result.CarriedCount);
+            Assert.Equal(1, result.RejectedCount);
+
+            var logText = log.ToString();
+            Assert.Contains("NOT carried: darling_4358_unknown_setting", logText, StringComparison.Ordinal);
+
+            var finalConf = await File.ReadAllTextAsync(newConfPath);
+            Assert.DoesNotContain("darling_4358_unknown_setting", finalConf, StringComparison.Ordinal);
+            Assert.Contains("log_min_duration_statement = 250", finalConf, StringComparison.Ordinal);
+            Assert.Contains("work_mem = '64MB'", finalConf, StringComparison.Ordinal);
+        }
+        finally
+        {
             TryDeleteTree(root.FullName);
         }
     }
