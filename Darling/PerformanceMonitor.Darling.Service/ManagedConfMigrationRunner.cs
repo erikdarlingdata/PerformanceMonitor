@@ -16,17 +16,17 @@ using Microsoft.Extensions.Logging;
 namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>The step Step A's outcome names — used only to report a Failed or Unknown result, since both A
-/// and later Step B (#4336 lane 6) share the same tri-state verification shape.</summary>
+/// and Step B share the same tri-state verification shape.</summary>
 internal enum ManagedConfMigrationStep
 {
     A,
     B,
 }
 
-/// <summary>The tri-state verdict of a Step A run (#4336 lane 5b, design decision (d)): <c>Verified</c> when
+/// <summary>The tri-state verdict of a Step A run: <c>Verified</c> when
 /// every applied setting the after-snapshot reports matches the before snapshot; <c>Failed</c> when a
 /// mismatch was found and the restore already ran; <c>Unknown</c> when a snapshot itself could not be taken
-/// — the rule the plan's ruling settles is which side of the write that failure landed on.</summary>
+/// — which side of the write that failure landed on decides the outcome.</summary>
 internal enum ManagedConfVerificationStatus
 {
     Verified,
@@ -36,12 +36,11 @@ internal enum ManagedConfVerificationStatus
 
 /// <summary>
 /// One <see cref="ManagedConfMigrationRunner.RunStepA"/> or <see cref="ManagedConfMigrationRunner.ResumePending"/>
-/// call's result (#4336 lane 5b, design decision (d)): the status, the keys a <c>Failed</c> result named as
+/// call's result: the status, the keys a <c>Failed</c> result named as
 /// mismatched (empty otherwise), the backup path once one exists (null only when nothing was ever written —
 /// the before-snapshot-throws and pending-write-failed cases), and which step produced this (always
-/// <see cref="ManagedConfMigrationStep.A"/> from this lane; Step B is #4336 lane 6), and for an <c>Unknown</c>
-/// result the exception type, message, and the phase it was caught in (null otherwise; never file contents —
-/// #4336 lane 6c).
+/// <see cref="ManagedConfMigrationStep.A"/> here; Step B is a separate call), and for an <c>Unknown</c>
+/// result the exception type, message, and the phase it was caught in (null otherwise; never file contents).
 /// </summary>
 internal readonly record struct ManagedConfMigrationOutcome(
     ManagedConfVerificationStatus Status,
@@ -51,7 +50,7 @@ internal readonly record struct ManagedConfMigrationOutcome(
     string? Detail = null);
 
 /// <summary>
-/// Drives Step A (#4336 lane 5b, design decisions (a)-(d)) end to end over the pure building blocks
+/// Drives Step A end to end over the pure building blocks
 /// <see cref="ManagedConfMigrationSteps"/>, <see cref="ManagedConfFile"/> and <see cref="ManagedConfFileSettings"/>:
 /// snapshot the OLD conf's effective values, persist that snapshot so a crash has something to compare
 /// against, back up the original, write the two new files, re-snapshot, compare, then stamp or restore. Every
@@ -62,13 +61,13 @@ internal readonly record struct ManagedConfMigrationOutcome(
 internal static class ManagedConfMigrationRunner
 {
     /// <summary>
-    /// Runs Step A once, start to finish, for a conf that has never been migrated before this call (#4336 lane
-    /// 5b). Order, exactly as the plan specifies:
+    /// Runs Step A once, start to finish, for a conf that has never been migrated before this call.
+    /// Order:
     /// <list type="number">
     /// <item>snapshot the OLD conf (a throw here leaves nothing written at all — <c>Unknown</c>);</item>
     /// <item><see cref="ManagedConfMigrationSteps.WritePending"/> (a throw here — the pending file itself
     /// could not be written — aborts before <see cref="ManagedConfMigrationSteps.BackupOriginal"/>, with
-    /// nothing changed — <c>Unknown</c>, per the ruling on the open question);</item>
+    /// nothing changed — <c>Unknown</c>);</item>
     /// <item><see cref="ManagedConfMigrationSteps.BackupOriginal"/>;</item>
     /// <item><see cref="ManagedConfFile.RenderWithValues"/> over the BEFORE snapshot's applied values (the
     /// new managed file's content);</item>
@@ -173,7 +172,7 @@ internal static class ManagedConfMigrationRunner
 
     /// <summary>
     /// Resumes a run left <c>PendingVerify</c> by a crash after <see cref="ManagedConfMigrationSteps.WriteTwoSteps"/>
-    /// but before the stamp or a restore (#4336 lane 5b): reads back the persisted BEFORE snapshot
+    /// but before the stamp or a restore: reads back the persisted BEFORE snapshot
     /// (<see cref="ManagedConfMigrationSteps.TryReadPending"/>), takes a fresh AFTER snapshot, and runs the
     /// same compare-then-stamp-or-restore tail <see cref="RunStepA"/> does. A snapshot throw here follows the
     /// same ruled path as <see cref="RunStepA"/>'s after-snapshot: restore, delete pending, <c>Unknown</c>.
@@ -234,7 +233,7 @@ internal static class ManagedConfMigrationRunner
     }
 
     /// <summary>
-    /// Step B (#4336 lane 6): after a normal derivation has already rendered and written
+    /// Step B: after a normal derivation has already rendered and written
     /// <c>darling-managed.conf</c>, checks that <paramref name="rows"/> (a fresh <c>pg_file_settings</c>
     /// snapshot) shows every key <paramref name="renderedText"/> declares with the rendered value and no
     /// error, from a row whose <c>sourcefile</c> ends with <see cref="ManagedConfFile.FileName"/>. A row's
@@ -307,7 +306,7 @@ internal static class ManagedConfMigrationRunner
 
     /// <summary>
     /// One Information line per key that changed between <paramref name="previousText"/> and the fresh
-    /// render, for Step B's log (#4336 lane 6): the key, its old value (<c>(unset)</c> when it had none), the
+    /// render, for Step B's log: the key, its old value (<c>(unset)</c> when it had none), the
     /// new value, and the <see cref="ManagedConfFile.RenderInputs"/> that produced it — RAM, whether that RAM
     /// figure is authoritative, platform, PostgreSQL major, CPU count, and hypertable count.
     /// </summary>

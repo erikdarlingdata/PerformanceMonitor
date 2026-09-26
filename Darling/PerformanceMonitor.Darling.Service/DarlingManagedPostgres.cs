@@ -676,7 +676,7 @@ public sealed class DarlingManagedPostgres
     public string DataDirectory => _dataDirectory;
 
     /// <summary>What <see cref="WriteManagedConfFile"/> did with <c>darling-managed.conf</c> on this start
-    /// (#4215 ruling H1 item 3/review H1 item 3) — carried out of the bootstrap the same way
+    /// (#4215) — carried out of the bootstrap the same way
     /// <see cref="LastUpgradeOutcome"/> is, so <c>DarlingWorker</c> can fold a hand edit's changed keys into
     /// the stored verdict rows without re-reading the file itself. Null when the service-owned conf-write path
     /// never ran this start (the adopted-listener branch of <see cref="EnsureRunningAsync"/>).</summary>
@@ -684,7 +684,7 @@ public sealed class DarlingManagedPostgres
     internal ManagedConfWriteResult? LastManagedConfWriteResult { get; private set; }
 
     /// <summary>Whether THIS start ran PostgreSQL on <see cref="ManagedConfFile.LastGoodFileName"/> rather than
-    /// the file <see cref="WriteManagedConfFile"/> just rendered (#4215, lane A1d) — set only in the recovery
+    /// the file <see cref="WriteManagedConfFile"/> just rendered (#4215) — set only in the recovery
     /// branch of <see cref="EnsureManagedConfReadyAsync"/>, the one place that copies the last-good file back
     /// over the rejected one. Reset to false at the top of every <see cref="EnsureManagedConfReadyAsync"/> call
     /// so a later, clean start clears it without a process restart — carried out to the store-settings self-alert
@@ -692,9 +692,9 @@ public sealed class DarlingManagedPostgres
     [SupportedOSPlatform("windows")]
     internal bool LastStartUsedLastGoodManagedConf { get; private set; }
 
-    /// <summary>The #4215/#4336 migration's outcome for THIS start (lane 5c) — null when
+    /// <summary>The #4215/#4336 migration's outcome for THIS start — null when
     /// <see cref="MigrateManagedConfAsync"/> never ran this start (the adopted-listener branch; a Verified
-    /// conf runs Step B instead, #4336 lane 6). Carried out of the bootstrap the same way
+    /// conf runs Step B instead). Carried out of the bootstrap the same way
     /// <see cref="LastManagedConfWriteResult"/> already is.</summary>
     [SupportedOSPlatform("windows")]
     internal ManagedConfMigrationOutcome? LastManagedConfVerification { get; private set; }
@@ -2648,7 +2648,7 @@ public sealed class DarlingManagedPostgres
                reverts and leaves the store exactly as it was. */
             /* #3909: before ANYTHING can start this cluster on PostgreSQL 17 binaries (the upgrade's old-cluster
                start just below, a reverted upgrade's restart, or a plain start of a store still on 17), make
-               sure its conf is one 17 will open. Legacy conf only (#4336 lane 5c): once #4215 has migrated,
+               sure its conf is one 17 will open. Legacy conf only (#4215): once the conf has migrated,
                maintenance_work_mem's value lives in darling-managed.conf, which this heal never touches — a
                migrated store's cap is the render's own job, not this append. */
             if (ManagedConfMigrationState.Classify(_dataDirectory) == ManagedConfMigrationState.Kind.Legacy)
@@ -2689,7 +2689,7 @@ public sealed class DarlingManagedPostgres
             }
         }
 
-        /* #4336 lane 5c, plan decision (c): the classifier reads the conf's own state ONCE, before the
+        /* #4215: the classifier reads the conf's own state ONCE, before the
            legacy appenders can run. Only a Legacy conf (a v-marker present, or the include missing) may
            append — a PendingVerify/Verified/MigratedUnstamped conf already carries the migrated file, and
            EnsureConfAppended appends at the END of postgresql.conf, which would override both the managed
@@ -2767,9 +2767,9 @@ public sealed class DarlingManagedPostgres
         {
             /* #4215: the one service-owned settings file, rendered and validated right before the start it
                takes effect on — never for the adopted-listener branch above, which does not start anything
-               this file could take effect on until the next service-owned start anyway. #4336 lane 5c: skipped
+               this file could take effect on until the next service-owned start anyway. Skipped
                on Legacy (no managed file exists yet — the old blocks are still what's in force) and on
-               PendingVerify (a crash left the migrated files exactly where the last attempt wrote them; A1
+               PendingVerify (a crash left the migrated files exactly where the last attempt wrote them; Step A
                must not re-derive before the stamp exists, or ResumePending's before/after comparison below
                would be comparing against a snapshot the render itself just changed). */
             if (confState == ManagedConfMigrationState.Kind.Verified || confState == ManagedConfMigrationState.Kind.MigratedUnstamped)
@@ -2805,7 +2805,7 @@ public sealed class DarlingManagedPostgres
 
             _startedByThisProcess = true;
 
-            /* #4336 lane 5c: guarded — Legacy and PendingVerify never ran EnsureManagedConfReadyAsync above, so
+            /* Guarded — Legacy and PendingVerify never ran EnsureManagedConfReadyAsync above, so
                darling-managed.conf may not exist yet on this start. Copying a missing file would throw and take
                the whole start down over what SaveLastGoodManagedConf's own doc comment already treats as a
                no-op-worthy failure. */
@@ -2867,7 +2867,7 @@ public sealed class DarlingManagedPostgres
            a network reconcile failure logs + degrades, it does not abort the bootstrap. */
         await ReconcileNetworkAsync(binDirectory, networkPlan.Value, connectionString, cancellationToken);
 
-        /* #4336 lane 5c: only when THIS process started the server — an adopted listener's conf takes effect
+        /* Only when THIS process started the server — an adopted listener's conf takes effect
            on the next service-owned start, same rule EnsureManagedConfReadyAsync above already follows, and
            the migration's own re-snapshot needs a server that is actually up on the files this start wrote. */
         if (_startedByThisProcess)
@@ -2880,8 +2880,8 @@ public sealed class DarlingManagedPostgres
 
     /// <summary>
     /// Runs Step A, resumes a pending Step A, or re-verifies a hand-edited migrated conf — whichever
-    /// <paramref name="confState"/> calls for (#4336 lane 5c, plan decision (c)). <see
-    /// cref="ManagedConfMigrationState.Kind.Verified"/> does nothing here; Step B is #4336 lane 6. Everything
+    /// <paramref name="confState"/> calls for. <see
+    /// cref="ManagedConfMigrationState.Kind.Verified"/> does nothing here; Step B runs separately. Everything
     /// is caught: a migration failure logs and reports, it never throws — the store this start already
     /// brought up must not go down over a verification step (plan (a)).
     /// </summary>
@@ -2953,8 +2953,8 @@ public sealed class DarlingManagedPostgres
 
                 case ManagedConfMigrationState.Kind.MigratedUnstamped:
                 {
-                    /* A hand edit of darling-managed.conf, or a crash inside Step B (#4336 lane 6's problem to
-                       distinguish further — here, both look the same: migrated, no pending file, stale stamp).
+                    /* A hand edit of darling-managed.conf, or a crash inside Step B — those two cases look the
+                       same here: migrated, no pending file, stale stamp.
                        Re-verify against what is on disk NOW: no new error row may come from darling-managed.conf
                        relative to the file's own current bytes — the file itself is the ground truth once no
                        pending snapshot survives to compare against. */
@@ -2994,7 +2994,7 @@ public sealed class DarlingManagedPostgres
 
                 case ManagedConfMigrationState.Kind.Verified:
                 {
-                    /* Step B (#4336 lane 6): only when this start's own WriteManagedConfFile call actually
+                    /* Step B: only when this start's own WriteManagedConfFile call actually
                        wrote a new darling-managed.conf does it have a previous text and the RenderInputs to
                        verify against; a start that found the same bytes already in force has nothing to do. */
                     if (LastManagedConfWriteResult is not { Written: true, PreviousText: var previousText, Inputs: { } inputs })
@@ -3052,7 +3052,7 @@ public sealed class DarlingManagedPostgres
         }
     }
 
-    /// <summary>Logs a <see cref="MigrateManagedConfAsync"/> outcome once (#4336 lane 5c): Information for a
+    /// <summary>Logs a <see cref="MigrateManagedConfAsync"/> outcome once: Information for a
     /// clean Verified, Warning for Failed or Unknown — naming the backup path and the mismatched keys so an
     /// operator has somewhere to look.</summary>
     [SupportedOSPlatform("windows")]
@@ -3680,7 +3680,7 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// Test-only seam (#4215, live-test lane A1c): when the CURRENT async flow sets this, <see
+    /// Test-only seam (#4215): when the CURRENT async flow sets this, <see
     /// cref="WriteManagedConfFile"/> applies it to the freshly rendered text before hand-edit detection or
     /// writing — so a live test can prove the rejected-value / last-good fallback path without depending on a
     /// real bug to produce a bad render. <c>AsyncLocal</c>, not a plain static field: its value flows only with
@@ -3694,8 +3694,8 @@ public sealed class DarlingManagedPostgres
 
     /// <summary>
     /// Renders and, unless the file on disk is a hand edit (<see cref="ManagedConfFile.IsHandEdited"/>) or the
-    /// render is already byte-identical to it, replaces <c>darling-managed.conf</c> (design step 1). Always
-    /// ensures the <c>include</c> line is present in <c>postgresql.conf</c> (review L5 — there is no opt-out)
+    /// render is already byte-identical to it, replaces <c>darling-managed.conf</c>. Always
+    /// ensures the <c>include</c> line is present in <c>postgresql.conf</c> — there is no opt-out —
     /// whichever branch it takes. Never throws: an I/O failure is reported in the result and the file already
     /// in force stays in force, exactly like a failed <see cref="EnsureConfAppended"/> append would today.
     /// </summary>
@@ -3765,8 +3765,8 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// Appends <see cref="ManagedConfFile.IncludeLine"/> to <c>postgresql.conf</c> when it is missing (review
-    /// L5): there is no opt-out, so an operator who removes it gets it back, with a warning, on the next start.
+    /// Appends <see cref="ManagedConfFile.IncludeLine"/> to <c>postgresql.conf</c> when it is missing.
+    /// There is no opt-out, so an operator who removes it gets it back, with a warning, on the next start.
     /// A present include in any form PostgreSQL itself would parse the same way
     /// (<see cref="ManagedConfFile.HasManagedInclude"/>) is left exactly where it is — never moved, never
     /// duplicated.
@@ -3787,7 +3787,7 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// The <c>postgres -C</c> validation (design step 2, review H1 items 1 and 5, L1): parses every
+    /// The <c>postgres -C</c> validation: parses every
     /// configuration file this data directory's postgresql.conf reaches, <c>darling-managed.conf</c> included,
     /// and exits without starting a postmaster. <c>-C</c> FIRST is load-bearing: PostgreSQL only skips its
     /// "refuses to run as an administrator" check when <c>-C</c> is the very first argument, and this service
@@ -3804,7 +3804,7 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// The recovery message for a rejected <c>darling-managed.conf</c> (design step 2, review H1 item 5): names
+    /// The recovery message for a rejected <c>darling-managed.conf</c>: names
     /// the two ways an operator can fix a value the product's own formula got wrong for this host — a line
     /// after the include in <c>postgresql.conf</c>, or <c>ALTER SYSTEM</c> once a store is running on it.
     /// </summary>
@@ -3816,7 +3816,7 @@ public sealed class DarlingManagedPostgres
     /// <summary>
     /// Everything <see cref="EnsureRunningAsync"/> needs before it can start a server on this data directory
     /// (#4215): render/write the managed file, validate it, and fall back to the last file that started
-    /// cleanly (design step 2, review H1 items 1, 2 and 5) rather than repeat a start failure forever. Runs
+    /// cleanly rather than repeat a start failure forever. Runs
     /// only on the service-owned start path — see the caller; the adopted-listener path never calls this.
     /// </summary>
     [SupportedOSPlatform("windows")]
