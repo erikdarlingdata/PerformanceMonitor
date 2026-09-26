@@ -1667,7 +1667,10 @@ public sealed class AlertEngine
                        context (the #1136 low-disk grading path) while Darling's deliverer folds the outcome's
                        in only when the context has none (#2090); setting both makes the two agree by
                        construction on both SKUs. */
-                    var poisonContext = new AlertContext { SeverityOverride = worst.Severity };
+                    /* #4223: the worst-graded wait type as structured data, the same value the mute
+                       context above already keys on — an alert-notebook reader can branch on it without
+                       parsing the detail heading or the prose. */
+                    var poisonContext = new AlertContext { SeverityOverride = worst.Severity, WaitType = worst.WaitType };
                     foreach (var finding in findings)
                     {
                         poisonContext.Details.Add(new AlertDetailItem

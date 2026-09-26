@@ -75,6 +75,17 @@ public class AlertContext
     /// this records whether the fan-out was allowed to run at all, one decision upstream of it.</para>
     /// </summary>
     public AlertRoutingDto? Routing { get; set; }
+
+    /// <summary>
+    /// The wait type this firing is ABOUT (#4223 Poison Wait notebook), as structured data rather than
+    /// something a reader has to regex out of <see cref="Details"/>'s prose heading or <c>DetailText</c>.
+    /// Set by the Poison Wait fire sites on both engines — the SQL Server evaluator's worst-graded
+    /// <c>WaitType</c>, the PostgreSQL evaluator's <c>Subject</c> (its own <c>type:event</c> display string,
+    /// e.g. <c>"IPC:BtreePage"</c>) — the same value each engine's mute context already keys on
+    /// (<c>AlertMuteContext.WaitType</c>). Null on every other alert and on any row written before this
+    /// member existed.
+    /// </summary>
+    public string? WaitType { get; set; }
 }
 
 /// <summary>
@@ -307,7 +318,10 @@ public record AlertContextDto(
     List<AlertIncidentDto>? Incidents = null,
     [property: JsonConverter(typeof(JsonStringEnumConverter))] AlertSeverityLevel? Severity = null,
     AlertRouteDto? Route = null,
-    AlertRoutingDto? Routing = null);
+    AlertRoutingDto? Routing = null,
+    /* #4223 Poison Wait: trailing and nullable like Route/Routing, so a row written before this member
+       existed rehydrates to null ("this row carries no wait type") rather than a fabricated value. */
+    string? WaitType = null);
 
 /// <summary>
 /// The persisted routing DECISION for an analysis finding (#3712): trailing and nullable on
@@ -595,8 +609,39 @@ public static class AlertContextSerializer
             /* #3598: where the posts went. Already the persisted shape, so it rides through as-is. */
             context.Route,
             /* #3712: whether the fan-out was allowed to run, and why. Already the persisted shape. */
-            context.Routing);
+            context.Routing,
+            /* #4223: the wait type this firing is about, as structured data. Already the persisted shape. */
+            context.WaitType);
         return JsonSerializer.Serialize(dto);
+    }
+
+    /// <summary>
+    /// The wait type a persisted alert-history row carries (#4223 Poison Wait notebook), or <c>null</c> when
+    /// it carries none — any non-Poison-Wait alert, a row written before the member existed, or unparseable
+    /// JSON. Reads the one property rather than rehydrating the whole context, for the reason
+    /// <see cref="TryReadRoute"/> gives.
+    /// </summary>
+    public static string? TryReadWaitType(string? contextJson)
+    {
+        if (string.IsNullOrWhiteSpace(contextJson))
+            return null;
+
+        try
+        {
+            using var document = JsonDocument.Parse(contextJson);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(nameof(AlertContextDto.WaitType), out var waitType)
+                || waitType.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            return waitType.GetString();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -778,6 +823,10 @@ public static class AlertContextSerializer
 
             /* #3712: the corroboration gate's decision, null on engine alerts and pre-#3712 rows. */
             context.Routing = dto.Routing;
+
+            /* #4223: the wait type this firing is about, null on every non-Poison-Wait alert and every row
+               written before this member existed. */
+            context.WaitType = dto.WaitType;
 
             foreach (var d in dto.Details)
             {

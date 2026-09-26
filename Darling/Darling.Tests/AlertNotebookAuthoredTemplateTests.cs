@@ -240,6 +240,10 @@ public sealed class AlertNotebookAuthoredTemplateTests
                     $"authored read cell names a barred read: {read}");
 
                 var parameters = Assert.IsType<JsonObject>(cell["params"]);
+                /* Data-driven off the endpoint's OWN limitless-read set (#4223) rather than one hardcoded
+                   name, so a new bucketed/no-limit read (get_wait_trend, get_memory_grants,
+                   get_resource_semaphore) is covered the moment its family adds a row -- nothing here has
+                   to change. */
                 if (AlertNotebookEndpoint.s_authoredLimitlessTrendReads.Contains(read))
                 {
                     Assert.False(parameters.ContainsKey("limit"), $"{read} must not carry a limit param");

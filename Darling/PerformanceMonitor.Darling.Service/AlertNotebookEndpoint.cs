@@ -396,6 +396,8 @@ internal static partial class AlertNotebookEndpoint
             new AuthoredTemplateEntry("authored/cpu", CpuTemplateVersion, BuildCpuCells)),
         (new[] { "Long-Running Query" },
             new AuthoredTemplateEntry("authored/long-running-query", LongRunningQueryTemplateVersion, BuildLongRunningQueryCells)),
+        (new[] { "Poison Wait" },
+            new AuthoredTemplateEntry("authored/poison-wait", PoisonWaitTemplateVersion, BuildPoisonWaitCells)),
         (new[] { "PostgreSQL Replication Slot Retention" },
             new AuthoredTemplateEntry("authored/pg-replication-slot", PgReplicationSlotTemplateVersion, BuildPgReplicationSlotCells)),
         (new[] { "PostgreSQL Vacuum Horizon Blocked" },
@@ -455,6 +457,12 @@ internal static partial class AlertNotebookEndpoint
     internal static readonly IReadOnlySet<string> s_authoredLimitlessTrendReads = new HashSet<string>(StringComparer.Ordinal)
     {
         "get_deadlock_trend",
+        /* #4223 Poison Wait: get_wait_trend has a bucket-count budget, not a row cap (PReqText("wait_type")
+           with no PLimit). get_memory_grants and get_resource_semaphore declare no limit param at all
+           (DarlingWebEndpoints.CatalogDescriptors). */
+        "get_wait_trend",
+        "get_memory_grants",
+        "get_resource_semaphore",
         /* #4223: get_top_queries_by_cpu / get_top_procedures_by_cpu / get_cpu_scheduler_pressure declare no
            'limit' param at all -- the first two cap with 'top' (carried explicitly below), the last has no
            row cap to carry. */
