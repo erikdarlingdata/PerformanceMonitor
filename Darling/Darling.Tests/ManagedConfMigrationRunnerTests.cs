@@ -563,7 +563,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Contains("min_wal_size = '2048MB'", managedText, StringComparison.Ordinal);
     }
 
-    /// <summary>Pin (nightly-473, #4336): a carried <c>maintenance_work_mem</c> — present in the BEFORE
+    /// <summary>Pin (#4336): a carried <c>maintenance_work_mem</c> — present in the BEFORE
     /// snapshot at a pre-#3909 <c>2048MB</c>, which this render does not itself derive (v7's own value is
     /// smaller here) — goes through the same <c>NeedsLegacyMaintenanceWorkMemCap</c> predicate
     /// <see cref="ManagedConfFile.RenderBody"/>'s v14 block uses, so PostgreSQL 17 never receives an
