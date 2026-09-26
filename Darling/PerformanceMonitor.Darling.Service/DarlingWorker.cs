@@ -7117,12 +7117,12 @@ AND   j.hypertable_name = '{relation}'", connection))
                     continue;
                 }
 
-                var ran = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, logger, cancellationToken);
-                if (!ran)
+                var outcome = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, logger, cancellationToken);
+                if (!outcome.Ran)
                 {
                     logger.LogInformation(
-                        "Raw retention purge for {Relation} did not run this pass — the run itself failed (see the warning above naming the timeout or error).",
-                        relation);
+                        "Raw retention purge for {Relation} did not run this pass — the run itself failed with SqlState {SqlState} (see the warning above naming the timeout or error).",
+                        relation, outcome.SqlState ?? "(none)");
                 }
                 else
                 {

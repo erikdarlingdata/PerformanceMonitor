@@ -105,10 +105,17 @@ VALUES (-1, now() - interval '30 days', 1, 'probe-server', 'ProbeDb', '0xPROBEHA
             }
 
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
-            var result = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, null, default);
+            var outcome = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, null, default);
             stopwatch.Stop();
 
-            Assert.False(result, "a run blocked behind a conflicting lock must fail (and be retried the next pass), not succeed");
+            Assert.False(outcome.Ran, "a run blocked behind a conflicting lock must fail (and be retried the next pass), not succeed");
+            /* #4299 lane 4299-2e: the FIX for a real bug in this same file's original assertion. Before this
+               lane, RunRetentionPurgeJobSql sent BEGIN/SET LOCAL/CALL/COMMIT as ONE NpgsqlCommand, which
+               Npgsql's positional-parameter mode always rejects with 42601 "cannot insert multiple commands
+               into a prepared statement" — so this test passed on EVERY run, blocked or not, because it only
+               ever checked the bool and the elapsed time, and 42601 fails fast too. Asserting the SqlState
+               pins the REAL reason: a lock timeout, not a syntax error the CALL never reached. */
+            Assert.Equal("55P03", outcome.SqlState);
             Assert.True(
                 stopwatch.Elapsed < TimeSpan.FromSeconds(20),
                 $"run_job took {stopwatch.Elapsed.TotalSeconds:F1}s to fail — lock_timeout is not bounding it inside run_job " +
@@ -133,6 +140,77 @@ VALUES (-1, now() - interval '30 days', 1, 'probe-server', 'ProbeDb', '0xPROBEHA
                 await locker.DisposeAsync();
             }
 
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                var batch = new LiveCleanupBatch(cleanup);
+                await batch.RemoveRetentionPolicyAsync(Raw, cleanupCt);
+            });
+
+            await connection.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// #4299 lane 4299-2e: the success path — NEVER shown passing before this lane, since the original
+    /// one-command SQL always raised 42601 and <see cref="TimescaleSupport.RunRetentionPurgeJobAsync"/>
+    /// swallowed it into <c>false</c> every time, blocked or not. Unblocked, with a chunk older than
+    /// <c>drop_after</c>: the CALL must actually run and the chunk must actually drop.
+    /// </summary>
+    [Fact]
+    public async Task RunRetentionPurgeJob_Unblocked_RunsAndDropsTheOldChunk()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4299 purge-success probe.");
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, default);
+        var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync();
+        await PgMigrations.MigrateAsync(connection, default);
+
+        var enabled = await TimescaleSupport.TryEnableAsync(connection, null, default);
+        Assert.SkipWhen(!enabled, "The live #4299 purge-success probe needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, default);
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection) { CommandTimeout = SetupTimeoutSeconds })
+        {
+            await stop.ExecuteNonQueryAsync();
+        }
+
+        var bodySucceeded = false;
+        try
+        {
+            await using (var seed = new NpgsqlCommand(@"
+INSERT INTO collect.query_stats
+    (collection_id, collection_time, server_id, server_name, database_name, query_hash, sql_handle,
+     delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
+VALUES (-1, now() - interval '30 days', 1, 'probe-server', 'ProbeDb', '0xPROBEHASH', '0xPROBEHANDLE', 0, 0, 0, 0)", connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                await seed.ExecuteNonQueryAsync();
+            }
+
+            long jobId;
+            await using (var arm = new NpgsqlCommand(
+                "SELECT add_retention_policy('collect.query_stats', drop_after => interval '7 days') AS job_id", connection) { CommandTimeout = SetupTimeoutSeconds })
+            {
+                jobId = (long)(int)(await arm.ExecuteScalarAsync())!;
+            }
+
+            var beforeChunks = await CountChunksAsync(connection);
+            Assert.True(beforeChunks > 0, "the seed row must have created at least one chunk for run_job to have something to drop");
+
+            var outcome = await TimescaleSupport.RunRetentionPurgeJobAsync(connection, jobId, null, default);
+
+            Assert.True(outcome.Ran, $"the unblocked run must succeed; SqlState={outcome.SqlState ?? "(none)"}");
+            Assert.Null(outcome.SqlState);
+
+            var afterChunks = await CountChunksAsync(connection);
+            Assert.True(afterChunks < beforeChunks, $"the old chunk must have been dropped: before={beforeChunks}, after={afterChunks}");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
             {
                 var batch = new LiveCleanupBatch(cleanup);

@@ -6177,35 +6177,73 @@ AND   j.config->>'darling_repair_epoch' IS NOT NULL";
     private const int RunRetentionPurgeJobTimeoutSeconds = SetupTimeoutSeconds;
 
     /// <summary>
-    /// #4299 (d′): the service's own trigger for a raw retention job, run ONLY from the hourly Periodic pass
-    /// (never Startup — PostgreSQL's own start-time run of an overdue scheduled job is exactly the race this
-    /// design takes the raw jobs off the scheduler to avoid; see <see cref="ConvergeRawArmedStateSql"/>).
-    /// Wrapped in its own transaction with a short <see cref="RunRetentionPurgeJobLockTimeout"/>
-    /// <c>lock_timeout</c> — proven live (#4299 lane 4299-1c) to apply INSIDE <c>run_job</c>, not just around
-    /// it: a run blocked on the target hypertable's chunk lock raises <c>55P03 lock_not_available</c> at the
-    /// bound instead of holding the lock request indefinitely. <c>$1</c> is the job's own <c>job_id</c>
-    /// (<see cref="RawArmedStateSql"/>'s caller already has it from the same catalog read).
-    ///
-    /// <para>A lock-timeout failure aborts the statement's own explicit transaction before reaching
-    /// <c>COMMIT</c> (same shape <see cref="PgTableTuning.GuardedDrop"/> documents for its guarded DROP), so
-    /// the caller (<see cref="RunRetentionPurgeJobAsync"/>) issues a best-effort <c>ROLLBACK</c> on every
-    /// caught failure — proven on the rig: the connection recovers and the next statement on it succeeds.</para>
+    /// #4299 lane 4299-2e: the SET LOCAL statement alone, run as the first statement inside the explicit
+    /// transaction opened by <see cref="RunRetentionPurgeJobAsync"/>, which the following paragraph
+    /// explains applies the SAME <see cref="RunRetentionPurgeJobLockTimeout"/> bound the rig proved (#4299
+    /// lane 4299-1c) works INSIDE <c>run_job</c>, not just around it: a blocked run raises
+    /// <c>55P03 lock_not_available</c> at this bound, aborting the transaction before <c>COMMIT</c> (same
+    /// shape <see cref="PgTableTuning.GuardedDrop"/> documents for its guarded DROP), so
+    /// <see cref="RunRetentionPurgeJobAsync"/> issues a best-effort <c>ROLLBACK</c> on every caught failure
+    /// — proven on the rig: the connection recovers and the next statement on it succeeds. Split out from the CALL because
+    /// Npgsql's default (extended-protocol, positional-parameter) command mode rejects more than one
+    /// statement in a single <see cref="NpgsqlCommand"/> with <c>42601 "cannot insert multiple commands
+    /// into a prepared statement"</c> — proven on the rig (lane 4299-2e): the original one-command
+    /// <c>BEGIN; SET LOCAL ...; CALL run_job($1::integer); COMMIT;</c> shape never once executed the CALL;
+    /// <see cref="RunRetentionPurgeJobAsync"/> caught the 42601 every time and returned <c>false</c>, so the
+    /// service-triggered raw purge could never succeed and the existing lock-timeout pin passed on the wrong
+    /// exception. <c>SET LOCAL</c> (not session-level <c>SET</c>) so the timeout cannot outlive this
+    /// method's own <see cref="NpgsqlTransaction"/> even if the CALL throws before COMMIT.
     /// </summary>
-    public const string RunRetentionPurgeJobSql =
-        "BEGIN; SET LOCAL lock_timeout = '" + RunRetentionPurgeJobLockTimeout + "'; CALL run_job($1::integer); COMMIT;";
+    private const string RunRetentionPurgeJobSetLocalSql = "SET LOCAL lock_timeout = '" + RunRetentionPurgeJobLockTimeout + "'";
+
+    /// <summary>
+    /// #4299 lane 4299-2e: the CALL alone, as its own <see cref="NpgsqlCommand"/> — see
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/> for why this had to split out of the original combined
+    /// text. <c>$1</c> is still the job's own <c>job_id</c> (<see cref="RawArmedStateSql"/>'s caller already
+    /// has it from the same catalog read).
+    /// </summary>
+    public const string RunRetentionPurgeJobSql = "CALL run_job($1::integer)";
+
+    /// <summary>
+    /// #4299 lane 4299-2e: why the CALL did not fail — <see cref="RunRetentionPurgeJobAsync"/>'s success
+    /// case — carries no reason, but the FAILURE case needs one so a pin can tell a lock timeout
+    /// (<c>55P03 lock_not_available</c>, the safe, expected, retry-next-pass case this design bounds for)
+    /// apart from anything else going wrong, including a regression back to the 42601 the original shape
+    /// always raised. <paramref name="SqlState"/> is PostgreSQL's own five-character SQLSTATE
+    /// (<see cref="PostgresException.SqlState"/>) when the failure was a <see cref="PostgresException"/>,
+    /// and <c>null</c> for anything else (a cancellation is never reached here; anything else is Npgsql's
+    /// own plumbing, not the server's).
+    /// </summary>
+    public sealed record RetentionPurgeOutcome(bool Ran, string? SqlState);
 
     /// <summary>
     /// Runs <see cref="RunRetentionPurgeJobSql"/> for <paramref name="jobId"/> — the service triggering ITS
     /// OWN raw purge under variant (d′), from the hourly Periodic pass only. A timeout or any other failure
     /// is logged at Warning and swallowed, never thrown: the caller's contract is "try once, report the
     /// outcome", and the NEXT hourly pass is the retry — there is no reason to crash a pass over one purge
-    /// that can wait an hour. Returns true only when the CALL completed inside both bounds.
+    /// that can wait an hour. Returns <see cref="RetentionPurgeOutcome.Ran"/> true only when the CALL
+    /// completed inside both bounds.
     ///
-    /// <para>Does not decide WHETHER to run — that is the Periodic trigger's job (a fresh Covered verdict, a
-    /// repair finished under the current <c>pg_postmaster_start_time()</c>, no hole in the range about to be
-    /// dropped). This method only executes the CALL once told to and reports what happened.</para>
+    /// <para><b>#4299 lane 4299-2e: an explicit <see cref="NpgsqlTransaction"/>, not the one-command SQL
+    /// text this used to be.</b> Proven on the rig with psql, unblocked, before this change: <c>BEGIN; SET
+    /// LOCAL lock_timeout = '5s'; CALL run_job(&lt;id&gt;); COMMIT;</c> succeeds and drops the target chunk —
+    /// a procedure invoked through <c>CALL</c> whose own internal <c>COMMIT</c> is fine inside an ordinary
+    /// transaction block (a procedure that COMMITs internally only errors with "invalid transaction
+    /// termination" when called INSIDE an already-open multi-statement block started by something other
+    /// than a plain top-level <c>CALL</c> — not this shape). Npgsql's positional-parameter mode just cannot
+    /// send <c>BEGIN; SET LOCAL; CALL; COMMIT;</c> as ONE command (42601, see
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/>), so this method opens the SAME three statements as an
+    /// <see cref="NpgsqlTransaction"/> instead: <see cref="NpgsqlConnection.BeginTransactionAsync"/>, then
+    /// <see cref="RunRetentionPurgeJobSetLocalSql"/> as its own parameterless command, then
+    /// <see cref="RunRetentionPurgeJobSql"/> with <paramref name="jobId"/> bound, then
+    /// <c>CommitAsync</c>.</para>
+    ///
+    /// <para>Returns a <see cref="RetentionPurgeOutcome"/> rather than a bare bool (#4299 lane 4299-2e) so
+    /// the caller can log WHY a run did not happen — in particular so a pin can assert the lock-timeout case
+    /// really is <c>55P03 lock_not_available</c> and not any other failure, including a regression back to
+    /// the 42601 the original one-command shape always raised.</para>
     /// </summary>
-    public static async Task<bool> RunRetentionPurgeJobAsync(
+    public static async Task<RetentionPurgeOutcome> RunRetentionPurgeJobAsync(
         NpgsqlConnection connection, long jobId, ILogger? logger, CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -6213,23 +6251,44 @@ AND   j.config->>'darling_repair_epoch' IS NOT NULL";
             throw new ArgumentNullException(nameof(connection));
         }
 
+        NpgsqlTransaction? transaction = null;
         try
         {
-            using var command = new NpgsqlCommand(RunRetentionPurgeJobSql, connection) { CommandTimeout = RunRetentionPurgeJobTimeoutSeconds };
-            command.Parameters.AddWithValue(jobId);
-            await command.ExecuteNonQueryAsync(cancellationToken);
-            return true;
+            transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+            using (var setLocal = new NpgsqlCommand(RunRetentionPurgeJobSetLocalSql, connection, transaction) { CommandTimeout = RunRetentionPurgeJobTimeoutSeconds })
+            {
+                await setLocal.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            using (var call = new NpgsqlCommand(RunRetentionPurgeJobSql, connection, transaction) { CommandTimeout = RunRetentionPurgeJobTimeoutSeconds })
+            {
+                call.Parameters.AddWithValue(jobId);
+                await call.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
+            return new RetentionPurgeOutcome(Ran: true, SqlState: null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            var sqlState = (ex as PostgresException)?.SqlState;
+
             logger?.LogWarning(
-                "Raw retention purge job {JobId} did not complete (lock_timeout={LockTimeout}, CommandTimeout={CommandTimeout}s) — the next hourly pass retries it: {Message}",
-                jobId, RunRetentionPurgeJobLockTimeout, RunRetentionPurgeJobTimeoutSeconds, ex.Message);
+                "Raw retention purge job {JobId} did not complete (lock_timeout={LockTimeout}, CommandTimeout={CommandTimeout}s, SqlState={SqlState}) — the next hourly pass retries it: {Message}",
+                jobId, RunRetentionPurgeJobLockTimeout, RunRetentionPurgeJobTimeoutSeconds, sqlState ?? "(none)", ex.Message);
 
             try
             {
-                using var rollback = new NpgsqlCommand("ROLLBACK", connection) { CommandTimeout = SetupTimeoutSeconds };
-                await rollback.ExecuteNonQueryAsync(cancellationToken);
+                if (transaction is not null)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                }
+                else
+                {
+                    using var rollback = new NpgsqlCommand("ROLLBACK", connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await rollback.ExecuteNonQueryAsync(cancellationToken);
+                }
             }
             catch (Exception rollbackEx) when (rollbackEx is not OperationCanceledException)
             {
@@ -6239,7 +6298,14 @@ AND   j.config->>'darling_repair_epoch' IS NOT NULL";
                 logger?.LogWarning("ROLLBACK after a failed raw retention purge job {JobId} also failed: {Message}", jobId, rollbackEx.Message);
             }
 
-            return false;
+            return new RetentionPurgeOutcome(Ran: false, SqlState: sqlState);
+        }
+        finally
+        {
+            if (transaction is not null)
+            {
+                await transaction.DisposeAsync();
+            }
         }
     }
 
