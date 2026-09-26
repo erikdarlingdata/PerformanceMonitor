@@ -82,10 +82,17 @@ public sealed class ViewerBlockingTrendBucketingSqlTests
         /* Blocked-session count is a PER-SNAPSHOT gauge, not a delta: the pre-bucket per_collection CTE
            keeps the un-bucketed read's own COUNT(*) per (collection, database), and the outer query
            AVERAGES that across the collections a bucket merges — a plain COUNT(*)/SUM over the merged
-           rows would double- (or N-tuple-) count purely because a wide bucket merged N snapshots. */
+           rows would double- (or N-tuple-) count purely because a wide bucket merged N snapshots. The
+           inner per_collection CTE legitimately keeps its own COUNT(*) AS blocked_count (that's the
+           per-snapshot count being averaged); what must never sum is the OUTER select, so this pins the
+           outer query's text specifically rather than the whole SQL string. */
         Assert.Contains("per_collection", sql, StringComparison.Ordinal);
         Assert.Contains("CAST(ROUND(AVG(blocked_count)) AS bigint) AS blocked_count", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("COUNT(*) AS blocked_count", sql, StringComparison.Ordinal);
+
+        var outerSelectStart = sql.IndexOf(")\n        SELECT", StringComparison.Ordinal);
+        Assert.True(outerSelectStart > 0, "expected to find the outer SELECT after the per_collection CTE closes");
+        var outerSelect = sql[outerSelectStart..];
+        Assert.DoesNotContain("COUNT(*) AS blocked_count", outerSelect, StringComparison.Ordinal);
     }
 }
 
