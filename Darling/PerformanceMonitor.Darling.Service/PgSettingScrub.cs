@@ -96,6 +96,27 @@ public static class PgSettingScrub
     /// keeps each UPDATE's key-array small. See the type remarks for why a day is the outer grouping.</summary>
     internal const int MaxKeysPerUpdate = 500;
 
+    /// <summary>When one (server, day) group's coarse candidate count passes this, the day is processed as
+    /// 24 hour slices of <c>collection_time</c> instead of one range covering the whole day. The type remarks'
+    /// own estimate puts an hourly-cadence day at about 8,000 candidate rows and a 1-minute-cadence day at
+    /// about 500,000; this threshold sits comfortably above the former and well below the latter, so normal
+    /// cadences take the single-range path and only a materially faster cadence — the one that risks a
+    /// day's first UPDATE decompressing enough of the chunk to run past <see cref="UpdateBatchTimeoutSeconds"/>
+    /// — gets sliced. Slicing bounds how much of the day's compressed segment any one transaction touches,
+    /// so a restart after a mid-day failure resumes at the next unfinished hour rather than re-attempting the
+    /// whole day's decompression from scratch.</summary>
+    internal const int HourSliceCandidateThreshold = 20_000;
+
+    /// <summary>Test-only seam: when set, overrides <see cref="UpdateBatchTimeoutSeconds"/> for the UPDATE
+    /// command (not the SET LOCAL) so a live test can force a client-side command timeout without needing a
+    /// data volume that would actually run 60 seconds.</summary>
+    internal static int? TestOnlyUpdateCommandTimeoutSecondsOverride;
+
+    /// <summary>Test-only seam: invoked once after each slice's UPDATE batch commits, so a live test can force
+    /// a mid-day failure after a chosen number of slices have already committed, to prove the ones already
+    /// done stay done across a restart.</summary>
+    internal static Action? TestOnlyAfterSliceCommitted;
+
     /// <summary>What one run of the scrub found and did, for the caller's summary log line.</summary>
     public sealed class Summary
     {
@@ -293,11 +314,58 @@ AND   t.server_id = $11";
             var dayUpdated = 0;
             try
             {
-                for (var i = 0; i < changed.Count; i += MaxKeysPerUpdate)
+                if (dayCandidates.Count > HourSliceCandidateThreshold)
                 {
-                    var take = Math.Min(MaxKeysPerUpdate, changed.Count - i);
-                    dayUpdated += await RunBatchAsync(
-                        connection, changed, newSettings, newBootVals, newResetVals, i, take, day, serverId, cancellationToken);
+                    /* One slice per hour of collection_time within this day, each its own transaction with
+                       its own literal [start, end) bound alongside the constant server_id predicate. A slice
+                       whose changed set is still large gets MaxKeysPerUpdate sub-batching same as the
+                       single-range path below. Candidate selection already finds only unredacted rows (the
+                       coarse ILIKE filter plus PgSettingRedactor.Redact's own comparison to the original), so
+                       a restart's candidate read never re-selects a slice's rows once they are redacted —
+                       there is nothing there for it to find. */
+                    for (var hour = 0; hour < 24; hour++)
+                    {
+                        var sliceStart = day.AddHours(hour);
+                        var sliceEnd = sliceStart.AddHours(1);
+                        var sliceChanged = new List<CandidateRow>();
+                        var sliceSettings = new List<string?>();
+                        var sliceBootVals = new List<string?>();
+                        var sliceResetVals = new List<string?>();
+                        for (var k = 0; k < changed.Count; k++)
+                        {
+                            if (changed[k].CollectionTime >= sliceStart && changed[k].CollectionTime < sliceEnd)
+                            {
+                                sliceChanged.Add(changed[k]);
+                                sliceSettings.Add(newSettings[k]);
+                                sliceBootVals.Add(newBootVals[k]);
+                                sliceResetVals.Add(newResetVals[k]);
+                            }
+                        }
+
+                        if (sliceChanged.Count == 0)
+                        {
+                            continue;
+                        }
+
+                        for (var i = 0; i < sliceChanged.Count; i += MaxKeysPerUpdate)
+                        {
+                            var take = Math.Min(MaxKeysPerUpdate, sliceChanged.Count - i);
+                            dayUpdated += await RunBatchAsync(
+                                connection, sliceChanged, sliceSettings, sliceBootVals, sliceResetVals, i, take,
+                                sliceStart, sliceEnd, serverId, cancellationToken);
+                        }
+
+                        TestOnlyAfterSliceCommitted?.Invoke();
+                    }
+                }
+                else
+                {
+                    for (var i = 0; i < changed.Count; i += MaxKeysPerUpdate)
+                    {
+                        var take = Math.Min(MaxKeysPerUpdate, changed.Count - i);
+                        dayUpdated += await RunBatchAsync(
+                            connection, changed, newSettings, newBootVals, newResetVals, i, take, day, day.AddDays(1), serverId, cancellationToken);
+                    }
                 }
             }
             catch (NpgsqlException ex)
@@ -354,7 +422,8 @@ AND   t.server_id = $11";
 
     private static async Task<int> RunBatchAsync(
         NpgsqlConnection connection, List<CandidateRow> changed, List<string?> newSettings, List<string?> newBootVals,
-        List<string?> newResetVals, int offset, int count, DateTime day, int serverId, CancellationToken cancellationToken)
+        List<string?> newResetVals, int offset, int count, DateTime rangeStart, DateTime rangeEnd, int serverId,
+        CancellationToken cancellationToken)
     {
         var serverIds = new int[count];
         var times = new DateTime[count];
@@ -405,7 +474,10 @@ AND   t.server_id = $11";
             await setLocal.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var update = new NpgsqlCommand(BatchUpdateSql, connection, transaction) { CommandTimeout = UpdateBatchTimeoutSeconds };
+        await using var update = new NpgsqlCommand(BatchUpdateSql, connection, transaction)
+        {
+            CommandTimeout = TestOnlyUpdateCommandTimeoutSecondsOverride ?? UpdateBatchTimeoutSeconds,
+        };
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = serverIds });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = times });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = names });
@@ -414,10 +486,11 @@ AND   t.server_id = $11";
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = settings });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = bootVals });
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = resetVals });
-        /* The literal day range is what lets TimescaleDB exclude every chunk but this one — see the type
-           remarks. Redundant with the join equality on collection_time, and load-bearing anyway. */
-        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day });
-        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = day.AddDays(1) });
+        /* The literal range is what lets TimescaleDB exclude every chunk but this one — see the type
+           remarks. Redundant with the join equality on collection_time, and load-bearing anyway. A slice
+           passes its own [start, end) hour bound here; the single-range path passes the whole day. */
+        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = rangeStart });
+        update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = rangeEnd });
         /* The constant server_id predicate is what lets TimescaleDB exclude every other server's segment in
            this day's chunk — see the H1 fix note above RunAsync's grouping. */
         update.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
