@@ -683,12 +683,17 @@ public sealed class FrozenRollupLiveTests
                OLDER and a NEWER hour, leaving a hole in between, then refresh only the newer one — the
                classic interior hole an outage under HourlyRefreshStartOffset opens. */
             var older = D0.AddDays(3);
+            var hole = older.AddHours(1);
             var newer = older.AddHours(3);
 
+            /* The hole bucket gets its OWN source row — a hole is "no materialized bucket AND the source still
+               admits a row there" (MaterializationHoleScanSql); a bucket with no source row at all is not a
+               hole under that definition, it is legitimately empty, so the fixture has to seed it. */
             await InsertQueryStatsAsync(connection, older, "interior_older", 900, 9, 3600, ct);
+            await InsertQueryStatsAsync(connection, hole, "interior_hole", 900, 9, 3600, ct);
             await InsertQueryStatsAsync(connection, newer, "interior_newer", 900, 9, 3600, ct);
 
-            await RefreshAsync(connection, TimescaleSupport.QueryStatsBaselineView, older.AddHours(-1), older, ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsBaselineView, older, older.AddHours(1), ct);
             await RefreshAsync(connection, TimescaleSupport.QueryStatsBaselineView, newer, newer.AddHours(1), ct);
 
             var seamOnly = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, newer.AddHours(2), ct);
@@ -696,7 +701,7 @@ public sealed class FrozenRollupLiveTests
 
             await using (var holeCheck = new NpgsqlCommand($"SELECT count(*) FROM collect.{TimescaleSupport.QueryStatsBaselineView} WHERE bucket = $1", connection))
             {
-                holeCheck.Parameters.AddWithValue(DateTime.SpecifyKind(older.AddHours(1), DateTimeKind.Unspecified));
+                holeCheck.Parameters.AddWithValue(DateTime.SpecifyKind(hole, DateTimeKind.Unspecified));
                 var stillAHole = Convert.ToInt64(await holeCheck.ExecuteScalarAsync(ct)) == 0;
                 Assert.True(stillAHole, "the seam-only repair must not touch an ordinary interior hole on a non-legacy-paired target");
             }

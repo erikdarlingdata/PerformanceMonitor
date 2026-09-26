@@ -369,18 +369,31 @@ public sealed class RetentionReevaluationTests
         Assert.Contains("private static readonly TimeSpan s_retentionReevaluationBudget = TimeSpan.FromMinutes(5);", worker, StringComparison.Ordinal);
 
         /* Three catches, in the order that makes each filter mean what it says: shutdown first (a shutdown
-           also trips the linked budget), then the budget, then everything else. No rethrow anywhere — the
-           sweep loop must never see this pass fail. */
+           also trips the linked budget), then the budget, then everything else. No rethrow past THESE outer
+           catches — the sweep loop must never see this pass fail.
+
+           #4300: the seam repair runs in its own failure-isolated try BEFORE this block, with its own earlier
+           "catch (Exception ex) when (ex is not OperationCanceledException)" — that inner catch is not the
+           outer "everything else" this assertion checks the order of, so otherAt is searched for starting
+           from budgetAt, past the seam's own isolation, to find the OUTER catch's position rather than the
+           seam's. The seam's own inner catch for a shutdown DOES rethrow ("throw;") so a real cancellation
+           bubbles out to these very outer catches rather than being swallowed there; that inner rethrow sits
+           BEFORE budgetAt, so the no-rethrow check below is scoped to body[budgetAt..] to guard only the
+           outer catches it is actually about. */
         var shutdownAt = body.IndexOf("catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)", StringComparison.Ordinal);
         var budgetAt = body.IndexOf("catch (OperationCanceledException) when (budget.IsCancellationRequested)", StringComparison.Ordinal);
-        var otherAt = body.IndexOf("catch (Exception ex)", StringComparison.Ordinal);
+        var otherAt = body.IndexOf("catch (Exception ex)", budgetAt, StringComparison.Ordinal);
         Assert.True(shutdownAt > 0 && budgetAt > shutdownAt && otherAt > budgetAt, "shutdown, then budget, then everything else");
-        Assert.DoesNotContain("throw", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("throw", body[budgetAt..], StringComparison.Ordinal);
 
-        /* Each non-quiet outcome is a distinct WARNING naming what it knows. */
+        /* Each non-quiet outcome is a distinct WARNING naming what it knows. #4300 adds a third, EARLIER
+           LogWarning for the seam repair's own isolated failure ("the seam repair could not run this
+           pass—") — a different site from the two outer-catch warnings below, so the count moved from 2 to 3
+           rather than the assertion being weakened. */
         Assert.Contains("\"Retention re-evaluation exceeded its {BudgetSeconds}s budget after {ElapsedMs} ms and was cut short", body, StringComparison.Ordinal);
         Assert.Contains("\"Retention re-evaluation could not run after {ElapsedMs} ms", body, StringComparison.Ordinal);
-        Assert.Equal(2, CountOf(body, "_logger.LogWarning("));
+        Assert.Contains("\"Retention re-evaluation: the seam repair could not run this pass", body, StringComparison.Ordinal);
+        Assert.Equal(3, CountOf(body, "_logger.LogWarning("));
     }
 
     /// <summary>
@@ -478,6 +491,19 @@ public sealed class RetentionReevaluationTests
 
     private static string ReadWorkerSource() =>
         RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+
+    /// <summary>
+    /// #4300: the seam-only repair on the hourly Periodic pass closes an outage-opened legacy/successor seam
+    /// within the hour on a store that keeps running, with no restart required. The doc this pins against
+    /// used to say the gate needed a SECOND start to release across the upgrade; that is no longer true, and
+    /// the doc must not say it again by accident.
+    /// </summary>
+    [Fact]
+    public void TheGateDoc_NoLongerClaimsASecondStartIsNeeded()
+    {
+        var storage = ReadStorageSource();
+        Assert.DoesNotContain("SECOND start", storage, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
