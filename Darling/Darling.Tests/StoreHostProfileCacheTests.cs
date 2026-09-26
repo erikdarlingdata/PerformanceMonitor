@@ -164,4 +164,37 @@ public sealed class StoreHostProfileCacheTests
         Assert.Equal(2, counter);
         Assert.NotNull(second.Profile);
     }
+
+    /// <summary>#4203: a gather cancelled through the CALLER's own token (<c>get_store_host</c>'s linked
+    /// source over <see cref="CancellationTokenSource.CreateLinkedTokenSource(CancellationToken)"/>) is never
+    /// cached, the same as <see cref="AFailedGather_IsNotCached"/> proves for any other exception —
+    /// <see cref="StoreHostProfileCache.GetOrGatherAsync"/> draws no distinction between the two: it only
+    /// assigns its cache entry after a gather call that returns, and <see cref="OperationCanceledException"/>
+    /// propagates out of that call exactly like any other throw.</summary>
+    [Fact]
+    public async Task ACancelledGather_IsNotCached()
+    {
+        var counter = 0;
+        var cache = new StoreHostProfileCache(TimeSpan.FromMinutes(5), () => T0);
+
+        Task<HostProfile> CancellingGather(CancellationToken token)
+        {
+            Interlocked.Increment(ref counter);
+            throw new OperationCanceledException("gather cancelled (test)");
+        }
+
+        Task<HostProfile> Gather(CancellationToken token)
+        {
+            Interlocked.Increment(ref counter);
+            return Task.FromResult(FixtureProfile());
+        }
+
+        await Assert.ThrowsAsync<OperationCanceledException>(
+            () => cache.GetOrGatherAsync(CancellingGather, CancellationToken.None));
+
+        var second = await cache.GetOrGatherAsync(Gather, CancellationToken.None);
+
+        Assert.Equal(2, counter);
+        Assert.NotNull(second.Profile);
+    }
 }
