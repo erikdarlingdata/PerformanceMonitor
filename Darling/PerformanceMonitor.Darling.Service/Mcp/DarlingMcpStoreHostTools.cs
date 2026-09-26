@@ -70,7 +70,9 @@ public sealed class DarlingMcpStoreHostTools
         + "act on the summary without walking the whole table. gathered_at (UTC) is when this snapshot was "
         + "taken; the store/settings facts are cached for up to 5 minutes and shared across callers, so a burst "
         + "of calls costs one live read. This tool never writes a setting or a conf file.")]
-    public static async Task<string> GetStoreHost(NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache)
+    public static async Task<string> GetStoreHost(
+        NpgsqlDataSource postgres, PostgresConfig? postgresConfig, StoreHostProfileCache cache,
+        CancellationToken cancellationToken = default)
     {
         if (postgresConfig is null)
         {
@@ -84,7 +86,15 @@ public sealed class DarlingMcpStoreHostTools
 
         try
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(ServiceCommandDeadlines.McpStoreHostProfileSeconds));
+            /* #4203: the caller's own token is LINKED with the cache's fixed gather deadline, not replaced by
+               it — either the caller cancelling (an abandoned web request) or the deadline elapsing (a slow
+               store) stops the gather. A gather this ties into is still never cached on cancellation: it
+               throws OperationCanceledException out of the gather delegate, and StoreHostProfileCache only
+               assigns its cache entry after a gather call that RETURNS, so a cancelled gather leaves the
+               cache exactly as StoreHostProfileCacheTests.AFailedGather_IsNotCached already proves for any
+               other exception. */
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            cts.CancelAfter(TimeSpan.FromSeconds(ServiceCommandDeadlines.McpStoreHostProfileSeconds));
 
             /* Round-1 review, Medium 2: the store/settings facts are cached for up to 5 minutes and shared
                across callers, so a burst of calls costs one live read. The connection opens INSIDE the
@@ -170,7 +180,7 @@ public sealed class DarlingMcpStoreHostTools
                 gathered_at = DateTime.SpecifyKind(gatheredAtUtc, DateTimeKind.Unspecified),
             }, McpHelpers.JsonOptions);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_store_host", ex);
         }
