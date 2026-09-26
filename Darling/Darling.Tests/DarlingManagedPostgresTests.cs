@@ -2859,15 +2859,27 @@ public sealed class DarlingManagedPostgresTests
                     $"postgresql.conf should carry no v-marker text ({marker}). {migrationDiagnostics}");
             }
 
+            /* darling-managed.conf's keys, read the same way the migration itself reads them
+               (DarlingManagedPostgres.ParseConfText), rather than by matching literal rendered text — the
+               render's unit and exact value are host-dependent (#4336). Last-occurrence-wins, same as the
+               server. */
+            var managedConfKeys = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(managedConf))
+            {
+                managedConfKeys[name] = value;
+            }
+            var managedConfKeysDiagnostics =
+                $"parsed keys=[{string.Join(", ", managedConfKeys.Select(kv => $"{kv.Key}={kv.Value}"))}]";
+
             /* No live check exists in this test for shared_preload_libraries or listen_addresses, so both
                move to darling-managed.conf's rendered text rather than being dropped. */
             Assert.True(
-                managedConf.Contains("shared_preload_libraries = 'timescaledb,pg_stat_statements'", StringComparison.Ordinal)
-                || managedConf.Contains("shared_preload_libraries = 'timescaledb'", StringComparison.Ordinal),
-                $"darling-managed.conf should carry the timescaledb preload. {migrationDiagnostics}");
+                managedConfKeys.TryGetValue("shared_preload_libraries", out var preload)
+                && (preload == "'timescaledb,pg_stat_statements'" || preload == "'timescaledb'"),
+                $"darling-managed.conf should carry the timescaledb preload. {migrationDiagnostics} {managedConfKeysDiagnostics}");
             Assert.True(
-                managedConf.Contains("listen_addresses = '127.0.0.1'", StringComparison.Ordinal),
-                $"darling-managed.conf should carry listen_addresses. {migrationDiagnostics}");
+                managedConfKeys.TryGetValue("listen_addresses", out var listenAddresses) && listenAddresses == "'127.0.0.1'",
+                $"darling-managed.conf should carry listen_addresses. {migrationDiagnostics} {managedConfKeysDiagnostics}");
 
             /* max_worker_processes: DROPPED as a conf-text check -- reader.GetString(2) below already proves
                this LIVE against the running server, and duplicating it against a file adds nothing. */
@@ -2876,20 +2888,22 @@ public sealed class DarlingManagedPostgresTests
                moves to darling-managed.conf (the exact MB depend on the runner); the values themselves are
                proven LIVE below (work_mem/shared_buffers NotEqual the stock defaults). */
             Assert.True(
-                managedConf.Contains("shared_buffers = ", StringComparison.Ordinal),
-                $"darling-managed.conf should carry shared_buffers. {migrationDiagnostics}");
+                managedConfKeys.ContainsKey("shared_buffers"),
+                $"darling-managed.conf should carry shared_buffers. {migrationDiagnostics} {managedConfKeysDiagnostics}");
             Assert.True(
-                managedConf.Contains("work_mem = ", StringComparison.Ordinal),
-                $"darling-managed.conf should carry work_mem. {migrationDiagnostics}");
+                managedConfKeys.ContainsKey("work_mem"),
+                $"darling-managed.conf should carry work_mem. {migrationDiagnostics} {managedConfKeysDiagnostics}");
 
             /* v4 write throughput and v5 co-located sizing: no live check of these specific values exists in
-               this test, so their settings move to darling-managed.conf rather than being dropped. */
+               this test, so their settings move to darling-managed.conf rather than being dropped. max_wal_size
+               is checked for presence only -- its rendered value depends on the runner's disk size (the same
+               ladder BuildWalSizingConfAppend uses), not a fixed "4GB". */
             Assert.True(
-                managedConf.Contains("max_connections = '200'", StringComparison.Ordinal),
-                $"darling-managed.conf should carry max_connections. {migrationDiagnostics}");
+                managedConfKeys.TryGetValue("max_connections", out var maxConnections) && maxConnections == "'200'",
+                $"darling-managed.conf should carry max_connections. {migrationDiagnostics} {managedConfKeysDiagnostics}");
             Assert.True(
-                managedConf.Contains("max_wal_size = '4GB'", StringComparison.Ordinal),
-                $"darling-managed.conf should carry max_wal_size. {migrationDiagnostics}");
+                managedConfKeys.ContainsKey("max_wal_size"),
+                $"darling-managed.conf should carry max_wal_size. {migrationDiagnostics} {managedConfKeysDiagnostics}");
 
             /* v6 log rotation: the logging collector is live, proven by the weekday ring file it creates
                under <data>\log the moment it starts (#1652) -- unaffected by where the setting text lives. */
