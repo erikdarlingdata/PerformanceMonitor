@@ -338,12 +338,12 @@ public sealed class McpReadCommandTimeoutTests
     /// <see cref="McpCommandDeadlines.ReadSeconds"/>.
     ///
     /// <para>Short form. The FLOOR is the managed store's own server-side ceiling: the <c>mcp</c> role's
-    /// default <c>statement_timeout</c> is 15 s, and it fires on this surface in production, so a client
-    /// deadline at or under it would pre-empt a bound that already works and already names its cause
-    /// (<c>57014</c>) instead of rendering as a stream fault. That floor dominates the measured one by more
-    /// than an order of magnitude — the family's verified reads are sub-second. The CEILING is the 30 s it
-    /// replaces, asserted relationally against the sibling half of the same surface so this project's reads
-    /// can never be the looser of the two.</para>
+    /// default <c>statement_timeout</c> is 60 s (15 s before the 2026-09-04 incident's follow-up, #4442), and it
+    /// fires on this surface in production, so a client deadline at or under it would pre-empt a bound that
+    /// already works and already names its cause (<c>57014</c>) instead of rendering as a stream fault. That
+    /// floor dominates the measured one by more than an order of magnitude — the family's verified reads are
+    /// sub-second. The CEILING is the 30 s it replaces, asserted relationally against the sibling half of the
+    /// same surface so this project's reads can never be the looser of the two.</para>
     /// </summary>
     [Fact]
     public void TheReadDeadline_StaysInsideItsJustifiedBand()
@@ -357,8 +357,8 @@ public sealed class McpReadCommandTimeoutTests
             + "server-side setting rather than backstop them");
 
         Assert.True(
-            seconds > 15,
-            $"read deadline {seconds}s is at or under the mcp role's 15s default statement_timeout, so on a managed "
+            seconds > 60,
+            $"read deadline {seconds}s is at or under the mcp role's 60s default statement_timeout, so on a managed "
             + "store it would fire FIRST and replace a 57014 that names its cause with Npgsql's "
             + "'Exception while reading from stream', which is the misdiagnosis #2826 exists to prevent");
 

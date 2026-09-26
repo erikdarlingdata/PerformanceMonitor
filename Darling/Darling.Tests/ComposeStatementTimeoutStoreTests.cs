@@ -60,6 +60,9 @@ public class ComposeStatementTimeoutStoreTests
         Assert.Contains("ALTER TABLE config.config_service", sql, StringComparison.Ordinal);
         Assert.Contains("ADD COLUMN IF NOT EXISTS compose_statement_timeout_seconds", sql, StringComparison.Ordinal);
         Assert.Contains("DEFAULT 15", sql, StringComparison.Ordinal);
+
+        /* V147 (#4442) raises the shipped default to 60; this rung's own DEFAULT 15 stays as history, the
+           value that shipped in V78 and that later rung moves forward. */
     }
 
     /// <summary>
@@ -118,11 +121,12 @@ public class ComposeStatementTimeoutStoreTests
     /// remove the ceiling entirely, which is the one outcome the whole design leans on not happening.
     /// </summary>
     [Theory]
-    [InlineData(0, 15)]
-    [InlineData(-1, 15)]
+    [InlineData(0, 60)]
+    [InlineData(-1, 60)]
     [InlineData(1, 5)]
     [InlineData(5, 5)]
     [InlineData(15, 15)]
+    [InlineData(60, 60)]
     [InlineData(120, 120)]
     [InlineData(600, 600)]
     [InlineData(9999, 600)]
@@ -138,7 +142,8 @@ public class ComposeStatementTimeoutStoreTests
     [Theory]
     [InlineData(120, "120s")]
     [InlineData(15, "15s")]
-    [InlineData(0, "15s")]
+    [InlineData(60, "60s")]
+    [InlineData(0, "60s")]
     [InlineData(99999, "600s")]
     public void TheProvisioningDdl_AppliesTheConfiguredTimeout(int seconds, string expected)
     {
@@ -165,11 +170,12 @@ public class ComposeStatementTimeoutStoreTests
     [Theory]
     [InlineData(120)]
     [InlineData(15)]
+    [InlineData(60)]
     [InlineData(600)]
     public void AReload_CarriesTheKnobIntoTheHeldConfig(int stored)
     {
         /* Deliberately NOT the darling.json default: an assignment that never happens has to be
-           distinguishable from one that happens to land on 15. */
+           distinguishable from one that happens to land on 60. */
         var config = new DarlingConfig { ComposeStatementTimeoutSeconds = 42 };
 
         StoreConfigProvider.ApplyToConfig(

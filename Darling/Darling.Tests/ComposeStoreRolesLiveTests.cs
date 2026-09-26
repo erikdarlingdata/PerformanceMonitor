@@ -140,7 +140,7 @@ public sealed class ComposeStoreRolesLiveTests
             var first = new CapturingTestLogger();
             var verdict = await DarlingStoreLogins.ProvisionComposeStoreAsync(ownerSource, owner, first, ct, credentials);
             Assert.True(verdict.Provisioned, first.Joined);
-            Assert.Equal(15, verdict.AppliedComposeStatementTimeoutSeconds);
+            Assert.Equal(60, verdict.AppliedComposeStatementTimeoutSeconds);
             Assert.Contains("Role passwords: re-asserted for admin, viewer, mcp", first.Joined, StringComparison.Ordinal);
 
             foreach (var role in Roles)

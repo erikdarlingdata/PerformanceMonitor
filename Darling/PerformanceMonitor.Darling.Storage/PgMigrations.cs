@@ -226,6 +226,7 @@ public static class PgMigrations
         new Migration(144, "raw-chunk-interval-rung-history", V144Sql),
         new Migration(145, "query-store-interval-wide", V145Sql),
         new Migration(146, "managed-conf-verdicts", V146Sql),
+        new Migration(147, "compose-statement-timeout-sixty", V147Sql),
     };
 
     /// <summary>
@@ -2277,6 +2278,18 @@ CREATE TABLE IF NOT EXISTS collect.managed_conf_verdicts
     CONSTRAINT pk_managed_conf_verdicts PRIMARY KEY (setting_name)
 );";
 
+    /// <summary>
+    /// V147 — raises the shipped default for <c>config.config_service.compose_statement_timeout_seconds</c>
+    /// from 15 s to 60 s (#4442 scope 1), and moves any row still sitting at the old shipped default.
+    /// An operator-set value other than 15 (including one that happens to equal the OLD default exactly at
+    /// a moment nobody touched it, indistinguishable from "never touched") is left alone; a store at 45
+    /// stays at 45. This mirrors the same shipped-value-move-only shape every other default-raise rung
+    /// uses: the column default changes for future rows, and the one-time UPDATE only ever touches rows
+    /// still at the value nobody chose.
+    /// </summary>
+    private const string V147Sql = @"
+ALTER TABLE config.config_service ALTER COLUMN compose_statement_timeout_seconds SET DEFAULT 60;
+UPDATE config.config_service SET compose_statement_timeout_seconds = 60 WHERE compose_statement_timeout_seconds = 15;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
