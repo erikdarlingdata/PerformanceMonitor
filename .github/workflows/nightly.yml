@@ -11,16 +11,17 @@ on:
         type: boolean
         required: false
         default: false
+      publish:
+        description: 'Publish the release artifacts (gh release, the ghcr image push) once build, linux and the Darling PostgreSQL tests all succeed. Set false for a diagnostic re-run that should build and test without publishing.'
+        type: boolean
+        required: false
+        default: true
 
+# Read-only by default; the release-publishing steps (gh release, the ghcr push, cosign, the
+# provenance attestation) run only in the publish job below, which declares its own write
+# permissions scoped to itself. No other job needs to write anything.
 permissions:
-  contents: write
-  # #1804: the linux job pushes the nightly container image to ghcr.
-  packages: write
-  # Sigstore keyless signing + GitHub provenance for the linux artifacts: id-token lets the job
-  # obtain its OIDC identity (Fulcio issues the short-lived signing cert against it), attestations
-  # lets attest-build-provenance store the tarball's provenance. Neither grants anything else.
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   # Scheduled workflows always execute the DEFAULT branch's copy of this file, while nightly
@@ -304,36 +305,32 @@ jobs:
           Write-Host "Checksums:"
           $checksums | ForEach-Object { Write-Host $_ }
 
-      - name: Delete previous nightly release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release delete nightly --yes --cleanup-tag 2>$null; exit 0
-        shell: pwsh
+      # The release-publishing steps (gh release create, the linux upload, the ghcr push) moved to
+      # the publish job below, which waits on build, linux AND darling-pg. This job hands off its
+      # windows release assets (the zips, the Setup.exe, SHA256SUMS.txt) and the version string as a
+      # workflow artifact instead of publishing them itself, so a nightly can no longer publish
+      # while the Darling PostgreSQL tests are red: publish downloads exactly what this job built
+      # and cannot run until darling-pg reports success.
+      - name: Upload windows release assets
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-release-assets
+          path: |
+            releases/*.zip
+            releases/*.exe
+            releases/SHA256SUMS.txt
+          if-no-files-found: error
 
-      - name: Create nightly release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.VERSION }}"
-          $sha = git rev-parse --short HEAD
-          $body = @"
-          Automated nightly build from ``dev`` branch.
+      - name: Save the nightly version string
+        shell: bash
+        run: echo "${{ steps.version.outputs.VERSION }}" > windows-version.txt
 
-          **Version:** ``$version``
-          **Commit:** ``$sha``
-          **Built:** $(Get-Date -Format "yyyy-MM-dd HH:mm UTC")
-
-          > These builds include the latest changes and may be unstable.
-          > For production use, download the [latest stable release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest).
-          "@
-
-          gh release create nightly `
-            --target dev `
-            --title "Nightly Build ($version)" `
-            --notes $body `
-            --prerelease `
-            releases/*.zip releases/*.exe releases/SHA256SUMS.txt
+      - name: Upload the nightly version string
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-version
+          path: windows-version.txt
+          if-no-files-found: error
 
   # Darling.Tests has live-PostgreSQL tests gated on env vars that the per-PR/push build never
   # sets, so regular CI runs only the ungated subset. This job stands up a throwaway PostgreSQL
@@ -497,6 +494,12 @@ jobs:
           if (Test-Path "$bin\pg_ctl.exe") { & "$bin\pg_ctl.exe" -D $dataDir -m fast -w stop }
           exit 0
 
+      # The gated upgrade-path tests stand up their OWN throwaway clusters under the runner's temp
+      # directory (Directory.CreateTempSubdirectory, prefixes like "darling-pg17boot-" and
+      # "darling-managedconf-"), separate from the fixed darling-pgdata cluster this job starts
+      # above. When one of those tests fails, its cluster's own server log (pg_ctl's -l file,
+      # named "logfile" inside each temp root, plus any "log\\" ring directory a managed-conf boot
+      # writes) is the only record of what postgres itself said, and it wasn't captured before.
       - name: Upload PG log and test results on failure
         if: failure()
         uses: actions/upload-artifact@v6
@@ -504,6 +507,9 @@ jobs:
           name: darling-pg-failure
           path: |
             ${{ runner.temp }}/darling-pg.log
+            ${{ runner.temp }}/darling-*/**/logfile
+            ${{ runner.temp }}/darling-*/**/log/**
+            ${{ runner.temp }}/darling-*/**/pg_log/**
             TestResults/
           if-no-files-found: ignore
 
@@ -560,12 +566,146 @@ jobs:
           tar -C publish/DarlingService-linux -czf "releases/PerformanceMonitorDarling-linux-x64-${version}.tar.gz" .
           (cd releases && sha256sum "PerformanceMonitorDarling-linux-x64-${version}.tar.gz" > SHA256SUMS-linux.txt && cat SHA256SUMS-linux.txt)
 
+      # The container image build needs THIS checkout (docker build's context is the repo root,
+      # #1804), so it stays here rather than moving to publish, which has no source tree. Only the
+      # PUSH, the signing and the release upload are release-publishing steps, and those move to
+      # publish below: this job saves the built image to a tar (docker save) and hands it, the
+      # linux tarball and its checksum file to publish as workflow artifacts. Nothing here talks to
+      # ghcr or the nightly release.
+      - name: Build container image (ghcr tags, not pushed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
+          # VERSION reaches the publish that runs INSIDE the image build (#3455): an image tagged
+          # with the nightly string whose service answers the clean release string is the zip
+          # defect again, one artifact over. The Dockerfile defaults the arg to empty, so
+          # build.yml's release image and any hand-run docker build keep publishing against the
+          # clean declared version.
+          docker build -f Darling/Dockerfile --build-arg VERSION="${version}" -t "${image}:nightly" -t "${image}:${version}" .
+          mkdir -p releases
+          docker save "${image}:nightly" "${image}:${version}" -o releases/darling-container-image.tar
+
+      - name: Upload linux release assets
+        uses: actions/upload-artifact@v6
+        with:
+          name: linux-release-assets
+          path: |
+            releases/PerformanceMonitorDarling-linux-x64-*.tar.gz
+            releases/SHA256SUMS-linux.txt
+          if-no-files-found: error
+
+      - name: Upload container image
+        uses: actions/upload-artifact@v6
+        with:
+          name: darling-container-image
+          path: releases/darling-container-image.tar
+          if-no-files-found: error
+
+  # ── Publish (#4336 follow-up) ─────────────────────────────────────────────────────────────────
+  # The one job that talks to the outside world: the GitHub release, the ghcr push, the signature,
+  # the provenance attestation. It downloads exactly what build and linux built above — nothing
+  # here rebuilds or republishes — and it needs all three of build, linux and darling-pg to have
+  # SUCCEEDED, so a red Darling PostgreSQL run can no longer ship a release built on top of it. The
+  # workflow_dispatch `publish` input is a second, independent gate for a diagnostic re-run that
+  # wants the build and test coverage without touching the release.
+  publish:
+    needs: [build, linux, darling-pg]
+    if: |
+      needs.build.result == 'success' &&
+      needs.linux.result == 'success' &&
+      needs.darling-pg.result == 'success' &&
+      (github.event_name != 'workflow_dispatch' || inputs.publish != false)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      # #1804: pushes the nightly container image to ghcr.
+      packages: write
+      # Sigstore keyless signing + GitHub provenance for the linux artifact: id-token lets this job
+      # obtain its OIDC identity (Fulcio issues the short-lived signing cert against it),
+      # attestations lets attest-build-provenance store the tarball's provenance.
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'dev' }}
+
+      - name: Download windows release assets
+        uses: actions/download-artifact@v6
+        with:
+          name: windows-release-assets
+          path: releases
+
+      - name: Download the nightly version string
+        uses: actions/download-artifact@v6
+        with:
+          name: windows-version
+          path: .
+
+      - name: Download linux release assets
+        uses: actions/download-artifact@v6
+        with:
+          name: linux-release-assets
+          path: releases
+
+      - name: Download container image
+        uses: actions/download-artifact@v6
+        with:
+          name: darling-container-image
+          path: releases
+
+      - name: Read the nightly version string
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cat windows-version.txt)"
+          [ -n "${version}" ] || { echo "::error::windows-version.txt was empty."; exit 1; }
+          echo "VERSION=${version}" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: ${version}"
+
+      - name: Delete previous nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release delete nightly --yes --cleanup-tag || true
+
+      - name: Create nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.VERSION }}"
+          sha="$(git rev-parse --short HEAD)"
+          body=$(cat <<EOF
+          Automated nightly build from \`dev\` branch.
+
+          **Version:** \`${version}\`
+          **Commit:** \`${sha}\`
+          **Built:** $(date -u +"%Y-%m-%d %H:%M UTC")
+
+          > These builds include the latest changes and may be unstable.
+          > For production use, download the [latest stable release](https://github.com/erikdarlingdata/PerformanceMonitor/releases/latest).
+          EOF
+          )
+
+          gh release create nightly \
+            --target dev \
+            --title "Nightly Build (${version})" \
+            --notes "${body}" \
+            --prerelease \
+            releases/*.zip releases/*.exe releases/SHA256SUMS.txt
+
       - name: Upload linux artifact to the nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload nightly releases/PerformanceMonitorDarling-linux-x64-*.tar.gz releases/SHA256SUMS-linux.txt --clobber
 
-      - name: Build and push container image (ghcr, :nightly)
+      - name: Push container image (ghcr, :nightly)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -574,20 +714,14 @@ jobs:
           version="${{ steps.version.outputs.VERSION }}"
           image="ghcr.io/${{ github.repository_owner }}/performancemonitor-darling"
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          # VERSION reaches the publish that runs INSIDE the image build (#3455): an image tagged
-          # with the nightly string whose service answers the clean release string is the zip
-          # defect again, one artifact over. The Dockerfile defaults the arg to empty, so
-          # build.yml's release image and any hand-run docker build keep publishing against the
-          # clean declared version.
-          docker build -f Darling/Dockerfile --build-arg VERSION="${version}" -t "${image}:nightly" -t "${image}:${version}" .
+          docker load -i releases/darling-container-image.tar
           docker push "${image}:nightly"
           docker push "${image}:${version}"
 
       # Keyless Sigstore signing: Fulcio issues a short-lived certificate against this job's OIDC
       # identity and the signature lands in ghcr next to the image, logged in Rekor. No keys exist
       # anywhere to manage or leak — the signature attests "built by this repository's workflow",
-      # which is the claim a container consumer actually wants verified. (SignPath's cosign support
-      # is edition-gated; this path has no subscription dependency.) Verify:
+      # which is the claim a container consumer actually wants verified. Verify:
       #   cosign verify ghcr.io/erikdarlingdata/performancemonitor-darling:nightly \
       #     --certificate-identity-regexp 'github.com/erikdarlingdata/PerformanceMonitor' \
       #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
