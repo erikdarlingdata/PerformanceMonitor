@@ -152,6 +152,16 @@ public sealed class DarlingWorker : BackgroundService
        as they were and says so; the next hour re-judges them. */
     private static readonly TimeSpan s_retentionReevaluationBudget = TimeSpan.FromMinutes(5);
 
+    /* #4300: the seam-only repair's own child budget, linked to the pass's s_retentionReevaluationBudget
+       rather than sharing it unbounded. A seam wide enough to need every one of the pass's five minutes
+       would otherwise starve the coverage sweep, the purge trigger and the epoch relaunch for that hour on a
+       slow store, every hour, for as long as the seam stays open. Two minutes leaves the rest of the pass
+       room to run; a seam that needs more than that closes over several hourly passes instead of one, which
+       is the same shape RollupBackfill's own newest-first resume already relies on (RollupBackfill.cs:203) —
+       a refresh batch that commits before it is cut short leaves the floor inside already-covered ground, so
+       picking the seam back up next hour repeats nothing that already closed. */
+    private static readonly TimeSpan s_seamRepairBudget = TimeSpan.FromMinutes(2);
+
     /* The whole-pass budget for the hourly TimescaleDB availability re-probe (#3815), the #2327 shape and a
        far tighter number than its neighbour above, from a different enclosing constraint. The probe is two
        statements — CREATE EXTENSION IF NOT EXISTS and a one-row pg_extension read — and both carry
@@ -7156,6 +7166,89 @@ LIMIT 1";
         try
         {
             await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+
+            /* #4300: the seam-only repair runs BEFORE the coverage sweep below, on the SAME connection, so a
+               seam it closes this tick is already gone by the time EnsureRetentionPoliciesAsync re-judges
+               coverage a moment later — the gate can release in this very tick rather than waiting for next
+               hour's pass to notice. It reuses the exact per-target body the start-path walk runs
+               (TimescaleSupport.RepairMaterializationSeamsAsync), restricted to legacy-paired targets and
+               their seam window alone; a target with an already-closed seam is a cheap skip (one span read,
+               one raw-floor read) — there is no heavier scan to avoid running twice. Failure-isolated: a
+               throw here must not stop the coverage sweep or the purge trigger below, both of which are the
+               pass's other, independent jobs.
+
+               Skipped entirely while _materializationHoleRepairRunning is true: the start-path (or a stale-
+               epoch relaunch) full walk covers every seam this seam-only pass would, and running both at once
+               would refresh the same aggregate on two connections at the same time for no gain. */
+            if (_materializationHoleRepairRunning)
+            {
+                _logger.LogDebug("Retention re-evaluation: skipping the seam-only repair this pass — a full materialization-hole repair is already running in this process and covers the same seam.");
+            }
+            else
+            {
+                /* #4300: the seam repair's own child budget (s_seamRepairBudget), linked to the pass's budget
+                   rather than sharing it unbounded — a seam wide enough to spend the whole pass budget would
+                   otherwise starve the coverage sweep, the purge trigger and the epoch relaunch below for that
+                   hour, on every hour the seam stays open on a slow store. */
+                using var seamBudget = CancellationTokenSource.CreateLinkedTokenSource(budget.Token);
+                seamBudget.CancelAfter(s_seamRepairBudget);
+
+                try
+                {
+                    var seamSummary = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, _logger, DateTime.UtcNow, seamBudget.Token);
+                    if (seamSummary.BucketsRepaired > 0 || seamSummary.BucketsDeferred > 0 || seamSummary.Failures > 0)
+                    {
+                        _logger.LogInformation(
+                            "Retention re-evaluation: seam repair closed {BucketsRepaired} bucket(s) across {HolesRepaired} hole(s) this pass, {BucketsDeferred} bucket(s) left for a later pass (past this pass's per-aggregate cap), {Failures} isolated failure(s).",
+                            seamSummary.BucketsRepaired, seamSummary.HolesRepaired, seamSummary.BucketsDeferred, seamSummary.Failures);
+                    }
+                    else
+                    {
+                        _logger.LogDebug("Retention re-evaluation: seam repair found nothing to close this pass.");
+                    }
+                }
+                /* #4300: the seam's OWN budget ran out — not the pass's outer budget, and not shutdown — so
+                   the seam repair is cut short here and the rest of the pass (the coverage sweep, the purge
+                   trigger, the epoch relaunch) still runs this tick. A cut-short refresh is resume-safe: the
+                   batches that committed before the cut ran newest-first, so the floor sits inside ground this
+                   pass already covered and next hour's seam-only pass picks up exactly where this one left off
+                   (RollupBackfill.cs's own newest-first resume argument, ~:203). The count that follows is a
+                   cheap re-read (span plus raw-floor per legacy-paired target, the same two probes the seam
+                   repair's own skip check makes), not a re-walk, so a store stuck deferring the same seam for
+                   a day is visible from this WARNING alone without anyone re-running the repair by hand. */
+                catch (OperationCanceledException) when (seamBudget.IsCancellationRequested && !budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                {
+                    /* #4300: the re-read itself is failure-isolated from the rest of the pass — a throw here
+                       (a catalog read that times out, a connection already in a bad state after the budget
+                       cut it off mid-statement) must not stop the coverage sweep, the purge trigger or the
+                       epoch relaunch below, the exact isolation this whole catch exists to preserve. An
+                       unreadable count logs as "unknown" rather than ending the pass here. */
+                    string hoursDeferred;
+                    try
+                    {
+                        hoursDeferred = (await TimescaleSupport.CountOpenSeamHoursAsync(connection, DateTime.UtcNow, budget.Token)).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        hoursDeferred = "unknown";
+                    }
+
+                    _logger.LogWarning(
+                        "Retention re-evaluation: seam repair paused at the {BudgetMinutes}-minute budget; resumes next hour; {HoursDeferred} hour(s) still deferred.",
+                        (long)s_seamRepairBudget.TotalMinutes, hoursDeferred);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(
+                        "Retention re-evaluation: the seam repair could not run this pass — any legacy/successor seam a prior outage opened stands until a later pass retries: {Message}",
+                        ex.Message);
+                }
+            }
+
             await TimescaleSupport.EnsureRetentionPoliciesAsync(
                 connection, _logger, TimescaleSupport.RetentionSweepPass.Periodic, budget.Token);
 

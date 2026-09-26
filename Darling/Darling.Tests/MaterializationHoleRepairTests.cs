@@ -524,8 +524,8 @@ public sealed class MaterializationHoleRepairTests
         Assert.Contains("holesFound += seamRanges.Count + ordinaryRanges.Count;", storage, StringComparison.Ordinal);
         Assert.Contains("bucketsFound += seamHoles.Count + ordinaryHoles.Count;", storage, StringComparison.Ordinal);
         Assert.Contains("had {Buckets} bucket(s) in [{Start}, {End})", storage, StringComparison.Ordinal);
-        Assert.Contains("left for the next start", storage, StringComparison.Ordinal);
-        Assert.Contains("could not scan or repair {View} this start", storage, StringComparison.Ordinal);
+        Assert.Contains("left for a later run", storage, StringComparison.Ordinal);
+        Assert.Contains("could not scan or repair {View} this run", storage, StringComparison.Ordinal);
     }
 
     /// <summary>The tally's shape is the line's shape: every count the worker names is a member, and the
@@ -699,7 +699,7 @@ public sealed class MaterializationHoleRepairLiveTests
         Assert.DoesNotContain("needed the forced refresh", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("aggregate(s) scanned", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("still shows", log.Joined, StringComparison.Ordinal);
-        Assert.DoesNotContain("left for the next start", log.Joined, StringComparison.Ordinal);
+        Assert.DoesNotContain("left for a later run", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("could not scan or repair", log.Joined, StringComparison.Ordinal);
 
         /* The tail reads; the outage hours are still (correctly) absent; the floor did not move. */
@@ -859,8 +859,8 @@ VALUES (99, $1, $2, $3, 'HoleDb', '0xHOLEHASH', '0xHOLEHANDLE', 0, 0, 0, 0)", co
         /* The detail lines the tally counts: the repair over exactly [H1, H25) and the deferral of exactly
            [H25, H27), named with its bounds and the cap; no summary line from the pass itself. */
         Assert.Contains($"{view} had 24 bucket(s) in [{H(1):O}, {H(25):O})", log.Joined, StringComparison.Ordinal);
-        Assert.Contains($"{view} has a further 2 bucket(s) of hole in [{H(25):O}, {H(27):O}) left for the next start", log.Joined, StringComparison.Ordinal);
-        Assert.Contains("this start's cap for it is 24 bucket(s)", log.Joined, StringComparison.Ordinal);
+        Assert.Contains($"{view} has a further 2 bucket(s) of hole in [{H(25):O}, {H(27):O}) left for a later run", log.Joined, StringComparison.Ordinal);
+        Assert.Contains("this run's cap for it is 24 bucket(s)", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("aggregate(s) scanned", log.Joined, StringComparison.Ordinal);
         Assert.DoesNotContain("could not scan or repair", log.Joined, StringComparison.Ordinal);
         Assert.Equal(Enumerable.Range(0, 25).Concat(new[] { 27 }).Select(H).ToArray(), await MaterializedBucketsAsync(connection, view, ct));
