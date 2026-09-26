@@ -4860,6 +4860,121 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
         Assert.Equal(4.52, new RetentionHoldReading(1, "t", false, "4 days", 19, 1_561_449, 345_600).OverHorizonRatio!.Value, 2);
     }
 
+    /* ---------------- #4299 L3b/L3d Raw Purge Over Horizon ---------------- */
+
+    private static RawPurgeOverHorizonReading RawReading(
+        long jobId = 2001, string hypertable = "query_stats", string dropAfter = "4 days",
+        double? ratio = 4.5, RawLastPurgeRecord? lastPurge = null) =>
+        new(jobId, hypertable, dropAfter, ratio,
+            lastPurge ?? new RawLastPurgeRecord(DateTime.UtcNow, "hole", null, null));
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_OverHorizonWithAHole_Fires_AndSaysAHole()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric, fired.MetricName);
+        Assert.Contains("a hole was found in the range", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_UnderHorizon_DoesNotFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading(ratio: 0.5) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_LastOutcomeRan_DoesNotFire()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_234)) }, Ct);
+
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_FiredThenRanAndUnder_Resolves()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(new[] { RawReading() }, Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(ratio: 0.5, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_234)) },
+            Ct);
+
+        var resolved = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric, resolved.MetricName);
+    }
+
+    [Fact]
+    public async Task RawPurgeOverHorizon_RunFailed_NamesTheSqlState()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyRawPurgeOverHorizonAsync(
+            new[] { RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "run_failed", "55P03", null)) },
+            Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("55P03", fired.DetailText, StringComparison.Ordinal);
+    }
+
+    /* Armed can't suppress this alert by construction: RawPurgeOverHorizonReading carries no armed flag at
+       all (unlike RetentionHoldReading) — ApplyRawPurgeOverHorizonAsync fires unconditionally on the
+       recorded outcome, per M1's ruling. There is nothing to pin here; a test that tried to pass an armed
+       flag would not compile, which IS the guarantee. */
+
+    [Fact]
+    public void RawCadenceReadings_OnlyRanWithElapsed_YieldsOneReadingAtTheTriggerInterval()
+    {
+        var readings = new[]
+        {
+            RawReading(jobId: 1, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 1_800_000)),
+            RawReading(jobId: 2, lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "hole", null, null)),
+            RawReading(jobId: 3, lastPurge: null),
+        };
+
+        var result = DarlingWorker.RawCadenceReadings(readings, TimeSpan.FromHours(1));
+
+        var only = Assert.Single(result);
+        Assert.Equal(1_800_000, only.LastRunDurationMs);
+        Assert.Equal(3_600_000, only.ScheduleIntervalMs);
+    }
+
+    [Fact]
+    public async Task JobOverCadence_RawReadingOverItsInterval_Fires()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var readings = new[]
+        {
+            RawReading(lastPurge: new RawLastPurgeRecord(DateTime.UtcNow, "ran", null, 5_400_000)),
+        };
+        var cadenceReadings = DarlingWorker.RawCadenceReadings(readings, TimeSpan.FromHours(1));
+
+        await e.ApplyStoreJobCadenceAsync(cadenceReadings, Ct);
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.JobCadenceMetric, fired.MetricName);
+    }
+
     /* ---------------- #2136 Store Job Over Cadence ---------------- */
 
     /* The cadence every hourly store policy has, and the denominator the warning knob is a share of. */
