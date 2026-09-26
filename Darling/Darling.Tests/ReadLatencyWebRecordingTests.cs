@@ -179,25 +179,37 @@ public sealed class ReadLatencyWebRecordingTests
         await using var postgres = NpgsqlDataSource.Create(cs!);
 
         const string routeName = "__test_statement_timeout";
-        DarlingWebEndpoints.s_testOnlyExtraDispatchEntry = (routeName, (_, _, _) =>
-            throw new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014"));
-        try
+        using var seam = new ExtraDispatchEntryScope(
+            (routeName, (_, _, _) =>
+                throw new PostgresException("canceling statement due to statement timeout", "ERROR", "ERROR", "57014")));
+
+        var readLatency = new ReadLatencyAccumulator();
+        var server = await BuildServer(postgres, readLatency);
+
+        var response = await Send(server, "/api/read/" + routeName);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+
+        var drained = readLatency.Drain();
+        var sample = Assert.Single(drained, d => d.Surface == ReadSurface.Web && d.Route == routeName);
+        Assert.Equal(ReadOutcome.Timeout, sample.Outcome);
+        Assert.Equal(1, sample.Count);
+    }
+
+    /// <summary>
+    /// Sets <see cref="DarlingWebEndpoints.s_testOnlyExtraDispatchEntry"/> for the scope's lifetime and
+    /// clears it on <see cref="Dispose"/>, so a later test's <c>BuildReadDispatch</c> call (this static
+    /// persists across the whole process, like <c>s_readLatency</c>) never sees a leftover entry from this
+    /// fact.
+    /// </summary>
+    private sealed class ExtraDispatchEntryScope : IDisposable
+    {
+        public ExtraDispatchEntryScope((string Name, DarlingWebEndpoints.ReadToolHandler Handler) entry)
         {
-            var readLatency = new ReadLatencyAccumulator();
-            var server = await BuildServer(postgres, readLatency);
-
-            var response = await Send(server, "/api/read/" + routeName);
-            Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
-
-            var drained = readLatency.Drain();
-            var sample = Assert.Single(drained, d => d.Surface == ReadSurface.Web && d.Route == routeName);
-            Assert.Equal(ReadOutcome.Timeout, sample.Outcome);
-            Assert.Equal(1, sample.Count);
+            DarlingWebEndpoints.s_testOnlyExtraDispatchEntry = entry;
         }
-        finally
+
+        public void Dispose()
         {
-            /* Cleared so a later test's BuildReadDispatch call (this static persists across the whole
-               process, like s_readLatency) never sees a leftover entry from this fact. */
             DarlingWebEndpoints.s_testOnlyExtraDispatchEntry = null;
         }
     }
