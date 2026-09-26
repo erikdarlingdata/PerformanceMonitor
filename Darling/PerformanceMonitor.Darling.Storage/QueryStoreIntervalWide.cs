@@ -592,6 +592,15 @@ WHERE t.server_id = $1;";
                 return (false, windowStart);
             }
 
+            /* Review D4R H1: clauses 4 and 5 need no table floor at all, so check them before the two
+               remaining round trips (ChunkFloorsSql's metadata read and, worse, PlainTableFloorSql's
+               unindexed server-wide scan). A short window or a literal end before appliedThrough can only
+               ever land on "raw" (UseTable's own tail), so failing here saves both queries. */
+            if (windowEnd - windowStart < minWindow || (literalWindowEnd is DateTime e && e < appliedThrough))
+            {
+                return (false, windowStart);
+            }
+
             DateTime? rawFloor = null;
             DateTime? tableFloor = null;
             var tableIsHypertable = false;
@@ -603,6 +612,15 @@ WHERE t.server_id = $1;";
                 rawFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
                 tableIsHypertable = reader.GetBoolean(1);
                 tableFloor = reader.IsDBNull(2) ? null : reader.GetDateTime(2);
+            }
+
+            /* Clause 2 (filledSince <= max(rawFloor, windowStart)) needs only rawFloor, already in hand from
+               ChunkFloorsSql's metadata read (or never set, on a non-Timescale store) — never the table floor.
+               An upgraded store whose claim doesn't cover the window yet fails here, before PlainTableFloorSql's
+               scan, instead of after it. */
+            if (filledSince > ClampedStart(rawFloor, windowStart))
+            {
+                return (false, windowStart);
             }
 
             if (!tableIsHypertable)

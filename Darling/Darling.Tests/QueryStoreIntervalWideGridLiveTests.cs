@@ -122,6 +122,61 @@ public sealed class QueryStoreIntervalWideGridLiveTests
     }
 
     /// <summary>
+    /// Review D4R H1: a window under <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> must issue ZERO
+    /// round trips against <c>collect.query_store_interval_wide</c> — no <c>ReadSourceInputsSql</c>, no
+    /// <c>ChunkFloorsSql</c>, and above all no <c>PlainTableFloorSql</c> (the unindexed
+    /// <c>MIN(first_execution_time) WHERE server_id = $1</c> scan) — counted directly off
+    /// <c>pg_stat_user_tables.seq_scan</c>/<c>idx_scan</c> before and after the call, since PostgreSQL's own
+    /// catalog is the only seam that tells "no statement ran" apart from "a statement ran and returned
+    /// nothing". Ungated at <c>a7fdde9f</c> (pre-fix): fails RED there because every grid read, short window or
+    /// not, always ran the gate's own round trips including the floor scan.
+    /// </summary>
+    [Fact]
+    public async Task ShortWindowRead_IssuesNoRoundTripAgainstTheWideTable()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to a Postgres connection string to run the #3953 H1 round-trip test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+
+        await SeedGridAsync(runner, ServerId, WindowStart, ct);
+        await ForceFilledSinceAsync(connection, WindowStart.AddDays(-1), ct);
+
+        async Task<(long SeqScan, long IdxScan)> ScanCountsAsync()
+        {
+            await using var command = new NpgsqlCommand(
+                "SELECT COALESCE(seq_scan, 0), COALESCE(idx_scan, 0) FROM pg_stat_user_tables WHERE relname = 'query_store_interval_wide'", connection);
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct))
+            {
+                return (0, 0);
+            }
+
+            return (reader.GetInt64(0), reader.GetInt64(1));
+        }
+
+        var shortWindowEnd = WindowStart.AddHours(6);
+        var before = await ScanCountsAsync();
+
+        /* The gate itself, under the ruled minimum window (12h): must return "raw" with no round trip at all. */
+        var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+            connection, ServerId, WindowStart, shortWindowEnd, null, QueryStoreIntervalWide.GridWideMinWindow, 30, null, ct);
+        Assert.False(useTable, "a 6h window is under the grid's 12h minimum and must read raw");
+
+        /* End to end through the viewer, the same surface the review named: no extra connection or transaction
+           against the wide table for a short-window grid read. */
+        await using var viewer = new ViewerDataService(scratch.ConnectionString);
+        await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, shortWindowEnd);
+
+        var after = await ScanCountsAsync();
+        Assert.Equal(before, after);
+    }
+
+    /// <summary>
     /// The clamp (review D4R H3): once raw's oldest chunk (this window's own day 0) is dropped, the table still
     /// holds those rows — its own retention is independent of raw's — so an UNCLAMPED table read would show rows
     /// raw no longer has. Bounding the table read at <see cref="QueryStoreIntervalWide.ClampedStart"/> instead

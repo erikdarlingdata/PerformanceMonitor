@@ -437,6 +437,13 @@ public sealed partial class ViewerDataService : IAsyncDisposable
 
     private readonly NpgsqlDataSource _dataSource;
 
+    /// <summary>Review D4R M3: <see cref="GetStoreSchemaVersionAsync"/>'s result, cached per instance (this
+    /// instance is per store connection) once the Queries grid's #3953 table-read gate has probed it, so a
+    /// long-window grid refresh pays the 121-column catalog probe once per session rather than on every load.
+    /// A store upgraded mid-session keeps reading raw until the viewer reconnects — errs toward raw, never
+    /// toward a stale "table" claim, same as every other input to this gate.</summary>
+    private int? _cachedStoreSchemaVersion;
+
     /// <param name="connectionString">The Postgres connection string (managed-derived or BYO from darling.json).</param>
     /// <param name="connectionTimeoutSeconds">
     /// The viewer's "Connection timeout" preference (<see cref="ViewerAppSettings.ConnectionTimeoutSeconds"/>,

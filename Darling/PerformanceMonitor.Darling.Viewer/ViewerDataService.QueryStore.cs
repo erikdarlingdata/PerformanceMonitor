@@ -401,14 +401,22 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null,
         DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
-        var schemaVersion = await GetStoreSchemaVersionAsync(cancellationToken);
-        if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
+        /* Review D4R H1: the window check comes FIRST, before the schema probe (a 121-column
+           EXISTS catalog query) and before TryGetQueryStoreTopQueriesFromTableAsync (a second
+           connection, a transaction, and the gate's own round trips including the unindexed table
+           floor scan). A window under GridWideMinWindow can only ever read raw (clause 5), so it must
+           reach raw with ZERO extra store round trips versus before this table existed. */
+        if (endUtc - startUtc >= QueryStoreIntervalWide.GridWideMinWindow)
         {
-            var tableRows = await TryGetQueryStoreTopQueriesFromTableAsync(
-                serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, cancellationToken);
-            if (tableRows is not null)
+            var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+            if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
             {
-                return tableRows;
+                var tableRows = await TryGetQueryStoreTopQueriesFromTableAsync(
+                    serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, cancellationToken);
+                if (tableRows is not null)
+                {
+                    return tableRows;
+                }
             }
         }
 
@@ -480,6 +488,9 @@ public sealed partial class ViewerDataService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Review D4R M2: a permission failure here (a viewer role that can't SELECT the new table on an
+               upgraded store) must not fall back to raw forever with no trace anywhere. */
+            System.Diagnostics.Trace.TraceWarning($"#3953 grid table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }

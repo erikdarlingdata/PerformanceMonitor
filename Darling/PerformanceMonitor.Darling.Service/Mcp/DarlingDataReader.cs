@@ -1580,7 +1580,12 @@ internal static class DarlingDataReader
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         string? executionType, string? moduleName, CancellationToken cancellationToken = default)
     {
-        if (StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion)
+        /* Review D4R H1: the window check first, before the gate's own round trips even open — this surface
+           has no live schema probe to save (StorageVersion.SchemaVersion is a compiled constant), but every
+           call under QueryStoreTopMinWindow otherwise still opens a second connection, a transaction, and
+           pays ReadSourceInputsSql plus the unindexed PlainTableFloorSql scan for a read that can only ever
+           land on raw (UseTable's clause 5). */
+        if (StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion && endUtc - startUtc >= QueryStoreTopMinWindow)
         {
             var tableRows = await TryGetQueryStoreTopFromTableAsync(
                 postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken);
@@ -1666,6 +1671,10 @@ internal static class DarlingDataReader
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Review D4R M2: same silent-fallback risk as the viewer's twin. This surface has no ILogger
+               reachable from a static method with no DI-injected instance (its caller, DarlingMcpDataTools,
+               takes no logger either), so Trace is the only seam available here. */
+            System.Diagnostics.Trace.TraceWarning($"#3953 MCP top-queries table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }
