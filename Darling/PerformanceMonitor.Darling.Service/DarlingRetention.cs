@@ -314,6 +314,28 @@ public static class DarlingRetention
                    uncovered ones — there is no cutoff that drops the covered tail while sparing the uncovered
                    head. NOT an outright exclusion of tiered tables either: the moment coverage reaches back,
                    the normal horizon applies again, so a never-armed policy cannot mean unbounded growth. */
+                /* #4427: the three raw relations (membership from TimescaleSupport.RawRelations itself,
+                   never a copied list) leave this sweep's drop path entirely on a TimescaleDB store. The
+                   floor-only check just above (IsTieredDropSafeAsync/IsRawTierDropSafeAsync) compares each
+                   rollup's OLDEST bucket against raw's oldest row, so it reads Covered even when a hole sits
+                   INSIDE the covered span — an outage seam the repair hasn't reached, a range the repair
+                   deferred, a failed repair. The service-triggered purge (#4299) already owns these three
+                   tables with the full gate (a fresh Covered verdict, a current repair epoch, a resolvable
+                   successor, and a clean interior-hole scan — DarlingWorker.TriggerRawPurgeCoreAsync); this
+                   sweep must not re-decide the same drop with a weaker check, or it defeats the very gate the
+                   hold exists to protect. Counted as neither purged nor failed — nothing here failed, and the
+                   rows are exactly where the gated purge (or a still-running repair) means them to be; the
+                   dimension GC below stays safe regardless, since its cutoff is measured from the oldest
+                   surviving digest-carrying fact row. Plain-PostgreSQL mode (timescaleAvailable false) is
+                   unaffected: there are no rollups there, so the DELETE fallback below is raw's only purge. */
+                if (timescaleAvailable && TimescaleSupport.RawRelations.Contains(definition.TargetTable))
+                {
+                    logger?.LogInformation(
+                        "Retention purge for {Table} is owned by the service-triggered, gated raw purge (#4299); the sweep does not drop it.",
+                        definition.TargetTable);
+                    continue;
+                }
+
                 if (timescaleAvailable && !await IsTieredDropSafeAsync(postgres, definition.TargetTable, logger, cancellationToken))
                 {
                     logger?.LogWarning(
