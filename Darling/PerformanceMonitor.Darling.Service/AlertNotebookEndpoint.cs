@@ -483,6 +483,8 @@ internal static partial class AlertNotebookEndpoint
     {
         (new[] { "Blocking Detected", "Blocking Wait Time" },
             new AuthoredTemplateEntry("authored/blocking", BlockingTemplateVersion, BuildBlockingCells)),
+        (new[] { "Collection Stopped", "Capture Down", "Collector Cost Regression" },
+            new AuthoredTemplateEntry("authored/self-monitor", SelfMonitorTemplateVersion, BuildSelfMonitorCells)),
         (new[] { "Deadlocks Detected" },
             new AuthoredTemplateEntry("authored/deadlocks", DeadlocksTemplateVersion, BuildDeadlockCells)),
         (new[] { "Failed Agent Job", "Long-Running Job", "Agent Not Running" },
@@ -553,6 +555,8 @@ internal static partial class AlertNotebookEndpoint
     {
         ("Custom:", AuthoredContextKind.CustomRule,
             new AuthoredTemplateEntry("authored/custom-rule", CustomRuleTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildCustomRuleCells)),
+        ("Analysis: ", AuthoredContextKind.AnalysisFinding,
+            new AuthoredTemplateEntry("authored/analysis-finding", AnalysisFindingTemplateVersion, BuildCells: null, BuildCellsWithContext: BuildAnalysisFindingCells)),
     };
 
     /// <summary>Exact-then-prefix resolution, with the kind the caller needs to run the right pre-fetch
@@ -752,6 +756,9 @@ internal static partial class AlertNotebookEndpoint
         "get_pg_wraparound_risk",
         "get_pg_xmin_horizon",
         "get_pg_replication_slots",
+        /* #4223 self-monitor: get_collector_cost declares only 'days_back'/'collector_name' -- no 'limit'
+           param at all (it always returns the one collector's daily trend or the ranked list). */
+        "get_collector_cost",
     };
 
     /// <summary>An authored template's read cell (spec §1 binding): <c>server</c>, <c>as_of = window_end</c>

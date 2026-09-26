@@ -56,8 +56,11 @@ public class PgStatementStatsDeltaSkipTests
     /// on the Aurora-only six, and — since #3653 A5 — a NULL <c>statements_stats_reset</c> at ordinal 27,
     /// which the epoch check reads as "unknown" and so never as a change; these tests are about the skip,
     /// not the epoch, and a NULL keeps the epoch inert. <c>ServerEpochTests</c> drives the epoch itself.)
+    /// Since #4428, ordinal 28 is <c>stats_since</c> (NULL by default here — the row-coherent restart
+    /// placement is tested separately in <c>Darling.Tests</c>) and ordinal 29 is <c>target_now</c>, the
+    /// target's own clock, defaulted to the collection time a scenario is about to pass to <c>ReadAsync</c>.
     /// </summary>
-    private static object[] Row(long queryId, long calls, double totalExecTimeMs, long rowsReturned = 0, long databaseId = 1, long userId = 1) => new object[]
+    private static object[] Row(long queryId, long calls, double totalExecTimeMs, long rowsReturned = 0, long databaseId = 1, long userId = 1, DateTime? statsSince = null, DateTime? targetNow = null) => new object[]
     {
         queryId, databaseId, userId, true, calls, totalExecTimeMs,
         0d, 0d, 0d, rowsReturned,
@@ -67,6 +70,8 @@ public class PgStatementStatsDeltaSkipTests
         0L, 0L, 0L,
         DBNull.Value, DBNull.Value,
         DBNull.Value,
+        statsSince.HasValue ? (object)statsSince.Value : DBNull.Value,
+        targetNow ?? T0,
     };
 
     private static async Task<List<PgStatementStatsCollector.Row>> ReadAsync(

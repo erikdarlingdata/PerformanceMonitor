@@ -116,6 +116,25 @@ public interface ICollectorDeltaCalculator
         => default;
 
     /// <summary>
+    /// #4428: rolls a caller-named pass window forward when <paramref name="observedTime"/> is new for
+    /// (<paramref name="serverId"/>, <paramref name="group"/>), and returns the PREVIOUS value of that
+    /// window — the same bookkeeping <see cref="DecideRow"/> already keeps on the collector's own clock
+    /// (<c>collectionTime</c>), exposed generically so a definition that must place a restart on a
+    /// DIFFERENT clock — a source's own <c>now()</c>, captured in the same read, rather than the collector
+    /// host's — can track that clock's own previous pass without a second cache of its own.
+    ///
+    /// <para><paramref name="group"/> is a caller-chosen namespace. It shares nothing with any
+    /// <c>collectorName</c> a delta family uses elsewhere — the point of the method is that a target-clock
+    /// window and a collector-clock window never mix, so a caller MUST pick a name no ordinary delta call
+    /// also passes as its <c>collectorName</c>.</para>
+    ///
+    /// <para>Default-implemented to return null, like every other member here, so an implementer that
+    /// tracks no such window — every test double in this repo until it opts in — keeps compiling.</para>
+    /// </summary>
+    DateTime? PreviousPass(int serverId, string group, DateTime observedTime)
+        => null;
+
+    /// <summary>
     /// Forgets every baseline and every pass window cached for <paramref name="serverId"/>, because the
     /// counters behind that id are no longer the counters the baselines were read from (#3653 A5, the
     /// identity-epoch item of #3540).
@@ -156,4 +175,71 @@ public interface ICollectorDeltaCalculator
     void ClearGroups(int serverId, string? discontinuity, params string[] groups)
     {
     }
+
+    /// <summary>
+    /// #4428: every value this calculator has cached for <paramref name="collectorName"/> under
+    /// <paramref name="serverId"/>, keyed by the same key each <c>CalculateDelta*</c> call under that
+    /// collector name uses — a PEEK, like <see cref="DecideRow"/>: it updates nothing and costs nothing a
+    /// caller was not already going to spend making its own per-key delta calls. Empty when the server or
+    /// collector has cached nothing yet (a first pass). The caller this exists for compares every row's
+    /// CURRENT value against its own cached baseline here to decide, once per pass, whether the whole
+    /// server's counters just reset together — a decision no single per-key delta call can make, because
+    /// each one sees only its own key.
+    ///
+    /// <para>Default-implemented to return an empty map, so existing implementers — including every test
+    /// double in this repo — keep compiling and report no baselines until they opt in, exactly the pattern
+    /// <see cref="DecideRow"/> and <see cref="CalculateDeltaWithSeriesAge"/> already use.</para>
+    /// </summary>
+    IReadOnlyDictionary<string, long> PeekBaselines(int serverId, string collectorName)
+        => EmptyBaselines;
+
+    /// <summary>The empty map <see cref="PeekBaselines"/> returns when nothing is cached.</summary>
+    static readonly IReadOnlyDictionary<string, long> EmptyBaselines = new Dictionary<string, long>(0);
+
+    /// <summary>
+    /// #4428: rebases every cached VALUE for the named delta groups on <paramref name="serverId"/> to zero,
+    /// KEEPING each key's cached timestamp — the counterpart to a server-wide counter clear (SQL Server's
+    /// <c>DBCC SQLPERF(@wait_stat_name, CLEAR)</c> job): every counter really did drop to (near) zero at the
+    /// same instant, so the next ordinary delta call (current value minus a zero baseline, over the real
+    /// interval since the kept timestamp) reports the row's current value as the delta since the clear —
+    /// rather than the reset branch's (0, 0), which would read the whole slice since the clear as unknowable
+    /// for every one of the (typically hundreds of) affected keys.
+    ///
+    /// <para>Only the slice between the previous pass and the clear is lost — genuinely unknowable, since
+    /// the DMV never reports the pre-clear value and the post-clear one in the same row — and this pass's
+    /// per-second rate for every rebased key is therefore slightly UNDERSTATED: its numerator is the whole
+    /// post-clear value but its denominator (the interval) still spans back to the pre-clear baseline's
+    /// timestamp, which is longer than the time the counter actually had to accrue in.</para>
+    ///
+    /// <para>Default-implemented as a no-op, like <see cref="ClearServer"/> and <see cref="ClearGroups"/>, so
+    /// an implementer that caches nothing per server keeps compiling with nothing to rebase.</para>
+    /// </summary>
+    void RebaseFamiliesToZero(int serverId, IEnumerable<string> collectorNames)
+    {
+    }
+
+    /// <summary>
+    /// #4428: queues the once-per-server-per-day account of a detected wait-stats clear (see
+    /// <see cref="RebaseFamiliesToZero"/>) for a host to log — the same waiting-room pattern
+    /// <see cref="ClearServer"/>'s discontinuity queue uses, but throttled to once per calendar day per
+    /// server (by <paramref name="nowUtc"/>'s date) rather than once per drain, because a busy clear job can
+    /// fire many times an hour and the log line's job is to tell an operator the phenomenon is happening, not
+    /// to count every occurrence. A second call the same UTC day is silently dropped.
+    ///
+    /// <para>Default-implemented as a no-op, so an implementer that caches nothing per server keeps
+    /// compiling with nothing to queue.</para>
+    /// </summary>
+    void NoteWaitStatsClear(int serverId, string serverName, DateTime nowUtc)
+    {
+    }
+
+    /// <summary>
+    /// Hands back — and forgets — every wait-stats-clear account queued for <paramref name="serverId"/> by
+    /// <see cref="NoteWaitStatsClear"/> since the last drain. A host calls this once per collector run,
+    /// after the run, and logs each line at Information exactly as given — the sentence is already complete
+    /// prose, unlike <see cref="DrainDiscontinuities"/>'s lines, which a host wraps with its own collector
+    /// and run framing. Empty in the default no-op implementation and in every ordinary run.
+    /// </summary>
+    IReadOnlyList<string> DrainWaitStatsClearWarnings(int serverId)
+        => Array.Empty<string>();
 }

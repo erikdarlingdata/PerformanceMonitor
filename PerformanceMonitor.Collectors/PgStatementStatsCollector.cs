@@ -182,6 +182,25 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
            with the measurement behind its shape (#3818). */
         var statsReset = StatementsEpochSql;
 
+        /* #4428: stats_since arrived in pg_stat_statements 1.11, bundled with PostgreSQL 17 — the moment
+           THIS entry was (re-)created in the extension's hashtable, the same series-age signal #2235
+           already uses for query_stats' compile_age, reported as a timestamp rather than an age. It is a
+           COLUMN of the base view, exactly like toplevel above, so it takes the SAME proxy toplevel
+           already takes and for the same accepted reason (#3818's remarks on toplevel): the server major
+           is a stand-in for the extension's catalog version, which is usually right and loudly wrong
+           (42703, unclassified) on the cluster it misses — a 17+ engine whose extension predates the
+           in-place major upgrade. aurora_stat_statements() is documented to carry every pg_stat_statements
+           column, stats_since included, wherever the function itself exists, so the Aurora flavor reads
+           it unguarded the same way it already reads toplevel unguarded. */
+        var statsSince = postgresMajorVersion >= 17 ? "stats_since" : "NULL::timestamp with time zone";
+
+        /* #4428: the TARGET's own clock, captured in the SAME read as stats_since, once per row (cheap —
+           PostgreSQL evaluates now() once per statement, not per row, so this is one clock read per pass
+           either way). The restart placement below compares stats_since ONLY against this column's value
+           from the PREVIOUS pass, never against the collector host's own clock — the two clocks can be
+           minutes apart (#4428's skew pin), and the collector's clock is not even the same MACHINE. */
+        var targetNow = "now()";
+
         if (!isAurora)
         {
             return $@"
@@ -213,7 +232,9 @@ SELECT
     wal_bytes::bigint                  AS wal_bytes,
     NULL::bigint                       AS total_exec_peakmem,
     NULL::bigint                       AS max_exec_peakmem,
-    {statsReset}                       AS statements_stats_reset
+    {statsReset}                       AS statements_stats_reset,
+    {statsSince}                       AS stats_since,
+    {targetNow}                        AS target_now
 FROM public.pg_stat_statements
 WHERE calls > 0";
         }
@@ -247,7 +268,9 @@ SELECT
     wal_bytes::bigint                  AS wal_bytes,
     total_exec_peakmem::bigint         AS total_exec_peakmem,
     max_exec_peakmem::bigint           AS max_exec_peakmem,
-    {statsReset}                       AS statements_stats_reset
+    {statsReset}                       AS statements_stats_reset,
+    {statsSince}                       AS stats_since,
+    {targetNow}                        AS target_now
 FROM aurora_stat_statements(false)
 WHERE calls > 0";
     }
@@ -478,6 +501,42 @@ WHERE calls > 0";
             var key = string.Create(CultureInfo.InvariantCulture,
                 $"{queryId}|{databaseId}|{userId}|{(topLevel ? 1 : 0)}");
 
+            /* #4428: stats_since (ordinal 28, NULL below PostgreSQL 17 or when the column does not exist
+               on this cluster's extension catalog) and target_now (ordinal 29, always present — now() never
+               returns NULL) are read TOGETHER, in this same row, before any delta call below can touch a
+               baseline. Both travel on the TARGET's own clock; neither is ever compared against anything
+               measured on the collector host's clock — see the class remarks and #4428's skew pin. */
+            var statsSince = reader.IsDBNull(28) ? (DateTime?)null : reader.GetDateTime(28);
+            var targetNow = reader.GetDateTime(29);
+
+            /* #4428: peeked BEFORE any of the three per-family calls below mutate a baseline — the same
+               ordering DecideRow's own doc comment requires and QueryStatsCollector already follows for
+               query_stats. seriesAgeSeconds is passed null deliberately: DecideRow's OWN gap-placement
+               branch (reached only when seriesAgeSeconds.HasValue) measures the gap on collectionTime,
+               the COLLECTOR's clock, which this definition must never use for placement. Passing null
+               skips that branch entirely and leaves this call a pure AnyReset peek; placement is decided
+               below, on the target's own clock, using stats_since and the target-clock pass window. */
+            var rowReset = context.Deltas.DecideRow(
+                context.ServerId,
+                new (string Family, long Current)[]
+                {
+                    ("pg_statement_stats_calls", calls),
+                    ("pg_statement_stats_time", (long)totalExecTimeMs),
+                    ("pg_statement_stats_rows", rowsReturned),
+                },
+                key,
+                seriesAgeSeconds: null,
+                collectionTime: context.CollectionTime,
+                maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+            /* #4428: the TARGET-clock pass window, tracked under a group name no ordinary delta call ever
+               passes as its own collectorName (see ICollectorDeltaCalculator.PreviousPass's contract), so
+               it never collides with the collector-clock windows the three CalculateDeltaWithInterval
+               calls below keep for themselves. Rolled every pass — target_now moves forward on every
+               genuine pass, so this always advances — and returns the PREVIOUS pass's target_now, the
+               only clock a restart may be placed against. */
+            var previousTargetNow = context.Deltas.PreviousPass(context.ServerId, "pg_statement_stats_target_clock", targetNow);
+
             var deltaCalls = context.Deltas.CalculateDeltaWithInterval(
                 context.ServerId, "pg_statement_stats_calls", key, calls, out var callsIntervalSeconds,
                 collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
@@ -496,11 +555,55 @@ WHERE calls > 0";
             var deltaRows = context.Deltas.CalculateDeltaWithInterval(
                 context.ServerId, "pg_statement_stats_rows", key, rowsReturned, out var rowsIntervalSeconds,
                 collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+            /* #4428: the row-coherent decision, applied AFTER every per-family call above has already run
+               and stored its own new baseline — exactly QueryStatsCollector's ordering, so the row is
+               ready for an ordinary delta on the NEXT pass regardless of which branch this row takes now.
+               Any family decreasing makes the WHOLE row a restart (rowReset.AnyReset, decided above on the
+               unmutated baseline). Placement: stats_since strictly AFTER the previous pass's target-clock
+               now() means the restart happened inside the gap, so every counter's delta becomes its
+               CURRENT value over the real target-clock gap; anything else — stats_since absent (rule 3),
+               previousTargetNow unknown (first pass), or stats_since at or before the previous target_now
+               — makes the whole row unknowable, (0, 0), same as an ordinary single-family reset already
+               reports. NEVER compared against context.CollectionTime — the collector host's own clock —
+               which is the whole point of carrying target_now beside stats_since in the same read. */
+            if (rowReset.AnyReset)
+            {
+                var gapSeconds = previousTargetNow.HasValue
+                    ? (int)(targetNow - previousTargetNow.Value).TotalSeconds
+                    : 0;
+
+                var creditedInGap = statsSince.HasValue && previousTargetNow.HasValue
+                    && statsSince.Value > previousTargetNow.Value
+                    && gapSeconds > 0;
+
+                if (creditedInGap)
+                {
+                    deltaCalls = calls;
+                    deltaTotalTime = (long)totalExecTimeMs;
+                    deltaRows = rowsReturned;
+                    callsIntervalSeconds = gapSeconds;
+                    timeIntervalSeconds = gapSeconds;
+                    rowsIntervalSeconds = gapSeconds;
+                }
+                else
+                {
+                    deltaCalls = 0;
+                    deltaTotalTime = 0;
+                    deltaRows = 0;
+                    callsIntervalSeconds = 0;
+                    timeIntervalSeconds = 0;
+                    rowsIntervalSeconds = 0;
+                }
+            }
+
             /* #3540 (V128): the stored interval is the MINIMUM over the row's three groups — the V127 rule
                (WaitStatsCollector). The groups share a key and a collection time, so they agree in every
                case but an independent single-counter reset, and pg_stat_statements resets an entry's
                counters together; the minimum makes the stored pair mean "every delta in this row is
-               knowable", so a reader never divides one group's reset 0 by a sibling's real span. */
+               knowable", so a reader never divides one group's reset 0 by a sibling's real span. After the
+               #4428 override above the three intervals already agree, so this is a no-op for a restarted
+               row and unchanged behaviour for every other one. */
             var sampleIntervalSeconds = Math.Min(callsIntervalSeconds, Math.Min(timeIntervalSeconds, rowsIntervalSeconds));
 
             /* The skip: a REAL interval (this is not a first sighting, a counter reset, or a gap this

@@ -171,6 +171,8 @@ public sealed class RepoFileAdoptionTests
         "QueryStoreClutterViewerSurfacesTests.cs",
         /* #4231: its web source pin counts noteKey: "truncation_note" occurrences across server-tabs.js and
            view-templates.js, which an LF-normalised read makes exact instead of CRLF-fragile. */
+        /* #4427: its wiring pin slices RunPurgeNowAsync's body by brace balance and matches calls that span line breaks. */
+        "RawPurgeNowWiringTests.cs",
         "RawWindowFloorViewerPortTests.cs",
         /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
            stores' sources and asserts them equal up to one token, and its wiring pin slices each pass method by
