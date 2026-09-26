@@ -1007,9 +1007,12 @@ internal static class DarlingDataReader
             AND   collection_time >= $2
             AND   collection_time <= $3
             AND   ($5::text IS NULL OR database_name = $5)
-            /* #4394: excludes a plan's first-collection row, whose "delta" can be cumulative since
-               plan creation rather than a true per-interval delta — the same filter the hourly
-               successor already bakes into its CREATE. */
+            /* #4394: excludes zero-interval rows (sample_interval_seconds = 0) through
+               TimescaleSupport.IntervalHonestSourceFilter, the same filter the hourly successors
+               bake into their CREATE, so a raw-served and an hourly-served read of the same window
+               agree by construction. The collector writes a zero-interval row with zero deltas
+               (CollectorDeltaCalculator's first-sighting, reset and gap cases), so this changes no
+               total in practice. It keeps the two tiers from disagreeing if that ever stops holding. */
             AND   {TimescaleSupport.IntervalHonestSourceFilter}
             /* #2012 stage 2: host_object_name splits INSERT...EXEC callers that share a query_hash
                (each proc-hosted statement groups under its own host object), while ad-hoc rows carry

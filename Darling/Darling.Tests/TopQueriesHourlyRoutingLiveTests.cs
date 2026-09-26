@@ -78,13 +78,15 @@ public sealed class TopQueriesHourlyRoutingLiveTests
             await PlantAsync(connection, ct, WindowStart.AddHours(2), "0xTOPQ2", "usp_HostA", 200_000L, 180_000L, 5L, 3600);
             await PlantAsync(connection, ct, WindowStart.AddHours(3), "0xTOPQ3", "usp_HostB", 50_000L, 40_000L, 2L, 3600);
 
-            /* ── seed (b'): #4394's own case — a ZERO-interval row for a group that ALSO has ordinary,
-               nonzero-interval rows (0xTOPQ1, already seeded above). Before #4394, TopQueriesSql summed this
-               row's delta_worker_time into raw's total for 0xTOPQ1 (a first-collection row whose "delta" can
-               be cumulative since plan creation), while the hourly successor's CREATE already excludes it via
-               IntervalHonestSourceFilter — the two tiers ranked the same window differently. #4394 adds the
-               same filter to raw's read, so raw and hourly now agree on 0xTOPQ1's total. RED on dev: raw's
-               0xTOPQ1 total exceeds hourly's by exactly this row's 700,000 CPU-us / 1 execution. ── */
+            /* ── seed (b'): #4394's own case — a planted zero-interval row with a nonzero delta, for a
+               group that ALSO has ordinary, nonzero-interval rows (0xTOPQ1, already seeded above). The
+               collector doesn't write this shape (a zero interval comes with zero deltas — see #2235
+               CollectorDeltaCalculator), but planting it is what makes the filter observable: before #4394,
+               TopQueriesSql summed this row's delta_worker_time into raw's total for 0xTOPQ1, while the
+               hourly successor's CREATE already excludes it via IntervalHonestSourceFilter — the two tiers
+               ranked the same window differently. #4394 adds the same filter to raw's read, so raw and
+               hourly now agree on 0xTOPQ1's total. RED on dev: raw's 0xTOPQ1 total exceeds hourly's by
+               exactly this row's 700,000 CPU-us / 1 execution. ── */
             await PlantAsync(connection, ct, WindowStart.AddHours(1).AddMinutes(40), "0xTOPQ1", "usp_HostA", 700_000L, 650_000L, 1L, 0);
 
             /* ── seed (b): one raw row for a query_hash that appears ONLY as a zero-interval first-collection
