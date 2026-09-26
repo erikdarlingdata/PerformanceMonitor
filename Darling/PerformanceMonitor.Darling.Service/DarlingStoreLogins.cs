@@ -253,6 +253,16 @@ internal static class DarlingStoreLogins
             Password = password,
             SearchPath = DarlingManagedPostgres.SearchPath,
             MaxPoolSize = RoleLoginMaxPoolSize,
+            /* #4442 scope 2: the same ApplicationName the managed-mode role connection strings carry
+               (DarlingManagedPostgres.BuildRoleConnectionString), so a compose-provisioned role's pool names
+               itself in the store's pg_stat_activity exactly like the managed one does. Role names are fixed
+               to viewer/mcp on this path (DarlingManagedPostgres.ViewerRoleName / McpRoleName are the only
+               callers), so the role name alone picks the surface. */
+            ApplicationName = role == DarlingManagedPostgres.ViewerRoleName
+                ? DarlingManagedPostgres.WebApplicationName
+                : role == DarlingManagedPostgres.McpRoleName
+                    ? DarlingManagedPostgres.McpApplicationName
+                    : null,
         };
         return builder.ConnectionString;
     }
