@@ -1795,6 +1795,102 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
+    /// PIN (#4406): a NON-empty successor with a hole inside its OWN span — above its first bucket past the
+    /// legacy's end — must not hold the raw purge. The seam probe (<see cref="TimescaleSupport.LegacySuccessorHoleExistsSql"/>
+    /// via the coverage stitch) walks only <c>(l.mx, the successor's first bucket above l.mx)</c>; buckets from
+    /// that first bucket upward belong to the successor's own span, which the walk's ordinary window repairs, so
+    /// the gate leaves them out on purpose. The legacy freezes a few hours back; the successor materializes its
+    /// very first bucket immediately above the legacy (so the seam itself is gap-free) and a LATER bucket too,
+    /// but skips a bucket in between — a real hole, just one the seam probe was never meant to see.
+    /// <see cref="TimescaleSupport.IsRawTierDropSafeAsync"/> must still read <c>true</c>. RED if the coverage
+    /// stitch's <c>toExpr</c> stopped honoring the successor's own first bucket and instead always fell back to
+    /// <c>now() - HourlyRefreshStartOffset</c>: the probe would then walk past the successor's floor and into
+    /// this test's deliberate hole, reporting Short.
+    /// </summary>
+    [Fact]
+    public async Task Upgrade_NonEmptySuccessor_HoleInItsOwnSpan_SeamProbeStopsAtItsFirstBucket_RawPurgeStaysCovered()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* now() anchor, truncated to the hour. The legacy froze 3 days back (H-72) — well past
+               HourlyRefreshStartOffset (1 day), so the fallback bound (used only when the successor holds
+               nothing above the legacy) would sit far ABOVE the seam if it were ever consulted here. The
+               successor's first bucket past the legacy, H-71 (T1), is materialized right away, so the seam
+               itself (H-72, H-71) holds no hole. The successor also materializes a much later bucket, H-2,
+               but skips H-30 (T2) in between — a real hole, entirely inside the successor's own span above
+               T1, which the seam probe must stop short of and never reach. */
+            var now = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow);
+            var h = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified);
+
+            await InsertProcedureStatsAsync(connection, h.AddHours(-72), "seam_proc_legacy_floor", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, h.AddHours(-71), "seam_proc_t1", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, h.AddHours(-30), "seam_proc_hole", 900, 9, 3600, ct);
+            await InsertProcedureStatsAsync(connection, h.AddHours(-2), "seam_proc_successor_span", 900, 9, 3600, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, h.AddHours(-72), h.AddHours(-71), ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, h.AddHours(-71), h.AddHours(-70), ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, h.AddHours(-2), h.AddHours(-1), ct);
+
+            /* The successor is non-empty (H-71 and H-2 are both materialized) and its own span holds a real
+               hole at H-30: raw admits a row for that hour, but neither the legacy nor the successor ever
+               materialized it. Proven directly so the pin cannot pass vacuously. */
+            await using (var holeCheck = new NpgsqlCommand(
+                $"SELECT (SELECT count(*) FROM collect.procedure_stats WHERE collection_time >= $1 AND collection_time < $2), " +
+                $"       (SELECT count(*) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView} WHERE bucket = $1), " +
+                $"       (SELECT count(*) FROM collect.{TimescaleSupport.ProcedureStatsHourlyView} WHERE bucket = $1)", connection))
+            {
+                holeCheck.Parameters.AddWithValue(h.AddHours(-30));
+                holeCheck.Parameters.AddWithValue(h.AddHours(-29));
+                await using var reader = await holeCheck.ExecuteReaderAsync(ct);
+                Assert.True(await reader.ReadAsync(ct));
+                Assert.True(reader.GetInt64(0) > 0, "raw must admit a row for the hour this test deliberately leaves unmaterialized");
+                Assert.Equal(0L, reader.GetInt64(1));
+                Assert.Equal(0L, reader.GetInt64(2));
+            }
+
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
     /// PIN (#4300): a real outage must still be caught, even inside the new fallback's window. The legacy's
     /// last bucket is 3 days ago; raw carries rows in the hours between 3 days ago and 1 day ago, but neither
     /// side ever materialized any of them — a genuine hole, not a healthy empty successor.
