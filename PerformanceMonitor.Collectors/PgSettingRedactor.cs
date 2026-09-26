@@ -202,7 +202,7 @@ public static class PgSettingRedactor
     /// <c>s3</c>, not <c>prompt</c>). A quoted value with an embedded space is masked whole via the
     /// quote-aware value alternation.</summary>
     private static readonly Regex SshpassOption = new(
-        @"(?<cmd>(?:^|(?<=/|\s))sshpass)(?:\s+\S+)*?\s+(?-i:-p)\s*(?:""(?<val>[^""]*)""|'(?<val>[^']*)'|(?<val>\S+))",
+        @"(?<prefix>(?:^|(?<=/|\s))sshpass(?:\s+\S+)*?\s+)(?-i:-p)\s*(?:""(?<val>[^""]*)""|'(?<val>[^']*)'|(?<val>\S+))",
         RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>Markers a decoded URI query KEY is tested against for <see cref="UriQueryKeyAnyEncoding"/> —
@@ -280,7 +280,7 @@ public static class PgSettingRedactor
         redacted = AssignmentSecretName.Replace(redacted, static m => m.Groups["name"].Value + "=" + Mask);
         redacted = OptionSecretSpaced.Replace(redacted, static m => m.Groups["opt"].Value + " " + Mask);
         redacted = CurlUserColon.Replace(redacted, static m => m.Groups["flag"].Value + " " + m.Groups["user"].Value + ":" + Mask);
-        redacted = SshpassOption.Replace(redacted, static m => m.Groups["cmd"].Value + " -p " + Mask);
+        redacted = SshpassOption.Replace(redacted, static m => m.Groups["prefix"].Value + "-p " + Mask);
 
         return redacted;
     }
