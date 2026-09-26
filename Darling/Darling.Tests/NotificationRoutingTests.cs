@@ -512,6 +512,9 @@ public sealed class NotificationRoutingTests
             DarlingSelfAlertEvaluator.StoreSettingsMetric,
             DarlingSelfAlertEvaluator.CompressionJobMetric, DarlingSelfAlertEvaluator.JobCadenceMetric,
             DarlingSelfAlertEvaluator.RetentionHoldMetric, DarlingSelfAlertEvaluator.StoreUpgradeMetric,
+            /* #4299: fired through the constant (FireAsync(..., RawPurgeOverHorizonMetric, ...)), not a quoted
+               literal, so the FireAsync regex scan below cannot see it — listed here like StoreSettingsMetric. */
+            DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric,
             /* #3816: the policy-job self-heal's two new per-family names and its total_failures arm. Listed
                here rather than found by the FireAsync literal scan below because all three fire through a
                band record's field (band.Metric) rather than a quoted string at the call site — the scan

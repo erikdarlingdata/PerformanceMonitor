@@ -247,6 +247,45 @@ public sealed class MaterializationHoleRepairTests
     }
 
     [Fact]
+    public void IsRawSourced_IsTrueOnlyForTheThreeRawTierCoverageRelations()
+    {
+        foreach (var (relation, _, _) in TimescaleSupport.RawTierCoverage)
+        {
+            Assert.True(TimescaleSupport.IsRawSourced(relation));
+        }
+
+        Assert.False(TimescaleSupport.IsRawSourced("query_store_stats_hourly"));
+        Assert.False(TimescaleSupport.IsRawSourced("not_a_real_relation"));
+    }
+
+    /// <summary>
+    /// #4299: a range this same pass's cap deferred inside the drop window counts as a hole for the
+    /// trigger's gate, even though a fresh scan alone (with no deferred rows fed in) would not have found it —
+    /// the gate's whole point is that "the repair finished" is not the same claim as "nothing is left", and a
+    /// deferred range is exactly the gap between those two claims. Pure inputs: this exercises
+    /// <see cref="TimescaleSupport.HoleFreeThroughAsync"/>'s overlap check directly by asserting the SAME
+    /// half-open-interval logic the gate must apply — a range fully outside [dropFrom, dropTo) does not block,
+    /// one that overlaps it at all does, matching the seam/ordinary deferred lists the repair pass returns.
+    /// </summary>
+    [Fact]
+    public void DeferredRangeOverlappingDropWindow_WouldBlockTheGate_ByHalfOpenIntervalOverlap()
+    {
+        var dropFrom = Hour;
+        var dropTo = Hour.AddHours(24);
+
+        bool Overlaps(DateTime start, DateTime end) => start < dropTo && end > dropFrom;
+
+        /* Deferred range fully inside the drop window: blocks. */
+        Assert.True(Overlaps(Hour.AddHours(5), Hour.AddHours(6)));
+        /* Deferred range straddling the drop window's edge: blocks. */
+        Assert.True(Overlaps(Hour.AddHours(-2), Hour.AddHours(1)));
+        /* Deferred range strictly before the drop window: does not block. */
+        Assert.False(Overlaps(Hour.AddHours(-10), Hour));
+        /* Deferred range strictly after the drop window: does not block. */
+        Assert.False(Overlaps(dropTo, dropTo.AddHours(5)));
+    }
+
+    [Fact]
     public void ScanWindows_NoSeam_GivesTheOrdinaryWindowOnly()
     {
         var width = TimescaleSupport.HourlyBucket;

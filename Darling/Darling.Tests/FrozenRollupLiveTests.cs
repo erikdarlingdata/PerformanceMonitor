@@ -1944,9 +1944,18 @@ WHERE ca.view_schema = 'collect' AND ca.view_name = '{view}'", connection);
         return Convert.ToInt64(await count.ExecuteScalarAsync(ct));
     }
 
+    /// <summary>
+    /// #4299 (d′): query_stats and procedure_stats are raw relations — their armed verdict is
+    /// config->>'darling_armed' through RawArmedStateSql, never 'scheduled' (which this build converges to
+    /// false unconditionally for the three raw jobs). Every other relation keeps the original scheduled read.
+    /// Mirrors the product's own branch in EnsureRetentionPoliciesAsync so the test and the product cannot
+    /// disagree about which column answers "is this armed".
+    /// </summary>
     private static async Task<bool?> IsRetentionScheduledAsync(NpgsqlConnection connection, string relation, CancellationToken ct)
     {
-        await using var read = new NpgsqlCommand(TimescaleSupport.RetentionPolicyScheduledSql(relation), connection);
+        var isRawRelation = TimescaleSupport.RawRelations.Any(r => r == relation);
+        await using var read = new NpgsqlCommand(
+            isRawRelation ? TimescaleSupport.RawArmedStateSql(relation) : TimescaleSupport.RetentionPolicyScheduledSql(relation), connection);
         var value = await read.ExecuteScalarAsync(ct);
         return value is bool b ? b : null;
     }

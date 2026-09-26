@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -267,7 +268,7 @@ LIMIT $3";
     }
 
     /// <summary>Databases with zero query executions over the last N days. $1 server_id, $2 cutoff.</summary>
-    public const string IdleDatabasesSql = @"
+    public const string IdleDatabasesSql = $@"
 WITH db_sizes AS (
     SELECT
         database_name,
@@ -285,7 +286,7 @@ WITH db_sizes AS (
 db_activity AS (
     SELECT
         database_name,
-        SUM(delta_execution_count) AS total_executions,
+        SUM(delta_execution_count) FILTER (WHERE {TimescaleSupport.IntervalHonestSourceFilter}) AS total_executions,
         MAX(last_execution_time) AS last_execution
     FROM v_query_stats
     WHERE server_id = $1
@@ -301,6 +302,7 @@ SELECT
 FROM db_sizes ds
 LEFT JOIN db_activity a ON a.database_name = ds.database_name
 WHERE COALESCE(a.total_executions, 0) = 0
+AND   (a.last_execution IS NULL OR a.last_execution < $2)
 AND   ds.database_name NOT IN ('master', 'model', 'msdb', 'tempdb', 'PerformanceMonitor')
 ORDER BY ds.total_size_mb DESC";
 

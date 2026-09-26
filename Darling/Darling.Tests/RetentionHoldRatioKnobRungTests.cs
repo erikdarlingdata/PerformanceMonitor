@@ -398,8 +398,13 @@ public sealed class RetentionHoldRatioKnobRungTests
 
         /* To the end of ClearRetentionHoldAsync, which is the next member and the other half of the
            subject — the resolution message is where the threshold is stated back to the operator. */
-        /* #3816 renamed the member this anchor names: the self-heal machine covers every policy family now. */
-        const string end = "/// Edge-applies the fleet-level policy-job self-heal machine";
+        /* #4299 inserted the Raw Purge Over Horizon evaluator right after ClearRetentionHoldAsync, ahead of
+           the #3816 self-heal machine this anchor used to name — that check reads the SAME two seams
+           (it judges raw relations on the same warn/critical pair), so anchoring on the self-heal machine
+           swept its reads into this slice too and doubled every _retentionHoldWarnRatio()/
+           _retentionHoldCriticalRatio() count. The isolating entry point's own doc comment is the marker
+           right after ClearRetentionHoldAsync ends, so anchor there instead. */
+        const string end = "/// The isolating entry point for the #4299 Raw Purge Over Horizon check";
         var to = source.IndexOf(end, from, StringComparison.Ordinal);
         Assert.True(to > from, "the end of ClearRetentionHoldAsync was not found, so this pin would read the rest of the file");
 

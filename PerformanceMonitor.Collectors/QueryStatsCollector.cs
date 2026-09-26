@@ -505,16 +505,31 @@ OUTER APPLY
            ALL EIGHT delta'd counters take the same rule. Crediting only some would make one row's metrics
            disagree about how much work it did, which is worse than under-reporting all of them. */
         var age = row.CompileAgeSeconds;
-        var deltaExecCount = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaExecCount = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_exec", deltaKey, row.ExecutionCount, age, out var execIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         /* Capture the collection interval alongside the CPU delta so the display can derive
            worker_time_per_second (peak CPU-ms per wall-clock second) over the window. */
-        var deltaWorkerTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, age, out var sampleIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
-        var deltaElapsedTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaWorkerTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_worker", deltaKey, row.TotalWorkerTime, age, out var workerIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+        var deltaElapsedTime = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_elapsed", deltaKey, row.TotalElapsedTime, age, out var elapsedIntervalSeconds, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaLogicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_reads", deltaKey, row.TotalLogicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaLogicalWrites = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_writes", deltaKey, row.TotalLogicalWrites, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaPhysicalReads = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_phys_reads", deltaKey, row.TotalPhysicalReads, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaRows = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_rows", deltaKey, row.TotalRows, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
         var deltaSpills = context.Deltas.CalculateDeltaWithSeriesAge(context.ServerId, "query_stats_spills", deltaKey, row.TotalSpills, age, out _, collectionTime: context.CollectionTime, maxGapSeconds: CollectorDeltaCalculator.DefaultMaxGapSeconds);
+
+        /* #4394: the worker (CPU) counter's own interval can land at 0 — a first sighting, a plan
+           reset, or a gap past the policy — while the exec-count or elapsed-time counters (same row,
+           same collection pass) return a real, knowable delta. Writing CPU as a false 0 over interval 0
+           in that case made the row look like it did no work, and the interval-honest filter
+           (sample_interval_seconds IS DISTINCT FROM 0) then discarded its real executions and duration
+           along with it. #2234 established interval 0 as the pairing for "no delta knowable"; that now
+           holds per counter rather than per row — CPU can be unknowable (NULL) while exec/elapsed are
+           real. A worker delta of 0 over a REAL interval (a query that ran but burned no CPU) is left
+           untouched: that 0 is measured, not assumed. */
+        var (resolvedWorkerDelta, sampleIntervalSeconds) = ResolveWorkerDelta(
+            deltaWorkerTime,
+            workerIntervalSeconds,
+            execIntervalSeconds,
+            elapsedIntervalSeconds);
 
         writer
             .Value(row.DatabaseName)
@@ -558,7 +573,7 @@ OUTER APPLY
             .Value(row.SqlHandle)
             .Value(row.PlanHandle)
             .Value(deltaExecCount)
-            .Value(deltaWorkerTime)
+            .Value(resolvedWorkerDelta)
             .Value(deltaElapsedTime)
             .Value(deltaLogicalReads)
             .Value(deltaLogicalWrites)
@@ -571,6 +586,40 @@ OUTER APPLY
             .Value(row.QueryPlanXmlBytes)      /* #3392: measured size, never gated by the cap */
             .Value(row.StatementStartOffset)   /* #3540: the delta key's offsets, raw, -1 included */
             .Value(row.StatementEndOffset);
+    }
+
+    /// <summary>
+    /// #4394: resolves the worker (CPU) delta to write. The worker counter's own delta call can return
+    /// interval 0 (a first sighting, a plan reset, or a gap past the policy) in the SAME collection pass
+    /// where the exec-count or elapsed-time counters return a real, knowable delta. In that case CPU is
+    /// unknowable rather than zero, so this returns a NULL worker delta and takes the row's
+    /// sample_interval_seconds from whichever of exec/elapsed has a real interval (exec first, then
+    /// elapsed). Every other case passes the worker call's own delta and interval through unchanged —
+    /// in particular a worker delta of 0 over a REAL interval (a query that ran but burned no measurable
+    /// CPU) is a measured 0, not an unknowable one, and keeps its own interval.
+    /// </summary>
+    internal static (long? WorkerDelta, int IntervalSeconds) ResolveWorkerDelta(
+        long workerDelta,
+        int workerIntervalSeconds,
+        int execIntervalSeconds,
+        int elapsedIntervalSeconds)
+    {
+        if (workerIntervalSeconds != 0)
+        {
+            return (workerDelta, workerIntervalSeconds);
+        }
+
+        if (execIntervalSeconds > 0)
+        {
+            return (null, execIntervalSeconds);
+        }
+
+        if (elapsedIntervalSeconds > 0)
+        {
+            return (null, elapsedIntervalSeconds);
+        }
+
+        return (workerDelta, workerIntervalSeconds);
     }
 
     /// <summary>
