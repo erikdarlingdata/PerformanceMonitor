@@ -6641,23 +6641,6 @@ LIMIT 1";
     /// budgeting argument is on the constant. The evaluator downstream receives a list that has already been
     /// confirmed and does not second-guess it.</para>
     /// </summary>
-    /// <summary>
-    /// #4299 L3d: the raw-cadence merge pulled out of <see cref="EvaluateCompressionJobHealthAsync"/> as its
-    /// own seam so it pins directly, without a connection. Behaviour is unchanged from the inline LINQ it
-    /// replaces: only readings whose last recorded purge outcome is <c>"ran"</c> AND carries an elapsed-ms
-    /// value become a cadence reading, at the given interval.
-    /// </summary>
-    internal static IReadOnlyList<StoreJobCadenceReading> RawCadenceReadings(
-        IReadOnlyList<RawPurgeOverHorizonReading> readings, TimeSpan interval) =>
-        readings
-            .Where(reading => reading.LastPurge is { Outcome: "ran", ElapsedMs: long })
-            .Select(reading => new StoreJobCadenceReading(
-                reading.JobId,
-                $"policy_retention {reading.HypertableName}",
-                reading.LastPurge!.ElapsedMs,
-                (long)interval.TotalMilliseconds))
-            .ToList();
-
     private async Task EvaluateCompressionJobHealthAsync(CancellationToken cancellationToken)
     {
         var readClock = Stopwatch.StartNew();
@@ -6844,6 +6827,23 @@ LIMIT 1";
                 null, "store background-job health reads (compression, job cadence, retention holds)", readClock.ElapsedMilliseconds);
         }
     }
+
+    /// <summary>
+    /// #4299 L3d: the raw-cadence merge pulled out of <see cref="EvaluateCompressionJobHealthAsync"/> as its
+    /// own seam so it pins directly, without a connection. Behaviour is unchanged from the inline LINQ it
+    /// replaces: only readings whose last recorded purge outcome is <c>"ran"</c> AND carries an elapsed-ms
+    /// value become a cadence reading, at the given interval.
+    /// </summary>
+    internal static IReadOnlyList<StoreJobCadenceReading> RawCadenceReadings(
+        IReadOnlyList<RawPurgeOverHorizonReading> readings, TimeSpan interval) =>
+        readings
+            .Where(reading => reading.LastPurge is { Outcome: "ran", ElapsedMs: long })
+            .Select(reading => new StoreJobCadenceReading(
+                reading.JobId,
+                $"policy_retention {reading.HypertableName}",
+                reading.LastPurge!.ElapsedMs,
+                (long)interval.TotalMilliseconds))
+            .ToList();
 
     /// <summary>
     /// The #3815 TimescaleDB availability re-probe (fleet-level, on the hourly store-maintenance tick, and

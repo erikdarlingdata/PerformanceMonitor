@@ -4918,7 +4918,7 @@ VALUES ($1, $2, $3, $4, $5, 0, $6, NULL, 0, 0, 0)", connection);
             Ct);
 
         var resolved = Assert.Single(h.History.Records);
-        Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonMetric, resolved.MetricName);
+        Assert.Equal(DarlingSelfAlertEvaluator.RawPurgeOverHorizonClearedMetric, resolved.MetricName);
     }
 
     [Fact]

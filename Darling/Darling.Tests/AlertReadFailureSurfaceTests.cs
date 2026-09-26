@@ -915,7 +915,7 @@ public sealed class AlertReadFailureSurfaceTests
     private static readonly (string Path, int Counted, int Exempt)[] s_wholeFileScopes =
     {
         (Path.Combine("PerformanceMonitor.Alerting", "AlertEngine.cs"), 14, 6),
-        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 13),
+        (Path.Combine("Darling", "PerformanceMonitor.Darling.Service", "DarlingSelfAlertEvaluator.cs"), 12, 14),
     };
 
     /// <summary>
@@ -1017,6 +1017,7 @@ public sealed class AlertReadFailureSurfaceTests
         ["Store policy-job health self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Store-job cadence self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Retention-held self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
+        ["Raw-purge-over-horizon self-alert failed"] = "handed its evidence as parameters; the read is counted in DarlingWorker",
         ["Stale-mute self-alert failed"] = "handed its evidence (the live MuteRuleService cache) as a parameter and performs no store read at all - there is no read anywhere for this condition to be the swallowing of",
         ["Web TLS certificate self-alert failed"] = "handed its evidence (the report from the web host's in-memory WebTlsCertificateState publish) as a parameter and performs no store read at all",
         ["Failed to record resolution"] = "an audit-row write",
@@ -1208,9 +1209,11 @@ public sealed class AlertReadFailureSurfaceTests
            catch, mirroring the store-log capture's catch beside it - a metrics write sweep whose swallowed
            failure costs no alert, and whose whole point is to leave the store-log census and the
            collector-cost flush below it running on the connection this catch keeps open. 29th since #4012:
-           the deadlock re-mask pass, which rewrites only rows still raw and resumes next hour, with every
-           deadlock read normalizing in the meantime. */
-        Assert.Equal(29, totalExempt);
+            the deadlock re-mask pass, which rewrites only rows still raw and resumes next hour, with every
+           deadlock read normalizing in the meantime. 30th since #4299 L3d: the Raw Purge Over Horizon
+           self-alert's catch, whose evidence (the readings) is handed in as a parameter, with the read
+           counted in DarlingWorker. */
+        Assert.Equal(30, totalExempt);
 
         /* Every exemption in the table is actually used. An exemption for a message that no longer exists
            is a hole this pin would otherwise keep open indefinitely — the shape that lets a real new catch
