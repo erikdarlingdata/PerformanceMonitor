@@ -18,8 +18,11 @@ namespace PerformanceMonitor.Darling.Service;
 
 /// <summary>
 /// One-time scrub of the legacy <c>state_unavailable:</c> evidence line in
-/// <c>collect.plan_force_actions.detail</c> that #4326/#4363/#4376 stop new rows from ever carrying, for a
-/// row an older build wrote before the fix (Erik: "Yes, one-time scrub" — #4346).
+/// <c>collect.plan_force_actions.detail</c>, for a row an older build wrote before #4326/#4363 fixed the
+/// PRODUCERS (<c>PgPlanForceActionStore.TryGetTargetStatesAsync</c> and <c>ForcePlanBotPolicy.Blockers</c>)
+/// to stop putting raw exception text there (Erik: "Yes, one-time scrub" — #4346). <c>JournalAsync</c>
+/// itself does not sanitize — it writes whatever <c>Detail</c> it is given — so a new row is safe only
+/// because the producers that build it are; this scrub exists for the rows written before they were.
 ///
 /// <para><b>Why this method reads <c>detail</c> raw.</b> Every OTHER reader of this table is built on
 /// <c>PgPlanForceActionStore.ReadRecord</c> (#4376), which already applies
@@ -49,10 +52,11 @@ namespace PerformanceMonitor.Darling.Service;
 ///
 /// <para><b>Failure is isolated and retried, never fatal.</b> The candidate read and each batch are
 /// independent; a batch that throws is logged once at WARNING (SQLSTATE only, never the exception's own
-/// text, which could carry the very secret being scrubbed) and the run continues with the next batch. The
-/// marker is written ONLY when every batch this run touched succeeded — a run that failed even one batch
-/// leaves the marker unset, so the next service start retries every batch, not just the ones that failed
-/// (cheap and correct: a row already scrubbed contributes nothing to the coarse filter's next pass).</para>
+/// text, which could carry the very secret being scrubbed), and the run STOPS — it does not attempt any
+/// later batch this pass. The marker is written ONLY when every batch this run touched succeeded — a run
+/// that failed even one batch leaves the marker unset, so the next service start retries every batch, not
+/// just the ones that failed (cheap and correct: a row already scrubbed contributes nothing to the coarse
+/// filter's next pass).</para>
 /// </summary>
 public static class PlanForceActionDetailScrub
 {
@@ -119,8 +123,13 @@ DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXCLUDED.updated_
     /// whose <c>detail</c> mentions the block's prefix at all. Over-inclusive on purpose (a row whose ONLY
     /// <c>state_unavailable:</c> block is already the safe post-fix shape matches this filter too); the
     /// fine-grained decision is <see cref="PgPlanForceActionStore.SanitizeDetailForAudit"/>, run per
-    /// candidate row below — this is the one and only exempted raw read of the column (#4377).</summary>
-    private const string CandidateSql = @"
+    /// candidate row below — this is the one and only exempted raw read of the column (#4377/#4384).
+    ///
+    /// <para>Named <c>LegacyDetailCandidateSql</c>, not the bare <c>CandidateSql</c> the census census's
+    /// earlier revision guarded on: <c>PgSettingScrub</c> and <c>QueryStoreBackfill</c> each declare their
+    /// own unrelated <c>CandidateSql</c> field, and a guard matching that bare name fails on the real tree
+    /// before the census even runs. This name cannot collide with either.</para></summary>
+    private const string LegacyDetailCandidateSql = @"
 SELECT action_id, detail
 FROM collect.plan_force_actions
 WHERE detail LIKE '%state_unavailable:%'";
@@ -153,7 +162,7 @@ WHERE t.action_id = b.action_id";
         var toUpdateDetails = new List<string?>();
         var candidateCount = 0;
 
-        await using (var read = new NpgsqlCommand(CandidateSql, connection) { CommandTimeout = CandidateReadTimeoutSeconds })
+        await using (var read = new NpgsqlCommand(LegacyDetailCandidateSql, connection) { CommandTimeout = CandidateReadTimeoutSeconds })
         await using (var reader = await read.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))

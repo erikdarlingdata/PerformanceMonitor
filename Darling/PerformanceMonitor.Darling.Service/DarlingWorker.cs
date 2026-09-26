@@ -3516,9 +3516,14 @@ public sealed class DarlingWorker : BackgroundService
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Never ex.Message here — this scrub's whole reason for existing is a row that carried
+               unredacted exception text, and its own failure path must not repeat that mistake. Log the
+               exception's type and SQLSTATE only, the same shape SanitizeDetailForAudit's own matched
+               templates and CollectionFailure.Describe use. */
+            var sqlState = ex is Npgsql.NpgsqlException { SqlState: { Length: > 0 } state } ? state : null;
             _logger.LogWarning(
-                "Plan-force-action detail scrub (#4346) could not run — any legacy row stays as it is until the next start retries: {Message}",
-                ex.Message);
+                "Plan-force-action detail scrub (#4346) could not run — any legacy row stays as it is until the next start retries: {ExceptionType}{SqlState}",
+                ex.GetType().Name, sqlState is null ? "" : $", SQLSTATE {sqlState}");
         }
     }
 

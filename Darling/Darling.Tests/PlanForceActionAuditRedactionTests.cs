@@ -514,14 +514,14 @@ public sealed class PlanForceActionAuditRedactionTests
         const string evilFieldBesideTheRealExemption =
             "namespace PerformanceMonitor.Darling.Service {\n" +
             "public static class PlanForceActionDetailScrub {\n" +
-            "    private const string CandidateSql = @\"SELECT action_id, detail FROM collect.plan_force_actions WHERE detail LIKE '%x%'\";\n" +
+            "    private const string LegacyDetailCandidateSql = @\"SELECT action_id, detail FROM collect.plan_force_actions WHERE detail LIKE '%x%'\";\n" +
             "    private const string EvilSql = @\"SELECT detail FROM collect.plan_force_actions\";\n" +
             "    public static async Task<Summary> RunAsync() {\n" +
             "    }\n" +
             "}\n" +
             "}";
         var evilFound = RawDetailReadersIn(StripComments(evilFieldBesideTheRealExemption));
-        Assert.Contains("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.CandidateSql", evilFound);
+        Assert.Contains("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.LegacyDetailCandidateSql", evilFound);
         Assert.Contains("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.EvilSql", evilFound);
         Assert.DoesNotContain("PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.RunAsync", evilFound);
         var evilStillViolating = System.Linq.Enumerable.Where(
@@ -533,7 +533,7 @@ public sealed class PlanForceActionAuditRedactionTests
            companion half of control (a): CandidateSql above IS in RawDetailReaderExemptions and is not a
            violation. */
         Assert.DoesNotContain(
-            "PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.CandidateSql",
+            "PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.LegacyDetailCandidateSql",
             evilStillViolating);
 
         /* Positive control (d): method-local SQL in another class attributes to that method's name, and
@@ -639,7 +639,7 @@ public sealed class PlanForceActionAuditRedactionTests
     /// <see cref="AssertExemptedFieldsOnlyReferencedInsideTheirOwner"/>.</summary>
     private static readonly string[] RawDetailReaderExemptions =
     [
-        "PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.CandidateSql",
+        "PerformanceMonitor.Darling.Service.PlanForceActionDetailScrub.LegacyDetailCandidateSql",
     ];
 
     /// <summary>The two readers that feed <c>ReadRecord</c> — the sanitizer's own choke point — are
