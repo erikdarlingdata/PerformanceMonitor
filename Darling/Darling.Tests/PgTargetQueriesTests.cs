@@ -495,7 +495,7 @@ public sealed class PgTargetQueriesTests
 
         var aurora = BadActor(HeavyQueryId, 0.6002, peakMemBytes: 8_388_608);
         var withPeakMem = PgTargetAdvice.Compose(key, Lookup(aurora))!;
-        Assert.Contains("Peak executor memory for a single execution reached 8.0 MB (Aurora only, context, not a threshold).", withPeakMem.Investigation, StringComparison.Ordinal);
+        Assert.Contains("Peak executor memory for a single execution reached 8 MB (Aurora only, context, not a threshold).", withPeakMem.Investigation, StringComparison.Ordinal);
 
         var stock = BadActor(HeavyQueryId, 0.6002);
         Assert.False(stock.Metadata.ContainsKey("max_exec_peakmem_bytes"));
