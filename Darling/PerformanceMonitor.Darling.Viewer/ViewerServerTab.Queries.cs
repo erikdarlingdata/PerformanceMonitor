@@ -174,13 +174,21 @@ public partial class ViewerServerTab
     private async Task LoadTopQueriesAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var rows = await _dataService.GetTopQueriesByCpuAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _queryStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-        UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, startUtc);
+        /* #4231 stage 3: an hourly-routed page holds no per-caller detail (see
+           ViewerDataService.GetTopQueriesByCpuTierAsync) — the raw-floor banner (#4231 stage 1/2) and this
+           tier disclosure are independent facts, so both may show at once (a window aged past raw AND
+           routed to hourly). */
+        UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
         await LoadQueryStatsSlicerAsync(startUtc, endUtc);
         await RefreshQueryStatsComparisonAsync(startUtc, endUtc);
     }
+
+    /// <summary>#4231 stage 3: the Queries-tab grid header's hourly-routing disclosure — appended to the
+    /// existing "Showing since" banner (#4278) rather than a new widget, per the lane's ruling.</summary>
+    private const string HourlyTierSuffix = " — aggregated hourly, per-caller detail unavailable";
 
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
@@ -216,16 +224,21 @@ public partial class ViewerServerTab
     /// form, in <see cref="ViewerTimeHelper.ForDisplay"/>'s own <c>yyyy-MM-dd HH:mm</c>, the format every trend
     /// chart title already uses for a head timestamp.
     /// </summary>
-    internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc)
+    internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null)
     {
-        if (!RawWindowFloor.IsTruncated(floor, requestedStartUtc))
+        var truncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
+        /* #4231 stage 3: the raw-floor truncation and the hourly-tier suffix are independent facts (a window
+           can be BOTH aged past raw's floor and routed to the hourly rollup) — so the banner shows whenever
+           either is true, not only when the raw floor was cut. */
+        if (!truncated && string.IsNullOrEmpty(tierSuffix))
         {
             banner.Visibility = Visibility.Collapsed;
             return;
         }
 
-        var effectiveStart = ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc));
-        banner.Text = $"Showing since {effectiveStart:yyyy-MM-dd HH:mm}";
+        banner.Text = truncated
+            ? $"Showing since {ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc)):yyyy-MM-dd HH:mm}{tierSuffix}"
+            : $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}{tierSuffix}";
         banner.Visibility = Visibility.Visible;
     }
 
@@ -274,9 +287,9 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetQueryStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var rows = await _dataService.GetTopQueriesByCpuAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var (rows, tier) = await _dataService.GetTopQueriesByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _queryStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, e.StartUtc);
+            UpdateTruncationBanner(QueryStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshQueryStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
