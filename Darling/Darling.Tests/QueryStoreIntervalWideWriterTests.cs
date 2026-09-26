@@ -30,7 +30,10 @@ namespace Darling.Tests;
 /// </summary>
 /* #1776 own-store: deliberately NOT [Collection("live-postgres")], for the same reason as
    QueryStoreIntervalLatestWriterTests: everything here lives inside its own ScratchPostgres database (one test
-   drops the wide table's unique index), so it cannot race live collection. */
+   drops the wide table's unique index), so it cannot race live collection. Serialized instead against the
+   OTHER ScratchPostgres classes on this same assembly's parallel pool (review-4341-r1, the flaky-test note):
+   see QueryStoreIntervalWideFaultInjectionCollection for why. */
+[Collection("query-store-interval-wide-fault-injection")]
 public sealed class QueryStoreIntervalWideWriterTests
 {
     private const int ServerId = -3953900;
