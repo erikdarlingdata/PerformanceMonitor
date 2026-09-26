@@ -286,6 +286,104 @@ public class CollectorDeltaCalculator : ICollectorDeltaCalculator
         _discontinuities.GetOrAdd(serverId, _ => new ConcurrentQueue<string>()).Enqueue(discontinuity);
     }
 
+    /// <summary>
+    /// #4428: the calendar-UTC-day a server's wait-stats-clear warning last queued, so
+    /// <see cref="NoteWaitStatsClear"/> can throttle to once per server per day even across many clears an
+    /// hour. In memory, like every other per-server throttle on this type: a restart simply warns once more.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, DateOnly> _waitStatsClearWarnedDate = new();
+
+    /// <summary>The queued, ready-to-log wait-stats-clear sentences — see <see cref="NoteWaitStatsClear"/>
+    /// and <see cref="DrainWaitStatsClearWarnings"/>.</summary>
+    private readonly ConcurrentDictionary<int, ConcurrentQueue<string>> _waitStatsClearWarnings = new();
+
+    /// <inheritdoc />
+    public IReadOnlyDictionary<string, long> PeekBaselines(int serverId, string collectorName)
+    {
+        if (!_cache.TryGetValue(serverId, out var serverCache)
+            || !serverCache.TryGetValue(collectorName, out var collectorCache))
+        {
+            return new Dictionary<string, long>(0);
+        }
+
+        var snapshot = new Dictionary<string, long>(collectorCache.Count);
+        foreach (var entry in collectorCache)
+        {
+            snapshot[entry.Key] = entry.Value.Value;
+        }
+
+        return snapshot;
+    }
+
+    /// <inheritdoc />
+    ///
+    /// <para>#4428: rebases the VALUE half of every cached (Value, Timestamp) pair to zero for the named
+    /// groups, on THIS server only, leaving the Timestamp untouched — the ordinary delta path
+    /// (<see cref="Core"/>'s Update branch) then measures the real interval against that kept timestamp and
+    /// reports "current value minus zero" as the delta, instead of "current value minus the pre-clear
+    /// baseline" going negative and being read as an ordinary counter reset (the (0, 0) unknowable pair).</para>
+    public void RebaseFamiliesToZero(int serverId, IEnumerable<string> collectorNames)
+    {
+        if (collectorNames is null || !_cache.TryGetValue(serverId, out var serverCache))
+        {
+            return;
+        }
+
+        foreach (var collectorName in collectorNames)
+        {
+            if (!serverCache.TryGetValue(collectorName, out var collectorCache))
+            {
+                continue;
+            }
+
+            foreach (var key in collectorCache.Keys)
+            {
+                collectorCache.AddOrUpdate(
+                    key,
+                    static _ => (0L, (DateTime?)null),
+                    static (_, existing) => (0L, existing.Timestamp));
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public void NoteWaitStatsClear(int serverId, string serverName, DateTime nowUtc)
+    {
+        var today = DateOnly.FromDateTime(nowUtc);
+
+        var alreadyWarnedToday = _waitStatsClearWarnedDate.TryGetValue(serverId, out var last) && last == today;
+
+        if (alreadyWarnedToday)
+        {
+            return;
+        }
+
+        _waitStatsClearWarnedDate[serverId] = today;
+
+        var line = $"Wait statistics on {serverName} were cleared between collections, as a DBCC " +
+            "SQLPERF(..., CLEAR) job does. This collection's wait figures cover only the time since the " +
+            "clear. Frequent clears also reset the wait history any other tool reads from this server.";
+
+        _waitStatsClearWarnings.GetOrAdd(serverId, _ => new ConcurrentQueue<string>()).Enqueue(line);
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyList<string> DrainWaitStatsClearWarnings(int serverId)
+    {
+        if (!_waitStatsClearWarnings.TryRemove(serverId, out var queue) || queue.IsEmpty)
+        {
+            return Array.Empty<string>();
+        }
+
+        var lines = new List<string>(queue.Count);
+        while (queue.TryDequeue(out var line))
+        {
+            lines.Add(line);
+        }
+
+        return lines;
+    }
+
     /// <inheritdoc />
     ///
     /// <para>#4428: peeks every family's cached (Value, Timestamp) for <paramref name="key"/> WITHOUT

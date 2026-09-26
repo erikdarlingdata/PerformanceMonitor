@@ -676,6 +676,15 @@ public partial class RemoteCollectorService
                 AppLogger.Info("Collector", $"  [{server.DisplayName}] {discontinuity} (#3653 A5; drained after {collectorName})");
             }
 
+            /* #4428: the wait-stats-clear account, queued by WaitStatsCollector.ReadAsync when it detects a
+               server-wide DBCC SQLPERF(..., CLEAR)-shaped pass — drained the same way as the identity-epoch
+               discontinuities above, but already throttled to once per server per day by the calculator, so
+               no collector-name framing is added here. */
+            foreach (var clearWarning in _deltaCalculator.DrainWaitStatsClearWarnings(GetServerId(server)))
+            {
+                AppLogger.Info("Collector", $"  [{server.DisplayName}] {clearWarning}");
+            }
+
             /* Annotate a successful-but-empty run (#1837): errorMessage is provably null here — only the
                catches below assign it — so this carries the runner's note (an enumeration that listed
                zero databases, items whose enumeration probe failed) onto the collection_log row without

@@ -10593,6 +10593,16 @@ LIMIT 1";
                     _logger.LogInformation("  [{Server}] {Discontinuity} (#3653 A5; drained after {Collector})",
                         server.Config.DisplayName, discontinuity, collectorName);
                 }
+
+                /* #4428: the wait-stats-clear account, queued by WaitStatsCollector.ReadAsync when it
+                   detects a server-wide DBCC SQLPERF(..., CLEAR)-shaped pass. Drained the same way as the
+                   identity-epoch discontinuities just above — a dictionary probe beside the run that
+                   observed it — but the calculator throttles it to once per server per day itself, so no
+                   collector-name framing is added here; the sentence is already complete. */
+                foreach (var clearWarning in _deltas.DrainWaitStatsClearWarnings(runtime.ServerId))
+                {
+                    _logger.LogInformation("  [{Server}] {ClearWarning}", server.Config.DisplayName, clearWarning);
+                }
             }
 
             /* #2851: the server-scoped phase split rides its OWN line, for the same reason #2811's fetch

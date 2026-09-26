@@ -110,6 +110,86 @@ FROM sys.dm_os_sys_info AS dosi;";
         new CollectorColumn("sample_interval_seconds", CollectorColumnType.Integer),
     };
 
+    /// <summary>
+    /// #4428: the delta group <see cref="DetectClear"/> reads baselines from to decide a clear —
+    /// <c>wait_time_ms</c>, because it is the family the field evidence measured (22% zero-interval rows on
+    /// the affected store) and the one <c>DBCC SQLPERF(..., CLEAR)</c> zeroes alongside the other two.
+    /// </summary>
+    internal const string ClearDetectionFamily = "wait_stats_time";
+
+    /// <summary>The three families a detected clear rebases together (#4428) — the same three
+    /// <see cref="WritePayload"/> keys every row's counters under.</summary>
+    internal static readonly string[] RebasedFamilies = { "wait_stats_tasks", "wait_stats_time", "wait_stats_signal" };
+
+    /// <summary>Minimum count of baselined wait types a pass must carry before a majority-lower reading can
+    /// even be considered (#4428, rule a) — refuses a clear verdict on a nearly-empty baseline set, where a
+    /// handful of naturally-shrinking types could clear the 50% bar by chance.</summary>
+    internal const int MinBaselinedTypesForClear = 20;
+
+    /// <summary>
+    /// #4428: true when this pass looks like a server-wide <c>DBCC SQLPERF(..., CLEAR)</c> rather than
+    /// ordinary accrual or a few types' independent resets. BOTH must hold, and the test fails toward "not a
+    /// clear" on any ambiguity — a false positive here would rebase (and so, on the very next ordinary pass,
+    /// silently discard) baselines for hundreds of wait types that never reset at all:
+    ///
+    /// <para>(a) among wait types this calculator has a cached <c>wait_time_ms</c> baseline &gt; 0 for (a
+    /// peek — <see cref="ICollectorDeltaCalculator.PeekBaselines"/> — not an update), at least
+    /// <see cref="MinBaselinedTypesForClear"/> of them AND at least half read LOWER now than that baseline;</para>
+    ///
+    /// <para>(b) this pass's SUM of <c>wait_time_ms</c> across every row is LOWER than the SUM of every
+    /// cached baseline — a rise in the total (even with a majority of individual types reading lower, which
+    /// happens whenever a few heavy waits absorb the interval's growth) means the server kept accruing and
+    /// this is not a clear.</para>
+    ///
+    /// <para>On the field evidence this fires on: ~900 types with baselines, essentially all of them lower,
+    /// total lower. On ordinary accrual it does not: most types grow, and even where some shrink (a workload
+    /// shift moving load off one wait type onto another) the SUM keeps rising because idle time — the
+    /// biggest wait of all on a healthy server — dwarfs everything else and rarely shrinks on its own.</para>
+    /// </summary>
+    internal static bool DetectClear(IReadOnlyList<Row> rows, IReadOnlyDictionary<string, long> baselines)
+    {
+        if (rows is null || rows.Count == 0 || baselines is null || baselines.Count == 0)
+        {
+            return false;
+        }
+
+        var baselinedCount = 0;
+        var lowerCount = 0;
+        var currentTotal = 0L;
+        var baselineTotal = 0L;
+
+        foreach (var baseline in baselines.Values)
+        {
+            baselineTotal += baseline;
+        }
+
+        foreach (var row in rows)
+        {
+            currentTotal += row.WaitTimeMs;
+
+            if (!baselines.TryGetValue(row.WaitType, out var baseline) || baseline <= 0)
+            {
+                continue;
+            }
+
+            baselinedCount++;
+
+            if (row.WaitTimeMs < baseline)
+            {
+                lowerCount++;
+            }
+        }
+
+        if (baselinedCount < MinBaselinedTypesForClear)
+        {
+            return false;
+        }
+
+        var majorityLower = lowerCount * 2 >= baselinedCount;
+
+        return majorityLower && currentTotal < baselineTotal;
+    }
+
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
@@ -129,6 +209,21 @@ FROM sys.dm_os_sys_info AS dosi;";
                 WaitingTasks: reader.GetInt64(1),
                 WaitTimeMs: reader.GetInt64(2),
                 SignalWaitTimeMs: reader.GetInt64(3)));
+        }
+
+        /* #4428: decide the whole pass BEFORE any subtraction — the same "decide before any subtraction"
+           point #3653 A5 already uses for the identity epoch below, and for the identical reason: once
+           WritePayload starts calling CalculateDeltaWithInterval per row, every family's baseline for the
+           row it has already visited is overwritten, so a clear verdict formed AFTER even one row has
+           written would be comparing this pass's rows against a mix of pre-clear and already-rebased
+           baselines. Peeking (not consuming) the wait_time_ms family's cache costs nothing here that
+           WritePayload was not already going to spend making its own per-key delta calls. */
+        var baselines = context.Deltas.PeekBaselines(context.ServerId, ClearDetectionFamily);
+
+        if (DetectClear(rows, baselines))
+        {
+            context.Deltas.RebaseFamiliesToZero(context.ServerId, RebasedFamilies);
+            context.Deltas.NoteWaitStatsClear(context.ServerId, context.ServerName, context.CollectionTime);
         }
 
         /* #3653 A5: the batch's SECOND result set — the instance identity. Observed HERE, after the rows are
