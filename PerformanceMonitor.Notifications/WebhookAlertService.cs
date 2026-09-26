@@ -762,7 +762,7 @@ public class WebhookAlertService
                     new Dictionary<string, object>
                     {
                         ["@type"] = "OpenUri",
-                        ["name"] = "Open triage page",
+                        ["name"] = TriageLink.LinkLabel(triageUrl),
                         ["targets"] = new object[] { new { os = "default", uri = triageUrl } }
                     }
                 }
@@ -1708,7 +1708,7 @@ public class WebhookAlertService
                     new
                     {
                         type = "button",
-                        text = new { type = "plain_text", text = "Open triage page", emoji = false },
+                        text = new { type = "plain_text", text = TriageLink.LinkLabel(triageUrl), emoji = false },
                         url = triageUrl
                     }
                 }
@@ -2415,7 +2415,7 @@ public class WebhookAlertService
 
         if (triageUrl is not null)
         {
-            payload["links"] = new object[] { new { href = triageUrl, text = "Open triage page" } };
+            payload["links"] = new object[] { new { href = triageUrl, text = TriageLink.LinkLabel(triageUrl) } };
         }
 
         return JsonSerializer.Serialize(payload, s_jsonOptions);
