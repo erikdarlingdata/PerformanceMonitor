@@ -3289,6 +3289,190 @@ internal sealed class DarlingStoreUpgrade
     private static readonly string[] s_secretNameFragments =
         { "conninfo", "command", "password", "passphrase", "secret", "key", "token", "credential", "auth" };
 
+    /* ==================== operator postgresql.conf below-include-line carry (#4358) ==================== */
+
+    /// <summary>What <see cref="CarryOperatorConfLinesAsync"/> did — counts only, never a line's own text
+    /// (same discipline as <see cref="AutoConfCarryResult"/>): a comment, or blank line among the
+    /// below-include region always counts as carried since it is never probed.</summary>
+    internal readonly record struct OperatorConfLineCarryResult(int CarriedCount, int RejectedCount);
+
+    /// <summary>The GUC-directive names <see cref="ManagedConfMigration.ExtractOperatorLinesBelowInclude"/>
+    /// can return that are never probed with <c>postgres -C</c>: an include directive names a FILE, not a
+    /// runtime parameter, so <c>-C</c> has no setting name to ask it about. Carried unconditionally, the same
+    /// way a comment or blank line among the extracted lines is — a bad include target fails the new
+    /// cluster's real start exactly as a hand-edited <c>postgresql.conf</c> already can today, and this carry
+    /// must never be the reason that risk is new.</summary>
+    private static readonly string[] s_confIncludeDirectiveNames = { "include", "include_if_exists", "include_dir" };
+
+    internal Task<OperatorConfLineCarryResult> CarryOperatorConfLinesAsync(
+        string oldDataDirectory,
+        string newDataDirectory,
+        string newBinDirectory,
+        CancellationToken cancellationToken)
+        => CarryOperatorConfLinesAsync(
+            oldDataDirectory, newDataDirectory, newBinDirectory,
+            (exePath, arguments, timeout, token) => DarlingManagedPostgres.RunToolAsync(exePath, arguments, timeout, token),
+            cancellationToken);
+
+    /// <summary>
+    /// Carries the OLD cluster's <c>postgresql.conf</c> lines that sat below the <c>darling-managed.conf</c>
+    /// include into the NEW cluster's <c>postgresql.conf</c>, appended AFTER the legacy blocks
+    /// <c>context.AppendManagedConf</c> already wrote there (#4358) — so an operator's line still wins over
+    /// the legacy block's own copy of the same key, matching <see cref="ManagedConfMigration.Rewrite"/>'s
+    /// rule 3 for the same-major case. Runs alongside <see cref="CarryAutoConfAsync"/>, post-swap, one
+    /// pattern: reads the OLD (now-<c>retained</c>) data directory's <c>postgresql.conf</c>,
+    /// <see cref="ManagedConfMigration.ExtractOperatorLinesBelowInclude"/> finds the candidates, and each
+    /// ASSIGNMENT line is probed one at a time against the NEW binaries with <c>postgres -C</c>, the same
+    /// isolation <see cref="CarryAutoConfAsync"/> gives auto.conf settings — a line the new major rejects is
+    /// logged as not carried and skipped, never fatal to the upgrade. A comment, blank line, or operator
+    /// <c>include</c>/<c>include_if_exists</c>/<c>include_dir</c> directive among the candidates is carried
+    /// unconditionally (see <see cref="s_confIncludeDirectiveNames"/>). Every carried line is marked with
+    /// <see cref="ManagedConfMigration.MovedOperatorLinesComment"/> (reused, per the ruling — provenance does
+    /// not need to distinguish a same-major move from a cross-major carry). Never throws: same
+    /// "must never brick a completed upgrade" posture the auto.conf carry follows for a probe failure — an
+    /// unexpected exception here resets the new cluster's <c>postgresql.conf</c> back to its pre-carry
+    /// (legacy-appended) baseline and logs a warning naming the retained old data directory as the manual
+    /// fallback, rather than propagate.
+    /// </summary>
+    internal async Task<OperatorConfLineCarryResult> CarryOperatorConfLinesAsync(
+        string oldDataDirectory,
+        string newDataDirectory,
+        string newBinDirectory,
+        Func<string, string, TimeSpan, CancellationToken, Task<(int ExitCode, string Output)>> probe,
+        CancellationToken cancellationToken)
+    {
+        var none = new OperatorConfLineCarryResult(0, 0);
+
+        var sourcePath = Path.Combine(oldDataDirectory, "postgresql.conf");
+        if (!File.Exists(sourcePath))
+        {
+            _logger.LogInformation(
+                "No postgresql.conf in the pre-upgrade data directory — nothing to carry below the include into the upgraded store.");
+            return none;
+        }
+
+        var oldConfText = await File.ReadAllTextAsync(sourcePath, cancellationToken);
+        var candidateLines = ManagedConfMigration.ExtractOperatorLinesBelowInclude(oldConfText);
+        if (candidateLines.Count == 0)
+        {
+            _logger.LogInformation(
+                "The pre-upgrade postgresql.conf has no operator lines below the darling-managed.conf include to carry.");
+            return none;
+        }
+
+        var newConfPath = Path.Combine(newDataDirectory, "postgresql.conf");
+        var baseline = await File.ReadAllTextAsync(newConfPath, cancellationToken);
+        if (baseline.Length > 0 && !baseline.EndsWith('\n'))
+        {
+            baseline += "\n";
+        }
+
+        var postgresExe = Path.Combine(newBinDirectory, "postgres.exe");
+        var goodLines = new List<string>();
+        var carried = 0;
+        var rejected = 0;
+
+        try
+        {
+            foreach (var rawLine in candidateLines)
+            {
+                var (_, name, _) = DarlingManagedPostgres.ParseConfText(rawLine).FirstOrDefault();
+                var isProbeableSetting = name is not null &&
+                    !s_confIncludeDirectiveNames.Contains(name, StringComparer.OrdinalIgnoreCase);
+
+                if (!isProbeableSetting)
+                {
+                    /* A comment, blank line, or an operator include directive — never probed, always carried
+                       (see s_confIncludeDirectiveNames and the method summary above). */
+                    goodLines.Add(rawLine);
+                    carried++;
+                    continue;
+                }
+
+                /* One candidate at a time, against the LEGACY-APPENDED baseline only (never a previously
+                   accepted candidate) — the same isolation CarryAutoConfAsync gives each auto.conf setting,
+                   so one bad line cannot be blamed on, or hide behind, another. */
+                await File.WriteAllTextAsync(newConfPath, baseline + rawLine + "\n", cancellationToken);
+
+                var (exitCode, output) = await probe(
+                    postgresExe,
+                    $"-C \"{name}\" -D \"{newDataDirectory}\"",
+                    s_confProbeTimeout,
+                    cancellationToken);
+
+                if (exitCode == 0)
+                {
+                    goodLines.Add(rawLine);
+                    carried++;
+                    _logger.LogInformation(
+                        "Carried {Name} from the pre-upgrade postgresql.conf's below-include region.", name);
+                }
+                else
+                {
+                    rejected++;
+                    if (NameMayHoldASecret(name) || name.Contains('.'))
+                    {
+                        /* Same withholding rule CarryAutoConfAsync applies to auto.conf settings (#4280 round-2
+                           Q3): PostgreSQL's own reject reason can repeat the offending value verbatim. */
+                        _logger.LogWarning(
+                            "NOT carried: {Name} — the new PostgreSQL binaries reject it (reason withheld: the " +
+                            "name suggests it may hold a credential, or names an extension setting whose reason " +
+                            "could). The original line is kept in the retained pre-upgrade data directory.",
+                            name);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "NOT carried: {Name} — the new PostgreSQL binaries reject it: {Reason}. The original " +
+                            "line is kept in the retained pre-upgrade data directory.",
+                            name, output);
+                    }
+                }
+            }
+
+            var finalContent = baseline;
+            if (goodLines.Count > 0)
+            {
+                finalContent += ManagedConfMigration.MovedOperatorLinesComment + "\n" +
+                    string.Join(string.Empty, goodLines.Select(l => l + "\n"));
+            }
+
+            await File.WriteAllTextAsync(newConfPath, finalContent, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            /* Never brick a completed upgrade over this carry (same posture as CarryAutoConfAsync's own
+               catch) — put postgresql.conf back to its pre-carry (legacy-appended) baseline and let the
+               caller's post-commit handler finish the upgrade regardless. */
+            try
+            {
+                await File.WriteAllTextAsync(newConfPath, baseline, CancellationToken.None);
+            }
+            catch (Exception resetEx)
+            {
+                _logger.LogWarning(
+                    "Carrying operator postgresql.conf lines below the include did not finish ({Reason}), and " +
+                    "resetting postgresql.conf to its pre-carry content also failed ({ResetReason}) — check " +
+                    "{Path} by hand against the retained pre-upgrade data directory.",
+                    ex.Message, resetEx.Message, newConfPath);
+                return none;
+            }
+
+            _logger.LogWarning(
+                "Carrying operator postgresql.conf lines below the include did not finish ({Reason}) — " +
+                "postgresql.conf was reset to its pre-carry content. The originals are kept in the retained " +
+                "pre-upgrade data directory.",
+                ex.Message);
+            return none;
+        }
+
+        _logger.LogInformation(
+            "postgresql.conf below-include lines carried: {Carried} of {Total} pre-upgrade line(s) kept, {Rejected} rejected.",
+            carried, candidateLines.Count, rejected);
+
+        return new OperatorConfLineCarryResult(carried, rejected);
+    }
+
     /// <summary>
     /// The in-place major upgrade, start to finish. Each step is labelled, and ANY failure before the commit
     /// point lands in one place, <see cref="RecoverFromPreCommitFailureAsync"/>: drop the half-built new
@@ -3499,6 +3683,17 @@ internal sealed class DarlingStoreUpgrade
             step = "carry-auto-conf";
             await CarryAutoConfAsync(
                 retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions);
+
+            /* #4358: alongside the auto.conf carry, same post-swap timing — one pattern. Reads the OLD
+               cluster's postgresql.conf from `retained` (its content now lives there, since the swap above
+               already moved it), extracts any operator lines below the darling-managed.conf include, and
+               appends them to the NEW cluster's postgresql.conf AFTER the legacy blocks
+               context.AppendManagedConf already wrote there (step "conf-new-cluster", above) — so an
+               operator's override still wins over the legacy block's own copy of the same key. Any failure
+               here is caught by the post-commit handler below, which keeps the store running on the new
+               major regardless — never a reason to brick it. */
+            step = "carry-operator-conf-lines";
+            await CarryOperatorConfLinesAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken);
 
             if (mode == FileTransferMode.Link)
             {
