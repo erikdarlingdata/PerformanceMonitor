@@ -145,6 +145,32 @@ public sealed class PlanForceActionDetailCensusTests
         Assert.Equal(0, PlanForceActionDetailCensus.CountDetailSites(source));
     }
 
+    /// <summary>L1 control (#4384): a <c>$$"""..."""</c> interpolated raw string's hole opens/closes with
+    /// exactly two braces — both <see cref="PlanForceActionDetailCensus.CountDetailSites"/> and
+    /// <see cref="PlanForceActionDetailCensus.CountTableMentions"/> must count the literal once, and the
+    /// <c>{{x}}</c> hole must not be treated as literal text that could supply either word.</summary>
+    [Fact]
+    public void Control_DoubleDollarRawString_HoleIsNotText_Counts1()
+    {
+        const string source =
+            "class C { void M(string x) { var sql = $$\"\"\"SELECT {{x}} FROM " +
+            "collect.plan_force_actions WHERE detail IS NULL\"\"\"; } }";
+        Assert.Equal(1, PlanForceActionDetailCensus.CountDetailSites(source));
+        Assert.Equal(1, PlanForceActionDetailCensus.CountTableMentions(source));
+    }
+
+    /// <summary>L1 control (#4384): in a <c>$$"""..."""</c> literal, a SINGLE brace is literal text, not a
+    /// hole delimiter (a hole needs the full two-brace run) — the literal text "{ literal brace }" must
+    /// still be read as ordinary characters, and the mention still counts once.</summary>
+    [Fact]
+    public void Control_DoubleDollarRawString_SingleBraceIsLiteralText_Counts1()
+    {
+        const string source =
+            "class C { void M() { var sql = $$\"\"\"{ literal brace } plan_force_actions detail\"\"\"; } }";
+        Assert.Equal(1, PlanForceActionDetailCensus.CountDetailSites(source));
+        Assert.Equal(1, PlanForceActionDetailCensus.CountTableMentions(source));
+    }
+
     /* ---------------------------------------------------------------------------------------------------
      * (b) The real-tree census: an exact hard-coded map, everything else must be zero.
      * --------------------------------------------------------------------------------------------------- */
@@ -166,39 +192,43 @@ public sealed class PlanForceActionDetailCensusTests
     /// text</c> column, so the same literal names both words; this is schema DDL, never a read, and needs
     /// no exemption entry (only READS are exempted here), but the census counts literals, not readers.</para>
     /// </summary>
+    /// <summary>Keyed by repo-relative path (#4384 L2), the same shape as
+    /// <see cref="ExpectedTableMentionCountsByPath"/> below — a bare file name is ambiguous once two
+    /// files anywhere in the tree happen to share a name.</summary>
     private static readonly Dictionary<string, int> ExpectedCountsByFileName = new()
     {
-        [StoreFileName] = 3,
-        [ScrubFileName] = 2,
-        [MigrationsFileName] = 1,
+        ["Darling/PerformanceMonitor.Darling.Service/PgPlanForceActionStore.cs"] = 3,
+        ["Darling/PerformanceMonitor.Darling.Service/PlanForceActionDetailScrub.cs"] = 2,
+        ["Darling/PerformanceMonitor.Darling.Storage/PgMigrations.cs"] = 1,
     };
 
     [Fact]
     public void RealTree_MatchesExactPerFileCounts()
     {
+        var root = RepoFile.Root;
         var unexpected = new List<string>();
-        var actualByFile = new Dictionary<string, int>();
+        var actualByPath = new Dictionary<string, int>();
 
         foreach (var file in ProductionSourceFiles())
         {
             var text = File.ReadAllText(file).ReplaceLineEndings("\n");
             var count = PlanForceActionDetailCensus.CountDetailSites(text);
-            var fileName = Path.GetFileName(file);
+            var relativePath = Path.GetRelativePath(root, file).Replace('\\', '/');
 
             if (count == 0)
             {
                 continue;
             }
 
-            actualByFile[fileName] = actualByFile.GetValueOrDefault(fileName) + count;
+            actualByPath[relativePath] = actualByPath.GetValueOrDefault(relativePath) + count;
 
-            if (!ExpectedCountsByFileName.ContainsKey(fileName))
+            if (!ExpectedCountsByFileName.ContainsKey(relativePath))
             {
                 var sites = PlanForceActionDetailCensus.JoinedStringLiterals(text)
                     .Where(l => l.Contains("plan_force_actions", StringComparison.OrdinalIgnoreCase)
                         && Regex.IsMatch(l, @"\bdetail\b", RegexOptions.IgnoreCase))
                     .Select(Truncate);
-                unexpected.Add($"{fileName}: {string.Join(" | ", sites)}");
+                unexpected.Add($"{relativePath}: {string.Join(" | ", sites)}");
             }
         }
 
@@ -207,11 +237,20 @@ public sealed class PlanForceActionDetailCensusTests
             "unexpected file(s) with a plan_force_actions+detail site not in the hard-coded map: "
             + string.Join("; ", unexpected));
 
-        foreach (var (fileName, expected) in ExpectedCountsByFileName)
+        foreach (var (path, expected) in ExpectedCountsByFileName)
         {
-            Assert.True(
-                actualByFile.TryGetValue(fileName, out var actual) && actual == expected,
-                $"{fileName}: expected {expected} site(s), found {actualByFile.GetValueOrDefault(fileName)}.");
+            var actual = actualByPath.GetValueOrDefault(path);
+            if (actual != expected)
+            {
+                var text = File.ReadAllText(Path.Combine(root, path)).ReplaceLineEndings("\n");
+                var sites = PlanForceActionDetailCensus.JoinedStringLiterals(text)
+                    .Where(l => l.Contains("plan_force_actions", StringComparison.OrdinalIgnoreCase)
+                        && Regex.IsMatch(l, @"\bdetail\b", RegexOptions.IgnoreCase))
+                    .Select(Truncate);
+                Assert.Fail(
+                    $"{path}: expected {expected} site(s), found {actual}. Literals: "
+                    + string.Join(" | ", sites));
+            }
         }
     }
 
@@ -345,24 +384,36 @@ public sealed class PlanForceActionDetailCensusTests
     }
 
     /* ---------------------------------------------------------------------------------------------------
-     * (c) The exemption list names only the store file plus the exempted type's own file.
+     * (c) The exemption list names exactly the files that back the map's non-store, non-migration
+     * entries — i.e. every reader the co-occurrence map admits that isn't the store's own read or schema
+     * DDL is accounted for by a documented exempted type, with nothing left over and nothing missing.
      * --------------------------------------------------------------------------------------------------- */
 
+    /// <summary>Asserts that <see cref="ExpectedCountsByFileName"/>'s entries, MINUS the store file (its
+    /// reads are the sanctioned, sanitizing path every OTHER reader goes through) and MINUS
+    /// <see cref="MigrationsFileName"/> (schema DDL — a <c>CREATE TABLE ... detail text</c> literal is not
+    /// a reader at all, so it needs no exemption entry), are EXACTLY the files of the types in
+    /// <see cref="RawDetailReaderExemptions"/>. A file could appear in the map for reasons other than
+    /// reading <c>detail</c> raw (the map counts literals, not readers) — this asserts that after removing
+    /// the two known, non-exemption-worthy entries, what remains matches the exemption list one-for-one.
+    /// </summary>
     [Fact]
     public void ExemptionList_NamesOnlyTheStoreFileAndTheExemptedType()
     {
         var exemptedFileNames = RawDetailReaderExemptions
             .Select(t => t[(t.LastIndexOf('.') + 1)..] + ".cs")
+            .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
         Assert.Equal(new[] { ScrubFileName }, exemptedFileNames);
 
-        var mapFileNames = ExpectedCountsByFileName.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray();
-        var expectedFileNames = new[] { MigrationsFileName, ScrubFileName, StoreFileName }
-            .OrderBy(k => k, StringComparer.Ordinal)
+        var nonStoreNonMigrationFileNames = ExpectedCountsByFileName.Keys
+            .Select(Path.GetFileName)
+            .Where(n => n != StoreFileName && n != MigrationsFileName)
+            .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
 
-        Assert.Equal(expectedFileNames, mapFileNames);
+        Assert.Equal(exemptedFileNames, nonStoreNonMigrationFileNames);
     }
 
     /* ---------------------------------------------------------------------------------------------------
@@ -377,6 +428,60 @@ public sealed class PlanForceActionDetailCensusTests
         var text = File.ReadAllText(scrubFile).ReplaceLineEndings("\n");
 
         Assert.Equal(2, PlanForceActionDetailCensus.CountIdentifierUses(text, "LegacyDetailCandidateSql"));
+    }
+
+    /// <summary>M1 control (#4384): a second use written as an interpolation HOLE
+    /// (<c>$"{LegacyDetailCandidateSql}"</c>) must be counted — a hole is code, not literal text, so
+    /// masking it away the way literal text is masked would make this use invisible.</summary>
+    [Fact]
+    public void Control_IdentifierUsedInsideAnInterpolationHole_Counts1()
+    {
+        const string source = "var s = $\"{LegacyDetailCandidateSql}\";";
+        Assert.Equal(1, PlanForceActionDetailCensus.CountIdentifierUses(source, "LegacyDetailCandidateSql"));
+    }
+
+    [Fact]
+    public void Control_IdentifierUsedInsideAnInterpolationHoleWithSurroundingText_Counts1()
+    {
+        const string source = "var s = $\"x {LegacyDetailCandidateSql} y\";";
+        Assert.Equal(1, PlanForceActionDetailCensus.CountIdentifierUses(source, "LegacyDetailCandidateSql"));
+    }
+
+    /// <summary>M1 (#4384): no production code reaches <c>LegacyDetailCandidateSql</c> (or any private
+    /// member of the exempted scrub type) via reflection instead of the compiler-checked reference the
+    /// census counts above — a <c>GetField</c>/<c>GetFields</c> call sitting in the same file as
+    /// <c>typeof(PlanForceActionDetailScrub)</c>, or anywhere in the scrub's own file, is exactly that
+    /// bypass.</summary>
+    [Fact]
+    public void M1_NoProductionCode_ReachesPlanForceActionDetailScrubMembersByReflection()
+    {
+        var violations = new List<string>();
+
+        foreach (var file in ProductionSourceFiles())
+        {
+            var raw = File.ReadAllText(file).ReplaceLineEndings("\n");
+            var hasGetField = raw.Contains("GetField(", StringComparison.Ordinal)
+                || raw.Contains("GetFields(", StringComparison.Ordinal);
+
+            if (!hasGetField)
+            {
+                continue;
+            }
+
+            var isScrubFile = Path.GetFileName(file) == ScrubFileName;
+            var namesTheScrubType = raw.Contains("typeof(PlanForceActionDetailScrub)", StringComparison.Ordinal);
+
+            if (isScrubFile || namesTheScrubType)
+            {
+                violations.Add(Path.GetFileName(file));
+            }
+        }
+
+        Assert.True(
+            violations.Count == 0,
+            "production code reaches PlanForceActionDetailScrub members by reflection (GetField/GetFields "
+            + "alongside typeof(PlanForceActionDetailScrub), or inside the scrub's own file): "
+            + string.Join(", ", violations));
     }
 
     [Fact]

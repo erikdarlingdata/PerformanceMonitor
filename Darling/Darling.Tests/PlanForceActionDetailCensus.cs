@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -212,7 +213,7 @@ internal static class PlanForceActionDetailCensus
             if (prefixLength >= 0)
             {
                 var start = i;
-                var (text, end) = ReadStringLiteral(source, i, prefixLength);
+                var (text, end) = ReadStringLiteral(source, i, prefixLength, null);
                 spans.Add(new LiteralSpan(start, end, text));
                 i = end;
                 continue;
@@ -225,7 +226,10 @@ internal static class PlanForceActionDetailCensus
     }
 
     /// <summary>Returns <paramref name="source"/> with every comment and string/char literal body replaced
-    /// by spaces (newlines preserved so line-based callers still line up).</summary>
+    /// by spaces (newlines preserved so line-based callers still line up) — EXCEPT that an interpolated
+    /// literal's <c>{...}</c> HOLE expressions are left as-is (verbatim source text), because a hole is
+    /// CODE, not literal text: <c>$"{LegacyDetailCandidateSql}"</c> is a real use of the identifier, and
+    /// blanking the hole the way plain literal text is blanked would make that use invisible.</summary>
     private static string MaskCommentsAndLiterals(string source)
     {
         var builder = new StringBuilder(source.Length);
@@ -283,8 +287,9 @@ internal static class PlanForceActionDetailCensus
             if (prefixLength >= 0)
             {
                 var start = i;
-                var (_, end) = ReadStringLiteral(source, i, prefixLength);
-                AppendMasked(builder, source, start, end);
+                var holeRanges = new List<(int Start, int End)>();
+                var (_, end) = ReadStringLiteral(source, i, prefixLength, holeRanges);
+                AppendMaskedKeepingHoles(builder, source, start, end, holeRanges);
                 i = end;
                 continue;
             }
@@ -304,8 +309,28 @@ internal static class PlanForceActionDetailCensus
         }
     }
 
-    /// <summary>Length of the literal's prefix (<c>@</c>, <c>$</c>, <c>$@</c>, <c>@$</c>, or none) if
-    /// <paramref name="position"/> begins a string literal, else -1.</summary>
+    /// <summary>Like <see cref="AppendMasked"/>, but leaves the ranges in <paramref name="holeRanges"/>
+    /// (interpolation holes, in source order, non-overlapping) verbatim instead of blanking them — only
+    /// the literal TEXT between holes gets blanked.</summary>
+    private static void AppendMaskedKeepingHoles(
+        StringBuilder builder, string source, int start, int end, List<(int Start, int End)> holeRanges)
+    {
+        var pos = start;
+
+        foreach (var (holeStart, holeEnd) in holeRanges)
+        {
+            AppendMasked(builder, source, pos, holeStart);
+            builder.Append(source, holeStart, holeEnd - holeStart);
+            pos = holeEnd;
+        }
+
+        AppendMasked(builder, source, pos, end);
+    }
+
+    /// <summary>Length of the literal's prefix (<c>@</c>, <c>$</c>, <c>$@</c>, <c>@$</c>, a run of two or
+    /// more <c>$</c> before a raw-string quote run, or none) if <paramref name="position"/> begins a
+    /// string literal, else -1. A run of N <c>$</c> signs immediately before the quote run (L1) is the
+    /// interpolated-raw-string form <c>$$"""..."""</c>, whose holes open/close with exactly N braces.</summary>
     private static int LiteralPrefixLength(string source, int position)
     {
         var n = source.Length;
@@ -332,14 +357,22 @@ internal static class PlanForceActionDetailCensus
             }
         }
 
-        if (source[position] == '$' && position + 1 < n)
+        if (source[position] == '$')
         {
-            if (source[position + 1] == '"')
+            var j = position;
+            while (j < n && source[j] == '$')
             {
-                return 1;
+                j++;
             }
 
-            if (source[position + 1] == '@' && position + 2 < n && source[position + 2] == '"')
+            var dollarRunLength = j - position;
+
+            if (dollarRunLength >= 1 && j < n && source[j] == '"')
+            {
+                return dollarRunLength;
+            }
+
+            if (dollarRunLength == 1 && j < n && source[j] == '@' && j + 1 < n && source[j + 1] == '"')
             {
                 return 2;
             }
@@ -351,12 +384,16 @@ internal static class PlanForceActionDetailCensus
     /// <summary>Reads one string literal beginning at <paramref name="start"/> (whose prefix is
     /// <paramref name="prefixLength"/> characters, before the first quote), returning its full text
     /// (interpolation holes replaced with a single space each) and the index just past its end.</summary>
-    private static (string Text, int End) ReadStringLiteral(string source, int start, int prefixLength)
+    private static (string Text, int End) ReadStringLiteral(
+        string source, int start, int prefixLength, List<(int Start, int End)>? holeRanges)
     {
         var n = source.Length;
         var prefix = source[start..(start + prefixLength)];
         var isVerbatim = prefix.Contains('@');
         var isInterpolated = prefix.Contains('$');
+        /* L1: a run of N '$' before the quote (N>=2, no '@') is an interpolated raw string whose holes
+           open/close with exactly N braces; every other interpolated form uses exactly 1. */
+        var holeBraceCount = isInterpolated && !isVerbatim ? Math.Max(1, prefix.Count(ch => ch == '$')) : 1;
 
         var quoteStart = start + prefixLength;
         var quoteRunLength = 0;
@@ -367,7 +404,7 @@ internal static class PlanForceActionDetailCensus
 
         if (quoteRunLength >= 3)
         {
-            return ReadRawString(source, start, quoteStart, quoteRunLength, isInterpolated);
+            return ReadRawString(source, start, quoteStart, quoteRunLength, isInterpolated, holeBraceCount, holeRanges);
         }
 
         var builder = new StringBuilder();
@@ -426,7 +463,9 @@ internal static class PlanForceActionDetailCensus
                     continue;
                 }
 
-                i = SkipInterpolationHole(source, i, builder);
+                var holeStart = i;
+                i = SkipInterpolationHole(source, i, builder, 1, out var holeEnd);
+                holeRanges?.Add((holeStart, holeEnd));
                 continue;
             }
 
@@ -445,9 +484,12 @@ internal static class PlanForceActionDetailCensus
     }
 
     /// <summary>Reads a raw string literal (<c>"""..."""</c>, N&gt;=3 quotes, optionally interpolated),
-    /// replacing each hole with a single space.</summary>
+    /// replacing each hole with a single space. <paramref name="holeBraceCount"/> is the number of
+    /// leading <c>$</c> signs (L1): a hole opens with exactly that many <c>{</c> and closes with that many
+    /// <c>}</c>; fewer braces than that in a row are literal text, not a hole delimiter.</summary>
     private static (string Text, int End) ReadRawString(
-        string source, int literalStart, int quoteStart, int quoteRunLength, bool isInterpolated)
+        string source, int literalStart, int quoteStart, int quoteRunLength, bool isInterpolated,
+        int holeBraceCount, List<(int Start, int End)>? holeRanges)
     {
         var n = source.Length;
         var delimiter = new string('"', quoteRunLength);
@@ -458,16 +500,11 @@ internal static class PlanForceActionDetailCensus
         var i = bodyStart;
         while (i < n)
         {
-            if (isInterpolated && source[i] == '{')
+            if (isInterpolated && source[i] == '{' && HasBraceRun(source, i, '{', holeBraceCount, n))
             {
-                if (i + 1 < n && source[i + 1] == '{')
-                {
-                    builder.Append("{{");
-                    i += 2;
-                    continue;
-                }
-
-                i = SkipInterpolationHole(source, i, builder);
+                var holeStart = i;
+                i = SkipInterpolationHole(source, i, builder, holeBraceCount, out var holeEnd);
+                holeRanges?.Add((holeStart, holeEnd));
                 continue;
             }
 
@@ -488,10 +525,32 @@ internal static class PlanForceActionDetailCensus
         return (builder.ToString(), i);
     }
 
-    /// <summary>Skips a brace-balanced <c>{...}</c> interpolation hole starting at the <c>{</c> at
-    /// <paramref name="openBraceIndex"/>, appending a single space to <paramref name="builder"/> in its
-    /// place, and returns the index just past the matching <c>}</c>.</summary>
-    private static int SkipInterpolationHole(string source, int openBraceIndex, StringBuilder builder)
+    /// <summary>True when <paramref name="source"/> has at least <paramref name="count"/> consecutive
+    /// occurrences of <paramref name="ch"/> starting at <paramref name="position"/>.</summary>
+    private static bool HasBraceRun(string source, int position, char ch, int count, int n)
+    {
+        if (position + count > n)
+        {
+            return false;
+        }
+
+        for (var k = 0; k < count; k++)
+        {
+            if (source[position + k] != ch)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Skips a brace-balanced interpolation hole starting at the run of <paramref name="openBraceCount"/>
+    /// consecutive <c>{</c> at <paramref name="openBraceIndex"/> (L1: N for an <c>N$</c>-raw string, else 1),
+    /// appending a single space to <paramref name="builder"/> in its place, and returns the index just past
+    /// the matching closing brace run, also reporting it via <paramref name="holeEnd"/>.</summary>
+    private static int SkipInterpolationHole(
+        string source, int openBraceIndex, StringBuilder builder, int openBraceCount, out int holeEnd)
     {
         var n = source.Length;
         var depth = 0;
@@ -499,19 +558,17 @@ internal static class PlanForceActionDetailCensus
 
         while (i < n)
         {
-            var c = source[i];
-
-            if (c == '{')
+            if (HasBraceRun(source, i, '{', openBraceCount, n))
             {
                 depth++;
-                i++;
+                i += openBraceCount;
                 continue;
             }
 
-            if (c == '}')
+            if (HasBraceRun(source, i, '}', openBraceCount, n))
             {
                 depth--;
-                i++;
+                i += openBraceCount;
                 if (depth == 0)
                 {
                     break;
@@ -520,12 +577,12 @@ internal static class PlanForceActionDetailCensus
                 continue;
             }
 
-            if (c == '"')
+            if (source[i] == '"')
             {
                 /* A string literal inside the hole (e.g. a ternary's branch) — skip it whole so a brace
                    inside it never desynchronises the depth count. */
                 var innerPrefixLength = LiteralPrefixLength(source, i);
-                var (_, end) = ReadStringLiteral(source, i, Math.Max(innerPrefixLength, 0));
+                var (_, end) = ReadStringLiteral(source, i, Math.Max(innerPrefixLength, 0), null);
                 i = end;
                 continue;
             }
@@ -534,6 +591,7 @@ internal static class PlanForceActionDetailCensus
         }
 
         builder.Append(' ');
+        holeEnd = i;
         return i;
     }
 }
