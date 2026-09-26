@@ -172,8 +172,8 @@ public sealed class AnalysisPassTokenThreadingTests
         Assert.Equal(s_exempt.Keys.OrderBy(k => k, StringComparer.Ordinal), untokenedBy.Keys.OrderBy(k => k, StringComparer.Ordinal));
 
         /* The counts are stated so a NEW untokened call inside an already-exempt method cannot ride in
-           on the exemption. 15 read-back calls across six methods, and the one finding INSERT. */
-        Assert.Equal(16, untokenedBy.Values.Sum());
+           on the exemption. 12 read-back calls across five methods, and the one finding INSERT. */
+        Assert.Equal(13, untokenedBy.Values.Sum());
         Assert.Equal(1, untokenedBy["InsertFindingAsync"]);
     }
 
