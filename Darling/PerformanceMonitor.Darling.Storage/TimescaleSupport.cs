@@ -6625,17 +6625,30 @@ AND   j.hypertable_name = '{relation}'";
            any slot's own filter. */
         var sourceOldest = $"(SELECT min({sourceTimeColumn}) FROM collect.{relation}) AS source_oldest";
 
-        /* Per-slot source filter (#4300, #4423): look the slot's OWN CreateSql up across all four
-           aggregate lists and reuse the same WHERE-clause extraction the hole probe already trusts
-           (MaterializationHoleSourceFilterFor). Fall back to IntervalHonestSourceFilter, exactly as
-           before, only when the lookup finds nothing or the CreateSql carries no WHERE of its own —
-           today that is every relation other than query_stats/procedure_stats's successors. This is what
-           lets query_stats's TWO #4423 consumers (the query-grain successor and
-           query_stats_db_interval_hourly) each pin their own floor: a shared filter could only honor one
-           of them, so a CPU-unknown row one filter admits and the other rejects could hold a slot Short
-           against a row its own rollup will never materialize. */
+        /* Per-slot source filter (#4300, #4423) applies ONLY to query_stats and procedure_stats — the two
+           relations whose successors bake IntervalHonestSourceFilter (or an equivalent WHERE) into their
+           CREATE. Every other coverage-gated relation (query_store_stats, and every layered CAGG whose own
+           retention is gated on ITS consumer — the query-store corrected interval layer, an hourly tier
+           gated on its daily) keeps NO filter, exactly as before #4300: those relations' consumers read
+           columns (e.g. bucket) that do not exist on the raw source this filter would be applied to, so
+           reusing MaterializationHoleSourceFilterFor's clause there is not merely unnecessary, it is wrong —
+           the coverage SQL would error, which the caller reads as Unknown and logs as a Warning, or filter
+           by a column collect.{relation} does not carry. Within query_stats/procedure_stats the slot's OWN
+           CreateSql is still looked up first (MaterializationHoleSourceFilterFor, the same extraction the
+           hole probe trusts), falling back to IntervalHonestSourceFilter only when that lookup finds nothing
+           or the CreateSql carries no WHERE of its own. This is what lets query_stats's TWO #4423 consumers
+           (the query-grain successor and query_stats_db_interval_hourly) each pin their own floor: a shared
+           filter could only honor one of them, so a CPU-unknown row one filter admits and the other rejects
+           could hold a slot Short against a row its own rollup will never materialize. Both #4423 consumers
+           are themselves sourced FROM collect.{relation} (query_stats), so this filter's columns are always
+           columns relation actually carries. */
         string SlotSourceFilterFor(string coverageRelation)
         {
+            if (relation is not ("query_stats" or "procedure_stats"))
+            {
+                return string.Empty;
+            }
+
             var createSql = HourlyAggregates.Concat(DailyAggregates).Concat(FrozenRollupAggregates).Concat(BaselineAggregates)
                 .FirstOrDefault(a => string.Equals(a.View, coverageRelation, StringComparison.Ordinal)).CreateSql;
 
@@ -6697,7 +6710,8 @@ AND   j.hypertable_name = '{relation}'";
                 + $"     CROSS JOIN (SELECT min(bucket) AS mn FROM collect.{c}) s)"
                 : $"(SELECT min(bucket) FROM collect.{c})";
             var slotFilter = SlotSourceFilterFor(c);
-            var slotSourceOldest = $"    (SELECT min({sourceTimeColumn}) FROM collect.{relation} WHERE {slotFilter}) AS source_oldest_{i}";
+            var slotFilterWhere = slotFilter.Length == 0 ? string.Empty : $" WHERE {slotFilter}";
+            var slotSourceOldest = $"    (SELECT min({sourceTimeColumn}) FROM collect.{relation}{slotFilterWhere}) AS source_oldest_{i}";
             return $"{slotSourceOldest},{Environment.NewLine}    {subquery} AS coverage_oldest_{i}";
         });
 
