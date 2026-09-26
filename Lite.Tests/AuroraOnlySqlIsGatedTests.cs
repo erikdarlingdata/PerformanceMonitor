@@ -97,6 +97,13 @@ public class AuroraOnlySqlIsGatedTests
             "get no anomaly baseline in v1, and the advice must not read as if they did. The advice reads facts, " +
             "never the target; the dependency itself is PgWaitStatsCollector's GATED entry, and the detector " +
             "that emits the fact baselines pg_wait_stats, which is empty off Aurora.",
+
+        ["PgTargetFactCollector.Queries.cs"] =
+            "PROSE. PgTargetTopStatementsSql selects MAX(max_exec_peakmem_bytes), a STORED column in " +
+            "collect.pg_statement_stats, never an Aurora function. PgStatementStatsCollector's vanilla path " +
+            "writes that column NULL off Aurora, so off Aurora the value is NULL, the fact metadata key is " +
+            "absent, and the advice sentence is omitted — never emitted as 0. The dependency itself is " +
+            "PgStatementStatsCollector's PAIRED entry above.",
     };
 
     [Fact]

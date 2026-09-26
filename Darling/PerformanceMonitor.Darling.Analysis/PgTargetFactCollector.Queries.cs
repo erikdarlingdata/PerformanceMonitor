@@ -91,6 +91,7 @@ WITH stmt_series AS (
         delta_calls,
         delta_total_exec_time_ms,
         max_exec_time_ms,
+        max_exec_peakmem_bytes,
         sample_interval_seconds,
         GREATEST(temp_blks_written - LAG(temp_blks_written) OVER identity, 0) AS d_temp_blks_written
     FROM pg_statement_stats
@@ -109,6 +110,7 @@ per_snapshot AS (
         SUM(delta_calls)              AS calls,
         SUM(delta_total_exec_time_ms) AS total_exec_ms,
         MAX(max_exec_time_ms)         AS max_exec_ms,
+        MAX(max_exec_peakmem_bytes)   AS max_exec_peakmem_bytes,
         SUM(d_temp_blks_written)      AS temp_blks_written,
         CASE WHEN MAX(sample_interval_seconds) IS NULL
              THEN extract(epoch FROM (collection_time - LAG(collection_time) OVER (PARTITION BY queryid ORDER BY collection_time)))
@@ -127,12 +129,14 @@ SELECT
     CAST(COALESCE(SUM(p.calls), 0) AS bigint)             AS calls,
     CAST(COALESCE(SUM(p.total_exec_ms), 0) AS bigint)     AS total_exec_ms,
     MAX(p.max_exec_ms)                                    AS max_exec_ms,
+    MAX(p.max_exec_peakmem_bytes)                         AS max_exec_peakmem_bytes,
     CAST(COALESCE(SUM(p.temp_blks_written), 0) AS bigint) AS temp_blks_written,
     CASE WHEN SUM(p.interval_seconds) > 0
          THEN CAST(SUM(p.calls) FILTER (WHERE p.interval_seconds IS NOT NULL) AS double precision) / SUM(p.interval_seconds)
     END                                                   AS calls_per_sec,
     MAX(d.database_count)                                 AS database_count,
     CAST(SUM(SUM(p.total_exec_ms)) OVER () AS bigint)     AS window_total_exec_ms
+    -- max_exec_peakmem_bytes: Aurora's aurora_stat_statements() only (#3691) - NULL, never 0, off Aurora.
 FROM per_snapshot AS p
 JOIN databases AS d
   ON d.queryid = p.queryid
@@ -157,7 +161,10 @@ LIMIT $4";
     /// reads so that 60% of nothing on an idle box never roots a card; <c>calls</c>, <c>total_exec_ms</c>,
     /// <c>mean_exec_ms</c> (absent when calls is 0 — a mean over no calls is not 0 ms), <c>max_exec_ms</c>;
     /// <c>calls_per_sec</c> over the statement's known accrual span (absent when unknowable — see the SQL);
-    /// <c>temp_blks_written</c> for lane 6's co-fire; <c>database_count</c>. The <c>queryid</c> is in the KEY
+    /// <c>max_exec_peakmem_bytes</c> (#3691) — Aurora's per-query peak executor memory, present only where
+    /// <c>aurora_stat_statements()</c> populated it, absent (never zero) off Aurora; a CONTEXT fact with no
+    /// bar and no threshold, carried the same way <c>max_exec_ms</c> is, and read by nothing that grades a
+    /// finding — a distribution read is a separate ruling; <c>temp_blks_written</c> for lane 6's co-fire; <c>database_count</c>. The <c>queryid</c> is in the KEY
     /// and nowhere else: the metadata is doubles-only, a 64-bit id is exact in a double only up to 2^53, and
     /// most real ids exceed that — a lossy copy a reader could paste into <c>get_pg_top_queries</c> and match
     /// nothing is worse than none. The drill-down carries <c>text_hash</c> beside the text.</para>
@@ -195,10 +202,11 @@ LIMIT $4";
                 var calls = reader.IsDBNull(1) ? 0L : ToInt64(reader.GetValue(1));
                 var totalExecMs = reader.IsDBNull(2) ? 0L : ToInt64(reader.GetValue(2));
                 var maxExecMs = reader.IsDBNull(3) ? (double?)null : Convert.ToDouble(reader.GetValue(3));
-                var tempBlksWritten = reader.IsDBNull(4) ? 0L : ToInt64(reader.GetValue(4));
-                var callsPerSec = reader.IsDBNull(5) ? (double?)null : Convert.ToDouble(reader.GetValue(5));
-                var databaseCount = reader.IsDBNull(6) ? 0L : ToInt64(reader.GetValue(6));
-                var windowTotalExecMs = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+                var maxExecPeakmemBytes = reader.IsDBNull(4) ? (long?)null : ToInt64(reader.GetValue(4));
+                var tempBlksWritten = reader.IsDBNull(5) ? 0L : ToInt64(reader.GetValue(5));
+                var callsPerSec = reader.IsDBNull(6) ? (double?)null : Convert.ToDouble(reader.GetValue(6));
+                var databaseCount = reader.IsDBNull(7) ? 0L : ToInt64(reader.GetValue(7));
+                var windowTotalExecMs = reader.IsDBNull(8) ? 0L : ToInt64(reader.GetValue(8));
 
                 /* HAVING admits only shapes with time > 0, and the window total is at least this row's, so
                    the share is defined; the guard is against a store that answers the projection differently. */
@@ -229,6 +237,9 @@ LIMIT $4";
                 if (calls > 0) fact.Metadata["mean_exec_ms"] = (double)totalExecMs / calls;
                 if (maxExecMs is { } max) fact.Metadata["max_exec_ms"] = max;
                 if (callsPerSec is { } rate) fact.Metadata["calls_per_sec"] = rate;
+                /* #3691: NULL off Aurora (stock PostgreSQL never populates the column), never 0 — a context
+                   fact only, no bar, no threshold; nothing here reads it to grade a finding. */
+                if (maxExecPeakmemBytes is { } peakMem) fact.Metadata["max_exec_peakmem_bytes"] = peakMem;
 
                 facts.Add(fact);
             }
