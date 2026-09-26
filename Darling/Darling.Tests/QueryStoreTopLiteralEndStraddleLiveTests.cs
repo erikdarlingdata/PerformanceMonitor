@@ -140,9 +140,12 @@ public sealed class QueryStoreTopLiteralEndStraddleLiveTests
 
         var before = await WideTableScanCountsAsync();
 
-        /* The viewer grid: a custom range whose literal end straddles the two snapshots. */
+        /* The viewer grid: a custom range whose literal end straddles the two snapshots. The product never
+           passes an endUtc past literalEndUtc for a custom range (see the doc comment on
+           ViewerDataService.GetQueryStoreTopQueriesAsync) - for a custom range they are the same value - so this
+           passes LiteralEnd for both, matching raw's own bound to the straddle point instead of past it. */
         await using var viewer = new ViewerDataService(scratch.ConnectionString);
-        var gridRows = await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, WindowEnd, TestTop, null, literalEndUtc: LiteralEnd);
+        var gridRows = await viewer.GetQueryStoreTopQueriesAsync(ServerId, WindowStart, LiteralEnd, TestTop, null, literalEndUtc: LiteralEnd);
         var gridRow = gridRows.Single(r => r.DatabaseName == "qsStraddle" && r.QueryId == 7001);
         Assert.Equal(192, gridRow.TotalExecutions);
 
