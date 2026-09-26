@@ -173,16 +173,17 @@ public sealed class DarlingMcpTrendTools
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
-        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null) =>
-        GetPerfmonTrend(postgres, counter_name, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PerfmonMaxPoints));
+        [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
+        CancellationToken cancellationToken = default) =>
+        GetPerfmonTrend(postgres, counter_name, server_name, hours_back, as_of, bucket_minutes, TrendBudget.Mcp(TrendBuckets.PerfmonMaxPoints), cancellationToken);
 
     /// <summary>get_perfmon_trend under an explicit <paramref name="budget"/> (#3960): the MCP tool passes its own,
     /// the web viewer's <c>/api/read</c> mirror <see cref="TrendBudget.Chart"/>.</summary>
     internal static async Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres, string counter_name, string? server_name, int hours_back, string? as_of, int? bucket_minutes,
-        TrendBudget budget)
+        TrendBudget budget, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -195,14 +196,14 @@ public sealed class DarlingMcpTrendTools
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var points = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, resolved.ServerId, counter_name, start, now, bucketMinutes);
+            var points = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, resolved.ServerId, counter_name, start, now, bucketMinutes, cancellationToken);
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
                    the miss path, so either order keeps the property that matters — but a permanently gated
                    engine takes this branch on every call, forever, and neither the probe nor the PLE branch
                    below could tell it anything. Asking first makes that case one query instead of two. */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "perfmon_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
@@ -211,7 +212,7 @@ public sealed class DarlingMcpTrendTools
                 /* No points can mean three different things to a caller. Distinguish them so an LLM
                    doesn't read a bad counter name as "this metric looks fine" — Lite's get_perfmon_trend
                    miss vocabulary. */
-                var collected = await DarlingTrendReader.GetDistinctPerfmonCountersAsync(postgres, resolved.ServerId, start, now);
+                var collected = await DarlingTrendReader.GetDistinctPerfmonCountersAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
                 /* Page Life Expectancy is the counter people reach for by habit; it is intentionally
                    not collected, so an empty trend would otherwise be misread as "PLE looks fine." */
@@ -252,13 +253,13 @@ public sealed class DarlingMcpTrendTools
                publish null delta_value and null sample_interval_seconds — the collector writes neither for a
                level — and value is the bucket's average reading. Lite's McpPerfmonTools builds the same
                payload (TrendPayloads.PerfmonTrend). */
-            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now);
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
             return TrendPayloads.PerfmonTrend(
                 resolved.ServerName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
                 budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_perfmon_trend", ex);
         }
@@ -271,8 +272,9 @@ public sealed class DarlingMcpTrendTools
         [Description("Hours of history. Default 24.")] int hours_back = 24,
         [Description(McpHelpers.AsOfDescription)] string? as_of = null,
         [Description(TrendBuckets.BucketMinutesDescription)] int? bucket_minutes = null,
-        [Description("One database, charted per file. Omit for every database.")] string? database_name = null) =>
-        GetFileIoTrend(postgres, server_name, hours_back, as_of, bucket_minutes, database_name, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints));
+        [Description("One database, charted per file. Omit for every database.")] string? database_name = null,
+        CancellationToken cancellationToken = default) =>
+        GetFileIoTrend(postgres, server_name, hours_back, as_of, bucket_minutes, database_name, TrendBudget.Mcp(TrendBuckets.FileIoMaxPoints), cancellationToken);
 
     /// <summary>
     /// get_file_io_trend under an explicit <paramref name="budget"/> (#3897): the MCP tool above passes its own,
@@ -287,9 +289,9 @@ public sealed class DarlingMcpTrendTools
     /// </summary>
     internal static async Task<string> GetFileIoTrend(
         NpgsqlDataSource postgres, string? server_name, int hours_back, string? as_of, int? bucket_minutes,
-        string? database_name, TrendBudget budget)
+        string? database_name, TrendBudget budget, CancellationToken cancellationToken = default)
     {
-        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
+        var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
         if (error != null) return error;
 
         var validation = McpHelpers.ValidateWindow(hours_back, as_of, out var windowEnd);
@@ -306,20 +308,20 @@ public sealed class DarlingMcpTrendTools
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var series = await DarlingTrendReader.GetFileIoSeriesAsync(postgres, resolved.ServerId, start, now, scope);
+            var series = await DarlingTrendReader.GetFileIoSeriesAsync(postgres, resolved.ServerId, start, now, scope, cancellationToken);
             if (series.Count == 0)
             {
                 /* Same two states as the memory trend, same probe discipline. The quiet-window sentence
                    carries one extra clause the others do not need: the ranking counts only series that read
                    or wrote, so a genuinely idle file set is empty here even on a server whose file_io_stats
                    collector ran every cycle. */
-                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats");
+                var gated = await DarlingEngineCapability.NotCollectedStatusAsync(postgres, resolved.ServerId, resolved.ServerName, "file_io_stats", cancellationToken);
                 if (gated != null)
                 {
                     return gated;
                 }
 
-                var everCollected = await DarlingTrendReader.HasAnyFileIoStatAsync(postgres, resolved.ServerId);
+                var everCollected = await DarlingTrendReader.HasAnyFileIoStatAsync(postgres, resolved.ServerId, cancellationToken);
 
                 /* A scoped read that found nothing is first a question about the NAME: a misspelt database
                    and an idle one land here alike, and only the collected names tell them apart. */
@@ -341,14 +343,14 @@ public sealed class DarlingMcpTrendTools
             if (bucketError != null) return bucketError;
 
             var points = await DarlingTrendReader.GetFileIoTrendAsync(
-                postgres, resolved.ServerId, start, now, scope, TrendPayloads.ChartedFor(series.Count), bucketMinutes);
-            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now);
+                postgres, resolved.ServerId, start, now, scope, TrendPayloads.ChartedFor(series.Count), bucketMinutes, cancellationToken);
+            var discontinuities = await DarlingTrendReader.GetBaselineDiscontinuitiesAsync(postgres, resolved.ServerId, start, now, cancellationToken);
 
             return TrendPayloads.FileIoTrend(
                 resolved.ServerName, hours_back, scope, series, points, bucketMinutes, bucket_minutes is not null,
                 budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("get_file_io_trend", ex);
         }

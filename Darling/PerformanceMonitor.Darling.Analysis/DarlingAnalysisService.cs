@@ -718,7 +718,7 @@ public sealed class DarlingAnalysisService
     /// gets <see cref="PgAnomalyDetector"/>'s, off the one resolution this read already performs.</para>
     /// </summary>
     public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
-        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
+        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -729,7 +729,8 @@ public sealed class DarlingAnalysisService
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
-            AsOfUtc = asOfUtc
+            AsOfUtc = asOfUtc,
+            CancellationToken = cancellationToken
         };
 
         try
@@ -835,14 +836,16 @@ public sealed class DarlingAnalysisService
     public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
-        DateTime comparisonStart, DateTime comparisonEnd)
+        DateTime comparisonStart, DateTime comparisonEnd,
+        CancellationToken cancellationToken = default)
     {
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
-            TimeRangeEnd = baselineEnd
+            TimeRangeEnd = baselineEnd,
+            CancellationToken = cancellationToken
         };
 
         var comparisonContext = new AnalysisContext
@@ -850,7 +853,8 @@ public sealed class DarlingAnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
-            TimeRangeEnd = comparisonEnd
+            TimeRangeEnd = comparisonEnd,
+            CancellationToken = cancellationToken
         };
 
         try
@@ -916,9 +920,9 @@ public sealed class DarlingAnalysisService
     /// the default 24-hour window has scrolled past.</para>
     /// </summary>
     public async Task<List<AnalysisFinding>> GetRecentFindingsAsync(
-        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null)
+        int serverId, int hoursBack = 24, int limit = 100, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
-        return await _findingStore.GetRecentFindingsAsync(serverId, hoursBack, limit, asOfUtc);
+        return await _findingStore.GetRecentFindingsAsync(serverId, hoursBack, limit, asOfUtc, cancellationToken);
     }
 
     /// <summary>

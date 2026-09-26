@@ -128,17 +128,11 @@ public static class DarlingWebEndpoints
     /// REMOVED, on the PR that finishes threading its <see cref="ReadToolHandler"/> entry AND its
     /// <c>[McpServerTool]</c> method's own <c>CancellationToken</c> parameter down to every store call — never
     /// added, because every tool on the <c>/api/read/*</c> surface is in scope for the same fix and none is
-    /// meant to stay uncancellable. First slice (this lane): <c>audit_config</c> (the tool #4191 measured) plus
-    /// every other tool the web viewer's Configuration tab calls. Later lanes take the rest, about 20 a lane,
-    /// against this same allowlist, until it is empty and #4203 closes.
+    /// meant to stay uncancellable. The list is now empty: every tool on the <c>/api/read/*</c> surface has been
+    /// converted, and #4203 is closed.
     /// </summary>
 internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSet<string>(StringComparer.Ordinal)
     {
-        "compare_analysis",
-        "get_analysis_facts",
-        "get_analysis_findings",
-        "get_file_io_trend",
-        "get_perfmon_trend",
     };
 
     /// <summary>The window (hours) the fleet card blocking / deadlock counts default to — the WPF Overview's window.</summary>
@@ -2969,13 +2963,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         {
             /* ── analysis reads (take the DarlingAnalysisService) ── */
             ["audit_config"] = (c, pg, an) => DarlingMcpTools.AuditConfig(an, pg, Server(c), c.RequestAborted),
-            ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryInt(c, "baseline_hours_back", null, 28), as_of: AsOf(c)),
-            ["get_analysis_facts"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFacts(an, pg, Server(c), Hours(c, 4), Str(c, "source"), QueryDouble(c, "min_severity", 0), as_of: AsOf(c)),
+            ["compare_analysis"] = (c, pg, an) => DarlingMcpTools.CompareAnalysis(an, pg, Server(c), Hours(c, 4), QueryInt(c, "baseline_hours_back", null, 28), as_of: AsOf(c), cancellationToken: c.RequestAborted),
+            ["get_analysis_facts"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFacts(an, pg, Server(c), Hours(c, 4), Str(c, "source"), QueryDouble(c, "min_severity", 0), as_of: AsOf(c), cancellationToken: c.RequestAborted),
             // #4198: the tool's own default (limit 18, previews) is sized for a chat caller's token budget.
             // The viewer's two "Analysis Findings" tables render no preview-cut field and never asked for a
             // budget, so this row keeps asking for what dev always returned: every chain, full text. See
             // DarlingWebEndpointsTests.GetAnalysisFindingsRow_PassesTheOldViewerDefaults_EveryChainFullText.
-            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger),
+            ["get_analysis_findings"] = (c, pg, an) => DarlingMcpTools.GetAnalysisFindings(an, pg, Server(c), Hours(c, 24), Rows(c, "limit", MaxRowLimit), QueryBool(c, "include_drilldown", false), QueryBool(c, "full_text", true), as_of: AsOf(c), logger: logger, cancellationToken: c.RequestAborted),
 
             /* ── sessions ── */
             ["get_active_queries"] = (c, pg, an) => DarlingMcpSessionTools.GetActiveQueries(pg, Server(c), Hours(c, 1), Str(c, "database_name"), QueryBool(c, "blocking_only", false), Rows(c, "limit", 50), 2000, AsOf(c), c.RequestAborted),
@@ -3142,14 +3136,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                should read — and bind bucket_minutes, refusing a value that is not a number rather than quietly
                sizing the points itself (the OptionalDouble rule). */
             ["get_file_io_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart)
+                ? DarlingMcpTrendTools.GetFileIoTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, Str(c, "database_name"), TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_memory_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
                 ? DarlingMcpTrendTools.GetMemoryTrend(pg, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                 : UnparseableParam("bucket_minutes"),
             ["get_perfmon_trend"] = (c, pg, an) => RequireText(c, "counter_name", out var counter)
                 ? (OptionalInt(c, "bucket_minutes", out var bucketMinutes)
-                    ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart)
+                    ? DarlingMcpTrendTools.GetPerfmonTrend(pg, counter, Server(c), Hours(c, 24), AsOf(c), bucketMinutes, TrendBudget.Chart, c.RequestAborted)
                     : UnparseableParam("bucket_minutes"))
                 : MissingParam("counter_name"),
             ["get_procedure_duration_trend"] = (c, pg, an) => OptionalInt(c, "bucket_minutes", out var bucketMinutes)
