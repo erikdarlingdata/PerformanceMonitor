@@ -1287,8 +1287,8 @@ internal static class DarlingDataReader
     }
 
     /// <summary>#4231 stage 3: which tier <see cref="GetTopQueriesByCpuRoutedAsync"/> actually read —
-    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly, this
-    /// lane's scope); the MCP tool's <c>tier_used</c> comes from here.</summary>
+    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
+    /// the MCP tool's <c>tier_used</c> comes from here.</summary>
     public sealed record TopQueriesReadResult(List<TopQueryRow> Rows, RetentionTier Tier);
 
     /// <summary>
@@ -1475,9 +1475,99 @@ internal static class DarlingDataReader
         LIMIT $4
         """;
 
+    /// <summary>The FROM-clause placeholder <see cref="TopProceduresHourlySql"/> carries — replaced with
+    /// <see cref="RollupCoverage.StitchedRelationSql"/>'s answer at call time. Never hardcode
+    /// <c>procedure_stats_interval_hourly</c> or <c>procedure_stats_hourly</c> in its place; see
+    /// <see cref="GetTopProceduresByCpuHourlyAsync"/>.</summary>
+    public const string TopProceduresHourlyFromPlaceholder = "$FROM$";
+
+    /// <summary>
+    /// #4231 stage 3b: the hourly-tier twin of <see cref="TopProceduresSql"/>, over <c>procedure_stats_hourly</c> /
+    /// <c>procedure_stats_interval_hourly</c> — routed here ONLY through <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// (never by naming either relation directly). The rollup carries neither <c>object_type</c> nor
+    /// <c>sql_handle</c>/<c>plan_handle</c> (see <c>s_stitchColumnsByLegacy[ProcedureStatsHourlyView]</c>,
+    /// <c>TimescaleSupport.cs</c>), so this groups by <c>(database_name, schema_name, object_name)</c> only —
+    /// <c>object_type</c> is disclosed as null by the MCP tool's <c>precision_note</c>, not hidden. Ranks by
+    /// <c>SUM(worker_time_sum) DESC</c> — the same CPU promise <see cref="TopProceduresSql"/> makes, over the
+    /// rollup's pre-summed bucket columns rather than per-collection deltas. <c>$FROM$</c> is a PLACEHOLDER,
+    /// substituted (string.Replace, not string.Format) with the FROM-clause item
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> returns for this window at call time — never a literal
+    /// relation name. $1 server_id, $2/$3 window (naive UTC), $4 top, $5 database filter (NULL = all).
+    /// </summary>
+    public const string TopProceduresHourlySql = """
+        WITH ranked AS (
+            SELECT
+                database_name,
+                schema_name,
+                object_name,
+                CAST(SUM(execution_count_sum) AS bigint) AS total_executions,
+                CAST(SUM(worker_time_sum) AS bigint) AS total_cpu_us,
+                CAST(SUM(elapsed_time_sum) AS bigint) AS total_elapsed_us,
+                MIN(worker_time_min) AS min_worker_time,
+                MAX(worker_time_max) AS max_worker_time,
+                MIN(elapsed_time_min) AS min_elapsed_time,
+                MAX(elapsed_time_max) AS max_elapsed_time
+            FROM $FROM$
+            WHERE server_id = $1
+            AND   bucket >= $2
+            AND   bucket <= $3
+            AND   ($5::text IS NULL OR database_name = $5)
+            GROUP BY database_name, schema_name, object_name
+            HAVING (SUM(execution_count_sum) > 0 OR SUM(elapsed_time_sum) > 0)
+            ORDER BY SUM(worker_time_sum) DESC
+            LIMIT $4
+        )
+        SELECT
+            r.database_name,
+            r.schema_name,
+            r.object_name,
+            r.total_executions,
+            r.total_cpu_us,
+            r.total_elapsed_us,
+            r.min_worker_time,
+            r.max_worker_time,
+            r.min_elapsed_time,
+            r.max_elapsed_time
+        FROM ranked AS r
+        ORDER BY r.total_cpu_us DESC
+        """;
+
+    /// <summary>
+    /// #4231 stage 3b: which tier <see cref="GetTopProceduresByCpuRoutedAsync"/> actually read —
+    /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
+    /// the MCP tool's <c>tier_used</c> comes from here.</summary>
+    public sealed record TopProceduresReadResult(List<TopProcedureRow> Rows, RetentionTier Tier);
+
     public static async Task<List<TopProcedureRow>> GetTopProceduresByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
     {
+        var result = await GetTopProceduresByCpuRoutedAsync(postgres, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
+        return result.Rows;
+    }
+
+    /// <summary>
+    /// #4231 stage 3b: <see cref="GetTopProceduresByCpuAsync"/>'s routed form, exposing the tier it read so a
+    /// caller can disclose it. Tier is decided over the LEGACY pair's coverage (<see cref="RollupCoverage.For"/>);
+    /// Daily is clamped to Hourly (#4231).
+    /// </summary>
+    public static async Task<TopProceduresReadResult> GetTopProceduresByCpuRoutedAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
+    {
+        var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+        var tier = RetentionTierRouter.Resolve(
+            DateTime.UtcNow, startUtc, rollups.ProcedureGrainHourly, dailyAvailable: false,
+            coverage.For(TimescaleSupport.ProcedureStatsHourlyView, TimescaleSupport.ProcedureStatsDailyView));
+        if (tier == RetentionTier.Daily)
+        {
+            tier = RetentionTier.Hourly;
+        }
+
+        if (tier == RetentionTier.Hourly)
+        {
+            var hourlyRows = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
+            return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly);
+        }
+
         var rows = new List<TopProcedureRow>();
         await using var command = postgres.CreateCommand(TopProceduresSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -1505,6 +1595,51 @@ internal static class DarlingDataReader
                 reader.IsDBNull(14) ? 0 : reader.GetInt64(14),
                 reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
                 reader.IsDBNull(16) ? 0 : reader.GetInt64(16)));
+        }
+
+        return new TopProceduresReadResult(rows, RetentionTier.Raw);
+    }
+
+    /// <summary>
+    /// #4231 stage 3b: the hourly-rollup arm of <see cref="GetTopProceduresByCpuRoutedAsync"/> — builds
+    /// <see cref="TopProceduresHourlySql"/>'s FROM clause ONLY through <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// (the standing gate: a raw-vs-rollup reader never names <c>procedure_stats_interval_hourly</c> or
+    /// <c>procedure_stats_hourly</c> directly). Rows carry <c>ObjectType = ""</c>, <c>SqlHandle = ""</c> and
+    /// <c>PlanHandle = ""</c> — the rollup has none of those columns, and the MCP tool's <c>precision_note</c>
+    /// says so.
+    /// </summary>
+    private static async Task<List<TopProcedureRow>> GetTopProceduresByCpuHourlyAsync(
+        NpgsqlDataSource postgres, RollupCoverage coverage, int serverId, DateTime startUtc, DateTime endUtc,
+        int top, string? databaseName, CancellationToken cancellationToken)
+    {
+        var fromClause = coverage.StitchedRelationSql(
+            TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+        var sql = TopProceduresHourlySql.Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal);
+
+        var rows = new List<TopProcedureRow>();
+        await using var command = postgres.CreateCommand(sql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        AddWindow(command, serverId, startUtc, endUtc);
+        AddInt(command, top);
+        AddNullableText(command, databaseName);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new TopProcedureRow(
+                DatabaseName: reader.IsDBNull(0) ? "" : reader.GetString(0),
+                SchemaName: reader.IsDBNull(1) ? "" : reader.GetString(1),
+                ObjectName: reader.IsDBNull(2) ? "" : reader.GetString(2),
+                /* #4231 stage 3b: the rollup has no object_type column. */
+                ObjectType: "",
+                SqlHandle: "", PlanHandle: "",
+                TotalExecutions: reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
+                TotalCpuUs: reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
+                TotalElapsedUs: reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                TotalLogicalReads: 0, TotalLogicalWrites: 0, TotalPhysicalReads: 0, TotalSpills: 0,
+                MinCpuUs: reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+                MaxCpuUs: reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+                MinElapsedUs: reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+                MaxElapsedUs: reader.IsDBNull(9) ? 0 : reader.GetInt64(9)));
         }
 
         return rows;

@@ -193,10 +193,12 @@ public partial class ViewerServerTab
     private async Task LoadTopProceduresAsync(DateTime startUtc, DateTime endUtc)
     {
         var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, startUtc, endUtc);
-        var rows = await _dataService.GetTopProceduresByCpuAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
+        var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter);
         _procStatsFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
-        UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, startUtc);
+        /* #4231 stage 3b: an hourly-routed page holds no object_type/sql_handle/plan_handle — the raw-floor
+           banner and this tier disclosure are independent facts, same reasoning as the Queries sub-tab. */
+        UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, startUtc, tier == "hourly" ? HourlyTierSuffix : null);
         await LoadProcStatsSlicerAsync(startUtc, endUtc);
         await RefreshProcStatsComparisonAsync(startUtc, endUtc);
     }
@@ -312,9 +314,9 @@ public partial class ViewerServerTab
         try
         {
             var floorTask = _dataService.GetProcedureStatsWindowFloorAsync(_server.ServerId, e.StartUtc, e.EndUtc);
-            var rows = await _dataService.GetTopProceduresByCpuAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
+            var (rows, tier) = await _dataService.GetTopProceduresByCpuTierAsync(_server.ServerId, e.StartUtc, e.EndUtc, databaseNames: SelectedDatabaseFilter);
             _procStatsFilterMgr!.UpdateData(rows);
-            UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, e.StartUtc);
+            UpdateTruncationBanner(ProcStatsTruncationBanner, await floorTask, e.StartUtc, tier == "hourly" ? HourlyTierSuffix : null);
             await RefreshProcStatsComparisonAsync(e.StartUtc, e.EndUtc);
         }
         catch (Exception ex)
