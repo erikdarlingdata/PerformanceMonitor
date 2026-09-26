@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -182,11 +183,114 @@ public sealed partial class ViewerDataService
         ORDER BY point_time
         """;
 
-    /// <summary>The selected Query Store row's per-interval execution timeline (avg × exec count) over the window.</summary>
+    /// <summary>
+    /// The table twin of <see cref="QueryStoreItemTimelineSql"/> (#4310 site 4): <c>query_store_interval_wide</c>
+    /// already holds the latest snapshot per interval (the raw prefix's dedupe, maintained as the table is
+    /// written), so this reads it directly with <c>COALESCE(interval_start_time_utc, collection_time)</c> as
+    /// both the placement and the filter column, exactly as the raw statement does. $5 is the gate's own clamp
+    /// (<see cref="QueryStoreIntervalWide.ClampedStart"/>); $6 is nullable — NULL for an open end (a WPF
+    /// preset, reads through whatever the table currently holds), or the literal end for a custom range,
+    /// matching <see cref="ViewerDataService.QueryStoreTopTableSql"/>'s own $3.
+    /// $1 server_id, $2 database_name, $3 query_id, $4 plan_id, $5 clamped start, $6 nullable literal end.
+    /// </summary>
+    public const string QueryStoreItemTimelineTableSql = """
+        SELECT
+            COALESCE(interval_start_time_utc, collection_time) AS point_time,
+            COALESCE(CAST(avg_cpu_time_us AS double precision) * execution_count, 0) / 1000.0 AS cpu_ms,
+            COALESCE(CAST(avg_duration_us AS double precision) * execution_count, 0) / 1000.0 AS elapsed_ms,
+            COALESCE(CAST(avg_logical_io_reads AS double precision) * execution_count, 0) AS reads,
+            COALESCE(CAST(avg_logical_io_writes AS double precision) * execution_count, 0) AS writes,
+            COALESCE(CAST(avg_physical_io_reads AS double precision) * execution_count, 0) AS physical_reads
+        FROM collect.query_store_interval_wide
+        WHERE server_id = $1
+        AND   database_name = $2
+        AND   query_id = $3
+        AND   plan_id = $4
+        AND   COALESCE(interval_start_time_utc, collection_time) >= $5
+        AND   ($6::timestamp IS NULL OR COALESCE(interval_start_time_utc, collection_time) <= $6)
+        ORDER BY point_time
+        """;
+
+    /// <summary>
+    /// #4310 site 4's gate and table read, on ONE connection in ONE read-only REPEATABLE READ transaction, same
+    /// shape as <see cref="ViewerDataService.TryGetQueryStoreTopQueriesFromTableAsync"/> (#4341's grid). Returns
+    /// null (never an empty list) when the gate says raw, so the caller can tell "read raw instead" from "the
+    /// table legitimately has nothing" — an empty list from the table IS a valid answer. Any fault opening the
+    /// connection, starting the transaction, running the gate, or reading the table also returns null (except
+    /// cancellation, which propagates).
+    /// </summary>
+    private async Task<List<ItemTimelinePoint>?> TryGetQueryStoreItemTimelineFromTableAsync(
+        int serverId, string databaseName, long queryId, long planId, DateTime startUtc, DateTime endUtc,
+        DateTime? literalEndUtc, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(System.Data.IsolationLevel.RepeatableRead, cancellationToken);
+
+            await using (var readOnly = new NpgsqlCommand("SET TRANSACTION READ ONLY", connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds })
+            {
+                await readOnly.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
+                connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
+                ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
+            if (!useTable)
+            {
+                return null;
+            }
+
+            await using var command = new NpgsqlCommand(QueryStoreItemTimelineTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            command.Parameters.Add(new NpgsqlParameter<string> { TypedValue = databaseName ?? "" });
+            command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = queryId });
+            command.Parameters.Add(new NpgsqlParameter<long> { TypedValue = planId });
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(clampedStart, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                Value = literalEndUtc.HasValue ? DateTime.SpecifyKind(literalEndUtc.Value, DateTimeKind.Unspecified) : DBNull.Value,
+            });
+            return await ReadItemTimelineAsync(command, cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            System.Diagnostics.Trace.TraceWarning($"#4310 item timeline table read fell back to raw: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The selected Query Store row's per-interval execution timeline (avg × exec count) over the window. #4310
+    /// site 4: reads <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
+    /// says its coverage holds the window (at or above #4341's <see cref="QueryStoreIntervalWide.GridWideMinWindow"/>
+    /// threshold and store schema 145+); any fault or a "no" reads <see cref="QueryStoreItemTimelineSql"/>
+    /// unchanged, exactly as before this table existed. <paramref name="literalEndUtc"/> is the gate's clause-4
+    /// input: NULL for an open end (a WPF preset — the caller means "through now"), or <paramref name="endUtc"/>
+    /// itself for a custom range, same convention as <see cref="ViewerDataService.GetQueryStoreTopQueriesAsync"/>.
+    /// </summary>
     public async Task<List<ItemTimelinePoint>> GetQueryStoreItemTimelineAsync(
         int serverId, string databaseName, long queryId, long planId, DateTime startUtc, DateTime endUtc,
-        CancellationToken cancellationToken = default)
+        DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
+        /* Review D4R H1 shape (same as #4341's grid): the window check comes first, before the schema probe
+           and before the table's own connection/transaction/round trips, so a window under GridWideMinWindow
+           reaches raw with ZERO extra store round trips versus before this table existed. */
+        if (endUtc - startUtc >= QueryStoreIntervalWide.GridWideMinWindow)
+        {
+            var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
+            if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
+            {
+                var tableRows = await TryGetQueryStoreItemTimelineFromTableAsync(
+                    serverId, databaseName, queryId, planId, startUtc, endUtc, literalEndUtc, cancellationToken);
+                if (tableRows is not null)
+                {
+                    return tableRows;
+                }
+            }
+        }
+
         await using var command = _dataSource.CreateCommand(QueryStoreItemTimelineSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });

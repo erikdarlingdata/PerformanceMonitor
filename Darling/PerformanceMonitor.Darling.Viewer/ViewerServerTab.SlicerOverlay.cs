@@ -93,7 +93,8 @@ public partial class ViewerServerTab
         {
             var (startUtc, endUtc) = GetWindowUtc();
             var timeline = await _dataService.GetQueryStoreItemTimelineAsync(
-                _server.ServerId, row.DatabaseName, row.QueryId, row.PlanId, startUtc, endUtc);
+                _server.ServerId, row.DatabaseName, row.QueryId, row.PlanId, startUtc, endUtc,
+                literalEndUtc: IsCustomRange ? endUtc : null);
             var label = !string.IsNullOrWhiteSpace(row.ModuleName)
                 ? row.ModuleName
                 : $"Query {row.QueryId} / Plan {row.PlanId}";
