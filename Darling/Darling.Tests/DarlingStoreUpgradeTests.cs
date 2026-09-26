@@ -3003,10 +3003,14 @@ public sealed class DarlingStoreUpgradeTests
                     File.ReadAllText(Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName)).Trim());
 
                 var conf = await File.ReadAllTextAsync(Path.Combine(dataDirectory, "postgresql.conf"), timeout.Token);
-                Assert.Contains("shared_preload_libraries = 'timescaledb'", conf, StringComparison.Ordinal);
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
                 Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
+
+                /* #4336's Step A moved shared_preload_libraries into darling-managed.conf, behind the include
+                   this migrated host now carries; postgresql.conf no longer states it directly. */
+                await ManagedPreloadAssert.FileLevel_HasOneManagedPreloadLine_WithBothLibraries(dataDirectory, timeout.Token);
+                await ManagedPreloadAssert.Live_ReportsBothLibraries_SourcedFromManagedConf(connectionString, timeout.Token);
             }
             finally
             {
