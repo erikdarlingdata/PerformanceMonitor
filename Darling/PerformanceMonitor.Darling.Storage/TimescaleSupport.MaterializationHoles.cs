@@ -117,6 +117,22 @@ namespace PerformanceMonitor.Darling.Storage;
 /// every raw-sourced rollup before the rollups that read it — followed by the baseline aggregates, so a daily's
 /// scan runs after its hourly has been repaired and sees the rows it needs.</para>
 ///
+/// <para><b>A repaired successor-hourly seam chains its successor daily too (#4300).</b> A long outage
+/// across an upgrade can leave the seam repair filling a successor hourly back further than the successor
+/// daily's own refresh window (three days) reaches, and further than its own floor — those days sit below
+/// the daily's policy window, so the daily never materializes them on its own. Since a successor hourly's
+/// 90-day retention is armed only through its successor daily's coverage, an unchased gap holds that
+/// retention indefinitely even though the hourly itself lost no row. After a seam range closes, this pass
+/// also refreshes the dependent successor daily over exactly that range — aligned out to whole days, clipped
+/// to the part strictly older than the daily's own window, and capped to the daily's own per-pass bucket
+/// budget (<see cref="ChainedDailyRange"/> is the pure rule). The same chase also runs on the START-PATH
+/// full walk (<c>seamOnly: false</c>), not only the hourly seam-only repair — any closed seam range chains
+/// its daily regardless of which caller closed it. Failure-isolated from the hourly repair whose range just
+/// closed: a daily-chase error is logged at Warning and never fails the pass that found it. The chase never
+/// refreshes a day while the hourly underneath it still has a hole in that range: it re-scans the hourly
+/// first and defers the whole chase if one is found, so a partial day is never handed to the daily as if it
+/// were whole.</para>
+///
 /// <para><b>Launched, not awaited.</b> The scan itself is cheap and starts the moment the ensure sweep has
 /// created every aggregate; the repairs are bounded but a full cap on the heaviest aggregate is a policy run's
 /// worth of work, which is minutes on the largest store. So the worker launches this the way it launches the
@@ -535,10 +551,17 @@ ORDER BY c.bucket";
     /// reading as holes after both refresh paths; <see cref="Failures"/> the aggregates whose scan or repair
     /// threw and was isolated; <see cref="HolesForced"/> the holes the plain refresh left standing and the
     /// forced one had to close. <see cref="Elapsed"/> is the pass's own wall clock from entry to return —
-    /// the detect, every probe, every refresh — and not the caller's connection open.</para>
+    /// the detect, every probe, every refresh — and not the caller's connection open. <see
+    /// cref="DailyBucketsChained"/> (#4300) is the buckets a repaired successor-hourly range's
+    /// dependent successor DAILY was ALSO refreshed over — added last so every existing construction site
+    /// keeps compiling unchanged; a failed daily chase is not counted here (it is isolated and logged
+    /// separately, never surfaced as a <see cref="Failures"/> of the hourly repair itself). Counted the same
+    /// way whether the closed seam range came from the hourly seam-only repair or the start-path full walk
+    /// (<c>seamOnly: false</c>) — both callers share the one chase. A day the hourly underneath still holds
+    /// a hole for is never counted here: the chase defers rather than chaining a partial day.</para>
     /// </summary>
     public sealed record MaterializationHoleRepairSummary(
-        int AggregatesScanned, int AggregatesSkipped, int HolesFound, int BucketsFound, int HolesRepaired, int BucketsRepaired, int HolesDeferred, int BucketsDeferred, int HolesRemaining, int Failures, int HolesForced, TimeSpan Elapsed);
+        int AggregatesScanned, int AggregatesSkipped, int HolesFound, int BucketsFound, int HolesRepaired, int BucketsRepaired, int HolesDeferred, int BucketsDeferred, int HolesRemaining, int Failures, int HolesForced, TimeSpan Elapsed, int DailyBucketsChained = 0);
 
     /// <summary>
     /// THE PASS: scan every registered continuous aggregate for materialization holes and close each with one
@@ -605,6 +628,7 @@ ORDER BY c.bucket";
         var failures = 0;
 
         var holesForced = 0;
+        var dailyBucketsChained = 0;
 
         if (!await DetectAsync(connection, cancellationToken))
         {
@@ -683,7 +707,23 @@ ORDER BY c.bucket";
                        hourly seam-only repair has nothing to do for it, and skips WITHOUT the ordinary
                        window's horizon probe below (RawFloorHorizonAsync/MaterializationHoleScanSpanFor):
                        the retention sweep's own coverage read is what judges the ordinary window; this pass
-                       only exists to close the seam. */
+                       only exists to close the seam.
+
+                       #4300 catch-up: BEFORE skipping, ask whether the successor DAILY has already
+                       caught up to where THIS hourly's own floor now reaches. A closed seam here means the
+                       normal chase (ChainDailyAsync, run right after a seam range closes below) already had
+                       its one chance to run for whatever repaired the hourly to this floor — if that chase
+                       threw (caught inside it, logged at Warning, returns 0) or was cut off mid-flight by the
+                       seam's own 2-minute budget (the OperationCanceledException propagates past this method
+                       entirely, so nothing here ever ran), the hourly floor still moved but the daily never
+                       heard about it, and no LATER pass would ever ask again — every later pass sees the same
+                       already-closed seam and skips here exactly as this one is about to. This check is the
+                       retention hold's own condition re-asked directly (does the daily's floor already reach
+                       back to the hourly's?) rather than a record of any one failure mode, so it heals a
+                       thrown chase, a cancelled one, or a chase that simply never got the chance to run, all
+                       the same way, on the very next pass. Legacy-paired targets only (checked by the caller
+                       above via LegacyOf); a target with no successor daily returns 0 immediately. */
+                    dailyBucketsChained += await CatchUpDailyChaseAsync(floor.Value);
                     skipped++;
                     continue;
                 }
@@ -828,6 +868,153 @@ ORDER BY c.bucket";
                     return remaining;
                 }
 
+                /* #4300: after a seam range closes, chase the dependent successor DAILY over the same
+                   ground, ALIGNED OUT to whole days, but ONLY the part older than the daily's own 3-day
+                   refresh window (DailyRefreshStartSpan) — a day inside that window is the daily policy's own
+                   business and this never duplicates it. Exists because the seam repair can fill a successor
+                   HOURLY back 5+ days across a long outage, and those days are below the successor DAILY's
+                   floor and its own policy window, so the daily never reaches them on its own — and the
+                   hourly's 90-day retention is armed only through its successor daily's coverage
+                   (RequireSuccessorDailyOf), so an unchased gap holds that retention open indefinitely even
+                   though the hourly itself lost no row. Runs ONLY for a seam range (never the ordinary
+                   window): an ordinary interior repair sits strictly above the floor and is never the shape
+                   this exists for. Bounded to MaterializationHoleRepairCapBuckets(DailyBucket) days per pass
+                   (the daily tier's own cap, so this never re-materializes more of the daily per pass than an
+                   ordinary daily policy run would) and failure-isolated: a throw here is caught, logged at
+                   Warning, and never fails the hourly repair whose range just closed — the days left uncounted
+                   here are simply re-judged by a later pass, exactly like a deferred hole. */
+                async Task<int> RunDailyChaseAsync(string successorDaily, DateTime chainStart, DateTime chainEnd, DateTime logStart, DateTime logEnd, string reason)
+                {
+                    /* The daily is hierarchical from THIS hourly, so a day this chase would refresh must not
+                       still hold an unmaterialized hourly bucket underneath it — a partial day reads Covered
+                       (min/max, no contiguity check) exactly like a whole one, and once that happens nothing
+                       ever refreshes it again: the day is below the daily's own 3-day policy window, so the
+                       ordinary daily walk never re-visits it, and the hourly hole scan only ever runs on the
+                       hourly, not on what the daily rolled up from it. Scan the HOURLY over the same bounds
+                       the chase is about to hand the daily, reusing the materialization this pass already
+                       resolved for target — a hole anywhere in that range means the hourly is not ready yet,
+                       so this defers the whole chase rather than refreshing a day the hourly cannot back. */
+                    var hourlyHoles = await ScanHolesAsync(connection, target, materialization.Value, chainStart, chainEnd - target.BucketWidth, cancellationToken);
+                    if (hourlyHoles.Count > 0)
+                    {
+                        logger?.LogInformation(
+                            "Materialization-hole repair (#4300): the successor daily {Daily} waits: the hourly {View} still has {Holes} unmaterialized bucket(s) in [{Start}, {End}) from its {Reason} — a later pass re-judges.",
+                            successorDaily, target.View, hourlyHoles.Count, logStart.ToString("O", CultureInfo.InvariantCulture), logEnd.ToString("O", CultureInfo.InvariantCulture), reason);
+                        return 0;
+                    }
+
+                    await RollupBackfill.RunSliceAsync(connection, successorDaily, chainStart, chainEnd, disclosure, cancellationToken);
+
+                    var dailyMaterialization = await ResolveMaterializationAsync(connection, successorDaily, cancellationToken);
+                    if (dailyMaterialization is not null)
+                    {
+                        var dailyTarget = MaterializationHoleTargets.FirstOrDefault(t => string.Equals(t.View, successorDaily, StringComparison.Ordinal));
+                        var dailyRemaining = dailyTarget.View is null
+                            ? 0
+                            : (await ScanHolesAsync(connection, dailyTarget, dailyMaterialization.Value, chainStart, chainEnd - DailyBucket, cancellationToken)).Count;
+                        if (dailyRemaining > 0)
+                        {
+                            await RollupBackfill.RepairAsync(connection, successorDaily, chainStart, chainEnd, disclosure, cancellationToken);
+                        }
+                    }
+
+                    var days = (int)((chainEnd - chainStart).Ticks / DailyBucket.Ticks);
+                    logger?.LogInformation(
+                        "Materialization-hole repair (#4300): {View}'s {Reason} chained its successor daily {Daily} over {Days} day(s) in [{Start}, {End}), keeping the hourly's own 90-day retention from being held on days its daily would not otherwise reach yet.",
+                        target.View, reason, successorDaily, days, logStart.ToString("O", CultureInfo.InvariantCulture), logEnd.ToString("O", CultureInfo.InvariantCulture));
+                    return days;
+                }
+
+                async Task<int> ChainDailyAsync(DateTime seamStart, DateTime seamEnd)
+                {
+                    var successorDaily = SuccessorDailyOf(target.View);
+                    if (successorDaily is null)
+                    {
+                        return 0;
+                    }
+
+                    try
+                    {
+                        var dailyPolicyWindowStart = utcNow - DailyRefreshStartSpan;
+                        var chained = ChainedDailyRange(seamStart, seamEnd, dailyPolicyWindowStart, MaterializationHoleRepairCapBuckets(DailyBucket));
+                        if (chained is null)
+                        {
+                            return 0;
+                        }
+
+                        var (chainStart, chainEnd) = chained.Value;
+                        return await RunDailyChaseAsync(successorDaily, chainStart, chainEnd, chainStart, chainEnd, "repaired seam range");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger?.LogWarning(
+                            "Materialization-hole repair (#4300): could not chase {View}'s successor daily over its just-repaired seam range [{Start}, {End}) this run — re-judged on a later run: {Message}",
+                            target.View, seamStart.ToString("O", CultureInfo.InvariantCulture), seamEnd.ToString("O", CultureInfo.InvariantCulture), ex.Message);
+                        return 0;
+                    }
+                }
+
+                /* #4300 catch-up: re-asks the SAME question ChainDailyAsync answers right after a seam
+                   range closes — does the successor daily's own floor already reach back to where this
+                   hourly's floor now sits? — but from the seam-already-closed skip, which every LATER pass
+                   takes once the hourly floor has moved and the seam has nothing left to close. Runs on every
+                   seamOnly pass a legacy-paired target's seam is closed, so it is exactly the retention hold's
+                   own condition: whatever left the daily behind (a thrown chase, one cut short by the seam's
+                   2-minute budget, or a chase that never got the chance to run at all across a service
+                   restart) is healed here the same way, on the very next pass, with no separate bookkeeping of
+                   which cause it was. */
+                async Task<int> CatchUpDailyChaseAsync(DateTime hourlyFloor)
+                {
+                    var successorDaily = SuccessorDailyOf(target.View);
+                    if (successorDaily is null)
+                    {
+                        return 0;
+                    }
+
+                    try
+                    {
+                        var dailyMaterialization = await ResolveMaterializationAsync(connection, successorDaily, cancellationToken);
+                        if (dailyMaterialization is null)
+                        {
+                            return 0;
+                        }
+
+                        DateTime? dailyFloor;
+                        using (var span = new NpgsqlCommand(MaterializationSpanSql(dailyMaterialization.Value), connection) { CommandTimeout = SetupTimeoutSeconds })
+                        {
+                            await using var reader = await span.ExecuteReaderAsync(cancellationToken);
+                            await reader.ReadAsync(cancellationToken);
+                            dailyFloor = reader.IsDBNull(0) ? null : reader.GetDateTime(0);
+                        }
+
+                        /* A daily that has materialized nothing yet is the plain backfill's case (its own
+                           first refresh has not landed), not this catch-up's business — the ordinary daily
+                           policy or the backfill runbook owns that, not a seam-adjacent chase keyed on a
+                           successor floor that does not exist yet. */
+                        if (dailyFloor is null)
+                        {
+                            return 0;
+                        }
+
+                        var dailyPolicyWindowStart = utcNow - DailyRefreshStartSpan;
+                        var chained = ChainedDailyRange(hourlyFloor, dailyFloor.Value, dailyPolicyWindowStart, MaterializationHoleRepairCapBuckets(DailyBucket));
+                        if (chained is null)
+                        {
+                            return 0;
+                        }
+
+                        var (chainStart, chainEnd) = chained.Value;
+                        return await RunDailyChaseAsync(successorDaily, chainStart, chainEnd, chainStart, chainEnd, "seam-already-closed catch-up");
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        logger?.LogWarning(
+                            "Materialization-hole repair (#4300): could not catch up {View}'s successor daily {Daily} on this closed-seam pass — re-judged on a later run: {Message}",
+                            target.View, successorDaily, ex.Message);
+                        return 0;
+                    }
+                }
+
                 /* #4186 round-3 H1: newest seam range first; stop at the first one that throws (propagates to
                    this target's own catch below, exactly the risk the ordinary window always carried) or
                    leaves buckets standing (remaining > 0) — do NOT go on to an older seam range once either
@@ -839,6 +1026,18 @@ ORDER BY c.bucket";
                     {
                         break;
                     }
+
+                    /* #4300 belt-and-braces: RunDailyChaseAsync's own hourly hole-scan already refuses a day
+                       the hourly cannot back, but a cap-split seam (this range repaired, older ranges of the
+                       SAME seam deferred) makes that redundant here too — this target still has a hole in the
+                       seam this pass, so its daily has no business chasing yet regardless of what the scan
+                       would find in THIS range alone. */
+                    if (seamDeferred.Count > 0)
+                    {
+                        continue;
+                    }
+
+                    dailyBucketsChained += await ChainDailyAsync(start, end);
                 }
 
                 /* Ordinary window: unchanged from before this fix. An interior repair cannot move the floor,
@@ -873,7 +1072,7 @@ ORDER BY c.bucket";
            a zero-hole start wrote nothing, and nothing is also what a start that never reached the scan writes. */
         passClock.Stop();
         return new MaterializationHoleRepairSummary(
-            scanned, skipped, holesFound, bucketsFound, holesRepaired, bucketsRepaired, holesDeferred, bucketsDeferred, holesRemaining, failures, holesForced, passClock.Elapsed);
+            scanned, skipped, holesFound, bucketsFound, holesRepaired, bucketsRepaired, holesDeferred, bucketsDeferred, holesRemaining, failures, holesForced, passClock.Elapsed, dailyBucketsChained);
     }
 
     /// <summary>
@@ -992,6 +1191,72 @@ ORDER BY c.bucket";
         }
 
         return new DateTime(instant.Ticks - (instant.Ticks % bucketWidth.Ticks), DateTimeKind.Unspecified);
+    }
+
+    /// <summary>An instant aligned UP to a bucket boundary — <see cref="AlignDown"/>'s twin, used by
+    /// <see cref="ChainedDailyRange"/> to widen a repaired hourly range OUT to whole days rather than in,
+    /// so the daily chase never leaves a bucket the hourly repair touched unrefreshed.</summary>
+    public static DateTime AlignUp(DateTime instant, TimeSpan bucketWidth)
+    {
+        var down = AlignDown(instant, bucketWidth);
+        return down == instant ? down : down + bucketWidth;
+    }
+
+    /// <summary>
+    /// #4300: which part, if any, of a just-repaired successor-hourly range <c>[repairedStart,
+    /// repairedEnd)</c> the dependent successor DAILY should also be chased over, so an outage-aged gap the
+    /// seam repair fills does not sit forever below the daily's own 3-day refresh window (<see
+    /// cref="DailyRefreshStartSpan"/>) — the daily never materializes there on its own, and the successor
+    /// hourly's 90-day retention is armed only through its successor daily's coverage (<see
+    /// cref="RequireSuccessorDailyOf"/>), so an unchased gap holds that retention indefinitely even though no
+    /// row was lost.
+    ///
+    /// <para><b>The rule.</b> Aligned OUT to whole days — <c>[AlignDown(repairedStart, 1 day),
+    /// AlignUp(repairedEnd, 1 day))</c> — because the daily aggregate only ever materializes whole-day
+    /// buckets and a partial day would either under-chase or double back on itself run to run. Then clipped to
+    /// ONLY the part strictly older than <paramref name="dailyPolicyWindowStart"/>: days inside the daily's
+    /// own policy window are left for that policy to pick up on its ordinary schedule, so this never chases a
+    /// day the daily was always going to reach anyway. A range entirely inside the window returns
+    /// <c>null</c> — nothing to chase. A range straddling the boundary returns only the OLDER part.</para>
+    ///
+    /// <para><b>Capped, newest-first.</b> When the clipped span is wider than <paramref name="capDays"/>, only
+    /// the <paramref name="capDays"/> days closest to the boundary (the newest of the clipped span) are
+    /// returned — the same "fill contiguously downward" shape the hourly seam walk itself uses
+    /// (<see cref="CapMaterializationHoleRepairs"/>'s <c>newestFirst</c>), so a day this pass leaves behind is
+    /// always adjacent to what a later pass will pick up next, never a gap in the middle.</para>
+    ///
+    /// Pure, so the tests can walk it without a live store.
+    /// </summary>
+    public static (DateTime Start, DateTime End)? ChainedDailyRange(
+        DateTime repairedStart, DateTime repairedEnd, DateTime dailyPolicyWindowStart, int capDays)
+    {
+        if (capDays <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(capDays), capDays, "the cap is at least one day");
+        }
+
+        if (repairedEnd <= repairedStart)
+        {
+            return null;
+        }
+
+        var alignedStart = AlignDown(repairedStart, DailyBucket);
+        var alignedEnd = AlignUp(repairedEnd, DailyBucket);
+        var windowStart = AlignDown(dailyPolicyWindowStart, DailyBucket);
+
+        var chainEnd = alignedEnd < windowStart ? alignedEnd : windowStart;
+        if (chainEnd <= alignedStart)
+        {
+            return null;
+        }
+
+        var days = (int)((chainEnd - alignedStart).Ticks / DailyBucket.Ticks);
+        if (days > capDays)
+        {
+            alignedStart = chainEnd - TimeSpan.FromDays(capDays);
+        }
+
+        return (alignedStart, chainEnd);
     }
 
     /// <summary>

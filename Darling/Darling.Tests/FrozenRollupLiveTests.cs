@@ -625,8 +625,458 @@ public sealed class FrozenRollupLiveTests
                 Assert.Equal(s.AddHours(-6), newFloor);
             }
 
-            /* The seam is now empty — Covered, from the hourly tick alone, no second start. */
+            /* The raw gate releases once the seam closes, independent of the daily — no second start. */
             Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4300: the SAME single-start seam-repair story as <see
+    /// cref="Outage_SeamBetweenFrozenLegacyAndSuccessor_SingleStart_HourlySeamRepairReleasesTheGate"/>, but
+    /// with the outage widened to 5 days so the repaired seam sits entirely OLDER than the successor daily's
+    /// own 3-day refresh window (<see cref="TimescaleSupport.DailyRefreshStartSpan"/>). The daily's ordinary
+    /// policy walk would never reach those days on its own; the hourly seam repair's own daily chase must
+    /// reach them instead, in the SAME hourly seam-only pass, with no second start.
+    /// </summary>
+    [Fact]
+    public async Task Outage_SeamOlderThanTheDailysOwnWindow_SingleStart_HourlySeamRepairChainsTheSuccessorDaily()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Same seam shape as the two-day twin, but the outage is 5 days wide: S is the stop, the legacy is
+               refreshed through S-2h, raw carries the [S-1h, S] tail plus a rejected interval-0 restart row,
+               then a genuine 5-day outage before the successor's first post-upgrade refresh at U = S+5d. */
+            var s = D0.AddDays(3);
+
+            for (var hour = 0; hour <= 6; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"seamdaily_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await InsertProcedureStatsAsync(connection, s.AddMinutes(30), "seamdaily_proc_restart", 0, 0, 0, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-6), s.AddHours(-1), ct);
+
+            /* ONE start's repair, at a clock BEFORE the successor's first refresh — the successor is still
+               empty, so this walk skips it ("has materialized nothing yet"), exactly as the real first start
+               after the outage does. */
+            var firstStart = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, s.AddHours(1), ct);
+            Assert.Equal(0, firstStart.BucketsRepaired);
+
+            var u = s.AddDays(5);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seamdaily_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            /* The seam holds raw rows the stitch cannot see through unconditionally — Short, not Covered —
+               with no second start anywhere in this sequence. */
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            var dailyFloorBefore = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.True(dailyFloorBefore is null || dailyFloorBefore.Value >= u.AddDays(-1));
+
+            /* The hourly Periodic pass's own seam-only repair — ONE call, ONE tick, no restart. Because the
+               repaired seam range [S-6h, S-1h) sits older than the daily's own 3-day window
+               (utcNow - DailyRefreshStartSpan, with utcNow == u), the SAME pass must also chain the
+               successor daily back over the seam's day, or that day is left below the daily's own policy
+               window forever. */
+            var seamOnly = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(7, seamOnly.BucketsRepaired);
+            Assert.Equal(0, seamOnly.HolesRemaining);
+            Assert.Equal(0, seamOnly.BucketsDeferred);
+            Assert.Equal(0, seamOnly.Failures);
+            Assert.True(seamOnly.DailyBucketsChained > 0);
+
+            await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
+            {
+                var newFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
+                Assert.Equal(s.AddHours(-6), newFloor);
+            }
+
+            /* The successor DAILY's own floor must now reach back to the repaired hourly day too — the
+               whole reason for #4300's chase. */
+            var dailyFloorAfter = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorAfter);
+            Assert.True(dailyFloorAfter!.Value <= TimescaleSupport.AlignDown(s.AddHours(-6), TimeSpan.FromDays(1)));
+
+            /* The seam is now empty AND the daily has been chained over it — Covered, from the hourly tick
+               alone, no second start. */
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4300: the SAME daily-chase story as <see
+    /// cref="Outage_SeamOlderThanTheDailysOwnWindow_SingleStart_HourlySeamRepairChainsTheSuccessorDaily"/>, but
+    /// with the outage seam widened to 30 hours — one more than <see
+    /// cref="TimescaleSupport.MaterializationHoleRepairCapBuckets"/>'s 24-bucket hourly cap — and the stop
+    /// clock set OFF midnight, so the seam does not align to a day boundary either. The FIRST seam-only pass
+    /// must cap-split the seam (newest 24 repaired, oldest 6 deferred) and, because a hole is still open in
+    /// this target's seam this pass, must NOT chase the successor daily yet (the belt-and-braces guard this
+    /// change adds). A LATER pass, once the remaining 6-bucket hole closes, must chase the daily the rest of
+    /// the way, and the chained day's own total must equal the sum of its 24 hourly rows.
+    /// </summary>
+    [Fact]
+    public async Task Outage_SeamWiderThanTheCap_OffMidnight_HourlySeamDefersTheChaseUntilItsOwnHoleCloses()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* S is the stop, OFF midnight (05:00), so the seam and the day it lands in do not align to the
+               same boundary the other #4300 pins use. The seam is 30 hours wide — one more than the 24-bucket
+               hourly cap — so ONE pass cannot close it. */
+            var s = D0.AddDays(3).AddHours(5);
+
+            for (var hour = 0; hour <= 29; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"seamcap30_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await InsertProcedureStatsAsync(connection, s.AddMinutes(30), "seamcap30_proc_restart", 0, 0, 0, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-29), s.AddHours(-1), ct);
+
+            var firstStart = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, s.AddHours(1), ct);
+            Assert.Equal(0, firstStart.BucketsRepaired);
+
+            var u = s.AddDays(5);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seamcap30_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            Assert.False(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            var dailyFloorBefore = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.True(dailyFloorBefore is null || dailyFloorBefore.Value >= u.AddDays(-1));
+
+            /* Pass 1: the cap splits the 30-bucket seam into the newest 24 (repaired) and the oldest 6
+               (deferred). Because this target still has a hole in its own seam this pass, the daily chase
+               must NOT run yet — the belt-and-braces guard this change adds. */
+            var pass1 = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(24, pass1.BucketsRepaired);
+            Assert.True(pass1.BucketsDeferred > 0);
+            Assert.Equal(0, pass1.DailyBucketsChained);
+
+            var dailyFloorAfterPass1 = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.True(dailyFloorAfterPass1 is null || dailyFloorAfterPass1.Value >= u.AddDays(-1));
+
+            /* Passes 2-3: the remaining deferred bucket(s) close, and once this target's own seam has no hole
+               left, the daily chase runs. */
+            TimescaleSupport.MaterializationHoleRepairSummary pass = pass1;
+            for (var attempt = 0; attempt < 2 && pass.DailyBucketsChained == 0; attempt++)
+            {
+                pass = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            }
+
+            Assert.Equal(0, pass.HolesRemaining);
+            Assert.True(pass.DailyBucketsChained > 0);
+
+            await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
+            {
+                var newFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
+                Assert.Equal(s.AddHours(-29), newFloor);
+            }
+
+            var dailyFloorAfter = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorAfter);
+            Assert.True(dailyFloorAfter!.Value <= TimescaleSupport.AlignDown(s.AddHours(-29), TimeSpan.FromDays(1)));
+
+            /* The chained day's own daily total equals the sum of that day's hourly rows, on the same column
+               pin A already reads. */
+            var chainedDay = TimescaleSupport.AlignDown(s.AddHours(-29), TimeSpan.FromDays(1));
+            var dailyTotals = await ReadDailyTotalsAsync(connection, TimescaleSupport.ProcedureStatsIntervalDailyView, ServerId, chainedDay, chainedDay.AddDays(1), ct);
+            var hourlyTotals = await ReadDailyTotalsAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, ServerId, chainedDay, chainedDay.AddDays(1), ct);
+            Assert.Single(dailyTotals);
+            Assert.Equal(hourlyTotals.Sum(r => r.WorkerSum), dailyTotals[0].WorkerSum);
+
+            Assert.True(await TimescaleSupport.IsRawTierDropSafeAsync(connection, "procedure_stats", ct));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4300: the CATCH-UP path, not the event path — a successor hourly whose own seam is already
+    /// CLOSED (no legacy/successor gap this pass), but whose dependent successor daily was left behind by an
+    /// earlier chase that never ran (the shape a thrown chase, a budget-cut chase, or a restart between the
+    /// hourly's floor moving and the daily catching up all leave behind). Seeded directly rather than through
+    /// an outage: the successor hourly already has a floor 6 days back plus a separate, more recent bucket;
+    /// the successor daily has materialized only the recent day. One <see
+    /// cref="TimescaleSupport.RepairMaterializationSeamsAsync"/> pass must catch the daily back up to the
+    /// hourly's own floor.
+    /// </summary>
+    [Fact]
+    public async Task StuckDaily_HourlySeamAlreadyClosed_SeamOnlyPassCatchesTheSuccessorDailyUp()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var u = D0.AddDays(20);
+            var oldDay = TimescaleSupport.AlignDown(u.AddDays(-6), TimeSpan.FromDays(1));
+            var recent = u.AddDays(-2);
+
+            /* The successor hourly's own floor, 6 days back — no seam anywhere: raw carries nothing OLDER
+               than this, so the seam-closed check (raw's own filtered floor already at or above the
+               successor's floor) holds without any legacy refresh at all. */
+            for (var hour = 0; hour <= 6; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, oldDay.AddHours(hour), $"stuckdaily_old_{hour}", 900, 9, 3600, ct);
+            }
+
+            /* A separate, more recent bucket — inside the daily's own 3-day policy window — that already got
+               refreshed on both tiers, same as the daily's ordinary policy run would leave behind. */
+            await InsertProcedureStatsAsync(connection, recent, "stuckdaily_recent", 900, 9, 3600, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, oldDay, u, ct);
+
+            /* The successor DAILY has materialized only the recent day — left behind exactly as an earlier
+               chase that never ran (thrown, budget-cut, or across a restart) would leave it, with NO seam
+               left anywhere for the event path to fire from. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalDailyView, recent.AddDays(-1), u, ct);
+
+            var dailyFloorBefore = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorBefore);
+            Assert.True(dailyFloorBefore!.Value > oldDay);
+
+            await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
+            {
+                var hourlyFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
+                Assert.Equal(oldDay, hourlyFloor);
+            }
+
+            /* ONE seam-only pass — the hourly's own seam is already closed, so this takes the catch-up branch,
+               not the event path (there is nothing for the event path to fire from: no seam range closes
+               this pass). */
+            var seamOnly = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(0, seamOnly.BucketsRepaired);
+            Assert.True(seamOnly.DailyBucketsChained > 0);
+
+            var dailyFloorAfter = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorAfter);
+            Assert.True(dailyFloorAfter!.Value <= oldDay);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4300: the CATCH-UP path's own hole scan — the same stuck-daily shape as <see
+    /// cref="StuckDaily_HourlySeamAlreadyClosed_SeamOnlyPassCatchesTheSuccessorDailyUp"/>, but with one
+    /// hourly bucket inside the catch-up range left unmaterialized (a hole, not a seam: the source still
+    /// admits a row there). <see cref="TimescaleSupport.RunDailyChaseAsync"/>'s own hole scan must defer the
+    /// chase while that hole stands, and chase the daily up only once a later pass closes it — the shape the
+    /// event path's deferred-seam skip never exercises, because the event path never reaches the catch-up
+    /// branch at all.
+    /// </summary>
+    [Fact]
+    public async Task StuckDaily_HourlyHoleInsideTheCatchUpRange_CatchUpWaitsUntilTheHoleCloses()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            var u = D0.AddDays(20);
+            var oldDay = TimescaleSupport.AlignDown(u.AddDays(-6), TimeSpan.FromDays(1));
+            var recent = u.AddDays(-2);
+            var holeHour = oldDay.AddHours(3);
+
+            /* The same 7-hour block pin B seeds — the successor hourly's own floor, 6 days back, no seam
+               anywhere. Hour 3 (about 5 days, 21 hours back from u) gets its source row like every other
+               hour, but this pass refreshes AROUND it, leaving its own bucket unmaterialized — a hole inside
+               the catch-up range, not a seam: the source still admits a row there. */
+            for (var hour = 0; hour <= 6; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, oldDay.AddHours(hour), $"stuckdaily_old_{hour}", 900, 9, 3600, ct);
+            }
+
+            await InsertProcedureStatsAsync(connection, recent, "stuckdaily_recent", 900, 9, 3600, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, oldDay, holeHour, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, holeHour.AddHours(1), u, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalDailyView, recent.AddDays(-1), u, ct);
+
+            var dailyFloorBefore = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorBefore);
+            Assert.True(dailyFloorBefore!.Value > oldDay);
+
+            await using (var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView}", connection))
+            {
+                var hourlyFloor = (DateTime)(await span.ExecuteScalarAsync(ct))!;
+                Assert.Equal(oldDay, hourlyFloor);
+            }
+
+            await using (var holeCheck = new NpgsqlCommand($"SELECT count(*) FROM collect.{TimescaleSupport.ProcedureStatsIntervalHourlyView} WHERE bucket = $1", connection))
+            {
+                holeCheck.Parameters.AddWithValue(DateTime.SpecifyKind(holeHour, DateTimeKind.Unspecified));
+                Assert.Equal(0L, Convert.ToInt64(await holeCheck.ExecuteScalarAsync(ct)));
+            }
+
+            /* PASS 1 — the hourly's own seam is already closed (same as pin B), so this takes the catch-up
+               branch, but the hourly hole inside the catch-up range must make RunDailyChaseAsync's own hole
+               scan defer the whole chase: nothing chained, and the daily's floor stays put. */
+            var seamOnlyWithHole = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(0, seamOnlyWithHole.BucketsRepaired);
+            Assert.Equal(0, seamOnlyWithHole.DailyBucketsChained);
+
+            var dailyFloorStillBlocked = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorStillBlocked);
+            Assert.Equal(dailyFloorBefore!.Value, dailyFloorStillBlocked!.Value);
+
+            /* Close the hole with the same plain refresh pin B's setup uses, over just that one hour. */
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, holeHour, holeHour.AddHours(1), ct);
+
+            /* PASS 2 — the hourly hole is gone, so the catch-up's own chase now runs and chains the daily back
+               up to the hourly's floor, exactly like pin B's single pass did. */
+            var seamOnlyHoleClosed = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(0, seamOnlyHoleClosed.BucketsRepaired);
+            Assert.True(seamOnlyHoleClosed.DailyBucketsChained > 0);
+
+            var dailyFloorAfter = await ProcedureStatsIntervalDailyFloorAsync(connection, ct);
+            Assert.NotNull(dailyFloorAfter);
+            Assert.True(dailyFloorAfter!.Value <= oldDay);
 
             bodySucceeded = true;
         }
@@ -2172,6 +2622,15 @@ VALUES ($1, $2, $3, $4, $5, 'dbo', $6, $7, $8, $8, $9, $10)", connection);
         refresh.Parameters.AddWithValue(from);
         refresh.Parameters.AddWithValue(to);
         await refresh.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>The successor daily's own <c>min(bucket)</c> — <c>null</c> when it has materialized nothing
+    /// yet, matching the probe #4300's catch-up/chase itself reads.</summary>
+    private static async Task<DateTime?> ProcedureStatsIntervalDailyFloorAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var span = new NpgsqlCommand($"SELECT min(bucket) FROM collect.{TimescaleSupport.ProcedureStatsIntervalDailyView}", connection);
+        var result = await span.ExecuteScalarAsync(ct);
+        return result is null or DBNull ? null : (DateTime)result;
     }
 
     /// <summary>Sets ONE continuous aggregate's materialization chunk width directly — the frozen six take no
