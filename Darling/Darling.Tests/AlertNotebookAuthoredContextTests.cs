@@ -308,4 +308,106 @@ public sealed class AlertNotebookAuthoredContextTests
 
         Assert.Same(AlertNotebookEndpoint.AuthoredContext.Empty, context);
     }
+
+    /* ═══════════════════════ ShouldPrefetch (#4223) ═══════════════════════ */
+
+    [Fact]
+    public void ShouldPrefetch_NoContextBuilder_IsFalse_ForEveryRegisteredFamily()
+    {
+        // s_authoredTemplates and s_authoredPrefixTemplates hold no #4223 context family yet, so this pins
+        // zero store reads for every family that exists today -- the gate the endpoint's call site depends on.
+        // A theory can't carry an internal type in a public signature, so this walks both tables in one fact.
+        foreach (var kind in new[]
+        {
+            AlertNotebookEndpoint.AuthoredContextKind.CustomRule,
+            AlertNotebookEndpoint.AuthoredContextKind.AnalysisFinding,
+        })
+        {
+            foreach (var (_, entry) in AlertNotebookEndpoint.s_authoredTemplates)
+            {
+                if (entry.BuildCellsWithContext is null)
+                {
+                    Assert.False(AlertNotebookEndpoint.ShouldPrefetch(entry, kind));
+                }
+            }
+
+            foreach (var (_, _, entry) in AlertNotebookEndpoint.s_authoredPrefixTemplates)
+            {
+                if (entry.BuildCellsWithContext is null)
+                {
+                    Assert.False(AlertNotebookEndpoint.ShouldPrefetch(entry, kind));
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void ShouldPrefetch_ContextBuilder_NonNoneKind_IsTrue()
+    {
+        JsonArray WithContext(string? m, string? s, string? a, DateTime ws, DateTime we, AlertIncident? i,
+            PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader.AlertHistoryReadRow? r, string st,
+            AlertNotebookEndpoint.AuthoredContext c) => new();
+
+        var entry = new AlertNotebookEndpoint.AuthoredTemplateEntry("authored/fabricated", 1, null, WithContext);
+
+        Assert.True(AlertNotebookEndpoint.ShouldPrefetch(entry, AlertNotebookEndpoint.AuthoredContextKind.AnalysisFinding));
+    }
+
+    [Fact]
+    public void ShouldPrefetch_ContextBuilder_NoneKind_IsFalse()
+    {
+        JsonArray WithContext(string? m, string? s, string? a, DateTime ws, DateTime we, AlertIncident? i,
+            PerformanceMonitor.Darling.Service.Mcp.DarlingAlertReader.AlertHistoryReadRow? r, string st,
+            AlertNotebookEndpoint.AuthoredContext c) => new();
+
+        var entry = new AlertNotebookEndpoint.AuthoredTemplateEntry("authored/fabricated-none", 1, null, WithContext);
+
+        Assert.False(AlertNotebookEndpoint.ShouldPrefetch(entry, AlertNotebookEndpoint.AuthoredContextKind.None));
+    }
+
+    /* ═══════════════════════ PickFindingByHash (#4223) ═══════════════════════ */
+
+    [Fact]
+    public void PickFindingByHash_SharedFourCharPrefix_DistinguishesAtTheEighthCharacter()
+    {
+        var first = new AnalysisFinding { StoryPathHash = "abcd1234extra" };
+        var second = new AnalysisFinding { StoryPathHash = "abcd5678extra" };
+        var findings = new[] { first, second };
+
+        Assert.Same(first, AlertNotebookEndpoint.PickFindingByHash(findings, "abcd1234"));
+        Assert.Same(second, AlertNotebookEndpoint.PickFindingByHash(findings, "abcd5678"));
+        Assert.Null(AlertNotebookEndpoint.PickFindingByHash(findings, "abcd9999"));
+    }
+
+    [Fact]
+    public void PickFindingByHash_NoMatch_ReturnsNull()
+    {
+        var findings = new[] { new AnalysisFinding { StoryPathHash = "deadbeef0000" } };
+
+        Assert.Null(AlertNotebookEndpoint.PickFindingByHash(findings, "abcd9999"));
+    }
+
+    [Fact]
+    public async Task PrefetchAsync_AnalysisFinding_DeletedFinding_ReadsMissing_NoThrow()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the live deleted-finding prefetch test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var analysis = new DarlingAnalysisService(postgres);
+
+        // A server with no findings at all -- "abcd9999" never matches, the same as a finding that aged out
+        // or was deleted after the metric name was minted.
+        var context = await AlertNotebookEndpoint.PrefetchAsync(
+            AlertNotebookEndpoint.AuthoredContextKind.AnalysisFinding, "Analysis: x [abcd9999]", serverId: 999999999,
+            DateTime.UtcNow, postgres, analysis, ct);
+
+        Assert.True(context.FindingMissing);
+        Assert.Null(context.Finding);
+    }
 }

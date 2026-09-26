@@ -208,7 +208,7 @@ internal static partial class AlertNotebookEndpoint
             {
                 var (authored, kind) = resolvedAuthored.Value;
                 var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
-                var authoredContext = authored.BuildCellsWithContext is not null && kind != AuthoredContextKind.None
+                var authoredContext = ShouldPrefetch(authored, kind)
                     ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, context.RequestAborted, logger, notes)
                     : AuthoredContext.Empty;
                 cells = authored.Invoke(
@@ -377,6 +377,13 @@ internal static partial class AlertNotebookEndpoint
         CustomRule,
         AnalysisFinding,
     }
+
+    /// <summary>The endpoint's pre-fetch gate (#4223): an entry pays for <see cref="PrefetchAsync"/> only
+    /// when it registered a <see cref="AuthoredTemplateEntry.BuildCellsWithContext"/> builder AND the
+    /// resolved <paramref name="kind"/> is not <see cref="AuthoredContextKind.None"/> — every plain family
+    /// (the overwhelming majority) reads neither the custom-rule nor the finding store.</summary>
+    internal static bool ShouldPrefetch(AuthoredTemplateEntry entry, AuthoredContextKind kind) =>
+        entry.BuildCellsWithContext is not null && kind != AuthoredContextKind.None;
 
     /// <summary>One authored template's cell-building delegate plus its id/version — the server-side
     /// evolution of a mechanical conversion for a metric whose forensic shape (spec §3) is worth composing
@@ -615,8 +622,7 @@ internal static partial class AlertNotebookEndpoint
         try
         {
             var findings = await analysis.GetRecentFindingsAsync(serverId.Value, hoursBack: 24, limit: 200, asOfUtc: anchor, ct);
-            var match = findings.FirstOrDefault(f =>
-                !string.IsNullOrEmpty(f.StoryPathHash) && f.StoryPathHash.StartsWith(hash8, StringComparison.Ordinal));
+            var match = PickFindingByHash(findings, hash8);
 
             return match is null
                 ? AuthoredContext.Empty with { FindingMissing = true }
@@ -633,6 +639,15 @@ internal static partial class AlertNotebookEndpoint
             return AuthoredContext.Empty with { FindingMissing = true };
         }
     }
+
+    /// <summary>The eight-character finding match (#4223): the first finding whose FULL <c>StoryPathHash</c>
+    /// starts with all of <paramref name="hash8"/> (ordinal), skipping any finding with no hash at all — the
+    /// same first-match rule <see cref="PrefetchAnalysisFindingAsync"/> always used, unchanged. Two findings
+    /// sharing a shorter prefix but differing at the 8th character are never confused, because the compare is
+    /// always all 8 characters.</summary>
+    internal static AnalysisFinding? PickFindingByHash(IEnumerable<AnalysisFinding> findings, string hash8) =>
+        findings.FirstOrDefault(f =>
+            !string.IsNullOrEmpty(f.StoryPathHash) && f.StoryPathHash.StartsWith(hash8, StringComparison.Ordinal));
 
     /// <summary>The reads this endpoint's authored templates call that declare no <c>limit</c> param at all
     /// (<see cref="DarlingWebEndpoints.BuildReadDispatch"/>'s own catalog) — a chart/trend read whose budget
