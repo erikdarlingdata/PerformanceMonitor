@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -172,6 +173,99 @@ public sealed class ManagedConfFileTests
         var diffs = ManagedConfFile.DiffBodyKeys(string.Empty, body);
 
         Assert.Contains(diffs, d => d.Key == "shared_buffers");
+    }
+
+    /// <summary>#4336 lane 5b, step 1, pin 1: a snapshot value replaces the derived one.</summary>
+    [Fact]
+    public void RenderWithValues_SnapshotValue_ReplacesTheDerivedOne()
+    {
+        var inputs = SampleInputs();
+        var derivedBody = ManagedConfFile.RenderBody(inputs);
+        var derivedDiffs = ManagedConfFile.DiffBodyKeys(string.Empty, derivedBody);
+        var derivedSharedBuffers = Assert.Single(derivedDiffs, d => d.Key == "shared_buffers").RenderedValue!;
+
+        var snapshotValues = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var diff in derivedDiffs)
+        {
+            snapshotValues[diff.Key] = diff.RenderedValue!;
+        }
+
+        snapshotValues["shared_buffers"] = "9999MB";
+        Assert.NotEqual(derivedSharedBuffers, snapshotValues["shared_buffers"]);
+
+        var rendered = ManagedConfFile.RenderWithValues(inputs, snapshotValues);
+        var renderedDiffs = ManagedConfFile.DiffBodyKeys(string.Empty, ManagedConfFile.ParseExisting(rendered).Body);
+
+        Assert.Contains(renderedDiffs, d => d.Key == "shared_buffers" && d.RenderedValue == "9999MB");
+    }
+
+    /// <summary>#4336 lane 5b, step 1, pin 2: <see cref="ManagedConfFile.IsHandEdited"/> is false on the
+    /// result — the hash is recomputed over the snapshot-valued body, so Step A's own write reads as its own
+    /// write, never as an edit.</summary>
+    [Fact]
+    public void RenderWithValues_ResultIsNotHandEdited()
+    {
+        var inputs = SampleInputs();
+        var derivedBody = ManagedConfFile.RenderBody(inputs);
+        var (_, values) = ExtractValues(derivedBody);
+
+        var rendered = ManagedConfFile.RenderWithValues(inputs, values);
+
+        Assert.False(ManagedConfFile.IsHandEdited(rendered));
+    }
+
+    /// <summary>#4336 lane 5b, step 1, pin 3: an owned key missing from the map is ABSENT from the body — it
+    /// stays at whatever default is already in force; Step A never invents a value the snapshot did not
+    /// report.</summary>
+    [Fact]
+    public void RenderWithValues_OwnedKeyMissingFromMap_IsAbsentFromBody()
+    {
+        var inputs = SampleInputs();
+        var derivedBody = ManagedConfFile.RenderBody(inputs);
+        var (_, values) = ExtractValues(derivedBody);
+        values.Remove("work_mem");
+
+        var rendered = ManagedConfFile.RenderWithValues(inputs, values);
+        var body = ManagedConfFile.ParseExisting(rendered).Body;
+
+        Assert.DoesNotContain("work_mem", body, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4336 lane 5b, step 1, pin 4 (the plan's risk 2): a value containing a quote and a backslash
+    /// round-trips exactly through <c>EscapeConfValue</c> and re-parsing.</summary>
+    [Fact]
+    public void RenderWithValues_QuoteAndBackslashValue_RoundTripsExactly()
+    {
+        var inputs = SampleInputs();
+        var derivedBody = ManagedConfFile.RenderBody(inputs);
+        var (_, values) = ExtractValues(derivedBody);
+        const string trickyValue = @"C:\pgdata\it's ""quoted""";
+        values["work_mem"] = trickyValue;
+
+        var rendered = ManagedConfFile.RenderWithValues(inputs, values);
+        var body = ManagedConfFile.ParseExisting(rendered).Body;
+        var (_, roundTripped) = ExtractValues(body);
+
+        Assert.Equal(trickyValue, roundTripped["work_mem"]);
+    }
+
+    private static (List<string> Order, Dictionary<string, string> Values) ExtractValues(string body)
+    {
+        var order = new List<string>();
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(body))
+        {
+            if (values.TryAdd(name, value))
+            {
+                order.Add(name);
+            }
+            else
+            {
+                values[name] = value;
+            }
+        }
+
+        return (order, values);
     }
 
     /// <summary>

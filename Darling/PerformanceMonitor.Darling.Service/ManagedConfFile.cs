@@ -238,6 +238,38 @@ internal static class ManagedConfFile
     }
 
     /// <summary>
+    /// Renders <c>darling-managed.conf</c> the way Step A's post-start verification needs (#4336 lane 5b,
+    /// design decision (b)): the SAME owned keys and order <see cref="RenderBody"/> would produce for
+    /// <paramref name="inputs"/>, but each owned key's VALUE comes from <paramref name="values"/> — the raw
+    /// text <c>pg_file_settings</c> reports as <c>applied</c> for that key — instead of the freshly derived
+    /// one. An owned key <see cref="RenderBody"/> would have written that is missing from
+    /// <paramref name="values"/> is dropped from the body entirely (it stays at whatever default is already
+    /// in force; Step A never invents a value the snapshot did not report). The header — and therefore the
+    /// body hash — is recomputed from the snapshot-valued body, so a fresh <see cref="Render"/> call over the
+    /// RESULT reports <see cref="IsHandEdited"/> false: this is what Step A itself just wrote, verified, not
+    /// an edit.
+    /// </summary>
+    internal static string RenderWithValues(RenderInputs inputs, IReadOnlyDictionary<string, string> values)
+    {
+        var derivedBody = RenderBody(inputs);
+        var (order, _) = ReduceToLastOccurrence(derivedBody);
+
+        var body = new StringBuilder();
+        foreach (var key in order)
+        {
+            if (values.TryGetValue(key, out var snapshotValue))
+            {
+                body.Append(key).Append(" = '")
+                    .Append(DarlingManagedPostgres.EscapeConfValue(snapshotValue))
+                    .Append("'\n");
+            }
+        }
+
+        var header = RenderHeader(inputs, ComputeBodyHash(body.ToString()));
+        return header + body.ToString();
+    }
+
+    /// <summary>
     /// Reduces builder-appended conf text to one value per key: <paramref name="text"/> parsed with
     /// <c>DarlingManagedPostgres.ParseConfText</c>, keys kept in FIRST-seen order, values overwritten by every
     /// later occurrence — exactly "last occurrence wins", read off in the order a person scanning v1 to v15

@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -185,5 +186,209 @@ internal static class ManagedConfMigrationSteps
         var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(text);
         var hash = SHA256.HashData(bytes);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>The pending file's name, in the data directory alongside <c>postgresql.conf</c> (#4336 lane
+    /// 5b): the only record of the BEFORE <c>pg_file_settings</c> snapshot and the prior managed-file text
+    /// (when one existed) once <see cref="WriteTwoSteps"/> has overwritten both files — a crash after that
+    /// point has nothing else to compare the after-snapshot against, or to restore to.</summary>
+    internal const string PendingFileName = "darling-managed.conf.pending";
+
+    private const char FieldNullTag = 'N';
+    private const char FieldValueTag = 'V';
+
+    /// <summary>
+    /// Writes <see cref="PendingFileName"/> atomically (#4336 lane 5b): the BEFORE snapshot (tab-separated,
+    /// one row per line, every field escaped so a tab or newline INSIDE a setting's own value round-trips
+    /// exactly — <see cref="EscapeField"/>) plus, on its own leading line, the prior managed-file text (null
+    /// when none existed — a fresh initdb'd store migrating for the first time). This is the risk called out
+    /// in the plan: "the pending file is the only record of 'before' after a crash." If it cannot be written,
+    /// the caller must abort before <see cref="BackupOriginal"/> — nothing has changed yet.
+    /// </summary>
+    internal static void WritePending(string dataDir, IReadOnlyList<FileSettingRow> before, string? priorManagedText)
+    {
+        var sb = new StringBuilder();
+        sb.Append(EncodeField(priorManagedText)).Append('\n');
+        foreach (var row in before)
+        {
+            sb.Append(EncodeField(row.SourceFile)).Append('\t')
+              .Append(EncodeField(row.SourceLine?.ToString(System.Globalization.CultureInfo.InvariantCulture))).Append('\t')
+              .Append(EncodeField(row.Name)).Append('\t')
+              .Append(EncodeField(row.Setting)).Append('\t')
+              .Append(row.Applied ? '1' : '0').Append('\t')
+              .Append(EncodeField(row.Error)).Append('\n');
+        }
+
+        var pendingPath = Path.Combine(dataDir, PendingFileName);
+        if (!ManagedConfFile.TryReplaceAtomic(
+                pendingPath,
+                sb.ToString(),
+                ManagedConfFile.DefaultMaxReplaceAttempts,
+                ManagedConfFile.DefaultReplaceRetryDelay,
+                out var error))
+        {
+            throw new IOException(FormattableString.Invariant($"Failed to write {pendingPath}."), error);
+        }
+    }
+
+    /// <summary>
+    /// Reads back what <see cref="WritePending"/> wrote. False (with both out parameters empty/null) when
+    /// there is no pending file at all — the normal case, or one already cleaned up by
+    /// <see cref="DeletePending"/>.
+    /// </summary>
+    internal static bool TryReadPending(
+        string dataDir,
+        out IReadOnlyList<FileSettingRow> before,
+        out string? priorManagedText)
+    {
+        var pendingPath = Path.Combine(dataDir, PendingFileName);
+        if (!File.Exists(pendingPath))
+        {
+            before = Array.Empty<FileSettingRow>();
+            priorManagedText = null;
+            return false;
+        }
+
+        var text = File.ReadAllText(pendingPath);
+        var normalized = text.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var lines = normalized.Split('\n');
+
+        priorManagedText = DecodeField(lines[0]);
+
+        var rows = new List<FileSettingRow>();
+        for (var i = 1; i < lines.Length; i++)
+        {
+            if (lines[i].Length == 0)
+            {
+                continue;
+            }
+
+            var fields = lines[i].Split('\t');
+            var sourceLineText = DecodeField(fields[1]);
+            int? sourceLine = sourceLineText is null
+                ? null
+                : int.Parse(sourceLineText, System.Globalization.CultureInfo.InvariantCulture);
+
+            rows.Add(new FileSettingRow(
+                SourceFile: DecodeField(fields[0]),
+                SourceLine: sourceLine,
+                Name: DecodeField(fields[2]),
+                Setting: DecodeField(fields[3]),
+                Applied: fields[4] == "1",
+                Error: DecodeField(fields[5])));
+        }
+
+        before = rows;
+        return true;
+    }
+
+    /// <summary>Deletes <see cref="PendingFileName"/>, if present. Best-effort is not appropriate here — a
+    /// pending file left behind after a completed run (verified or restored) would make the NEXT start read a
+    /// stale "before" that no longer describes anything, so a delete failure is allowed to throw.</summary>
+    internal static void DeletePending(string dataDir)
+    {
+        var pendingPath = Path.Combine(dataDir, PendingFileName);
+        if (File.Exists(pendingPath))
+        {
+            File.Delete(pendingPath);
+        }
+    }
+
+    /// <summary>
+    /// Restores the pre-migration state (#4336 lane 5b, the mismatch and the after-snapshot-throws paths
+    /// alike): <paramref name="backupPath"/>'s bytes go back to <c>postgresql.conf</c> atomically, and
+    /// <paramref name="priorManagedText"/> — null when no managed file existed before this run — either
+    /// replaces <c>darling-managed.conf</c> (a prior migration's file, restored verbatim) or is left absent
+    /// when null (nothing ever included it, so leaving it missing is the byte-identical restore; a stray file
+    /// nothing references is not itself a mismatch, but not writing one when none existed keeps the directory
+    /// exactly as it was). Never touches the backup or the pending file — the caller deletes those once this
+    /// returns.
+    /// </summary>
+    internal static void RestoreOriginal(string dataDir, string backupPath, string? priorManagedText)
+    {
+        var postgresqlConfPath = Path.Combine(dataDir, "postgresql.conf");
+        var backupText = File.ReadAllText(backupPath);
+        if (!ManagedConfFile.TryReplaceAtomic(
+                postgresqlConfPath,
+                backupText,
+                ManagedConfFile.DefaultMaxReplaceAttempts,
+                ManagedConfFile.DefaultReplaceRetryDelay,
+                out var confError))
+        {
+            throw new IOException(FormattableString.Invariant($"Failed to restore {postgresqlConfPath}."), confError);
+        }
+
+        var managedConfPath = Path.Combine(dataDir, ManagedConfFile.FileName);
+        if (priorManagedText is null)
+        {
+            if (File.Exists(managedConfPath))
+            {
+                File.Delete(managedConfPath);
+            }
+
+            return;
+        }
+
+        if (!ManagedConfFile.TryReplaceAtomic(
+                managedConfPath,
+                priorManagedText,
+                ManagedConfFile.DefaultMaxReplaceAttempts,
+                ManagedConfFile.DefaultReplaceRetryDelay,
+                out var managedError))
+        {
+            throw new IOException(FormattableString.Invariant($"Failed to restore {managedConfPath}."), managedError);
+        }
+    }
+
+    /// <summary>Encodes one pending-file field (#4336 lane 5b): a leading <see cref="FieldNullTag"/> for a
+    /// null value, or <see cref="FieldValueTag"/> followed by <paramref name="value"/> with backslash escaped
+    /// first, then tab and newline — so a setting containing either round-trips through
+    /// <see cref="DecodeField"/> exactly (the risk the plan calls out for <c>EscapeConfValue</c>, here for the
+    /// pending file's own tab-separated format).</summary>
+    private static string EncodeField(string? value)
+    {
+        if (value is null)
+        {
+            return FieldNullTag.ToString();
+        }
+
+        var escaped = value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\t", "\\t", StringComparison.Ordinal)
+            .Replace("\n", "\\n", StringComparison.Ordinal)
+            .Replace("\r", "\\r", StringComparison.Ordinal);
+        return FieldValueTag + escaped;
+    }
+
+    private static string? DecodeField(string field)
+    {
+        if (field.Length == 0 || field[0] == FieldNullTag)
+        {
+            return null;
+        }
+
+        var escaped = field[1..];
+        var sb = new StringBuilder(escaped.Length);
+        for (var i = 0; i < escaped.Length; i++)
+        {
+            if (escaped[i] == '\\' && i + 1 < escaped.Length)
+            {
+                i++;
+                sb.Append(escaped[i] switch
+                {
+                    '\\' => '\\',
+                    't' => '\t',
+                    'n' => '\n',
+                    'r' => '\r',
+                    _ => escaped[i],
+                });
+            }
+            else
+            {
+                sb.Append(escaped[i]);
+            }
+        }
+
+        return sb.ToString();
     }
 }

@@ -171,4 +171,104 @@ public sealed class ManagedConfMigrationStepsTests : IDisposable
 
         Assert.False(ManagedConfMigrationSteps.IsVerified(_dataDir));
     }
+
+    private static FileSettingRow SampleRow(string name, string setting)
+        => new(SourceFile: "postgresql.conf", SourceLine: 1, Name: name, Setting: setting, Applied: true, Error: null);
+
+    [Fact]
+    public void WritePending_ThenTryReadPending_RoundTripsTheBeforeSnapshotAndPriorManagedText()
+    {
+        var before = new[] { SampleRow("work_mem", "16MB"), SampleRow("shared_buffers", "2048MB") };
+
+        ManagedConfMigrationSteps.WritePending(_dataDir, before, "prior managed text\n");
+
+        var found = ManagedConfMigrationSteps.TryReadPending(_dataDir, out var readBack, out var priorText);
+
+        Assert.True(found);
+        Assert.Equal("prior managed text\n", priorText);
+        Assert.Equal(2, readBack.Count);
+        Assert.Contains(readBack, r => r.Name == "work_mem" && r.Setting == "16MB" && r.Applied);
+        Assert.Contains(readBack, r => r.Name == "shared_buffers" && r.Setting == "2048MB" && r.Applied);
+    }
+
+    [Fact]
+    public void WritePending_NoPriorManagedText_RoundTripsAsNull()
+    {
+        ManagedConfMigrationSteps.WritePending(_dataDir, new[] { SampleRow("work_mem", "16MB") }, priorManagedText: null);
+
+        ManagedConfMigrationSteps.TryReadPending(_dataDir, out _, out var priorText);
+
+        Assert.Null(priorText);
+    }
+
+    [Fact]
+    public void WritePending_ValueWithTabAndNewline_RoundTripsExactly()
+    {
+        const string tricky = "line one\tcol\nline two";
+        var before = new[] { SampleRow("comment", tricky) };
+
+        ManagedConfMigrationSteps.WritePending(_dataDir, before, priorManagedText: tricky);
+
+        ManagedConfMigrationSteps.TryReadPending(_dataDir, out var readBack, out var priorText);
+
+        Assert.Equal(tricky, priorText);
+        Assert.Equal(tricky, Assert.Single(readBack).Setting);
+    }
+
+    [Fact]
+    public void TryReadPending_NoPendingFile_ReturnsFalseAndEmpty()
+    {
+        var found = ManagedConfMigrationSteps.TryReadPending(_dataDir, out var readBack, out var priorText);
+
+        Assert.False(found);
+        Assert.Empty(readBack);
+        Assert.Null(priorText);
+    }
+
+    [Fact]
+    public void DeletePending_RemovesTheFile_AndIsANoOpWhenAlreadyGone()
+    {
+        ManagedConfMigrationSteps.WritePending(_dataDir, new[] { SampleRow("work_mem", "16MB") }, priorManagedText: null);
+
+        ManagedConfMigrationSteps.DeletePending(_dataDir);
+        Assert.False(File.Exists(Path.Combine(_dataDir, ManagedConfMigrationSteps.PendingFileName)));
+
+        // A no-op the second time.
+        ManagedConfMigrationSteps.DeletePending(_dataDir);
+    }
+
+    [Fact]
+    public void RestoreOriginal_RestoresPostgresqlConfFromBackup_AndManagedConfFromPriorText()
+    {
+        var confPath = Path.Combine(_dataDir, "postgresql.conf");
+        File.WriteAllText(confPath, "original\n");
+        var backupPath = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc));
+
+        // Simulate the migration having written new content to both files.
+        File.WriteAllText(confPath, "migrated\n");
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        File.WriteAllText(managedPath, "new managed body\n");
+
+        ManagedConfMigrationSteps.RestoreOriginal(_dataDir, backupPath, priorManagedText: "old managed body\n");
+
+        Assert.Equal("original\n", File.ReadAllText(confPath));
+        Assert.Equal("old managed body\n", File.ReadAllText(managedPath));
+    }
+
+    [Fact]
+    public void RestoreOriginal_NoPriorManagedText_LeavesTheManagedFileAbsent()
+    {
+        var confPath = Path.Combine(_dataDir, "postgresql.conf");
+        File.WriteAllText(confPath, "original\n");
+        var backupPath = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc));
+
+        File.WriteAllText(confPath, "migrated\n");
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        File.WriteAllText(managedPath, "new managed body\n");
+
+        ManagedConfMigrationSteps.RestoreOriginal(_dataDir, backupPath, priorManagedText: null);
+
+        Assert.Equal("original\n", File.ReadAllText(confPath));
+        Assert.False(File.Exists(managedPath));
+    }
 }
