@@ -9,7 +9,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
+using Npgsql;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
 
@@ -193,5 +199,189 @@ public sealed class ManagedConfUpgradePathTests : IDisposable
         Assert.DoesNotContain("ManagedConfMigrationState", preceding, StringComparison.Ordinal);
         Assert.DoesNotContain("Classify", preceding, StringComparison.Ordinal);
         Assert.DoesNotContain("Kind.", preceding, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4358 live pin: an operator line the OLD cluster's <c>postgresql.conf</c> holds below the
+    /// <c>darling-managed.conf</c> include is present in the NEW cluster's <c>postgresql.conf</c> after a
+    /// real major upgrade, and — read through <c>pg_file_settings</c>, not <c>pg_settings.sourcefile</c>,
+    /// because sourcefile still names postgresql.conf for a value that has not changed since the last reload
+    /// — it is APPLIED on the first start of the new cluster. No managed key is duplicated between the
+    /// legacy-appended block and the carried operator block. RED on the pre-#4358 code
+    /// (<c>DarlingStoreUpgrade</c> has no <c>CarryOperatorConfLinesAsync</c>, and
+    /// <c>UpgradeDataDirectoryAsync</c> never calls it): the operator line never reaches the new cluster at
+    /// all, so both the presence assertion and the pg_file_settings.applied assertion fail. Needs
+    /// DARLING_TEST_PGRUNTIME_OLD (a PREVIOUS-major pg-runtime) and DARLING_TEST_PGRUNTIME_NEWZIP (a
+    /// CURRENT-pins pg-runtime.zip) — the managed runtime this exercises is Windows-only, so this pin
+    /// cannot run on macOS; CI decides it.
+    /// </summary>
+    [Fact]
+    public async Task UpgradeInPlace_OperatorLineBelowInclude_CarriedAndApplied_NoManagedKeyDuplicated_Gated()
+    {
+        var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_OLD");
+        var newZip = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_NEWZIP");
+
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime) || string.IsNullOrWhiteSpace(newZip),
+            "Set DARLING_TEST_PGRUNTIME_OLD to an assembled pg-runtime directory built from the PREVIOUS " +
+            "PostgreSQL major (the folder containing pgsql\\bin\\pg_ctl.exe) and DARLING_TEST_PGRUNTIME_NEWZIP " +
+            "to a pg-runtime.zip built from the CURRENT one. Darling\\tools\\new-upgraded-store-fixture.ps1 " +
+            "produces both.");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(oldRuntime!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME_OLD={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
+        Assert.SkipUnless(File.Exists(newZip!), $"DARLING_TEST_PGRUNTIME_NEWZIP={newZip} does not exist.");
+
+        var root = Directory.CreateTempSubdirectory("darling-4358-opline-");
+        try
+        {
+            var deployment = Path.Combine(root.FullName, "deploy");
+            var runtimeRoot = Path.Combine(deployment, "pg-runtime");
+            Directory.CreateDirectory(deployment);
+            CopyDirectoryForTests(Path.Combine(oldRuntime!, "pgsql"), Path.Combine(runtimeRoot, "pgsql"));
+
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            var config = new PostgresConfig { Managed = true, Port = FindFreeTcpPortForTests(), DataDirectory = dataDirectory };
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(20));
+
+            /* ---- 1. Build the OLD store on the OLD runtime through the product's own bootstrap. A SECOND
+                    start migrates postgresql.conf to the darling-managed.conf include shape (#4336) —
+                    #4358 is scoped to that migrated shape, so a second start is needed before the operator
+                    line is added below the include. ---- */
+            var bootstrap = new DarlingManagedPostgres(config, NullLogger<DarlingManagedPostgres>.Instance, runtimeRoot);
+            await bootstrap.EnsureRunningAsync(timeout.Token);
+            await bootstrap.StopIfStartedByThisProcessAsync();
+
+            var bootstrap2 = new DarlingManagedPostgres(config, NullLogger<DarlingManagedPostgres>.Instance, runtimeRoot);
+            await bootstrap2.EnsureRunningAsync(timeout.Token);
+            await bootstrap2.StopIfStartedByThisProcessAsync();
+
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            var conf = await File.ReadAllTextAsync(confPath, timeout.Token);
+            Assert.True(ManagedConfFile.HasManagedInclude(conf),
+                "expected postgresql.conf to carry the darling-managed.conf include after a second start (#4336)");
+
+            /* ---- 2. The operator's own line, below the include — exactly what #4358 carries. ---- */
+            await File.AppendAllTextAsync(confPath, "log_min_duration_statement = 4358\n", timeout.Token);
+
+            /* Stamp the installed runtime, matching what extraction does at deploy time. */
+            var stampSource = Path.Combine(root.FullName, "old-runtime-stamp-source.zip");
+            ZipFile.CreateFromDirectory(
+                Path.Combine(runtimeRoot, "pgsql"), stampSource, CompressionLevel.NoCompression, includeBaseDirectory: true);
+            File.WriteAllText(
+                Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName),
+                DarlingStoreUpgrade.ComputeFileHash(stampSource));
+
+            File.Copy(newZip!, Path.Combine(deployment, "pg-runtime.zip"));
+
+            /* ---- 3. The real bootstrap runs the upgrade end to end. ---- */
+            var log = new DarlingSelfAlertTests.CapturingLogger();
+            var managed = new DarlingManagedPostgres(config, log, runtimeRoot);
+            string connectionString;
+            try
+            {
+                connectionString = await managed.EnsureRunningAsync(timeout.Token);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"The store upgrade bootstrap threw: {ex.Message}\n\n--- orchestration log ---\n{log}", ex);
+            }
+
+            try
+            {
+                Assert.Equal(DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded, managed.LastUpgradeOutcome.Status);
+
+                var newConf = await File.ReadAllTextAsync(confPath, timeout.Token);
+                Assert.Contains("log_min_duration_statement = 4358", newConf, StringComparison.Ordinal);
+                Assert.Contains(ManagedConfMigration.MovedOperatorLinesComment, newConf, StringComparison.Ordinal);
+
+                /* No managed key duplicated between the legacy-appended block and the carried operator block. */
+                var occurrences = 0;
+                var searchFrom = 0;
+                while (true)
+                {
+                    var found = newConf.IndexOf("shared_preload_libraries = 'timescaledb'", searchFrom, StringComparison.Ordinal);
+                    if (found < 0)
+                    {
+                        break;
+                    }
+
+                    occurrences++;
+                    searchFrom = found + 1;
+                }
+
+                Assert.Equal(1, occurrences);
+
+                await using var connection = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false }.ConnectionString);
+                await connection.OpenAsync(timeout.Token);
+                await using var command = new NpgsqlCommand(
+                    "SELECT applied FROM pg_file_settings WHERE name = 'log_min_duration_statement' AND setting = '4358'",
+                    connection);
+                var applied = await command.ExecuteScalarAsync(timeout.Token) as bool?;
+                Assert.True(applied == true,
+                    $"expected log_min_duration_statement = 4358 to be APPLIED per pg_file_settings after the upgrade's first start.\n\n--- orchestration log ---\n{log}");
+            }
+            finally
+            {
+                await managed.StopIfStartedByThisProcessAsync();
+            }
+        }
+        finally
+        {
+            if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_KEEP")))
+            {
+                TryDeleteTreeForTests(root.FullName);
+            }
+        }
+    }
+
+    private static int FindFreeTcpPortForTests()
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    private static void CopyDirectoryForTests(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (var file in Directory.GetFiles(source))
+        {
+            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)));
+        }
+
+        foreach (var directory in Directory.GetDirectories(source))
+        {
+            CopyDirectoryForTests(directory, Path.Combine(destination, Path.GetFileName(directory)));
+        }
+    }
+
+    private static void TryDeleteTreeForTests(string path)
+    {
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+            }
+
+            Directory.Delete(path, recursive: true);
+        }
+        catch (IOException)
+        {
+            // Best-effort cleanup.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Best-effort cleanup.
+        }
     }
 }
