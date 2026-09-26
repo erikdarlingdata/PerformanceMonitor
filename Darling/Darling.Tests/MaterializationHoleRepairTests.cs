@@ -553,6 +553,53 @@ public sealed class MaterializationHoleRepairTests
         Assert.True(zero.Elapsed > TimeSpan.Zero);
     }
 
+    /// <summary>
+    /// #4300 item 3, pure pin for <see cref="TimescaleSupport.ChainedDailyRange"/>: which part, if any, of a
+    /// just-repaired successor-hourly seam range the dependent successor daily should be chased over.
+    /// </summary>
+    [Fact]
+    public void ChainedDailyRange_ChasesOnlyTheDaysOlderThanTheDailysOwnWindow_AlignedOutAndCapped()
+    {
+        var windowStart = new DateTime(2026, 9, 20, 0, 0, 0, DateTimeKind.Unspecified);
+
+        /* A repaired range entirely OLDER than the daily's own window: the aligned whole-day range, in full,
+           uncapped. */
+        var older = TimescaleSupport.ChainedDailyRange(
+            new DateTime(2026, 9, 10, 3, 0, 0, DateTimeKind.Unspecified),
+            new DateTime(2026, 9, 15, 7, 0, 0, DateTimeKind.Unspecified),
+            windowStart, capDays: 30);
+        Assert.NotNull(older);
+        Assert.Equal(new DateTime(2026, 9, 10, 0, 0, 0, DateTimeKind.Unspecified), older!.Value.Start);
+        Assert.Equal(new DateTime(2026, 9, 16, 0, 0, 0, DateTimeKind.Unspecified), older.Value.End);
+
+        /* A repaired range entirely INSIDE the daily's own window: nothing to chase — the daily policy was
+           always going to reach these days on its own ordinary schedule. */
+        var inside = TimescaleSupport.ChainedDailyRange(
+            new DateTime(2026, 9, 21, 1, 0, 0, DateTimeKind.Unspecified),
+            new DateTime(2026, 9, 22, 5, 0, 0, DateTimeKind.Unspecified),
+            windowStart, capDays: 30);
+        Assert.Null(inside);
+
+        /* A repaired range STRADDLING the boundary: only the OLDER part, aligned out to whole days. */
+        var straddling = TimescaleSupport.ChainedDailyRange(
+            new DateTime(2026, 9, 18, 12, 0, 0, DateTimeKind.Unspecified),
+            new DateTime(2026, 9, 21, 6, 0, 0, DateTimeKind.Unspecified),
+            windowStart, capDays: 30);
+        Assert.NotNull(straddling);
+        Assert.Equal(new DateTime(2026, 9, 18, 0, 0, 0, DateTimeKind.Unspecified), straddling!.Value.Start);
+        Assert.Equal(windowStart, straddling.Value.End);
+
+        /* The cap truncates to the NEWEST N days of the clipped span — fill contiguously downward, the same
+           direction as the seam walk itself — leaving the OLDER remainder for a later pass. */
+        var wide = TimescaleSupport.ChainedDailyRange(
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Unspecified),
+            new DateTime(2026, 9, 19, 0, 0, 0, DateTimeKind.Unspecified),
+            windowStart, capDays: 3);
+        Assert.NotNull(wide);
+        Assert.Equal(new DateTime(2026, 9, 16, 0, 0, 0, DateTimeKind.Unspecified), wide!.Value.Start);
+        Assert.Equal(new DateTime(2026, 9, 19, 0, 0, 0, DateTimeKind.Unspecified), wide.Value.End);
+    }
+
     private static int CountOf(string text, string needle)
     {
         var count = 0;

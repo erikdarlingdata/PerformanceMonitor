@@ -3592,10 +3592,10 @@ public sealed class DarlingWorker : BackgroundService
                buckets found = repaired + deferred; a range the cap split counts once as found and once on each
                side), and the elapsed is the pass's clock, not this method's connection open. */
             _logger.LogInformation(
-                "TimescaleDB: materialization hole scan (#3653 Q10) — {Scanned} aggregate(s) walked, {Skipped} skipped, {HolesFound} hole(s) found spanning {BucketsFound} bucket(s), {HolesRepaired} hole(s) / {BucketsRepaired} bucket(s) repaired ({Forced} needed the forced refresh), {HolesDeferred} hole(s) / {BucketsDeferred} bucket(s) deferred past the cap, {Remaining} bucket(s) still reading as holes after repair, {Failures} isolated failure(s), in {ElapsedMs} ms.",
+                "TimescaleDB: materialization hole scan (#3653 Q10) — {Scanned} aggregate(s) walked, {Skipped} skipped, {HolesFound} hole(s) found spanning {BucketsFound} bucket(s), {HolesRepaired} hole(s) / {BucketsRepaired} bucket(s) repaired ({Forced} needed the forced refresh), {HolesDeferred} hole(s) / {BucketsDeferred} bucket(s) deferred past the cap, {Remaining} bucket(s) still reading as holes after repair, {DailyChained} successor-daily bucket(s) chained (#4300), {Failures} isolated failure(s), in {ElapsedMs} ms.",
                 summary.AggregatesScanned, summary.AggregatesSkipped, summary.HolesFound, summary.BucketsFound,
                 summary.HolesRepaired, summary.BucketsRepaired, summary.HolesForced, summary.HolesDeferred, summary.BucketsDeferred,
-                summary.HolesRemaining, summary.Failures, (long)summary.Elapsed.TotalMilliseconds);
+                summary.HolesRemaining, summary.DailyBucketsChained, summary.Failures, (long)summary.Elapsed.TotalMilliseconds);
 
             /* #4299/#4391: the completion stamp — reached ONLY here, past both the epoch read and the
                repair call, neither of which threw or was cancelled. Stamped on every one of the three raw jobs
