@@ -2582,7 +2582,13 @@ public sealed class DarlingStoreUpgradeTests
 
             var password = DarlingSecrets.Unprotect(
                 File.ReadAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory)).Trim());
-            var oldConnection = DarlingManagedPostgres.BuildConnectionString(config.Port, password);
+            /* Pooling=false: this connection string is used against a server this test itself stops and
+               restarts (StopWithRuntimeAsync/StartWithRuntimeAsync below). A pooled Npgsql connection handed
+               back on the same host/port/user after a restart is a physical socket opened against the OLD
+               server's lifetime, which the stop already killed — its first use fails with a forcibly-closed
+               connection. */
+            var oldConnection = new NpgsqlConnectionStringBuilder(
+                DarlingManagedPostgres.BuildConnectionString(config.Port, password)) { Pooling = false }.ConnectionString;
 
             /* ---- 2. Measure the store BEFORE, through the old binaries. An ALTER SYSTEM value here (#4253)
                     is the operator tuning the upgrade must not silently discard — written straight to
@@ -2787,7 +2793,13 @@ public sealed class DarlingStoreUpgradeTests
 
             var password = DarlingSecrets.Unprotect(
                 File.ReadAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory)).Trim());
-            var oldConnection = DarlingManagedPostgres.BuildConnectionString(config.Port, password);
+            /* Pooling=false: this connection string is used against a server this test itself stops and
+               restarts (StopWithRuntimeAsync/StartWithRuntimeAsync below). A pooled Npgsql connection handed
+               back on the same host/port/user after a restart is a physical socket opened against the OLD
+               server's lifetime, which the stop already killed — its first use fails with a forcibly-closed
+               connection. */
+            var oldConnection = new NpgsqlConnectionStringBuilder(
+                DarlingManagedPostgres.BuildConnectionString(config.Port, password)) { Pooling = false }.ConnectionString;
 
             /* ---- 2. Measure BEFORE, through the old binaries. ---- */
             await StartWithRuntimeAsync(runtimeRoot, dataDirectory, config.Port, timeout.Token);
@@ -2951,7 +2963,13 @@ public sealed class DarlingStoreUpgradeTests
 
             var password = DarlingSecrets.Unprotect(
                 File.ReadAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory)).Trim());
-            var oldConnection = DarlingManagedPostgres.BuildConnectionString(config.Port, password);
+            /* Pooling=false: this connection string is used against a server this test itself stops and
+               restarts (StopWithRuntimeAsync/StartWithRuntimeAsync below). A pooled Npgsql connection handed
+               back on the same host/port/user after a restart is a physical socket opened against the OLD
+               server's lifetime, which the stop already killed — its first use fails with a forcibly-closed
+               connection. */
+            var oldConnection = new NpgsqlConnectionStringBuilder(
+                DarlingManagedPostgres.BuildConnectionString(config.Port, password)) { Pooling = false }.ConnectionString;
 
             await StartWithRuntimeAsync(runtimeRoot, dataDirectory, config.Port, timeout.Token);
             var before = await MeasureStoreAsync(oldConnection, timeout.Token);
