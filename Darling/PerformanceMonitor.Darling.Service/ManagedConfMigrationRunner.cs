@@ -15,7 +15,7 @@ using Microsoft.Extensions.Logging;
 
 namespace PerformanceMonitor.Darling.Service;
 
-/// <summary>The step Step A's outcome names — used only to report a Failed or Unknown result, since both A
+/// <summary>Which step an outcome came from — used only to report a Failed or Unknown result, since both A
 /// and Step B share the same tri-state verification shape.</summary>
 internal enum ManagedConfMigrationStep
 {
@@ -69,13 +69,14 @@ internal static class ManagedConfMigrationRunner
     /// could not be written — aborts before <see cref="ManagedConfMigrationSteps.BackupOriginal"/>, with
     /// nothing changed — <c>Unknown</c>);</item>
     /// <item><see cref="ManagedConfMigrationSteps.BackupOriginal"/>;</item>
-    /// <item><see cref="ManagedConfFile.RenderWithValues"/> over the BEFORE snapshot's applied values (the
-    /// new managed file's content);</item>
     /// <item><see cref="ManagedConfMigration.Rewrite"/> over <paramref name="derived"/> (the freshly DERIVED
-    /// map, per design decision (b) — this is what makes the item-4 log line read "derived &lt;new&gt;");</item>
+    /// map — this is what makes the change log line read "derived &lt;new&gt;"); the keys it dropped that
+    /// this render does not itself derive are collected here (#4336);</item>
+    /// <item><see cref="ManagedConfFile.RenderWithValues"/> over the BEFORE snapshot's applied values plus
+    /// those dropped keys (the new managed file's content);</item>
     /// <item>the rewrite's own log lines, through <paramref name="logger"/>;</item>
     /// <item><see cref="ManagedConfMigrationSteps.WriteTwoSteps"/>;</item>
-    /// <item>re-snapshot (a throw here — the RULED behavior: restore both files to their exact pre-migration
+    /// <item>re-snapshot (a throw here — restore both files to their exact pre-migration
     /// bytes via <see cref="ManagedConfMigrationSteps.RestoreOriginal"/>, delete the pending file, no stamp —
     /// <c>Unknown</c>);</item>
     /// <item><see cref="ManagedConfFileSettings.Compare"/> the before and after snapshots;</item>
@@ -119,7 +120,7 @@ internal static class ManagedConfMigrationRunner
         }
         catch (IOException ex)
         {
-            /* Ruled: the pending file could not be written — abort before BackupOriginal, nothing changed. */
+            /* The pending file could not be written — abort before BackupOriginal, nothing changed. */
             var detail = FormattableString.Invariant($"pending write: {ex.GetType().Name}: {ex.Message}");
             logger.LogWarning(
                 "The #4215 conf migration's pending-file write failed for {DataDirectory}: {Detail}", dataDir, detail);
@@ -138,13 +139,51 @@ internal static class ManagedConfMigrationRunner
             }
         }
 
-        var newManagedConfText = ManagedConfFile.RenderWithValues(inputs, beforeValues);
         var postgresqlConfText = File.ReadAllText(postgresqlConfPath);
         var rewrite = ManagedConfMigration.Rewrite(postgresqlConfText, derived, port);
+
+        /* The keys the rewrite dropped as Ours (design rule 2, ManagedConfMigration.Rewrite) that this
+           render does not itself derive a value for — v12's min_wal_size when the disk reading is not
+           authoritative, for example. Without carrying the BEFORE snapshot's value forward, the managed
+           file simply has nothing for that key, the after-snapshot loses it, and Compare reports a mismatch
+           on every start. */
+        var classifiedBefore = ManagedConfMigration.ClassifyLines(postgresqlConfText, port);
+        var droppedKeys = new List<string>();
+        foreach (var line in classifiedBefore)
+        {
+            if (line.Classification == ManagedConfMigration.ConfLineClassification.Ours
+                && line.Key is not null
+                && !derived.ContainsKey(line.Key)
+                && beforeValues.ContainsKey(line.Key)
+                && !droppedKeys.Exists(k => string.Equals(k, line.Key, StringComparison.OrdinalIgnoreCase)))
+            {
+                droppedKeys.Add(line.Key);
+            }
+        }
+
+        var newManagedConfText = ManagedConfFile.RenderWithValues(inputs, beforeValues, droppedKeys);
 
         foreach (var entry in rewrite.Log)
         {
             logger.LogInformation("{Message}", entry.Message);
+        }
+
+        /* #4336: if any product marker survives the rewrite — an unclassified or hand-edited marker line
+           this rewrite kept verbatim — the file classifies Legacy again on the very next start
+           (ManagedConfMigrationState.Classify), and EnsureConfAppended then re-appends the missing blocks
+           at the end, after the moved operator lines, overriding them. Abort BEFORE any write — nothing on
+           disk has changed yet — and report Failed rather than let that happen silently. */
+        var survivingMarker = Array.Find(DarlingManagedPostgres.AllManagedConfMarkers,
+            marker => rewrite.NewConfText.Contains(marker, StringComparison.Ordinal));
+        if (survivingMarker is not null)
+        {
+            var markerDetail = FormattableString.Invariant($"rewrite: a product marker survived the rewrite: {survivingMarker}");
+            logger.LogWarning(
+                "The #4215 conf migration's rewrite for {DataDirectory} left a product marker in the new postgresql.conf; aborting before any write. {Detail}",
+                dataDir, markerDetail);
+            ManagedConfMigrationSteps.DeletePending(dataDir);
+            return new ManagedConfMigrationOutcome(
+                ManagedConfVerificationStatus.Failed, Array.Empty<string>(), backupPath, ManagedConfMigrationStep.A, markerDetail);
         }
 
         ManagedConfMigrationSteps.WriteTwoSteps(dataDir, newManagedConfText, rewrite.NewConfText);
@@ -156,7 +195,7 @@ internal static class ManagedConfMigrationRunner
         }
         catch (Exception ex) when (ct.IsCancellationRequested is false)
         {
-            /* Ruled: the after-snapshot throws — restore both files to their exact pre-migration bytes, no
+            /* The after-snapshot throws — restore both files to their exact pre-migration bytes, no
                stamp, delete the pending file, report Unknown. */
             var detail = FormattableString.Invariant($"after-snapshot: {ex.GetType().Name}: {ex.Message}");
             logger.LogWarning(
@@ -175,7 +214,11 @@ internal static class ManagedConfMigrationRunner
     /// but before the stamp or a restore: reads back the persisted BEFORE snapshot
     /// (<see cref="ManagedConfMigrationSteps.TryReadPending"/>), takes a fresh AFTER snapshot, and runs the
     /// same compare-then-stamp-or-restore tail <see cref="RunStepA"/> does. A snapshot throw here follows the
-    /// same ruled path as <see cref="RunStepA"/>'s after-snapshot: restore, delete pending, <c>Unknown</c>.
+    /// same path as <see cref="RunStepA"/>'s after-snapshot: restore, delete pending, <c>Unknown</c>. A
+    /// pending file that exists but cannot be parsed (#4336) is a DIFFERENT case from either of those: there
+    /// is a backup (<paramref name="backupPath"/> is always given to this call), so this restores from it,
+    /// deletes the pending file, and reports <c>Failed</c> — not <c>Unknown</c> — so the store-settings
+    /// alert fires rather than staying silent forever on a stuck PendingVerify.
     /// </summary>
     internal static async Task<ManagedConfMigrationOutcome> ResumePending(
         string dataDir,
@@ -184,7 +227,16 @@ internal static class ManagedConfMigrationRunner
         CancellationToken ct,
         ILogger? logger = null)
     {
-        ManagedConfMigrationSteps.TryReadPending(dataDir, out var before, out var priorManagedText);
+        if (!ManagedConfMigrationSteps.TryReadPending(dataDir, out var before, out var priorManagedText))
+        {
+            const string detail = "resume: the pending file exists but could not be parsed";
+            logger?.LogWarning(
+                "The #4215 conf migration's pending file for {DataDirectory} could not be parsed; restoring from backup and reporting Failed.", dataDir);
+            ManagedConfMigrationSteps.RestoreOriginal(dataDir, backupPath, priorManagedText: null);
+            ManagedConfMigrationSteps.DeletePending(dataDir);
+            return new ManagedConfMigrationOutcome(
+                ManagedConfVerificationStatus.Failed, Array.Empty<string>(), backupPath, ManagedConfMigrationStep.A, detail);
+        }
 
         var managedConfPath = Path.Combine(dataDir, ManagedConfFile.FileName);
         var currentManagedConfText = File.Exists(managedConfPath) ? File.ReadAllText(managedConfPath) : string.Empty;
@@ -236,7 +288,9 @@ internal static class ManagedConfMigrationRunner
     /// Step B: after a normal derivation has already rendered and written
     /// <c>darling-managed.conf</c>, checks that <paramref name="rows"/> (a fresh <c>pg_file_settings</c>
     /// snapshot) shows every key <paramref name="renderedText"/> declares with the rendered value and no
-    /// error, from a row whose <c>sourcefile</c> ends with <see cref="ManagedConfFile.FileName"/>. A row's
+    /// error, from a row whose <c>sourcefile</c> is exactly <see cref="ManagedConfFile.FileName"/>, by name
+    /// (#4336; <see cref="Path.GetFileName(string)"/>, not a suffix match — a stray <c>old-darling-managed.conf</c>
+    /// in an include directory is a different file). A row's
     /// <c>applied</c> may be false — an operator line below the include can legitimately override it; only
     /// the value and the absence of an error matter here. All keys match: stamp the new text as verified. Any
     /// key fails: restore <paramref name="previousText"/> (when there was one) so the old stamp matches
@@ -252,7 +306,7 @@ internal static class ManagedConfMigrationRunner
         foreach (var row in rows)
         {
             if (row.Name is null || row.SourceFile is null
-                || !row.SourceFile.EndsWith(ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
+                || !string.Equals(Path.GetFileName(row.SourceFile), ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }

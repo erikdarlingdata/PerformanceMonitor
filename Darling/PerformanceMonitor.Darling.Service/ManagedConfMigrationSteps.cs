@@ -201,9 +201,9 @@ internal static class ManagedConfMigrationSteps
     /// Writes <see cref="PendingFileName"/> atomically (#4336): the BEFORE snapshot (tab-separated,
     /// one row per line, every field escaped so a tab or newline INSIDE a setting's own value round-trips
     /// exactly — <see cref="EncodeField(string?)"/>) plus, on its own leading line, the prior managed-file text (null
-    /// when none existed — a fresh initdb'd store migrating for the first time). This is the risk called out
-    /// in the plan: "the pending file is the only record of 'before' after a crash." If it cannot be written,
-    /// the caller must abort before <see cref="BackupOriginal"/> — nothing has changed yet.
+    /// when none existed — a fresh initdb'd store migrating for the first time). This is the risk this
+    /// method exists to cover: "the pending file is the only record of 'before' after a crash." If it cannot
+    /// be written, the caller must abort before <see cref="BackupOriginal"/> — nothing has changed yet.
     /// </summary>
     internal static void WritePending(string dataDir, IReadOnlyList<FileSettingRow> before, string? priorManagedText)
     {
@@ -234,52 +234,82 @@ internal static class ManagedConfMigrationSteps
     /// <summary>
     /// Reads back what <see cref="WritePending"/> wrote. False (with both out parameters empty/null) when
     /// there is no pending file at all — the normal case, or one already cleaned up by
-    /// <see cref="DeletePending"/>.
+    /// <see cref="DeletePending"/> — or when the pending file exists but its content cannot be parsed as
+    /// the format <see cref="WritePending"/> writes (#4336): a corrupt or truncated field never throws here,
+    /// it is reported the same as a missing file, so the caller's PendingVerify handling can name the
+    /// reason itself.
     /// </summary>
     internal static bool TryReadPending(
         string dataDir,
         out IReadOnlyList<FileSettingRow> before,
         out string? priorManagedText)
     {
+        before = Array.Empty<FileSettingRow>();
+        priorManagedText = null;
+
         var pendingPath = Path.Combine(dataDir, PendingFileName);
         if (!File.Exists(pendingPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var text = File.ReadAllText(pendingPath);
+            var normalized = text.Replace("\r\n", "\n", StringComparison.Ordinal);
+            var lines = normalized.Split('\n');
+
+            var parsedPriorManagedText = DecodeField(lines[0]);
+
+            var rows = new List<FileSettingRow>();
+            for (var i = 1; i < lines.Length; i++)
+            {
+                if (lines[i].Length == 0)
+                {
+                    continue;
+                }
+
+                var fields = lines[i].Split('\t');
+                if (fields.Length != 6)
+                {
+                    return false;
+                }
+
+                var sourceLineText = DecodeField(fields[1]);
+                int? sourceLine = null;
+                if (sourceLineText is not null)
+                {
+                    if (!int.TryParse(
+                            sourceLineText,
+                            System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out var parsedSourceLine))
+                    {
+                        return false;
+                    }
+
+                    sourceLine = parsedSourceLine;
+                }
+
+                rows.Add(new FileSettingRow(
+                    SourceFile: DecodeField(fields[0]),
+                    SourceLine: sourceLine,
+                    Name: DecodeField(fields[2]),
+                    Setting: DecodeField(fields[3]),
+                    Applied: fields[4] == "1",
+                    Error: DecodeField(fields[5])));
+            }
+
+            priorManagedText = parsedPriorManagedText;
+            before = rows;
+            return true;
+        }
+        catch (IOException)
         {
             before = Array.Empty<FileSettingRow>();
             priorManagedText = null;
             return false;
         }
-
-        var text = File.ReadAllText(pendingPath);
-        var normalized = text.Replace("\r\n", "\n", StringComparison.Ordinal);
-        var lines = normalized.Split('\n');
-
-        priorManagedText = DecodeField(lines[0]);
-
-        var rows = new List<FileSettingRow>();
-        for (var i = 1; i < lines.Length; i++)
-        {
-            if (lines[i].Length == 0)
-            {
-                continue;
-            }
-
-            var fields = lines[i].Split('\t');
-            var sourceLineText = DecodeField(fields[1]);
-            int? sourceLine = sourceLineText is null
-                ? null
-                : int.Parse(sourceLineText, System.Globalization.CultureInfo.InvariantCulture);
-
-            rows.Add(new FileSettingRow(
-                SourceFile: DecodeField(fields[0]),
-                SourceLine: sourceLine,
-                Name: DecodeField(fields[2]),
-                Setting: DecodeField(fields[3]),
-                Applied: fields[4] == "1",
-                Error: DecodeField(fields[5])));
-        }
-
-        before = rows;
-        return true;
     }
 
     /// <summary>Deletes <see cref="PendingFileName"/>, if present. Best-effort is not appropriate here — a
@@ -343,7 +373,7 @@ internal static class ManagedConfMigrationSteps
     /// <summary>Encodes one pending-file field (#4336): a leading <see cref="FieldNullTag"/> for a
     /// null value, or <see cref="FieldValueTag"/> followed by <paramref name="value"/> with backslash escaped
     /// first, then tab and newline — so a setting containing either round-trips through
-    /// <see cref="DecodeField"/> exactly (the risk the plan calls out for <c>EscapeConfValue</c>, here for the
+    /// <see cref="DecodeField"/> exactly (the same tab/newline round-trip risk <c>EscapeConfValue</c> covers, here for the
     /// pending file's own tab-separated format).</summary>
     private static string EncodeField(string? value)
     {

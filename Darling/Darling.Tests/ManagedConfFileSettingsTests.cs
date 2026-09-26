@@ -13,7 +13,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// <see cref="ManagedConfFileSettings.Compare"/> (#4336): the six pins the plan names, plus the
+/// <see cref="ManagedConfFileSettings.Compare"/> (#4336): pins for the design's compare rules, plus the
 /// applied-row shape the compare walks.
 /// </summary>
 public sealed class ManagedConfFileSettingsTests

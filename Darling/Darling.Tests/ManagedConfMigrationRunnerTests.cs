@@ -168,7 +168,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Contains("simulated connection failure", logger.Joined);
     }
 
-    /// <summary>Ruled pin: the after-snapshot throws. Both postgresql.conf and darling-managed.conf are
+    /// <summary>Pin: the after-snapshot throws. Both postgresql.conf and darling-managed.conf are
     /// restored BYTE-IDENTICAL to their pre-migration bytes (the managed file absent if it was absent), the
     /// stamp is absent, the pending file is deleted, and Status is Unknown.</summary>
     [Fact]
@@ -212,7 +212,7 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Contains("simulated connection failure on re-read", outcome.Detail);
     }
 
-    /// <summary>Ruled pin variant: the same as above, but a prior managed file already existed before this
+    /// <summary>Pin variant: the same as above, but a prior managed file already existed before this
     /// run — the restore must bring that file back byte-identical too, not leave it absent.</summary>
     [Fact]
     public async Task RunStepA_AfterSnapshotThrows_WithPriorManagedFile_RestoresItByteIdentical()

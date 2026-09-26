@@ -2809,8 +2809,13 @@ public sealed class DarlingManagedPostgres
             /* Guarded — Legacy and PendingVerify never ran EnsureManagedConfReadyAsync above, so
                darling-managed.conf may not exist yet on this start. Copying a missing file would throw and take
                the whole start down over what SaveLastGoodManagedConf's own doc comment already treats as a
-               no-op-worthy failure. */
-            if (File.Exists(Path.Combine(_dataDirectory, ManagedConfFile.FileName)))
+               no-op-worthy failure. On a Verified confState this start's server started on a FRESH render
+               that Step B (MigrateManagedConfAsync, below) has not verified yet (#4336) — saving here would
+               let a render Step B goes on to reject become the fallback a future rejected render restores
+               to. That save happens only once Step B verifies, further down. Every other confState (Legacy,
+               PendingVerify, MigratedUnstamped) has no Step B to wait on, so the save still belongs here. */
+            if (confState != ManagedConfMigrationState.Kind.Verified
+                && File.Exists(Path.Combine(_dataDirectory, ManagedConfFile.FileName)))
             {
                 SaveLastGoodManagedConf(_dataDirectory);
             }
@@ -2873,7 +2878,15 @@ public sealed class DarlingManagedPostgres
            the migration's own re-snapshot needs a server that is actually up on the files this start wrote. */
         if (_startedByThisProcess)
         {
-            LastManagedConfVerification = await MigrateManagedConfAsync(confState, connectionString, cancellationToken);
+            var migrationOutcome = await MigrateManagedConfAsync(confState, connectionString, cancellationToken);
+
+            /* #4336: a bootstrap retry can land here on a Verified confState with no write result (Step B's
+               own null-return case, above) — nothing new to report, not a fact that the earlier attempt's
+               outcome is now unknown. Keep the prior non-null outcome rather than erasing it with null. */
+            if (migrationOutcome is not null || LastManagedConfVerification is null)
+            {
+                LastManagedConfVerification = migrationOutcome;
+            }
         }
 
         return connectionString;
@@ -2884,7 +2897,7 @@ public sealed class DarlingManagedPostgres
     /// <paramref name="confState"/> calls for. <see
     /// cref="ManagedConfMigrationState.Kind.Verified"/> does nothing here; Step B runs separately. Everything
     /// is caught: a migration failure logs and reports, it never throws — the store this start already
-    /// brought up must not go down over a verification step (plan (a)).
+    /// brought up must not go down over a verification step.
     /// </summary>
     [SupportedOSPlatform("windows")]
     private async Task<ManagedConfMigrationOutcome?> MigrateManagedConfAsync(
@@ -2940,11 +2953,15 @@ public sealed class DarlingManagedPostgres
                     var backupPath = Directory.GetFiles(_dataDirectory, "postgresql.conf.pre-4215.*.bak");
                     if (backupPath.Length == 0)
                     {
+                        /* #4336: a PendingVerify conf with no backup has nothing this method can restore
+                           to — the migrated files stay exactly where the last attempt left them, unverified.
+                           Reporting Failed (not Unknown) so the store-settings alert actually fires; Unknown
+                           never fires it alone, and a stuck PendingVerify must not go silent forever. */
                         _logger.LogWarning(
-                            "{DataDirectory} has a pending #4215 migration but no backup file — cannot resume; reporting Unknown.",
+                            "{DataDirectory} has a pending #4215 migration but no backup file — cannot resume; reporting Failed.",
                             _dataDirectory);
                         return new ManagedConfMigrationOutcome(
-                            ManagedConfVerificationStatus.Unknown, Array.Empty<string>(), null, ManagedConfMigrationStep.A,
+                            ManagedConfVerificationStatus.Failed, Array.Empty<string>(), null, ManagedConfMigrationStep.A,
                             "resume: no backup file found for a PendingVerify conf");
                     }
 
@@ -2967,7 +2984,7 @@ public sealed class DarlingManagedPostgres
                     foreach (var row in rows)
                     {
                         if (row.Error is not null && row.SourceFile is not null
-                            && row.SourceFile.EndsWith(ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
+                            && string.Equals(Path.GetFileName(row.SourceFile), ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
                         {
                             newErrorFromManagedFile = true;
                             if (row.Name is not null)
@@ -3644,10 +3661,11 @@ public sealed class DarlingManagedPostgres
     }
 
     /* ===================== darling-managed.conf (#4215): the one service-owned settings file =====================
-       EnsureConfAppended above and its v1-v15 blocks are UNTOUCHED: this file is rendered and included AFTER
-       them, so on the postgresql.conf side it is simply the last word (last-occurrence-wins), and on the code
-       side nothing here changes when or whether a v1-v15 block runs. A2 (#4215) retires the blocks once this
-       file has proven itself; until then both write, and darling-managed.conf wins. */
+       EnsureConfAppended above and its v1-v15 blocks run ONLY on a Legacy conf (ManagedConfMigrationState.Classify):
+       the blocks are appended when a postgresql.conf still carries them, or is missing the managed include.
+       ManagedConfMigrationRunner.Rewrite (#4336) then migrates that conf, post-start, dropping every block's own
+       line and adding the managed include — from the NEXT start on, darling-managed.conf is the only file that
+       carries these settings. */
 
     /// <summary>
     /// Gathers this host's current values for <see cref="ManagedConfFile.RenderInputs"/> — the SAME readers

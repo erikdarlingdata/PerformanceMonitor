@@ -31,7 +31,7 @@ public sealed class ManagedConfMigrationWiringTests
         return index;
     }
 
-    /// <summary>The legacy appenders run ONLY on a Legacy conf (plan decision (c)): the
+    /// <summary>The legacy appenders run ONLY on a Legacy conf: the
     /// <c>EnsureConfAppended(_dataDirectory);</c> call inside <c>EnsureRunningAsync</c> sits inside an
     /// <c>if</c> whose condition names <c>ManagedConfMigrationState.Kind.Legacy</c>.</summary>
     [Fact]

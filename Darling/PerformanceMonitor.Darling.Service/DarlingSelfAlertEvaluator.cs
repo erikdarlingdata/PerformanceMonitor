@@ -4640,8 +4640,11 @@ internal sealed class DarlingSelfAlertEvaluator
             var restoredFrom = verification.BackupPath is not null
                 ? FormattableString.Invariant($"postgresql.conf was restored from {verification.BackupPath}")
                 : "the previous verified darling-managed.conf was restored";
+            var runningNote = verification.Step == ManagedConfMigrationStep.B
+                ? "; the running server keeps the new values until its next restart"
+                : string.Empty;
             reasons.Add(FormattableString.Invariant(
-                $"verifying darling-managed.conf failed (step {verification.Step}): {mismatchedList} did not match pg_file_settings; {restoredFrom}"));
+                $"verifying darling-managed.conf failed (step {verification.Step}): {mismatchedList} did not match pg_file_settings; {restoredFrom}{runningNote}"));
         }
 
         /* #4215, extended to the verification read (#4336): null means the rejected-settings read FAILED this tick, and Verification's

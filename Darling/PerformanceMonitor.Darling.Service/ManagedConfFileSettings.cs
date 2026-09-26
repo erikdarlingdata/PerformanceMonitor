@@ -30,7 +30,7 @@ internal static class ManagedConfFileSettings
     /// <summary>
     /// The query Step A's snapshot delegate runs, both before and after the two-step write: every row
     /// <c>pg_file_settings</c> reports, re-parsed from the files on disk at query time with no reload or
-    /// restart required (plan decision (a)).
+    /// restart required.
     /// </summary>
     internal const string SnapshotSql =
         "SELECT sourcefile, sourceline, name, setting, applied, error FROM pg_file_settings";

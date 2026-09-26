@@ -246,21 +246,45 @@ internal static class ManagedConfFile
     /// text <c>pg_file_settings</c> reports as <c>applied</c> for that key — instead of the freshly derived
     /// one. An owned key <see cref="RenderBody"/> would have written that is missing from
     /// <paramref name="values"/> is dropped from the body entirely (it stays at whatever default is already
-    /// in force; Step A never invents a value the snapshot did not report). The header — and therefore the
-    /// body hash — is recomputed from the snapshot-valued body, so a fresh <see cref="Render"/> call over the
-    /// RESULT reports <see cref="IsHandEdited"/> false: this is what Step A itself just wrote, verified, not
+    /// in force; Step A never invents a value the snapshot did not report). <paramref name="extraKeys"/>
+    /// (#4336) carries the keys the rewritten <c>postgresql.conf</c> lost that this render does not own —
+    /// for example v12's <c>min_wal_size</c> when the disk reading is not authoritative this start — each
+    /// written from <paramref name="values"/>'s snapshot value, in the order given, after every owned key;
+    /// a key already written from <paramref name="values"/> above is never duplicated. The header — and
+    /// therefore the body hash — is recomputed from the snapshot-valued body, so a fresh <see cref="Render"/>
+    /// call over the RESULT reports <see cref="IsHandEdited"/> false: this is what Step A itself just wrote, verified, not
     /// an edit.
     /// </summary>
-    internal static string RenderWithValues(RenderInputs inputs, IReadOnlyDictionary<string, string> values)
+    internal static string RenderWithValues(
+        RenderInputs inputs,
+        IReadOnlyDictionary<string, string> values,
+        IReadOnlyList<string>? extraKeys = null)
     {
         var derivedBody = RenderBody(inputs);
         var (order, _) = ReduceToLastOccurrence(derivedBody);
 
         var body = new StringBuilder();
+        var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var key in order)
         {
             if (values.TryGetValue(key, out var snapshotValue))
             {
+                body.Append(key).Append(" = '")
+                    .Append(DarlingManagedPostgres.EscapeConfValue(snapshotValue))
+                    .Append("'\n");
+                written.Add(key);
+            }
+        }
+
+        if (extraKeys is not null)
+        {
+            foreach (var key in extraKeys)
+            {
+                if (!written.Add(key) || !values.TryGetValue(key, out var snapshotValue))
+                {
+                    continue;
+                }
+
                 body.Append(key).Append(" = '")
                     .Append(DarlingManagedPostgres.EscapeConfValue(snapshotValue))
                     .Append("'\n");
