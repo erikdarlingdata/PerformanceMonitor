@@ -6307,6 +6307,15 @@ AND   j.hypertable_name = '{relation}'";
     };
 
     /// <summary>
+    /// #4299 (d′): the raw relation names, straight off <see cref="RawTierCoverage"/> — the set the sweep
+    /// checks a policy against to decide whether it is one of the three raw jobs that never run on
+    /// TimescaleDB's own scheduler (<see cref="ConvergeRawArmedStateSql"/>, <see cref="RawArmedReadExpression"/>)
+    /// rather than one of the fourteen others that keep today's <c>scheduled</c> semantics unchanged.
+    /// </summary>
+    public static readonly IReadOnlyList<string> RawRelations =
+        RawTierCoverage.Select(t => t.Relation).ToArray();
+
+    /// <summary>
     /// EVERY retention policy this store attaches, each naming the tier(s) that must already cover it before
     /// arming is safe (#1680). The rule this list enforces is: NEVER DROP WHAT YOUR CONSUMER HAS NOT CAPTURED
     /// YET. Iterated by <see cref="EnsureRetentionPoliciesAsync"/>, which used to build it as a local.
@@ -6752,13 +6761,23 @@ AND   j.hypertable_name = '{relation}'";
                     }
                 }
 
-                /* #3812: the job's scheduled flag BEFORE the gate's flip, so the tally below can tell a transition
-                   from a re-assertion. Read here, after the converge, because the converge names only config and
-                   cannot move it (RetentionHorizonConvergeCannotArmTests) — this is the freshest the flag can be
-                   before the one statement that may change it. Null when no job row answers, which the flip
-                   statements below would also match nothing on. */
+                /* #4299 (d′): the three raw relations never use the scheduled-flag verdict — they converge
+                   onto scheduled = false unconditionally, every pass, and carry the armed verdict in
+                   config->>'darling_armed' instead (ConvergeRawArmedStateSql, RawArmedReadExpression). This is
+                   the hourly converge the ruling names: it reverts a DBA's alter_job(scheduled => true) within
+                   the hour (and at every start), restoring the armed key to whatever this pass measures. */
+                var isRawRelation = RawRelations.Contains(relation);
+
+                /* #3812: the job's PRIOR armed verdict BEFORE the gate's flip, so the tally below can tell a
+                   transition from a re-assertion. Read here, after the horizon converge (which names only
+                   config and cannot move either flag — RetentionHorizonConvergeCannotArmTests), and BEFORE the
+                   raw/non-raw flip below — this is the freshest the verdict can be before the one statement
+                   that may change it. A raw relation reads its prior state off config->>'darling_armed'
+                   (RawArmedReadExpression); every other relation keeps reading the scheduled flag
+                   (RetentionPolicyScheduledSql). Null when no job row answers, which the flip statements below
+                   would also match nothing on. */
                 bool? wasScheduled;
-                using (var scheduledRead = new NpgsqlCommand(RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds })
+                using (var scheduledRead = new NpgsqlCommand(isRawRelation ? RawArmedStateSql(relation) : RetentionPolicyScheduledSql(relation), connection) { CommandTimeout = JobCatalogReadTimeoutSeconds })
                 {
                     var flag = await scheduledRead.ExecuteScalarAsync(cancellationToken);
                     wasScheduled = flag is bool b ? b : null;
@@ -6767,8 +6786,17 @@ AND   j.hypertable_name = '{relation}'";
                 var (verdict, shortConsumer) = await MeasureRetentionCoverageAsync(connection, relation, timeColumn, coverage, cancellationToken);
                 if (verdict == RetentionCoverage.Covered)
                 {
-                    using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await arm.ExecuteNonQueryAsync(cancellationToken);
+                    if (isRawRelation)
+                    {
+                        using var armRaw = new NpgsqlCommand(ConvergeRawArmedStateSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        armRaw.Parameters.AddWithValue(true);
+                        await armRaw.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        using var arm = new NpgsqlCommand(ArmRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await arm.ExecuteNonQueryAsync(cancellationToken);
+                    }
 
                     if (wasScheduled == false)
                     {
@@ -6809,8 +6837,17 @@ AND   j.hypertable_name = '{relation}'";
                        a timeout, a permission blip, or a relation that is mid-rebuild. And the release is the
                        existing arming path, unchanged: the next sweep measures Covered and arms it, with no
                        manual step, exactly as a first-time hold releases. */
-                    using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
-                    await hold.ExecuteNonQueryAsync(cancellationToken);
+                    if (isRawRelation)
+                    {
+                        using var holdRaw = new NpgsqlCommand(ConvergeRawArmedStateSql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        holdRaw.Parameters.AddWithValue(false);
+                        await holdRaw.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        using var hold = new NpgsqlCommand(HoldRetentionPolicySql(relation), connection) { CommandTimeout = SetupTimeoutSeconds };
+                        await hold.ExecuteNonQueryAsync(cancellationToken);
+                    }
                     held++;
 
                     if (wasScheduled == true)
