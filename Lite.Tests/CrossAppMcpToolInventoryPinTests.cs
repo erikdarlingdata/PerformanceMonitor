@@ -202,6 +202,13 @@ public sealed class CrossAppMcpToolInventoryPinTests
            forensics, port this and delete the entry; the ratchet only shrinks. */
         "get_collector_stall_probes",
 
+        /* #4442 scope 2: the read-latency read (get_read_latency) over collect.read_latency - the tool
+           measuring its OWN read speed on the web dashboard and MCP server. Darling-ONLY by architecture,
+           the get_collector_cost reason: it is an internal self-metric over the central store's read
+           pipeline, which Lite (a single-instance app with no central store and no /api/read/* dispatch
+           loop of this shape) has no twin of. */
+        "get_read_latency",
+
         /* #3398: the oversized-plan backlog read (get_oversized_plan_backlog) over
            collect.oversized_plan_backlog - which cached plans the capture cap declined, and what the
            out-of-band sweep has since done about each one. Darling-ONLY by architecture rather than a porting
