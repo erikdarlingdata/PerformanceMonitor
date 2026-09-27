@@ -967,9 +967,32 @@ public static class FactAdvice
         : ms < 60000 ? $"{ms / 1000.0:0.#} s"
         : $"{ms / 60000.0:0.#} min";
 
-    /// <summary>"{n} {noun}" with a plural "s" unless n == 1, e.g. "1 deadlock" / "47 deadlocks".</summary>
-    private static string Plural(double n, string noun) =>
-        $"{n:N0} {noun}{(Math.Abs(n - 1) < 0.5 ? string.Empty : "s")}";
+    /// <summary>"{n} {noun}" pluralized unless n == 1, e.g. "1 deadlock" / "47 deadlocks", "1 query" / "3 queries"
+    /// (#4478 — a bare trailing-"s" rule wrote "querys"). A noun ending in a consonant + "y" drops the "y" for
+    /// "ies" ("query" → "queries"); every other noun this file passes just takes "s". Internal, not private,
+    /// so <c>Darling.Tests</c>/<c>Lite.Tests</c> (InternalsVisibleTo) can pin the pluralization directly.</summary>
+    internal static string Plural(double n, string noun) =>
+        $"{n:N0} {PluralNoun(noun, Math.Abs(n - 1) < 0.5)}";
+
+    /// <summary>The irregular half of <see cref="Plural"/>: a noun ending in a consonant immediately before a
+    /// trailing "y" pluralizes to "ies", not "ys" ("query" → "queries", not "querys"). A vowel before the "y"
+    /// ("day") keeps the plain "s" rule, which is every other noun <see cref="Plural"/>'s callers pass.</summary>
+    private static string PluralNoun(string noun, bool isSingular)
+    {
+        if (isSingular)
+        {
+            return noun;
+        }
+
+        if (noun.Length > 1 && noun[^1] == 'y' && !IsVowel(noun[^2]))
+        {
+            return noun[..^1] + "ies";
+        }
+
+        return noun + "s";
+    }
+
+    private static bool IsVowel(char c) => "aeiouAEIOU".IndexOf(c) >= 0;
 
     // Anomaly value formatters (passed to ComposeAnomaly as the observed/baseline renderer).
     private static string Pct(double v) => $"{v:0.#}%";

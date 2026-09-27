@@ -215,7 +215,12 @@ internal static class DarlingAgReader
                page must still get the fleet's real distinct-AG count, not the page's. */
             AvailabilityGroupCount = totalGroupCount,
             ReportingServerCount = groups.Select(g => g.ServerId).Distinct().Count(),
-            DistinctAgCount = groups.Select(g => Key(g.AgName)).Distinct(StringComparer.Ordinal).Count(),
+            /* #4475: identity is the AG name plus a CONNECTED COMPONENT over replica-name sets, not the exact
+               set — a real AG monitored from its secondary reports only that secondary's own name (the DMV
+               returns local information only off the primary), so exact-set identity would double-count it.
+               Shares AgTopology's counting helper so the viewer and this read cannot drift back apart. */
+            DistinctAgCount = AgTopology.CountDistinctGroups(
+                groups.Select(g => (g.AgName, (IEnumerable<string?>)g.Replicas.Select(r => r.ReplicaServerName)))),
             WorstSeverity = groups.Count == 0 ? HealthSeverity.Unknown : groups.Max(g => g.Severity),
             AvailabilityGroups = pagedGroups,
             GroupsReturned = pagedGroups.Count,
@@ -650,8 +655,10 @@ public sealed class AgHealthResult
     /// <summary>How many monitored servers reported any AG.</summary>
     [JsonPropertyName("reporting_server_count")] public int ReportingServerCount { get; init; }
 
-    /// <summary>How many distinct <c>ag_name</c>s are represented, collapsing the multiple monitored replicas that
-    /// report the same AG.</summary>
+    /// <summary>How many distinct AGs are represented, by identity (AG name plus replica set, #4475) rather than
+    /// name alone — so two monitored replicas of the SAME AG still collapse to one, but two different AGs that
+    /// happen to share a name (every Amazon RDS for SQL Server Multi-AZ instance's internal <c>RDSAG0</c>) do
+    /// not.</summary>
     [JsonPropertyName("distinct_ag_count")] public int DistinctAgCount { get; init; }
 
     [JsonPropertyName("worst_severity")] public HealthSeverity WorstSeverity { get; init; }
