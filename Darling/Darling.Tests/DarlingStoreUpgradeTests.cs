@@ -2905,6 +2905,10 @@ public sealed class DarlingStoreUpgradeTests
                 Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
                 Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
                 Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
+
+                /* The preload line moved with them: it lives in darling-managed.conf, reached through the include,
+                   and keeps both libraries (the check the same-major swap test already makes). */
+                await ManagedPreloadAssert.FileLevel_HasOneManagedPreloadLine_WithBothLibraries(dataDirectory, timeout.Token);
             }
             catch (Exception ex)
             {
