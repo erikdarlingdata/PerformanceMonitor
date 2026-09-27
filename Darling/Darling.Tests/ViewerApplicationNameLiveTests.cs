@@ -24,6 +24,9 @@ namespace Darling.Tests;
 /// <c>pg_stat_activity</c> from a second connection, not a call to
 /// <see cref="DarlingStoreConnection.WithApplicationName"/> standing in for it.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every live fact here reaches
+   DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and then works entirely
+   inside it, so it cannot race the shared store's tables. */
 public sealed class ViewerApplicationNameLiveTests
 {
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");

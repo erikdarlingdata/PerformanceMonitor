@@ -23,6 +23,9 @@ namespace Darling.Tests;
 /// pools already did (#4442). <see cref="DarlingStoreConnection.WithApplicationName"/> is the one place that
 /// picks the name — set-if-ABSENT, so a bring-your-own connection string's own <c>ApplicationName</c> wins.
 /// </summary>
+/* #1776 own-store: deliberately NOT [Collection("live-postgres")]. Every live fact here reaches
+   DARLING_TEST_PG only to CREATE and DROP its own database through ScratchPostgres and then works entirely
+   inside it, so it cannot race the shared store's tables. */
 public sealed class StoreApplicationNamePinTests
 {
     [Fact]
