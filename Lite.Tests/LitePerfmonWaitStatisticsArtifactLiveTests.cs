@@ -130,16 +130,13 @@ public sealed class LitePerfmonWaitStatisticsArtifactLiveTests : IClassFixture<S
         var times = Enumerable.Range(0, 5).Select(i => t0.AddMinutes(i)).ToArray();
 
         var startedPerSec = new long[] { 318, 400, 214_396_451, 1_021, 500 };
-        var inProgress = new long[] { 2, 3, 2, 1, 2 };
-        var avgWaitMs = new long[] { 10, 10, 10, 10, 10 };
-        var cumulativeWaitMs = new long[] { 50, 50, 50, 50, 50 };
 
+        /* This counter is planted as a SOLO instance (no sibling instances under the same counter name), so
+           the artifact's own collection has nothing else to sum — every row in that bucket is set aside. */
+        const string SoloCounterName = "Waits started per second";
         for (var i = 0; i < 5; i++)
         {
-            await PlantAsync(times[i], CounterName, "Waits started per second", startedPerSec[i]);
-            await PlantAsync(times[i], CounterName, "Waits in progress", inProgress[i]);
-            await PlantAsync(times[i], CounterName, "Average wait time (ms)", avgWaitMs[i]);
-            await PlantAsync(times[i], CounterName, "Cumulative wait time (ms) per second", cumulativeWaitMs[i]);
+            await PlantAsync(times[i], SoloCounterName, "", startedPerSec[i]);
         }
 
         /* Smallest bucket width (1 minute), asOfUtc past the last plant, hoursBack wide enough to cover the
@@ -148,7 +145,7 @@ public sealed class LitePerfmonWaitStatisticsArtifactLiveTests : IClassFixture<S
         var asOfUtc = times[^1].AddMinutes(1);
 
         var result = await _dataService.GetPerfmonBucketsAsync(
-            ServerId, "Waits started per second", hoursBack: 1, asOfUtc: asOfUtc, bucketMinutes: 1);
+            ServerId, SoloCounterName, hoursBack: 1, asOfUtc: asOfUtc, bucketMinutes: 1);
 
         /* Only 4 points, not 5: this counter has a single instance, so the artifact's own collection has
            nothing else to sum — every row in that bucket was set aside, and GetPerfmonBucketsAsync drops a
