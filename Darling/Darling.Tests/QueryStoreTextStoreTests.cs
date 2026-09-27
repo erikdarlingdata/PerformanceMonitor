@@ -37,7 +37,11 @@ public sealed class QueryStoreTextStoreTests
     /// <summary>
     /// The rung and the helper's own DDL must agree, or a fresh store and an upgraded one get different
     /// tables — the same discipline the ladder diff enforces for collector tables, applied by hand because a
-    /// non-collector table is outside that generator.
+    /// non-collector table is outside that generator. V149 (#4250) drops the rung's <c>last_seen</c> index
+    /// and sets fillfactor 90 on the live table, so the helper's <c>CreateTableSql</c> (which a fresh store
+    /// never runs directly — <see cref="PgMigrations.MigrateAsync"/> runs the V74 rung, then V149) is now the
+    /// POST-V149 shape, not the V74 rung's byte-for-byte shape. This asserts the columns V74 and V149 both
+    /// agree on rather than the whole string.
     /// </summary>
     [Fact]
     public void TheRungMatchesTheHelpersCreateTableSql()
@@ -45,7 +49,8 @@ public sealed class QueryStoreTextStoreTests
         var rung = PgMigrations.Scripts.Single(s => s.Version == 74);
 
         Assert.Equal("query-store-text", rung.Name);
-        Assert.Equal(Normalize(QueryStoreTextStore.CreateTableSql), Normalize(rung.Sql));
+        Assert.Contains("PRIMARY KEY (server_id, database_name, query_id)", Normalize(rung.Sql), StringComparison.Ordinal);
+        Assert.Contains("PRIMARY KEY (server_id, database_name, query_id)", Normalize(QueryStoreTextStore.CreateTableSql), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -122,13 +127,15 @@ public sealed class QueryStoreTextStoreTests
 
     /// <summary>
     /// The table's shape: keyed on <c>query_id</c> — which is already a stored fact column, so this rung
-    /// adds a table and touches nothing existing — and indexed on the column it is pruned by.
+    /// adds a table and touches nothing existing. Since V149 (#4250) the prune no longer has an index to
+    /// lean on — <c>last_seen</c> is still the pruned column, it is just no longer indexed, so the helper's
+    /// live DDL carries the column but not the (now-dropped) index.
     /// </summary>
     [Fact]
-    public void TheTableIsKeyedOnQueryIdAndIndexedForThePrune()
+    public void TheTableIsKeyedOnQueryIdAndPrunedOnLastSeen()
     {
         Assert.Contains("PRIMARY KEY (server_id, database_name, query_id)", QueryStoreTextStore.CreateTableSql, StringComparison.Ordinal);
-        Assert.Contains("idx_query_store_text_last_seen", QueryStoreTextStore.CreateTableSql, StringComparison.Ordinal);
+        Assert.DoesNotContain("idx_query_store_text_last_seen", QueryStoreTextStore.CreateTableSql, StringComparison.Ordinal);
         Assert.Contains(QueryStoreTextStore.LastSeenColumn, QueryStoreTextStore.CreateTableSql, StringComparison.Ordinal);
     }
 

@@ -54,6 +54,12 @@ public static class QueryStoreTextStore
     /// </summary>
     public const int PruneMarginDays = 2;
 
+    /* This const mirrors the IMMUTABLE V74 migration rung and stays byte-frozen with it, EXCEPT for V149
+       (#4250): the rung drops the last_seen btree index and sets fillfactor 90 on the live table so the
+       liveness touch's UPDATE (see TouchAndProbeSql below) can go HOT — last_seen is the only indexed
+       column that touch ever changed, and the text/digest payload columns it never rewrites stay untouched
+       either way. PruneSql below is the only other reader of that index and keeps working off a sequential
+       scan bounded by its own margin-day slice. */
     public const string CreateTableSql = @"CREATE TABLE IF NOT EXISTS collect.query_store_text (
     server_id integer NOT NULL,
     database_name text NOT NULL,
@@ -61,9 +67,7 @@ public static class QueryStoreTextStore
     query_sql_text text,
     last_seen timestamp NOT NULL,
     PRIMARY KEY (server_id, database_name, query_id)
-);
-CREATE INDEX IF NOT EXISTS idx_query_store_text_last_seen
-    ON collect.query_store_text(last_seen);";
+);";
 
     /// <summary>
     /// Records what a text fetch landed.

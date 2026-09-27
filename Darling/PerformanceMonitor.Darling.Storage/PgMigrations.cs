@@ -228,6 +228,7 @@ public static class PgMigrations
         new Migration(146, "managed-conf-verdicts", V146Sql),
         new Migration(147, "compose-statement-timeout-sixty", V147Sql),
         new Migration(148, "read-latency", V148Sql),
+        new Migration(149, "query-store-liveness-hot-touch", V149Sql),
     };
 
     /// <summary>
@@ -2325,6 +2326,36 @@ CREATE TABLE IF NOT EXISTS collect.read_latency
 
 CREATE INDEX IF NOT EXISTS idx_read_latency_time
     ON collect.read_latency(metric_time);";
+
+    /// <summary>
+    /// V149 — the Query Store liveness touch becomes a HOT update on <c>collect.query_store_plan_map</c> and
+    /// <c>collect.query_store_text</c> (#4250): drops each table's <c>last_seen</c> btree index and sets
+    /// <c>fillfactor = 90</c>. <c>TouchAndProbeSql</c> on both tables (<see cref="QueryStorePlanMap"/>,
+    /// <see cref="QueryStoreTextStore"/>) only ever writes <c>last_seen</c> and, conditionally, an
+    /// unindexed hash column — so once the index is gone, no indexed column the touch changes remains, and a
+    /// page with fillfactor headroom lets the new tuple stay on its old page: both conditions Postgres's HOT
+    /// optimization needs. Confirmed by <c>git grep</c> against the service and storage code: the only other
+    /// reader of either index is each table's own <c>PruneSql</c> time-sliced <c>DELETE ... WHERE last_seen &lt;
+    /// $1</c> — no reader orders, filters, or range-scans <c>last_seen</c> for anything else. That prune stays
+    /// on the primary key's default plan (a sequential scan bounded by the same margin-day slice it already
+    /// uses); it is not re-tuned here.
+    ///
+    /// <para>Plain <c>DROP INDEX</c> and <c>ALTER TABLE ... SET (fillfactor = ...)</c>, not <c>CONCURRENTLY</c>:
+    /// <c>MigrateAsync</c> wraps every rung in a transaction, and <c>CREATE/DROP INDEX CONCURRENTLY</c> cannot
+    /// run inside one. Both operations here are metadata-only — the index drop does not touch the heap, and
+    /// the fillfactor change only affects pages written from here on — so the brief <c>ACCESS EXCLUSIVE</c>
+    /// each takes is a catalog update, not a rewrite; nothing else in the migrate session holds a competing
+    /// lock on either table at that moment.</para>
+    ///
+    /// <para>Fillfactor 90 is prospective only: existing pages, packed at the old default of 100, do not gain
+    /// HOT headroom until they are rewritten by organic churn (the tables are continuously purged) or a
+    /// deliberate rewrite. No rewrite ships in this rung.</para>
+    /// </summary>
+    private const string V149Sql = @"
+DROP INDEX IF EXISTS collect.idx_query_store_plan_map_last_seen;
+DROP INDEX IF EXISTS collect.idx_query_store_text_last_seen;
+ALTER TABLE collect.query_store_plan_map SET (fillfactor = 90);
+ALTER TABLE collect.query_store_text SET (fillfactor = 90);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every

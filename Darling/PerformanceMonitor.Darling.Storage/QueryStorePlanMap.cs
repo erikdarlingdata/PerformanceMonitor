@@ -53,9 +53,14 @@ public static class QueryStorePlanMap
     public const string LastSeenColumn = "last_seen";
 
     /* This const mirrors the IMMUTABLE migration rung that created the table and stays byte-frozen with it.
-       The LIVE shape differs in one place: V77 relaxed digest to nullable for the #2312 content-less marker
+       The LIVE shape differs in two places: V77 relaxed digest to nullable for the #2312 content-less marker
        rows (a plan whose XML the engine cannot persist gets a map row with a NULL digest, so the probe reads
-       it as known instead of refetching it forever). */
+       it as known instead of refetching it forever), and V149 (#4250) drops the last_seen btree index and
+       sets fillfactor 90, so the liveness touch's UPDATE (see TouchAndProbeSql below) can go HOT: last_seen
+       is the only indexed column that touch ever changed, so once nothing indexes it and the page has
+       fillfactor headroom, the touch stops writing a new index entry and (once the page has room) stops
+       moving the tuple. The prune below (PruneSql) is the only other reader of that index and keeps working
+       off a sequential scan bounded by its own margin-day slice. */
     public const string CreateTableSql = @"CREATE TABLE IF NOT EXISTS collect.query_store_plan_map (
     server_id integer NOT NULL,
     database_name text NOT NULL,
@@ -64,8 +69,7 @@ public static class QueryStorePlanMap
     plan_hash text,
     last_seen timestamp NOT NULL,
     PRIMARY KEY (server_id, database_name, plan_id)
-);
-CREATE INDEX IF NOT EXISTS idx_query_store_plan_map_last_seen ON collect.query_store_plan_map(last_seen);";
+);";
 
     /* Deliberately NO index on digest. Nothing reads this table by digest: readers resolve
        (server_id, database_name, plan_id) -> digest through the primary key, the liveness touch joins on that
