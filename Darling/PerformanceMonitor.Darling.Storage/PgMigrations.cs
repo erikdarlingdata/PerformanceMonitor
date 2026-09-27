@@ -2335,10 +2335,11 @@ CREATE INDEX IF NOT EXISTS idx_read_latency_time
     /// unindexed hash column — so once the index is gone, no indexed column the touch changes remains, and a
     /// page with fillfactor headroom lets the new tuple stay on its old page: both conditions Postgres's HOT
     /// optimization needs. Confirmed by <c>git grep</c> against the service and storage code: the only other
-    /// reader of either index is each table's own <c>PruneSql</c> time-sliced <c>DELETE ... WHERE last_seen &lt;
-    /// $1</c> — no reader orders, filters, or range-scans <c>last_seen</c> for anything else. That prune stays
-    /// on the primary key's default plan (a sequential scan bounded by the same margin-day slice it already
-    /// uses); it is not re-tuned here.
+    /// reader of either index was each table's own <c>PruneSql</c> time-sliced <c>DELETE ... WHERE last_seen &lt;
+    /// $1</c> — no reader orders, filters, or range-scans <c>last_seen</c> for anything else. This change
+    /// replaces that prune on both tables with <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.UnorderedRowCappedDeleteSql"/>:
+    /// one capped sequential pass per batch, with no ordering or subquery over <c>last_seen</c> to lose by
+    /// dropping the index. See that builder's summary for the shape and the measured cost.
     ///
     /// <para>Plain <c>DROP INDEX</c> and <c>ALTER TABLE ... SET (fillfactor = ...)</c>, not <c>CONCURRENTLY</c>:
     /// <c>MigrateAsync</c> wraps every rung in a transaction, and <c>CREATE/DROP INDEX CONCURRENTLY</c> cannot
