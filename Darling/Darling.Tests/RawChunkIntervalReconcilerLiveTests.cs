@@ -212,8 +212,8 @@ WHERE hypertable_schema = 'collect' AND hypertable_name = 'rci_test' AND dimensi
             "TimescaleDB is not available in the DARLING_TEST_PG store — the reconcile needs it.");
 
         /* 28 tables at 36-73 chunks (sum 1,069) + 43 tables at 3-4 chunks (sum 136) = 71 filler tables, 1,205
-           chunks, largest 73 — plus the rated table's 5 gives 72 tables / 1,210 chunks / max 73, per the brief's
-           shape. Uncompressed, so they never enter TableInputsSql's JOIN. */
+           chunks, largest 73 — plus the rated table's 5 gives 72 tables / 1,210 chunks / max 73, the production
+           store's shape. Uncompressed, so they never enter TableInputsSql's JOIN. */
         int[] fillerChunkCounts =
         {
             73, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 36, 36, 36,
