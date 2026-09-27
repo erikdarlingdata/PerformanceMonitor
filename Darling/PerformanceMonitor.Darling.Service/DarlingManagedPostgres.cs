@@ -3037,23 +3037,15 @@ public sealed class DarlingManagedPostgres
                        same here: migrated, no pending file, stale stamp.
                        Re-verify against what is on disk NOW: no new error row may come from darling-managed.conf
                        relative to the file's own current bytes — the file itself is the ground truth once no
-                       pending snapshot survives to compare against. */
+                       pending snapshot survives to compare against. Except DarlingStoreHostProfile.CommandLineOnlyKeys
+                       (port, listen_addresses): an exposed store always starts PostgreSQL with both forced onto
+                       the pg_ctl command line, which outranks the file unconditionally, so the rendered
+                       (always loopback-only) listen_addresses line reports an error row here on every start of
+                       an exposed store even though nothing is actually wrong — same trap and same fix as
+                       ManagedConfMigrationRunner.VerifyStepB below. */
                     var rows = await snapshot(cancellationToken);
                     var managedConfPath = Path.Combine(_dataDirectory, ManagedConfFile.FileName);
-                    var newErrorFromManagedFile = false;
-                    var mismatchedKeys = new List<string>();
-                    foreach (var row in rows)
-                    {
-                        if (row.Error is not null && row.SourceFile is not null
-                            && string.Equals(Path.GetFileName(row.SourceFile), ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            newErrorFromManagedFile = true;
-                            if (row.Name is not null)
-                            {
-                                mismatchedKeys.Add(row.Name);
-                            }
-                        }
-                    }
+                    var (newErrorFromManagedFile, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
 
                     if (newErrorFromManagedFile)
                     {
