@@ -4725,7 +4725,10 @@ public sealed class DarlingWorker : BackgroundService
 
     /// <summary>The bounded statement itself (#4469), pinned by name so a live/plan test can assert its
     /// text and shape directly rather than re-deriving it from the call site. $1 server_id; $2 the floor
-    /// (<c>DateTime.UtcNow - WatermarkFloorLookback</c>, naive UTC).</summary>
+    /// (<c>DateTime.UtcNow - WatermarkFloorLookback</c>, bound naive-UTC (Unspecified) to match the naive
+    /// <c>timestamp</c> column, so Npgsql sends <c>timestamp</c> and TimescaleDB excludes the old chunks
+    /// with no cast on <c>collection_time</c> — the same product-wide contract as
+    /// <see cref="BindActualPlanResolveParameters"/>).</summary>
     internal const string ReadCollectorWatermarksSql = """
         SELECT collector_name, MAX(collection_time)
         FROM collection_log
@@ -4744,7 +4747,10 @@ public sealed class DarlingWorker : BackgroundService
             using var command = new NpgsqlCommand(ReadCollectorWatermarksSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(DateTime.UtcNow - WatermarkFloorLookback);
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow - WatermarkFloorLookback, DateTimeKind.Unspecified),
+            });
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
