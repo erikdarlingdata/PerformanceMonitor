@@ -133,6 +133,14 @@ $ErrorActionPreference = 'Stop'
 $serviceName = 'PerformanceMonitor Darling'
 $serviceExeName = 'PerformanceMonitor.Darling.Service.exe'
 $configName = 'darling.json'
+
+# #4466: how long phase two waits for a process that is still exiting after the service reports Stopped,
+# before it refuses. Get-Service reporting Stopped means the SCM's own state machine reached that state,
+# not that every process the service spawned has finished unwinding - a postmaster or a child process can
+# still be a few seconds from actually exiting. A bound this generous is still bounded: it never turns into
+# an indefinite hang, and it is far short of the two minutes already spent waiting for the service itself.
+$script:InstallTreeClearWaitSeconds = 120
+$script:InstallTreeClearPollSeconds = 2
 $manifestName = 'darling-install-manifest.txt'
 
 function Fail([string]$message) { Write-Host "ERROR: $message" -ForegroundColor Red; exit 1 }
@@ -757,6 +765,31 @@ function Get-DarlingProcessesUnderPath([string]$root) {
     }
 
     return @($hits)
+}
+
+# #4466: Get-Service reporting Stopped is the SCM's state, not proof that every process the service spawned
+# has actually exited yet - a postmaster (or another child) can still be a moment from unwinding when phase
+# two takes its snapshot, and that moment alone was enough to send an operator into the refusal below with
+# nothing wrong. This polls Get-DarlingProcessesUnderPath until it comes back empty or $waitSeconds runs
+# out, printing what it is waiting on the first time it sees a hit, so phase two only ever has to look once
+# it returns. Factored out so it can be driven with a short bound and a fake process in a test, without
+# waiting on a real two-minute service stop to exercise it.
+function Wait-DarlingInstallTreeClear([string]$root, [int]$waitSeconds, [int]$pollSeconds) {
+    $deadline = (Get-Date).AddSeconds($waitSeconds)
+    $announced = $false
+    $holding = @(Get-DarlingProcessesUnderPath $root)
+
+    while ($holding.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        if (-not $announced) {
+            $names = @($holding | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
+            Note "Still exiting: $($names -join ', '). Waiting up to $waitSeconds seconds for the install tree to clear..."
+            $announced = $true
+        }
+        Start-Sleep -Seconds $pollSeconds
+        $holding = @(Get-DarlingProcessesUnderPath $root)
+    }
+
+    return @($holding)
 }
 
 # True for a process that stopping the service will take with it: the service's own executable, and
@@ -1837,6 +1870,14 @@ Good "Service is stopped."
 # than the normal one - most often a postmaster under pg-runtime that outlived the service stop, which is
 # precisely the process nothing may kill. Phase one cannot see this and phase two cannot see phase one's
 # cases without an outage, which is why there are two.
+#
+# #4466: Get-Service already reported Stopped above, but that is the SCM's state, not proof every process
+# the service spawned has actually finished exiting - so this gives one a bounded window to finish before
+# treating its presence as the interesting case. -SkipStopGuard skips the wait along with the refusal it
+# exists to avoid, same as it always has.
+if (-not $SkipStopGuard) {
+    Wait-DarlingInstallTreeClear $InstallRoot $script:InstallTreeClearWaitSeconds $script:InstallTreeClearPollSeconds | Out-Null
+}
 $stillHolding = Get-DarlingProcessesUnderPath $InstallRoot
 if ($stillHolding.Count -gt 0 -and -not $SkipStopGuard) {
     $names = @($stillHolding | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
