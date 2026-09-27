@@ -777,12 +777,13 @@ ORDER BY range_start", connection);
     /// chunk older than the head window except the one chunk the hole hour itself falls in — never the whole
     /// eight-day history a pre-#4477 build would have scanned raw for this one missing hour.
     ///
-    /// <para><b>RUNTIME RED on dev, not a compile-time one.</b> This test references only members
-    /// (<c>DarlingFleetReader.CeilingHour</c>, the private <c>ReadFailingCollectorCountsAsync</c> reached by
-    /// reflection, <see cref="RunPolicyAsync"/>) that already exist on <c>origin/dev</c>, so it compiles
-    /// there. It fails at RUNTIME there because dev's guard has no hole-hours plan: ANY missing hour makes it
-    /// return unusable, the caller falls back to <see cref="DarlingFleetReader.FleetCollectionHealthSql"/> for
-    /// the WHOLE window, and every old chunk this test asserts untouched gets scanned instead.</para>
+    /// <para><b>RED on dev.</b> <c>CollectionHealthRollupSupport.RollupPlanAsync</c> and its
+    /// <c>RollupPlan.HoleHours</c> member do not exist before #4477, so this test fails to build there — the
+    /// only shape a fix that adds a whole new return type can be RED against pre-fix code with. Even if the
+    /// plan assertions were stripped, dev's guard would still fail this test at RUNTIME: it has no
+    /// hole-hours concept, ANY missing hour makes the whole read unusable, the caller falls back to
+    /// <see cref="DarlingFleetReader.FleetCollectionHealthSql"/> for the WHOLE window, and every old chunk
+    /// this test asserts untouched would be scanned instead.</para>
     /// </summary>
     [Fact]
     public async Task ProductPath_OneHoleHour_NeverScansAChunkOlderThanTheHeadOrTheHole_AgainstDevPostgres()
