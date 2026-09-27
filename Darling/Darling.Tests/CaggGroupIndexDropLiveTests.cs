@@ -1,0 +1,224 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Npgsql;
+using PerformanceMonitor.Darling.Storage;
+using Xunit;
+
+namespace Darling.Tests;
+
+/// <summary>
+/// #4503: on a FRESH migrate, the six Query Store rollups' materializations carry EXACTLY the group
+/// indexes an UPGRADED store keeps after V152's <c>DO</c> block drops the unread ones — the same key
+/// columns, the same <c>bucket DESC</c> order, and the same PostgreSQL-assigned name — and nothing else.
+///
+/// <para><b>#1776 own-store</b> — mints its own scratch database (<see cref="ScratchPostgres"/>) so the
+/// index catalog it reads is not shared with any other live class, the same reason
+/// <see cref="IntervalDedupMaterializationIndexesTests"/> does.</para>
+/// </summary>
+public sealed class CaggGroupIndexDropLiveTests
+{
+    /// <summary>The six views #4503 touches, with the key column(s) each KEEPS.</summary>
+    private static readonly (string View, string[] KeptColumns)[] Views =
+    {
+        (TimescaleSupport.QueryStoreStatsHourlyView, new[] { "server_id", "server_name" }),
+        (TimescaleSupport.QueryStoreStatsCorrectedHourlyView, new[] { "server_id", "server_name" }),
+        (TimescaleSupport.QueryStoreStatsDailyView, new[] { "server_id" }),
+        (TimescaleSupport.QueryStoreStatsCorrectedDailyView, new[] { "server_id" }),
+        (TimescaleSupport.QueryStoreStatsIntervalDailyView, new[] { "server_id" }),
+        (TimescaleSupport.QueryStoreStatsDayGrainDailyView, new[] { "server_id" }),
+    };
+
+    /// <summary>Every column any of the six views' default <c>create_group_indexes</c> would have built,
+    /// beyond what <see cref="Views"/> keeps — the DROPPED set this pin proves absent.</summary>
+    private static readonly IReadOnlyDictionary<string, string[]> DroppedColumns = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        [TimescaleSupport.QueryStoreStatsHourlyView] = new[] { "database_name", "module_name", "query_hash" },
+        [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = new[] { "database_name", "module_name", "query_hash" },
+        [TimescaleSupport.QueryStoreStatsDailyView] = new[] { "database_name", "module_name", "query_hash", "server_name" },
+        [TimescaleSupport.QueryStoreStatsCorrectedDailyView] = new[] { "database_name", "module_name", "query_hash", "server_name" },
+        [TimescaleSupport.QueryStoreStatsIntervalDailyView] = new[]
+        {
+            "database_name", "execution_type_desc", "first_execution_time", "module_name", "plan_id",
+            "query_hash", "query_id", "replica_role", "runtime_stats_interval_id", "server_name",
+        },
+        [TimescaleSupport.QueryStoreStatsDayGrainDailyView] = new[] { "database_name", "module_name", "query_hash", "server_name" },
+    };
+
+    /// <summary>
+    /// (a) A fresh migrate to the top, then the aggregates ensured: on each of the six, every DROPPED
+    /// column's group index is absent, every KEPT column's is present, and the plain <c>bucket_idx</c>
+    /// survives too. RED on <c>origin/dev</c> — a fresh store there still carries the dropped indexes,
+    /// because <c>create_group_indexes = false</c> and the kept-index follow-up did not exist before #4503.
+    /// </summary>
+    [Fact]
+    public async Task FreshMigrate_KeepsOnlyTheSurvivingGroupIndexes_OnAllSixRollups()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4503 fresh-vs-upgraded index test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
+                "the dev fixture is expected to have TimescaleDB installed");
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+            foreach (var (view, keptColumns) in Views)
+            {
+                var (matSchema, matName) = await MaterializationOfAsync(connection, view, ct);
+                var indexes = await GroupIndexColumnsAsync(connection, matSchema, matName, ct);
+
+                foreach (var dropped in DroppedColumns[view])
+                {
+                    Assert.DoesNotContain(dropped, indexes);
+                }
+
+                foreach (var kept in keptColumns)
+                {
+                    Assert.Contains(kept, indexes);
+                }
+
+                /* The plain bucket index — never a group index, never touched by #4503 either side. */
+                var plainBucket = await ScalarBoolAsync(connection,
+                    $"SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = '{matSchema}' AND tablename = '{matName}' AND indexdef ~ 'USING btree \\(bucket DESC\\)$')",
+                    ct);
+                Assert.True(plainBucket, $"{view}'s materialization lost its plain bucket index");
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>
+    /// (c) The kept-index build is idempotent: running <see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/>
+    /// a second time issues no error and leaves the SAME <c>pg_indexes</c> rows on every one of the six
+    /// materializations — the follow-up's own catalog read finds each kept index already present and
+    /// creates nothing more.
+    /// </summary>
+    [Fact]
+    public async Task EnsureContinuousAggregates_RunTwice_IsIdempotent_OnTheKeptIndexes()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4503 idempotency test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgMigrations.MigrateAsync(connection, ct);
+            Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct));
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+            var before = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (var (view, _) in Views)
+            {
+                var (matSchema, matName) = await MaterializationOfAsync(connection, view, ct);
+                before[view] = await IndexDefinitionsAsync(connection, matSchema, matName, ct);
+            }
+
+            /* Second pass — no error. */
+            await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+            foreach (var (view, _) in Views)
+            {
+                var (matSchema, matName) = await MaterializationOfAsync(connection, view, ct);
+                var after = await IndexDefinitionsAsync(connection, matSchema, matName, ct);
+                Assert.Equal(before[view], after);
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    private static async Task<(string Schema, string Name)> MaterializationOfAsync(NpgsqlConnection connection, string view, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT materialization_hypertable_schema, materialization_hypertable_name FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = $1", connection);
+        command.Parameters.AddWithValue(view);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct), $"{view} was not created");
+        return (reader.GetString(0), reader.GetString(1));
+    }
+
+    private static async Task<List<string>> IndexDefinitionsAsync(NpgsqlConnection connection, string schema, string table, CancellationToken ct)
+    {
+        var definitions = new List<string>();
+        await using var command = new NpgsqlCommand(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 ORDER BY indexname", connection);
+        command.Parameters.AddWithValue(schema);
+        command.Parameters.AddWithValue(table);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            definitions.Add(reader.GetString(0));
+        }
+
+        return definitions;
+    }
+
+    /// <summary>The set of columns carrying a two-key <c>(column, bucket)</c> group index on the given materialization.</summary>
+    private static async Task<HashSet<string>> GroupIndexColumnsAsync(NpgsqlConnection connection, string schema, string table, CancellationToken ct)
+    {
+        var columns = new HashSet<string>(StringComparer.Ordinal);
+        await using var command = new NpgsqlCommand(@"
+SELECT a1.attname
+FROM pg_index i
+JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+WHERE i.indrelid = format('%I.%I', $1, $2)::regclass
+AND   i.indnatts = 2
+AND   a2.attname = 'bucket'", connection);
+        command.Parameters.AddWithValue(schema);
+        command.Parameters.AddWithValue(table);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            columns.Add(reader.GetString(0));
+        }
+
+        return columns;
+    }
+
+    private static async Task<bool> ScalarBoolAsync(NpgsqlConnection connection, string sql, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        var result = await command.ExecuteScalarAsync(ct);
+        return result is bool value && value;
+    }
+}
