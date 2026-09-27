@@ -168,9 +168,24 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
     /// #4197's headline correctness pin: after real writes through the product's own
     /// <c>WriteBatchAsync</c>, the cache's advanced watermark equals what a fresh
     /// <c>GetLastCollectedTimeAsync</c>/<c>GetLastCollectedInstanceIdAsync</c> read of the store returns.
-    /// Includes an out-of-order batch and a replay (a batch OLDER than the cache) to prove the value never
-    /// moves backwards, and sub-microsecond-tick / mixed DateTimeKind values so any conversion on the way
-    /// into the store would show up as a mismatch here.
+    /// Includes an out-of-order batch (newest row not last in the list) and sub-microsecond-tick / mixed
+    /// DateTimeKind values so any conversion on the way into the store would show up as a mismatch here.
+    ///
+    /// <para><b>Why the third batch's <c>instance_id</c> only goes UP, never down (#4487).</b> job_history's
+    /// numeric watermark is read as the max of the NEWEST collected batch
+    /// (<see cref="DarlingCollectorRunner.GetLastCollectedInstanceIdAsync"/>'s collection_time-scoped query),
+    /// not an all-time max — see that method's own remarks for why. Every REAL collector arm hands this batch
+    /// query the target's own current max as its floor (the steady arm's <c>instance_id &gt; @last_instance_id</c>;
+    /// the regressed and archival-emptied arms re-read a bounded window whose max is the target's own current
+    /// max; the first run reads everything), so a genuinely later batch's max can never be LOWER than an
+    /// earlier one's — the only way that happens is an identity reset, which the #4487 guard now detects and
+    /// invalidates the cache for instead of merging it in — see
+    /// <c>ServerWatermarkCacheTests</c>' own coverage of a regressed batch's invalidate-not-advance rule.
+    /// A batch that violated this (an ordinary batch with a lower newest id than the one before it) is not a
+    /// shape the product can produce, so this test does not plant one; the REPLAY batch here is older only
+    /// in <c>run_datetime</c> (job_history's timestamp watermark, read by a PLAIN unscoped MAX — see
+    /// <see cref="DarlingCollectorRunner.GetLastCollectedTimeAsync"/> — which a replay can legitimately
+    /// undercut without regressing the identity at all), never in <c>instance_id</c>.</para>
     ///
     /// <para>RED on dev: <c>ResolveServerWatermarkAsync</c>/<c>AdvanceServerWatermark</c> do not exist there
     /// (this branch's own extraction), so this fails to compile against dev.</para>
@@ -216,12 +231,15 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             Assert.True(written2 > 0);
             Advance(runner, server, definition, batch2, fromUtc: false);
 
-            /* Batch 3: a REPLAY — every value OLDER than what is already cached. The cache must not move
-               backwards; DateTimeKind.Utc here, to prove a frame difference alone does not fool the max. */
+            /* Batch 3: a REPLAY in TIME only — an older run_datetime (DateTimeKind.Utc, to prove a frame
+               difference alone does not fool the max) than what is already cached, but a HIGHER instance_id
+               than batch 2's, exactly as every real collector arm produces it (see the class remarks above
+               for why a lower-id newest batch cannot happen here). Proves the timestamp watermark does not
+               move backwards even while the numeric one legitimately advances on the very same batch. */
             var replayTime = DateTime.SpecifyKind(t1.AddMinutes(-30), DateTimeKind.Utc);
             var batch3 = new List<JobHistoryCollector.Row>
             {
-                new() { InstanceId = 50, JobId = Guid.NewGuid().ToString(), JobName = "j1", RunDateTime = replayTime, RunStatus = 1 },
+                new() { InstanceId = 103, JobId = Guid.NewGuid().ToString(), JobName = "j1", RunDateTime = replayTime, RunStatus = 1 },
             };
             var context3 = MakeContext(server, DateTime.UtcNow);
             var written3 = await WriteBatchAsync(runner, connection, definition, batch3, server, context3.CollectionTime, context3, ct);
@@ -236,9 +254,12 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
 
             Assert.Equal(freshValue, cachedValue);
             Assert.Equal(freshNumeric, cachedNumeric);
-            /* The replay must not have moved anything backwards: the max is still t2b / 102. */
+            /* The run_datetime replay must not have moved the TIMESTAMP watermark backwards: it is still
+               t2b, the max over ALL batches (a plain unscoped MAX — see GetLastCollectedTimeAsync). The
+               NUMERIC watermark legitimately advances to 103 — the newest batch's own max — on this same
+               batch, because instance_id only ever goes up on a real collector arm. */
             Assert.Equal(DateTime.SpecifyKind(t2b, DateTimeKind.Unspecified), cachedValue!.Value, TimeSpan.FromSeconds(1));
-            Assert.Equal(102L, cachedNumeric);
+            Assert.Equal(103L, cachedNumeric);
 
             bodySucceeded = true;
         }
