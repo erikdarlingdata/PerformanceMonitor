@@ -548,56 +548,99 @@ public sealed partial class ViewerDataService
     private Dictionary<int, List<CollectorHealthRow>>? _fleetHealthByServer;
     private DateTime _fleetHealthByServerAtUtc;
 
-    /// <summary>Re-probe at most this often (#4226) — the same "benignly racy" TTL-cache shape
-    /// <see cref="GetRollupAvailabilityAsync"/> already uses: a fresh call within the window is served from
-    /// memory, and concurrent callers racing a cold cache (the Overview loader's per-server lanes, the status
-    /// bar's own tick) may each start one scan rather than sharing a single in-flight one. That is still one to
-    /// a handful of fleet-wide rollup reads per tick, not the 43 raw per-server scans this replaces.</summary>
+    /// <summary>#4477: the single-flight gate <see cref="GetFleetCollectionHealthByServerAsync"/> now takes.
+    /// The old "benignly racy" TTL cache let every concurrent caller that missed a cold
+    /// <see cref="_fleetHealthByServer"/> start its OWN fleet-wide scan, because nothing was shared until the
+    /// first one finished and wrote back — on a production fleet the Overview loader's per-server lanes did
+    /// this once per card, measured at 40 store round trips in one 4.5-minute session (#4477). This field holds
+    /// the ONE in-flight fetch so every racing caller inside the same refresh awaits the SAME task instead of
+    /// starting its own.</summary>
+    private Task<Dictionary<int, List<CollectorHealthRow>>>? _fleetHealthByServerInFlight;
+
+    /// <summary>Guards <see cref="_fleetHealthByServer"/> / <see cref="_fleetHealthByServerInFlight"/> — a plain
+    /// lock is enough because the section it protects never awaits.</summary>
+    private readonly object _fleetHealthByServerGate = new();
+
+    /// <summary>Re-probe at most this often (#4226): a fresh call within the window is served from memory with
+    /// no store round trip at all.</summary>
     private static readonly TimeSpan FleetHealthByServerMemoLifetime = TimeSpan.FromSeconds(20);
 
     /// <summary>
     /// The 7-day per-(server, collector) health breakdown, ONE store round trip (rollup-backed when usable,
     /// else the exact raw scan), grouped by server for the caller — the read #4226 gives the Overview cards and
     /// the status bar so a 30 s refresh tick costs one fleet-wide read instead of 43 per-server raw scans plus a
-    /// second raw fleet scan. Memoized for <see cref="FleetHealthByServerMemoLifetime"/>.
+    /// second raw fleet scan. Memoized for <see cref="FleetHealthByServerMemoLifetime"/>, and single-flighted
+    /// (#4477) so a whole Overview refresh — every card's lane racing a cold cache at once — still issues
+    /// exactly one fleet-wide statement rather than one per racing lane.
     /// </summary>
-    public async Task<Dictionary<int, List<CollectorHealthRow>>> GetFleetCollectionHealthByServerAsync(CancellationToken cancellationToken = default)
+    public Task<Dictionary<int, List<CollectorHealthRow>>> GetFleetCollectionHealthByServerAsync(CancellationToken cancellationToken = default)
     {
-        if (_fleetHealthByServer is not null && DateTime.UtcNow - _fleetHealthByServerAtUtc < FleetHealthByServerMemoLifetime)
+        lock (_fleetHealthByServerGate)
         {
-            return _fleetHealthByServer;
-        }
-
-        var now = DateTime.UtcNow;
-        var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
-        var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
-        var composed = await CollectionHealthRollupSupport.RollupUsableAsync(_dataSource, headEnd, cancellationToken);
-
-        await using var command = _dataSource.CreateCommand(composed ? FleetCollectionHealthByServerComposedSql : FleetCollectionHealthByServerSql);
-        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
-        if (composed)
-        {
-            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
-        }
-
-        var byServer = new Dictionary<int, List<CollectorHealthRow>>();
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            var serverId = reader.GetInt32(0);
-            if (!byServer.TryGetValue(serverId, out var rows))
+            if (_fleetHealthByServer is not null && DateTime.UtcNow - _fleetHealthByServerAtUtc < FleetHealthByServerMemoLifetime)
             {
-                rows = new List<CollectorHealthRow>();
-                byServer[serverId] = rows;
+                return Task.FromResult(_fleetHealthByServer);
             }
 
-            rows.Add(MapFleetByServerRow(reader));
+            /* #4477: a fetch is already running for this refresh — every other racing caller awaits IT rather
+               than starting a second fleet-wide scan. The fetch runs with no caller's cancellation token (it is
+               shared work, not any one caller's), so one caller cancelling cannot cancel the read for the
+               others still waiting on it. */
+            _fleetHealthByServerInFlight ??= FetchFleetCollectionHealthByServerAsync();
+            return _fleetHealthByServerInFlight;
         }
+    }
 
-        _fleetHealthByServer = byServer;
-        _fleetHealthByServerAtUtc = now;
-        return byServer;
+    /// <summary>The actual fleet-wide fetch behind <see cref="GetFleetCollectionHealthByServerAsync"/>'s
+    /// single-flight gate — runs exactly once per cold cache regardless of how many callers are racing it.</summary>
+    private async Task<Dictionary<int, List<CollectorHealthRow>>> FetchFleetCollectionHealthByServerAsync()
+    {
+        try
+        {
+            var now = DateTime.UtcNow;
+            var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
+            var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
+            var composed = await CollectionHealthRollupSupport.RollupUsableAsync(_dataSource, headEnd, CancellationToken.None);
+
+            await using var command = _dataSource.CreateCommand(composed ? FleetCollectionHealthByServerComposedSql : FleetCollectionHealthByServerSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
+            if (composed)
+            {
+                command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
+            }
+
+            var byServer = new Dictionary<int, List<CollectorHealthRow>>();
+            await using var reader = await command.ExecuteReaderAsync(CancellationToken.None);
+            while (await reader.ReadAsync(CancellationToken.None))
+            {
+                var serverId = reader.GetInt32(0);
+                if (!byServer.TryGetValue(serverId, out var rows))
+                {
+                    rows = new List<CollectorHealthRow>();
+                    byServer[serverId] = rows;
+                }
+
+                rows.Add(MapFleetByServerRow(reader));
+            }
+
+            lock (_fleetHealthByServerGate)
+            {
+                _fleetHealthByServer = byServer;
+                _fleetHealthByServerAtUtc = now;
+            }
+
+            return byServer;
+        }
+        finally
+        {
+            /* Release the gate whether the fetch succeeded or threw, so a failed scan does not wedge every
+               later caller onto a completed-with-exception task forever — the next call starts a fresh one. */
+            lock (_fleetHealthByServerGate)
+            {
+                _fleetHealthByServerInFlight = null;
+            }
+        }
     }
 
     /// <summary>Maps one row of <see cref="FleetCollectionHealthByServerSql"/> / its composed twin (ordinals

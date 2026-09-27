@@ -55,8 +55,27 @@ CROSS JOIN LATERAL
 ) AS latest
 WHERE s.server_id <> 0";
 
-    /// <summary>The store's on-disk size in bytes (status-bar Database field). No parameters.</summary>
+    /// <summary>The store's on-disk size in bytes (status-bar Database field). No parameters.
+    ///
+    /// <para><c>pg_database_size</c> walks every file in the database directory, so its cost scales with the
+    /// store rather than with the one number it returns (#4477 measured 468 ms mean / 1.96 s worst-case on a
+    /// production store, called on every status-bar refresh — 9 calls in one 4.5-minute session). See
+    /// <see cref="StoreSizeCacheLifetime"/> for why the fix here is a cache rather than a cheaper query.</para>
+    /// </summary>
     public const string StoreSizeSql = "SELECT pg_database_size(current_database())";
+
+    /// <summary>How long <see cref="GetStoreSizeBytesAsync"/> serves its cached reading before it re-runs
+    /// <see cref="StoreSizeSql"/> (#4477). Five minutes, not the refresh timer's own 10-600 s
+    /// <c>NocRefreshIntervalSeconds</c>: the status-bar field is a coarse operator signal ("about how big is
+    /// the store"), never a threshold or a stored numeric value, and a store's on-disk size does not move
+    /// enough within five minutes for the field to read stale to a human glancing at it — the same order of
+    /// staleness <see cref="StoreSelfMetrics.LatestStoreSizeSql"/> already accepts for the service's own
+    /// disk-pressure check (mean ~59 min between sweeps there). Five minutes keeps this field visibly fresher
+    /// than that self-metrics row while cutting the read from every refresh tick to at most one per window.</summary>
+    public static readonly TimeSpan StoreSizeCacheLifetime = TimeSpan.FromMinutes(5);
+
+    private long? _cachedStoreSizeBytes;
+    private DateTime _cachedStoreSizeAtUtc;
 
     /// <summary>
     /// Reads MAX(collection_time) for every server in a single query, keyed by server_id. A server with no
@@ -80,12 +99,28 @@ WHERE s.server_id <> 0";
         return result;
     }
 
-    /// <summary>The store database's size in bytes, or null when it can't be read.</summary>
+    /// <summary>The store database's size in bytes, or null when it can't be read. Cached for
+    /// <see cref="StoreSizeCacheLifetime"/> (#4477): a call inside the window returns the cached reading with
+    /// no store round trip at all, rather than re-running <see cref="StoreSizeSql"/>'s whole-file-directory
+    /// walk on every status-bar refresh.</summary>
     public async Task<long?> GetStoreSizeBytesAsync(CancellationToken cancellationToken = default)
     {
+        if (_cachedStoreSizeBytes is not null && DateTime.UtcNow - _cachedStoreSizeAtUtc < StoreSizeCacheLifetime)
+        {
+            return _cachedStoreSizeBytes;
+        }
+
         await using var command = _dataSource.CreateCommand(StoreSizeSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         var result = await command.ExecuteScalarAsync(cancellationToken);
-        return result is null || result == DBNull.Value ? null : Convert.ToInt64(result);
+        var bytes = result is null || result == DBNull.Value ? (long?)null : Convert.ToInt64(result);
+
+        if (bytes is not null)
+        {
+            _cachedStoreSizeBytes = bytes;
+            _cachedStoreSizeAtUtc = DateTime.UtcNow;
+        }
+
+        return bytes;
     }
 }
