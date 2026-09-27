@@ -85,7 +85,7 @@ public sealed class McpToolsListBudgetTests
     /// here.</item>
     /// </list>
     /// </summary>
-    /* #4471: +185 bytes for get_ag_health's new limit parameter (141 bytes for its own served description;
+    /* #4471: +199 bytes for get_ag_health's new limit parameter (155 bytes for its own served description;
        the served head is unchanged, since the size-budget guidance for the cap moved to the tool's
        <<GUIDE>> tail, which is not served in tools/list and so is not counted here). */
     /* #4198/#4199 (M2b): +839 bytes for get_fleet_overview's worst_only/band filters (2 new params) and
@@ -190,7 +190,7 @@ public sealed class McpToolsListBudgetTests
     // #4452 (merge): re-measured on the tree combining dev's #4442 get_read_latency addition with this
     // branch's scheduler-issues tool description growth (+95). Constant set to the value
     // McpToolsListBudgetTests itself measured on the merged tree, not the two deltas added by hand.
-    private const int TotalCeilingBytes = 176_462;
+    private const int TotalCeilingBytes = 176_476;
 
 
 
