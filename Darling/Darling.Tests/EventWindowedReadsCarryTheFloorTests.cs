@@ -51,9 +51,11 @@ public sealed class EventWindowedReadsCarryTheFloorTests
         /* 2, not 1: #4229's own fix split the single job_history scan into two — job_stats (the per-job
            GROUP BY) and base (the newest-2000 selection) — so this is the "two-CTE reads have TWO scans"
            case the class summary calls out, and a floor on only one would leave the other opening every
-           chunk again. */
-        { nameof(ViewerDataService) + ".BuildJobHistorySql(false)", ViewerDataService.BuildJobHistorySql(scopedToServer: false), 2 },
-        { nameof(ViewerDataService) + ".BuildJobHistorySql(true)", ViewerDataService.BuildJobHistorySql(scopedToServer: true), 2 },
+           chunk again. #4477: 3, not 2 — the per-server top-N rewrite added a third scan (active_servers,
+           the DISTINCT server_id driver) alongside the per-server LATERAL top-N scan and the job_stats
+           LATERAL, each carrying its own floor. */
+        { nameof(ViewerDataService) + ".BuildJobHistorySql(false)", ViewerDataService.BuildJobHistorySql(scopedToServer: false), 3 },
+        { nameof(ViewerDataService) + ".BuildJobHistorySql(true)", ViewerDataService.BuildJobHistorySql(scopedToServer: true), 3 },
     };
 
     [Theory]
