@@ -179,6 +179,9 @@ internal static class DarlingAgReader
                 ServerId = first.ServerId,
                 ServerName = first.ServerName,
                 AgName = first.AgName,
+                /* Every replica row of one AG carries the SAME group_id (V151); tolerate a row or two still
+                   NULL mid-upgrade rather than requiring every row in the group to agree. */
+                GroupId = replicaViews.Select(r => r.GroupId).FirstOrDefault(g => !string.IsNullOrWhiteSpace(g)),
                 CollectionTime = first.CollectionTime,
                 DatabaseCollectionTime = dbRows is { Count: > 0 } ? dbRows[0].CollectionTime : null,
                 PrimaryReplica = replicaViews.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName,
@@ -220,7 +223,7 @@ internal static class DarlingAgReader
                returns local information only off the primary), so exact-set identity would double-count it.
                Shares AgTopology's counting helper so the viewer and this read cannot drift back apart. */
             DistinctAgCount = AgTopology.CountDistinctGroups(
-                groups.Select(g => (g.AgName, (IEnumerable<string?>)g.Replicas.Select(r => r.ReplicaServerName)))),
+                groups.Select(g => (g.AgName, (IEnumerable<string?>)g.Replicas.Select(r => r.ReplicaServerName), g.GroupId))),
             WorstSeverity = groups.Count == 0 ? HealthSeverity.Unknown : groups.Max(g => g.Severity),
             AvailabilityGroups = pagedGroups,
             GroupsReturned = pagedGroups.Count,
@@ -290,6 +293,7 @@ internal static class DarlingAgReader
             AvailabilityModeDesc = row.AvailabilityModeDesc,
             FailoverModeDesc = row.FailoverModeDesc,
             EndpointUrl = row.EndpointUrl,
+            GroupId = row.GroupId,
         };
     }
 
@@ -470,7 +474,8 @@ internal static class DarlingAgReader
             rows.Add(new ReplicaRow(
                 row.ServerId, row.ServerName, row.CollectionTime, row.AgName, row.ReplicaServerName, row.RoleDesc,
                 row.IsLocal, row.OperationalStateDesc, row.ConnectedStateDesc, row.RecoveryHealthDesc,
-                row.SynchronizationHealthDesc, row.AvailabilityModeDesc, row.FailoverModeDesc, row.EndpointUrl));
+                row.SynchronizationHealthDesc, row.AvailabilityModeDesc, row.FailoverModeDesc, row.EndpointUrl,
+                row.GroupId));
         }
 
         return rows;
@@ -488,7 +493,7 @@ internal static class DarlingAgReader
                 row.ServerId, row.ServerName, row.CollectionTime, row.AgName, row.DatabaseName, row.ReplicaServerName,
                 row.IsLocal, row.SynchronizationStateDesc, row.LastHardenedLsn, row.LastCommitLsn, row.LogSendQueueSize,
                 row.RedoQueueSize, row.LogSendRate, row.RedoRate, row.IsSuspended, row.SuspendReasonDesc,
-                row.AvailabilityModeDesc, row.SecondaryLagSeconds));
+                row.AvailabilityModeDesc, row.SecondaryLagSeconds, row.GroupId));
         }
 
         return rows;
@@ -511,7 +516,8 @@ internal static class DarlingAgReader
         string? SynchronizationHealthDesc,
         string? AvailabilityModeDesc,
         string? FailoverModeDesc,
-        string? EndpointUrl);
+        string? EndpointUrl,
+        string? GroupId);
 
     /// <summary>One database-grain row, exactly as <c>collect.ag_database_replica_states</c> stores it. Queue sizes
     /// are KB and rates KB/s (the DMV's units), both instantaneous gauges rather than counters.</summary>
@@ -533,7 +539,8 @@ internal static class DarlingAgReader
         bool? IsSuspended,
         string? SuspendReasonDesc,
         string? AvailabilityModeDesc,
-        long? SecondaryLagSeconds);
+        long? SecondaryLagSeconds,
+        string? GroupId);
 }
 
 /// <summary>One replica inside a group, pre-banded. Every <c>*_severity</c> is derived server-side (R1).</summary>
@@ -568,6 +575,10 @@ public sealed class AgReplicaView
     [JsonPropertyName("availability_mode")] public string? AvailabilityModeDesc { get; init; }
     [JsonPropertyName("failover_mode")] public string? FailoverModeDesc { get; init; }
     [JsonPropertyName("endpoint_url")] public string? EndpointUrl { get; init; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475). Null on a row collected before
+    /// this column existed.</summary>
+    [JsonPropertyName("group_id")] public string? GroupId { get; init; }
 }
 
 /// <summary>One database-on-a-replica row inside a group, pre-banded.</summary>
@@ -614,6 +625,11 @@ public sealed class AvailabilityGroupView
 
     [JsonPropertyName("server_id")] public int ServerId { get; init; }
     [JsonPropertyName("ag_name")] public string? AgName { get; init; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475) — the same GUID the engine stamps
+    /// on every replica of this AG, taken from whichever replica row carried it. Null when every replica row in
+    /// this group predates V151.</summary>
+    [JsonPropertyName("group_id")] public string? GroupId { get; init; }
 
     /// <summary>When the reporting server's newest REPLICA-grain snapshot was taken (naive UTC). The collectors
     /// write nothing for a server with no AGs, so a group that stops refreshing keeps its last instant here —

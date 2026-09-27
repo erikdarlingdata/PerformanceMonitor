@@ -211,6 +211,10 @@ public static class AgTopology
                 DatabaseCollectionTime = dbRows is { Count: > 0 } ? dbRows[0].CollectionTime : null,
                 PrimaryReplica = replicaItems.FirstOrDefault(r => r.IsPrimary)?.ReplicaServerName,
                 Severity = worst,
+                /* Every replica row of one AG carries the SAME group_id (the engine stamps one id per AG), so
+                   the first non-null one found is the card's — tolerant of a row or two still NULL mid-upgrade
+                   rather than requiring every row to agree. */
+                GroupId = replicaItems.Select(r => r.GroupId).FirstOrDefault(g => !string.IsNullOrWhiteSpace(g)),
             };
 
             /* Replicas/Databases are get-only ObservableCollections (#4238) — populated here, once, rather than
@@ -272,30 +276,59 @@ public static class AgTopology
         ArgumentNullException.ThrowIfNull(cards);
 
         return (
-            CountDistinctGroups(cards.Select(c => (c.AgName, (IEnumerable<string?>)c.Replicas.Select(r => r.ReplicaServerName)))),
+            CountDistinctGroups(cards.Select(c => (c.AgName, (IEnumerable<string?>)c.Replicas.Select(r => r.ReplicaServerName), c.GroupId))),
             cards.Select(c => c.ServerId).Distinct().Count(),
             cards.Count);
     }
 
     /// <summary>
-    /// Counts distinct AG groups by connected components (#4475): two members with the same name
-    /// (case-insensitive) union into one group when their replica-name sets overlap (share at least one name,
-    /// case-insensitive); a member with an EMPTY replica set unions ONLY with other same-named EMPTY members
-    /// (name-only matching among themselves), never with a same-named member that has replicas, since nothing
-    /// on an empty row ties it to one specific AG over another. Members with
-    /// different names never union, regardless of their replica sets. Shared by <see cref="Counts"/> and the
-    /// MCP/web AG reader's equivalent distinct-AG count (<c>DarlingAgReader.Build</c>), so the two surfaces
-    /// cannot drift back apart. No store read: both callers already carry the replica names on the rows they
-    /// group.
+    /// Counts distinct AG groups by connected components (#4475), with a members overload that carries no
+    /// <c>group_id</c> — every member falls back to the name-plus-overlap rule below, unchanged from before
+    /// V151. Kept so the pre-existing id-less callers and pins compile and behave exactly as before.
     /// </summary>
     public static int CountDistinctGroups(IEnumerable<(string? AgName, IEnumerable<string?> ReplicaServerNames)> members)
     {
         ArgumentNullException.ThrowIfNull(members);
 
+        return CountDistinctGroups(members.Select(m => (m.AgName, m.ReplicaServerNames, (string?)null)));
+    }
+
+    /// <summary>
+    /// Counts distinct AG groups by connected components, extended for <c>sys.availability_groups.group_id</c>
+    /// (#4475/V151). <b>The count rule:</b>
+    /// <list type="bullet">
+    /// <item>A member that carries a <see cref="Guid"/>-shaped <c>GroupId</c> (case-insensitive text compare)
+    /// unions with every OTHER member whose <c>GroupId</c> matches it EXACTLY — the engine stamps the same GUID
+    /// on every replica of one AG, so this closes the one gap the name-plus-overlap rule alone could not: two
+    /// monitored SECONDARIES of one AG, with its primary unmonitored, share no replica name with each other
+    /// (each reports only itself under <c>sys.dm_hadr_availability_replica_states</c>'s local-only rule), so
+    /// they union on group_id alone even though their replica-name sets are disjoint.</item>
+    /// <item>Two members that BOTH carry a group_id, but DIFFERENT ones, never union — even when they share a
+    /// name and their replica sets overlap. A group_id is definitive: two different ids can never mean the same
+    /// AG, so nothing below overrides that verdict.</item>
+    /// <item>A member with NO group_id (a row collected before V151, or an id-less caller) falls back to the
+    /// pre-existing name-plus-replica-overlap rule (below) among the OTHER id-less members — case-insensitive
+    /// name match, replica-name sets overlap (or both empty, matched by name alone), never bridging an empty
+    /// set to a same-named non-empty one.</item>
+    /// <item>A WITH-id member and a WITHOUT-id member of the SAME name whose replica sets overlap still union —
+    /// the same AG, observed once before the V151 upgrade landed on that reporter and once after. The id-less
+    /// member does not get a group_id from this union; it simply joins the same connected component.</item>
+    /// </list>
+    /// Shared by <see cref="Counts"/> and the MCP/web AG reader's equivalent distinct-AG count
+    /// (<c>DarlingAgReader.Build</c>), so the two surfaces cannot drift back apart. No store read: both callers
+    /// already carry the replica names (and now the group id) on the rows they group.
+    /// </summary>
+    public static int CountDistinctGroups(IEnumerable<(string? AgName, IEnumerable<string?> ReplicaServerNames, string? GroupId)> members)
+    {
+        ArgumentNullException.ThrowIfNull(members);
+
         var items = members
-            .Select(m => (Name: Key(m.AgName), Replicas: new HashSet<string>(
-                m.ReplicaServerNames.Select(n => (n ?? "").ToUpperInvariant()).Where(n => n.Length > 0),
-                StringComparer.Ordinal)))
+            .Select(m => (
+                Name: Key(m.AgName),
+                Replicas: new HashSet<string>(
+                    m.ReplicaServerNames.Select(n => (n ?? "").ToUpperInvariant()).Where(n => n.Length > 0),
+                    StringComparer.Ordinal),
+                GroupId: string.IsNullOrWhiteSpace(m.GroupId) ? null : m.GroupId.Trim().ToUpperInvariant()))
             .ToList();
 
         var parent = new int[items.Count];
@@ -324,8 +357,39 @@ public static class AgTopology
             }
         }
 
-        /* Only same-named members can ever union, so grouping by name first keeps the pairwise comparison
-           quadratic within one AG name's cards rather than across the whole fleet. */
+        /* Pass 1: members that carry a group_id union EXACTLY on it, regardless of name -- a group_id is
+           definitive, and two different ids never union even under a matching name (handled by never reaching
+           the name+overlap pass below for a with-id member paired with another with-id member of a DIFFERENT
+           id). */
+        var byGroupId = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        for (var i = 0; i < items.Count; i++)
+        {
+            if (items[i].GroupId is string groupId)
+            {
+                if (!byGroupId.TryGetValue(groupId, out var indices))
+                {
+                    indices = new List<int>();
+                    byGroupId[groupId] = indices;
+                }
+
+                indices.Add(i);
+            }
+        }
+
+        foreach (var indices in byGroupId.Values)
+        {
+            for (var a = 1; a < indices.Count; a++)
+            {
+                Union(indices[0], indices[a]);
+            }
+        }
+
+        /* Pass 2: the pre-existing name-plus-overlap rule, run over every pair that is NOT both with-id-and-
+           different-id. A with-id member still takes part here so it can join a same-named WITHOUT-id member
+           whose replicas overlap (the same AG seen before and after the V151 upgrade); two with-id members of
+           DIFFERENT ids must never union even if their names match and replicas overlap, so that specific pair
+           is skipped. Only same-named members can ever union, so grouping by name first keeps the pairwise
+           comparison quadratic within one AG name's cards rather than across the whole fleet. */
         var byName = new Dictionary<string, List<int>>(StringComparer.Ordinal);
         for (var i = 0; i < items.Count; i++)
         {
@@ -345,6 +409,16 @@ public static class AgTopology
                 for (var b = a + 1; b < indices.Count; b++)
                 {
                     var (ia, ib) = (indices[a], indices[b]);
+
+                    /* Two members that BOTH carry a group_id never union here on name+overlap alone -- pass 1
+                       already decided their relationship definitively (same id -> already unioned; different
+                       id -> must never union), and letting name+overlap override that would defeat the whole
+                       point of carrying an id. */
+                    if (items[ia].GroupId is not null && items[ib].GroupId is not null)
+                    {
+                        continue;
+                    }
+
                     var setA = items[ia].Replicas;
                     var setB = items[ib].Replicas;
 
@@ -405,6 +479,7 @@ public static class AgTopology
             FailoverModeDesc = row.FailoverModeDesc,
             EndpointUrl = row.EndpointUrl,
             Severity = Worse(Worse(Worse(Worse(syncHealth, connected), operational), recovery), role),
+            GroupId = row.GroupId,
         };
     }
 
@@ -572,6 +647,10 @@ public sealed class AgTopologyReplicaRow
     public string? AvailabilityModeDesc { get; init; }
     public string? FailoverModeDesc { get; init; }
     public string? EndpointUrl { get; init; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475) — the same GUID on every replica
+    /// of one AG, stamped by the engine. Null on a row collected before this column existed.</summary>
+    public string? GroupId { get; init; }
 }
 
 /// <summary>One database-grain row as collected. Queue sizes are KB and rates KB/s (the DMV's units), both
@@ -594,6 +673,11 @@ public sealed class AgTopologyDatabaseRow
     public string? SuspendReasonDesc { get; init; }
     public string? AvailabilityModeDesc { get; init; }
     public long? SecondaryLagSeconds { get; init; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475), carried on the database grain
+    /// too since the collector stamps it there as well. Unused by <see cref="CountDistinctGroups"/> today (the
+    /// count rule works off the replica grain), kept for symmetry with the SQL and the storage-layer row.</summary>
+    public string? GroupId { get; init; }
 }
 
 /// <summary>
@@ -630,6 +714,10 @@ public sealed class AgTopologyReplica : AgTopologyObservable
     public string? FailoverModeDesc { get; set; }
     public string? EndpointUrl { get; set; }
     public HealthSeverity Severity { get; set; }
+
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475). Null on a row collected before
+    /// this column existed — the count rule falls back to name+overlap for those.</summary>
+    public string? GroupId { get; set; }
 
     public string RoleDisplay => string.IsNullOrWhiteSpace(RoleDesc) ? "UNKNOWN ROLE" : RoleDesc!;
 
@@ -695,6 +783,7 @@ public sealed class AgTopologyReplica : AgTopologyObservable
         FailoverModeDesc = latest.FailoverModeDesc;
         EndpointUrl = latest.EndpointUrl;
         Severity = latest.Severity;
+        GroupId = latest.GroupId;
 
         RaiseAllPropertiesChanged();
     }
@@ -784,6 +873,12 @@ public sealed class AgTopologyCard : AgTopologyObservable
     public string? PrimaryReplica { get; set; }
     public HealthSeverity Severity { get; set; }
 
+    /// <summary><c>sys.availability_groups.group_id</c> as text (V151, #4475) — taken from the card's first
+    /// replica row, which is the same value every replica of this AG stores (the engine stamps one group_id
+    /// per AG, identically on every replica). Null on a card built entirely from rows collected before this
+    /// column existed.</summary>
+    public string? GroupId { get; set; }
+
     /// <summary>Get-only and never reassigned (#4238): the SAME collection instance lives for the card's whole
     /// life, so the nested, non-virtualized replica-chip <c>ItemsControl</c> never sees a new
     /// <c>ItemsSource</c> reference and never rebuilds its containers either. <see cref="UpdateFrom"/> mutates
@@ -844,6 +939,7 @@ public sealed class AgTopologyCard : AgTopologyObservable
         DatabaseCollectionTime = latest.DatabaseCollectionTime;
         PrimaryReplica = latest.PrimaryReplica;
         Severity = latest.Severity;
+        GroupId = latest.GroupId;
 
         AgTopology.Reconcile(
             Replicas, latest.Replicas,
