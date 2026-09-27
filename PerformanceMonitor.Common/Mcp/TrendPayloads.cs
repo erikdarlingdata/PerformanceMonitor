@@ -68,11 +68,14 @@ internal sealed record GrantBucketPoint(DateTime BucketStart, double AvgGrantedM
 /// (interval &gt; 0) where any exist, the unknowable collections' (interval 0) where only those do, and the unrecorded
 /// ones' (interval NULL, a pre-V127 row) otherwise, each the class's own sum so a caller's delta / interval stays
 /// the formula it always was.
+/// <para><c>ArtifactsSetAside</c> (#4476): how many instance rows this bucket excluded as an isolated
+/// single-sample Wait Statistics spike, before the SUMs/AVG/MAX above ran — defaulted to 0 so Lite, which
+/// does not yet carry the exclusion, constructs this record unchanged.</para>
 /// </summary>
 internal sealed record PerfmonBucketPoint(
     DateTime BucketStart, double AvgValue, long MaxValue, long LastValue,
     long? RatedDelta, long? RatedSeconds, long UnknowableCollections, long? UnknowableDelta, long? UnrecordedDelta,
-    double? PeakPerSecond, int? CntrType);
+    double? PeakPerSecond, int? CntrType, long ArtifactsSetAside = 0);
 
 /// <summary>
 /// The wire shapes of the bucketed trends both SKUs serve with the same fields — <c>get_file_io_trend</c> and
@@ -449,10 +452,18 @@ internal static class TrendPayloads
     /// </summary>
     public static string PerfmonTrend(
         string serverName, string counterName, int hoursBack, IReadOnlyList<PerfmonBucketPoint> points,
-        int bucketMinutes, bool requested, int autoBudget, object discontinuities)
+        int bucketMinutes, bool requested, int autoBudget, object discontinuities, long artifactsSetAside = -1)
     {
         var seriesType = points.Select(p => p.CntrType).LastOrDefault(t => t.HasValue);
         var basis = DeltaSeriesShaping.BasisFor(counterName, seriesType);
+        /* -1 (the default) means the caller has no separate total — points that were fully set aside never
+           got dropped before reaching here, so summing the published points' own counts is complete. A
+           caller (get_perfmon_trend) that CAN drop a fully-set-aside bucket passes its own pre-drop total,
+           since summing the survivors would then undercount. */
+        if (artifactsSetAside < 0)
+        {
+            artifactsSetAside = points.Sum(p => p.ArtifactsSetAside);
+        }
 
         var envelope = new Dictionary<string, object?>
         {
@@ -468,7 +479,14 @@ internal static class TrendPayloads
                 : TrendBuckets.AggregateNote(bucketMinutes, requested, autoBudget),
             ["trend"] = points.Select(p => PerfmonPoint(p, basis)),
             ["discontinuities"] = discontinuities,
+            ["artifacts_set_aside"] = artifactsSetAside,
         };
+
+        if (artifactsSetAside > 0)
+        {
+            envelope["notes"] = WaitStatisticsArtifact.ChartCaption(artifactsSetAside) +
+                " (SQL Server reported a cumulative-sized value for one sample; the stored value is unchanged)";
+        }
 
         return JsonSerializer.Serialize(envelope, McpHelpers.JsonOptions);
     }

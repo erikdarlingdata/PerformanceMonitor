@@ -166,7 +166,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_perfmon_trend"), Description("Gets one performance counter over time in buckets, ending at as_of. counter_kind says the unit: gauge - value is the bucket average, delta_value and sample_interval_seconds null (no delta for a level); rate - per-second is delta_value divided by sample_interval_seconds, never delta_value alone or when the interval is 0; other - delta_value is a non-rate change; null - classify by name (ends in /sec = rate). No points never returns empty: not_collected covers a gated engine, Page Life Expectancy, or an unknown counter name; unavailable: no counter at all collected in the window. <<GUIDE>> Gets one performance counter over time in time buckets. Use get_perfmon_stats first to see available counter names. artifacts_set_aside counts an isolated single-sample Wait Statistics spike excluded from the sums before bucketing (notes explains it); it is not a missing-data count. counter_kind (from the stored cntr_type) says what a point's number is: 'gauge' — value is the bucket's average reading and peak_value its highest, delta_value and sample_interval_seconds are null because a level has no delta; 'rate' — the per-second figure is delta_value divided by sample_interval_seconds, never delta_value alone, and never where sample_interval_seconds is 0 (no delta was knowable); 'other' — delta_value is the change of an average/fraction numerator, not a rate and not a level; null — the rows predate the stored type or the instances mix types, so classify by name (a name ending in /sec is a rate)." + BaselineDiscontinuities.DescriptionSentence)]
     public static Task<string> GetPerfmonTrend(
         NpgsqlDataSource postgres,
         [Description("The exact counter name, e.g. 'Batch Requests/sec'.")] string counter_name,
@@ -196,7 +196,8 @@ public sealed class DarlingMcpTrendTools
         {
             var now = windowEnd;
             var start = now.AddHours(-hours_back);
-            var points = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, resolved.ServerId, counter_name, start, now, bucketMinutes, cancellationToken);
+            var bucketsResult = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, resolved.ServerId, counter_name, start, now, bucketMinutes, cancellationToken);
+            var points = bucketsResult.Points;
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
@@ -257,7 +258,7 @@ public sealed class DarlingMcpTrendTools
 
             return TrendPayloads.PerfmonTrend(
                 resolved.ServerName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

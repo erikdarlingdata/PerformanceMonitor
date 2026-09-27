@@ -76,19 +76,22 @@ public sealed class ReadLatencyFlushLiveTests
         var arity = method.GetParameters().Length;
         Assert.Equal("hasReadLatency", method.GetParameters()[ProbeOrdinal].Name);
 
-        /* Every rung above this one (V149's hasHotLivenessTouch) must also be false, or the map finds the
-           newer arm first and this assertion is checking the wrong rung's fallthrough. */
+        /* Every rung above this one (V149's hasHotLivenessTouch, V150's
+           hasCollectionLogWatermarkAndJobHistoryIndexes) must also be false, or the map finds a newer arm
+           first and this assertion is checking the wrong rung's fallthrough. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
-        behind[arity - 1] = false;
+        for (var i = ProbeOrdinal; i < arity; i++)
+        {
+            behind[i] = false;
+        }
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* V149 (#4250) is now the top rung, so this arm no longer needs to be the LAST one — it only has
-           to sit below the current top's arm, which is what the ladder-dense invariant above already
+        /* V150 (#4469, #4477) is now the top rung, so this arm no longer needs to be the LAST one — it only
+           has to sit below the current top's arm, which is what the ladder-dense invariant above already
            guarantees is registered ahead of it. */
         var thisArm = viewer.IndexOf("if (hasReadLatency)", StringComparison.Ordinal);
-        var topArm = viewer.IndexOf("if (hasHotLivenessTouch)", StringComparison.Ordinal);
+        var topArm = viewer.IndexOf("if (hasCollectionLogWatermarkAndJobHistoryIndexes)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V148 sentinel arm \u2014 a fully-migrated store would map one rung short");
         Assert.True(topArm >= 0 && topArm < thisArm, "the current top rung's arm must sit above the V148 arm");
         Assert.Contains(

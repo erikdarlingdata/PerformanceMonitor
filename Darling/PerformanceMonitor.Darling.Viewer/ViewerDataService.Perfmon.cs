@@ -42,7 +42,8 @@ public sealed record PerfmonTrendPoint(
     long Value,
     long? DeltaValue,
     long? SampleIntervalSeconds,
-    int? CntrType = null);
+    int? CntrType = null,
+    long ArtifactsSetAside = 0);
 
 public sealed partial class ViewerDataService
 {
@@ -103,12 +104,37 @@ public sealed partial class ViewerDataService
     /// same name) and <c>collection_count</c> (<c>COUNT(*)</c> over that same subquery) ride along so the
     /// caller can tell a true singleton bucket from one the bucketing merged.
     /// <c>GetPerfmonTrendsByCountersAsync</c> uses <c>collection_count</c> to decide.</para>
+    /// <para>#4476: a raw-row layer sits under the per-collection SUM, carrying <c>lag</c>/<c>lead</c> of
+    /// <c>cntr_value</c> per instance (<c>PARTITION BY object_name, counter_name, instance_name ORDER BY
+    /// collection_time</c> — this read covers several counter names in one query, unlike the MCP twin's
+    /// single-counter partition, so <c>counter_name</c> joins the window) so
+    /// <see cref="WaitStatisticsArtifact.ArtifactPredicateSql"/> can tell an isolated single-sample artifact
+    /// (a <c>SQLServer:Wait Statistics</c> gauge instance whose one collection reads its lifetime cumulative
+    /// count, #4476) apart from a real value BEFORE the instances are summed into a per-collection point — a
+    /// C#-side check on the already-summed point can never see the one spiking instance. Every artifact
+    /// instance-row is excluded from the per-collection <c>cntr_value</c>/<c>delta_cntr_value</c> SUMs via
+    /// <c>FILTER (WHERE NOT is_artifact)</c>, while the MAX interval and the MIN=MAX type rule keep reading
+    /// EVERY row (an artifact row's own type and interval are not themselves suspect). The per-collection
+    /// layer counts how many of its rows were set aside (<c>COUNT(*) FILTER (WHERE is_artifact)</c>), and the
+    /// outer bucket layer SUMs that count into <c>artifacts_set_aside</c>, appended LAST so ordinals 0-7 do
+    /// not move. A bucket whose every row was an artifact reads <c>cntr_value IS NULL</c> with a positive
+    /// <c>artifacts_set_aside</c> — <see cref="GetPerfmonTrendsByCountersAsync"/> drops that point rather than
+    /// turning it into a fabricated 0.</para>
+    /// <para>The raw-row layer is itself a <c>UNION ALL</c> (#4476 cost review): the lag/lead window opens only
+    /// on rows <see cref="WaitStatisticsArtifact.ObjectNameSuffixMatchSql"/> lets through, with the rest of the
+    /// selected counters carrying a plain <c>false AS is_artifact</c> and no window at all — windowing every
+    /// row measured 12 counters over 7 days at 2.3-2.4s against ~800ms unwindowed, because the sort touched
+    /// rows that could never be an artifact and pushed the planner off its index scan onto a parallel seq scan.
+    /// Same shape as the MCP twin's <c>PerfmonTrendSql</c>.</para>
     /// $1 server_id, $2/$3 window (naive UTC), $4.. counter names, last $ the bucket width in minutes.
     /// </summary>
     public static string PerfmonTrendsSql(int counterCount)
     {
         var nameParams = string.Join(", ", Enumerable.Range(0, counterCount).Select(i => "$" + (i + 4)));
         var widthParam = "$" + (counterCount + 4);
+        var isArtifact = "COALESCE((" + WaitStatisticsArtifact.ArtifactPredicateSql(
+            "cntr_type", "object_name", "prev_value", "cntr_value", "next_value") + "), false)";
+        var isWaitStatistics = WaitStatisticsArtifact.ObjectNameSuffixMatchSql("object_name");
         return $$"""
             SELECT
                 counter_name,
@@ -118,20 +144,63 @@ public sealed partial class ViewerDataService
                 SUM(sample_interval_seconds) FILTER (WHERE sample_interval_seconds > 0) AS sample_interval_seconds,
                 CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
                 MIN(collection_time) AS first_collection_time,
-                COUNT(*) AS collection_count
+                COUNT(*) AS collection_count,
+                SUM(artifacts) AS artifacts_set_aside
             FROM (
                 SELECT
                     counter_name,
                     collection_time,
-                    CAST(SUM(cntr_value) AS bigint) AS cntr_value,
-                    CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
+                    CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value,
+                    CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value,
                     CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
-                    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
-                FROM v_perfmon_stats
-                WHERE server_id = $1
-                AND   collection_time >= $2
-                AND   collection_time <= $3
-                AND   counter_name IN ({{nameParams}})
+                    CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+                    COUNT(*) FILTER (WHERE is_artifact) AS artifacts
+                FROM (
+                    SELECT
+                        counter_name,
+                        collection_time,
+                        cntr_value,
+                        delta_cntr_value,
+                        sample_interval_seconds,
+                        cntr_type,
+                        false AS is_artifact
+                    FROM v_perfmon_stats
+                    WHERE server_id = $1
+                    AND   collection_time >= $2
+                    AND   collection_time <= $3
+                    AND   counter_name IN ({{nameParams}})
+                    AND   NOT ({{isWaitStatistics}})
+
+                    UNION ALL
+
+                    SELECT
+                        counter_name,
+                        collection_time,
+                        cntr_value,
+                        delta_cntr_value,
+                        sample_interval_seconds,
+                        cntr_type,
+                        {{isArtifact}} AS is_artifact
+                    FROM (
+                        SELECT
+                            counter_name,
+                            collection_time,
+                            object_name,
+                            cntr_value,
+                            delta_cntr_value,
+                            sample_interval_seconds,
+                            cntr_type,
+                            lag(cntr_value) OVER w AS prev_value,
+                            lead(cntr_value) OVER w AS next_value
+                        FROM v_perfmon_stats
+                        WHERE server_id = $1
+                        AND   collection_time >= $2
+                        AND   collection_time <= $3
+                        AND   counter_name IN ({{nameParams}})
+                        AND   {{isWaitStatistics}}
+                        WINDOW w AS (PARTITION BY object_name, counter_name, instance_name ORDER BY collection_time)
+                    ) AS raw
+                ) AS flagged
                 GROUP BY counter_name, collection_time
             ) AS collections
             GROUP BY counter_name, 2
@@ -223,7 +292,7 @@ public sealed partial class ViewerDataService
         }
         command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = bucketMinutes });
 
-        var rows = new List<(string CounterName, DateTime BucketStart, DateTime FirstCollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType)>();
+        var rows = new List<(string CounterName, DateTime BucketStart, DateTime FirstCollectionTime, long? Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType, long ArtifactsSetAside)>();
         var everyBucketSingleton = true;
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -238,16 +307,28 @@ public sealed partial class ViewerDataService
                 reader.GetString(0),
                 reader.GetDateTime(1),
                 reader.GetDateTime(6),
-                reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
+                /* NULL stays NULL here: a bucket whose every row was an artifact (#4476) is dropped below
+                   rather than turned into a fabricated 0 — that decision needs to see the NULL. */
+                reader.IsDBNull(2) ? null : reader.GetInt64(2),
                 /* NULL stays NULL: a gauge's instance rows store no delta (V132), so the SUM is NULL, not 0. */
                 reader.IsDBNull(3) ? null : reader.GetInt64(3),
                 /* NULL stays NULL (#3540's third state); 0 is the marker and must not be manufactured from it. */
                 reader.IsDBNull(4) ? null : reader.GetInt64(4),
-                reader.IsDBNull(5) ? null : reader.GetInt32(5)));
+                reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                reader.GetInt64(8)));
         }
 
         foreach (var row in rows)
         {
+            /* #4476: every instance summed into this bucket was set aside as an isolated single-sample
+               artifact — there is no real value to plot, so the point is skipped rather than read as 0
+               (the pre-#4476 IsDBNull(2) ? 0 : ... coercion this replaces). Every other NULL keeps that
+               coercion, since a NULL cntr_value with no artifacts set aside is not this case. */
+            if (row.Value is null && row.ArtifactsSetAside > 0)
+            {
+                continue;
+            }
+
             if (!result.TryGetValue(row.CounterName, out var list))
             {
                 list = new List<PerfmonTrendPoint>();
@@ -256,12 +337,45 @@ public sealed partial class ViewerDataService
 
             list.Add(new PerfmonTrendPoint(
                 everyBucketSingleton ? row.FirstCollectionTime : row.BucketStart,
-                row.Value,
+                row.Value ?? 0,
                 row.DeltaValue,
                 row.SampleIntervalSeconds,
-                row.CntrType));
+                row.CntrType,
+                row.ArtifactsSetAside));
         }
 
         return result;
+    }
+}
+
+/// <summary>
+/// The chart-title arithmetic for <see cref="WaitStatisticsArtifact.ChartCaption"/> (#4476): SUMs
+/// <see cref="PerfmonTrendPoint.ArtifactsSetAside"/> across every point of every plotted counter's trend —
+/// a pure, non-WPF static so it is unit-testable without the picker's WPF chart control.
+/// </summary>
+public static class PerfmonChartArtifactSummary
+{
+    /// <summary>The total artifacts set aside across every plotted counter's points, for the counters
+    /// actually plotted (<paramref name="plottedCounterNames"/>) — a counter present in
+    /// <paramref name="trendsByCounter"/> but not plotted (an empty trend, #4234's guard) contributes
+    /// nothing.</summary>
+    public static long TotalArtifactsSetAside(
+        IReadOnlyDictionary<string, List<PerfmonTrendPoint>> trendsByCounter, IEnumerable<string> plottedCounterNames)
+    {
+        long total = 0;
+        foreach (var counterName in plottedCounterNames)
+        {
+            if (!trendsByCounter.TryGetValue(counterName, out var trend))
+            {
+                continue;
+            }
+
+            foreach (var point in trend)
+            {
+                total += point.ArtifactsSetAside;
+            }
+        }
+
+        return total;
     }
 }

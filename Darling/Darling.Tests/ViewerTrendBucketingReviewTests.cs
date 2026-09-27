@@ -317,7 +317,7 @@ public sealed class ViewerTrendBucketingLiveTests
                 }
             }
 
-            var mcpBuckets = await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, ServerId, "Batch Requests/sec", start, end, width, ct);
+            var mcpBuckets = (await DarlingTrendReader.GetPerfmonBucketsAsync(postgres, ServerId, "Batch Requests/sec", start, end, width, ct)).Points;
 
             Assert.True(wpfBuckets.Count >= 2, "the window must straddle more than one 60-minute bucket");
             Assert.Equal(mcpBuckets.Count, wpfBuckets.Count);

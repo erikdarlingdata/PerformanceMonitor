@@ -992,7 +992,7 @@ public static class FactAdvice
         return noun + "s";
     }
 
-    private static bool IsVowel(char c) => "aeiouAEIOU".IndexOf(c) >= 0;
+    private static bool IsVowel(char c) => "aeiouAEIOU".Contains(c);
 
     // Anomaly value formatters (passed to ComposeAnomaly as the observed/baseline renderer).
     private static string Pct(double v) => $"{v:0.#}%";

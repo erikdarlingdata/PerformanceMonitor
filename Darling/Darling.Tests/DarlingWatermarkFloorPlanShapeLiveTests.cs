@@ -98,11 +98,31 @@ public sealed class DarlingWatermarkFloorPlanShapeLiveTests
             /* The plan-shape half: EXPLAIN the bounded statement and prove the chunk count is bounded by the
                floor, not the 30 days of retention just seeded. */
             var floor = Whole(nowUtc) - DarlingWorker.WatermarkFloorLookback;
-            var boundedPlan = await ExplainAsync(connection, DarlingWorker.ReadCollectorWatermarksSql, floor, ct);
+            var collectorNames = new[] { "wait_stats", "index_object_stats" };
+            var boundedPlan = await ExplainAsync(connection, DarlingWorker.ReadCollectorWatermarksSql, floor, ct, collectorNames);
             var boundedChunks = PlanChunkScans.DistinctChunkCount(boundedPlan);
 
             Assert.True(boundedChunks is >= 1 and <= 3,
                 $"expected the 2-day floor to touch at most a couple of chunks (touched={boundedChunks}):\n{boundedPlan}");
+
+            /* V150: one SubPlan/Limit descent per collector name, driven off unnest($3) — NOT a
+               GROUP BY/HashAggregate over every row in range. "Index Only Scan on idx_collection_log_watermark"
+               alone does not discriminate: the OLD GROUP BY statement, run against a store that already has
+               this index, ALSO plans as an Index Only Scan (TimescaleDB satisfies a GROUP BY's per-chunk
+               aggregate from the index instead of a table scan once the index exists) — Function Scan on
+               unnest only appears in the new per-collector LIMIT 1 shape, and HashAggregate/Finalize
+               HashAggregate only in the old GROUP BY shape. This is the exact regression this rung exists to
+               prevent: reverting the read to GROUP BY (variant C's shape too) must fail here even though the
+               index is still present. */
+            Assert.Contains("idx_collection_log_watermark", boundedPlan, StringComparison.Ordinal);
+            Assert.Contains("Function Scan on unnest", boundedPlan, StringComparison.Ordinal);
+            Assert.True(
+                boundedPlan.Contains("Index Only Scan", StringComparison.Ordinal)
+                || boundedPlan.Contains("Index Scan", StringComparison.Ordinal),
+                $"expected an Index Only Scan or Index Scan on idx_collection_log_watermark:\n{boundedPlan}");
+            Assert.DoesNotContain("Bitmap Heap Scan", boundedPlan, StringComparison.Ordinal);
+            Assert.DoesNotContain("Seq Scan on _hyper", boundedPlan, StringComparison.Ordinal);
+            Assert.DoesNotContain("HashAggregate", boundedPlan, StringComparison.Ordinal);
 
             /* Seed a SECOND server at 2x the chunk count (60 days) and prove the bounded plan's chunk count
                does not grow with retention — the property #4469 exists to establish, not just "is small
@@ -115,7 +135,7 @@ public sealed class DarlingWatermarkFloorPlanShapeLiveTests
             }
             await CompressOldChunksAsync(connection, ct);
 
-            var widePlan = await ExplainAsync(connection, DarlingWorker.ReadCollectorWatermarksSql, floor, ct, wideServerId);
+            var widePlan = await ExplainAsync(connection, DarlingWorker.ReadCollectorWatermarksSql, floor, ct, collectorNames, wideServerId);
             var wideChunks = PlanChunkScans.DistinctChunkCount(widePlan);
             Assert.True(wideChunks <= boundedChunks + 1,
                 $"expected doubling retained history to leave the bounded plan's chunk count essentially unchanged (30d={boundedChunks}, 60d={wideChunks}):\n{widePlan}");
@@ -188,11 +208,12 @@ VALUES ($1, $2, $3, $4, $5, 0, 'SUCCESS', NULL, 0, 0, 0)", connection);
     }
 
     private static async Task<string> ExplainAsync(
-        NpgsqlConnection connection, string sql, DateTime floor, CancellationToken ct, int? serverId = null)
+        NpgsqlConnection connection, string sql, DateTime floor, CancellationToken ct, string[] collectorNames, int? serverId = null)
     {
         using var command = new NpgsqlCommand("EXPLAIN (COSTS OFF) " + sql, connection);
         command.Parameters.AddWithValue(serverId ?? LiveServerId);
         command.Parameters.AddWithValue(floor);
+        command.Parameters.Add(new NpgsqlParameter<string[]> { TypedValue = collectorNames });
         await using var reader = await command.ExecuteReaderAsync(ct);
         var sb = new System.Text.StringBuilder();
         while (await reader.ReadAsync(ct))
