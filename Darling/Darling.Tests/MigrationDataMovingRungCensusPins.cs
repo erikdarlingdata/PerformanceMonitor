@@ -460,16 +460,31 @@ public sealed class MigrationDataMovingRungCensusPins
     }
 
     /// <summary>
+    /// The one rung today whose dynamic SQL is an accepted, hand-costed exception — the scan cannot read
+    /// past <c>EXECUTE format(...)</c>, so this name has to be kept in sync by hand rather than derived.
+    /// V152's <c>DO $$ ... EXECUTE format('DROP INDEX IF EXISTS %s', ...) $$</c> (#4503) resolves a
+    /// catalog index via <c>pg_index</c>/<c>pg_attribute</c> (metadata, not collected rows) and then
+    /// DROPS it — the opposite direction from every shape <see cref="s_declared"/> tracks (which are all
+    /// index BUILDS or DML over pre-existing rows), so it gets no <see cref="s_declared"/> entry at all:
+    /// there is no data-moving cost to declare, only a scan blind spot to name.
+    /// </summary>
+    private static readonly int[] s_dynamicSqlExemptedRungs = [152];
+
+    /// <summary>
     /// The scan is textual, so dynamic SQL would hide a data-moving statement from it completely. The
-    /// ladder has none — 109 rungs, and the only <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's
-    /// trigger definitions. Pinned so the blind spot stays theoretical: a rung that builds DDL with
-    /// <c>format()</c> needs to be costed by hand, and this is where that gets said.
+    /// ladder has one exempted rung today (V152, named in <see cref="s_dynamicSqlExemptedRungs"/> because
+    /// its <c>DO $$ ... EXECUTE format(...)</c> drops a catalog index rather than moving data) and
+    /// otherwise none — the only other <c>EXECUTE</c> is <c>EXECUTE FUNCTION</c> in V17's trigger
+    /// definitions. Pinned so the blind spot stays theoretical for every other rung: one that builds DDL
+    /// with <c>format()</c> needs to be costed by hand, added either to this exemption list (if it moves
+    /// no data) or to <see cref="s_declared"/> (if it does), and this is where that gets said.
     /// </summary>
     [Fact]
     public void TheLadderStillContainsNoDynamicSql()
     {
         var offenders = PgMigrations.Scripts
             .Where(m => s_dynamicSql.IsMatch(StripComments(m.Sql)))
+            .Where(m => !s_dynamicSqlExemptedRungs.Contains(m.Version))
             .Select(m => $"V{m.Version.ToString(CultureInfo.InvariantCulture)} ({m.Name})")
             .ToList();
 
