@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -178,6 +179,164 @@ WHERE hypertable_schema = 'collect' AND hypertable_name = 'rci_test' AND dimensi
         var expected = RawChunkIntervalPlanner.BringYourOwnBudgetBytes(reader.GetInt64(0), reader.GetInt64(1));
 
         Assert.Equal(expected, budget!.Value);
+    }
+
+    /// <summary>
+    /// The production shape from #4457: 72 raw hypertables, 1,210 chunks total, the largest at 73 — a store
+    /// well past the OLD store-wide 1,000-chunk cap, but where no single table is anywhere near it. One
+    /// compressed, RATED table carries real ingest bytes; the other 71 are uncompressed filler, cheap to seed
+    /// with <c>generate_series</c>, that exist only so <c>timescaledb_information.hypertables.num_chunks</c>
+    /// sums past 1,000 on the store — they never enter <see cref="RawChunkIntervalReconciler.TableInputsSql"/>'s
+    /// JOIN (no compressed chunk), so they cannot move and cannot affect the rated table's own decision. The
+    /// budget is set so the rated table alone sits at 2.55x it, matching the ratio a real store's
+    /// <c>query_stats</c> table sat at when this cap was store-wide. This proves the fix at the product's own
+    /// call path — <see cref="RawChunkIntervalReconciler.ReconcileAsync"/> end to end, not the planner
+    /// directly — and is also the RUNTIME RED against dev (#4457): on dev's store-wide cap, this store's total
+    /// chunk count alone holds the rated table at 24h regardless of its own forecast.
+    /// </summary>
+    [Fact]
+    public async Task ProductionShape_72Hypertables1210ChunksLargest73_NarrowsTheRatedTableOnItsOwnForecast_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live raw chunk-interval reconcile test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        Assert.SkipUnless(await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct),
+            "TimescaleDB is not available in the DARLING_TEST_PG store — the reconcile needs it.");
+
+        /* 28 tables at 36-73 chunks (sum 1,069) + 43 tables at 3-4 chunks (sum 136) = 71 filler tables, 1,205
+           chunks, largest 73 — plus the rated table's 5 gives 72 tables / 1,210 chunks / max 73, per the brief's
+           shape. Uncompressed, so they never enter TableInputsSql's JOIN. */
+        int[] fillerChunkCounts =
+        {
+            73, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 37, 36, 36, 36,
+            4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        };
+        Assert.Equal(71, fillerChunkCounts.Length);
+        Assert.Equal(1_205, fillerChunkCounts.Sum());
+        Assert.Equal(73, fillerChunkCounts.Max());
+
+        for (var i = 0; i < fillerChunkCounts.Length; i++)
+        {
+            await CreateFillerHypertableAsync(connection, $"filler_{i}", fillerChunkCounts[i], ct);
+        }
+
+        await ExecAsync(connection, "CREATE TABLE collect.rated_test (ts timestamp NOT NULL, val text NOT NULL)", ct);
+        await ExecAsync(connection,
+            "SELECT create_hypertable('collect.rated_test', by_range('ts', INTERVAL '24 hours'), if_not_exists => true, migrate_data => true)", ct);
+        await ExecAsync(connection, "ALTER TABLE collect.rated_test SET (timescaledb.compress, timescaledb.compress_orderby = 'ts')", ct);
+
+        var utcNow = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+        for (var day = 1; day <= 5; day++)
+        {
+            await PlantRatedChunkAsync(connection, utcNow.AddDays(-day), ct);
+        }
+        await ExecAsync(connection, "SELECT compress_chunk(c) FROM show_chunks('collect.rated_test') c", ct);
+
+        Assert.Equal((72, 1_210, 73), await HypertableCensusAsync(connection, ct));
+        Assert.Equal(24, await CurrentIntervalHoursAsync(connection, "rated_test", ct));
+
+        /* The rated table's own ingest rate, read the same way the reconciler does — chunk_compression_stats()
+           bytes over the compressed chunks' own wall-clock span — so the budget below is set from the SAME
+           figure ReconcileAsync will compute, not a hand guess at it. */
+        double ratePerHour;
+        await using (var rateCommand = new NpgsqlCommand(@"
+SELECT SUM(ccs.before_compression_total_bytes)::double precision
+           / (SUM(EXTRACT(EPOCH FROM (c.range_end - c.range_start))) / 3600.0)
+FROM chunk_compression_stats('collect.rated_test'::regclass) ccs
+JOIN timescaledb_information.chunks c
+  ON c.hypertable_schema = 'collect' AND c.hypertable_name = 'rated_test'
+ AND c.chunk_schema = ccs.chunk_schema AND c.chunk_name = ccs.chunk_name
+WHERE ccs.before_compression_total_bytes IS NOT NULL", connection))
+        {
+            ratePerHour = (double)(await rateCommand.ExecuteScalarAsync(ct))!;
+        }
+
+        var openBytesAt24Hours = ratePerHour * 24;
+        var budgetBytes = openBytesAt24Hours / 2.55;
+
+        var logger = new CapturingTestLogger();
+        var changed = await RawChunkIntervalReconciler.ReconcileAsync(connection, budgetBytes, DateTime.UtcNow, logger, ct);
+
+        Assert.Equal(1, changed);
+        Assert.Equal(12, await CurrentIntervalHoursAsync(connection, "rated_test", ct));
+        Assert.Equal(1L, await ScalarLongAsync(connection,
+            "SELECT COUNT(*) FROM collect.raw_chunk_interval_rung_history WHERE table_name = 'rated_test'", ct));
+
+        var summary = logger.Lines.FirstOrDefault(l => l.Contains("moved", StringComparison.Ordinal) && l.Contains("evaluated", StringComparison.Ordinal));
+        Assert.NotNull(summary);
+        Assert.Contains("1 moved", summary, StringComparison.Ordinal);
+
+        /* ---- second arm: a huge budget, no table over its own forecast cap, so nothing moves and the
+           summary line still logs at Information with the ratio under 1 ---- */
+        var loggerNoChange = new CapturingTestLogger();
+        var changedNoChange = await RawChunkIntervalReconciler.ReconcileAsync(
+            connection, budgetBytes: openBytesAt24Hours * 1_000, DateTime.UtcNow, loggerNoChange, ct);
+
+        Assert.Equal(0, changedNoChange);
+        var summaryNoChange = loggerNoChange.Lines.FirstOrDefault(l => l.Contains("evaluated", StringComparison.Ordinal));
+        Assert.NotNull(summaryNoChange);
+        Assert.Contains("0 moved", summaryNoChange, StringComparison.Ordinal);
+        Assert.Contains("0.", summaryNoChange, StringComparison.Ordinal); /* ratio under 1, e.g. "0.00x budget" */
+    }
+
+    /// <summary>Plants one row a day before <paramref name="ts"/> for <c>collect.rated_test</c>, the same
+    /// closed-chunk pattern as <see cref="PlantChunkAsync"/> uses for <c>rci_test</c>.</summary>
+    private static async Task PlantRatedChunkAsync(NpgsqlConnection connection, DateTime ts, CancellationToken ct)
+    {
+        await using var insert = new NpgsqlCommand("INSERT INTO collect.rated_test (ts, val) VALUES ($1, $2)", connection);
+        insert.Parameters.AddWithValue(ts);
+        insert.Parameters.AddWithValue(new string('x', 4096));
+        await insert.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One uncompressed filler hypertable at the 6h rung with <paramref name="chunkCount"/> chunks,
+    /// seeded with one <c>generate_series</c> insert — never compressed, so it never enters
+    /// <see cref="RawChunkIntervalReconciler.TableInputsSql"/>'s JOIN and cannot move or affect any other
+    /// table's decision; it exists only to push the store's total chunk count (and hypertable count) up to the
+    /// production shape.</summary>
+    private static async Task CreateFillerHypertableAsync(NpgsqlConnection connection, string tableName, int chunkCount, CancellationToken ct)
+    {
+        await ExecAsync(connection, $"CREATE TABLE collect.{tableName} (ts timestamp NOT NULL, val text NOT NULL)", ct);
+        await ExecAsync(connection,
+            $"SELECT create_hypertable('collect.{tableName}', by_range('ts', INTERVAL '6 hours'), if_not_exists => true, migrate_data => true)", ct);
+        await using var insert = new NpgsqlCommand(
+            $"INSERT INTO collect.{tableName} (ts, val) SELECT date_trunc('hour', now()) - (n * INTERVAL '6 hours'), 'x' FROM generate_series(1, $1) n", connection);
+        insert.Parameters.AddWithValue(chunkCount);
+        await insert.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Only this fact's own tables (the <c>filler_*</c> series and <c>rated_test</c>) —
+    /// <c>PgMigrations.MigrateAsync</c> already creates its own real hypertables (e.g.
+    /// <c>collect.collection_log</c>) in every scratch database, so an unfiltered count of
+    /// <c>timescaledb_information.hypertables</c> would overcount by however many migrations create.</summary>
+    private static async Task<(long Tables, long Chunks, long MaxChunks)> HypertableCensusAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+SELECT COUNT(*), COALESCE(SUM(num_chunks), 0), COALESCE(MAX(num_chunks), 0)
+FROM timescaledb_information.hypertables
+WHERE hypertable_schema = 'collect'
+  AND (hypertable_name LIKE 'filler\_%' OR hypertable_name = 'rated_test')", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+        return (reader.GetInt64(0), reader.GetInt64(1), reader.GetInt64(2));
+    }
+
+    private static async Task<int> CurrentIntervalHoursAsync(NpgsqlConnection connection, string hypertableName, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+SELECT (EXTRACT(EPOCH FROM time_interval) / 3600.0)::integer
+FROM timescaledb_information.dimensions
+WHERE hypertable_schema = 'collect' AND hypertable_name = $1 AND dimension_type = 'Time'", connection);
+        command.Parameters.AddWithValue(hypertableName);
+        return (int)(await command.ExecuteScalarAsync(ct))!;
     }
 
     /// <summary>The off switch (#4211): <see cref="DarlingConfig.RawChunkIntervalReconcileEnabled"/> defaults on,
