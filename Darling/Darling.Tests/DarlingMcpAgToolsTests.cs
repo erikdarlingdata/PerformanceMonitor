@@ -292,7 +292,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
                 "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://AGNODE1:5022");
 
             /* Straight through the reader, exactly as the /api/ag endpoint calls it — no server filter. */
-            var result = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var result = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
 
             var group = Assert.Single(result.AvailabilityGroups, g => g.ServerName == ServerName);
             Assert.Equal("AG_FLEET", group.AgName);
@@ -340,7 +340,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             /* Newest sweep: one replica, healthy. */
             await InsertReplicaAsync(connection, ct, newest, "AG_SNAP", "NEW1", "PRIMARY", "HEALTHY");
 
-            var result = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var result = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
 
             var group = Assert.Single(result.AvailabilityGroups, g => g.ServerName == ServerName);
             Assert.Equal(newest, group.CollectionTime);
@@ -386,10 +386,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             await InsertReplicaAsync(connection, ct, when, "AG_MINE", "MINE1", "PRIMARY", "HEALTHY");
             await InsertReplicaAsync(connection, ct, when, "AG_THEIRS", "THEIRS1", "PRIMARY", "HEALTHY", otherId, OtherName);
 
-            var filtered = await DarlingAgReader.GetAgHealthAsync(postgres, ServerId, DateTime.UtcNow, ct);
+            var filtered = await DarlingAgReader.GetAgHealthAsync(postgres, ServerId, DateTime.UtcNow, cancellationToken: ct);
             Assert.Equal("AG_MINE", Assert.Single(filtered.AvailabilityGroups).AgName);
 
-            var unfiltered = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var unfiltered = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
             var names = unfiltered.AvailabilityGroups.Select(g => g.AgName).ToList();
             Assert.Contains("AG_MINE", names);
             Assert.Contains("AG_THEIRS", names);
@@ -428,13 +428,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             var when = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
             await InsertReplicaAsync(connection, ct, when, "AG_DISABLED", "NODE1", "PRIMARY", "HEALTHY");
 
-            var before = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var before = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
             Assert.Contains("AG_DISABLED", before.AvailabilityGroups.Select(g => g.AgName));
 
             await DarlingMcpTestData.ExecAsync(connection, ct,
                 "UPDATE servers SET is_enabled = FALSE WHERE server_id = $1", ServerId);
 
-            var after = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var after = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
             Assert.DoesNotContain("AG_DISABLED", after.AvailabilityGroups.Select(g => g.AgName));
 
             bodySucceeded = true;

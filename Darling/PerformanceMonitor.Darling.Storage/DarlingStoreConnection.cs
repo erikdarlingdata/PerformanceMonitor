@@ -57,4 +57,27 @@ public static class DarlingStoreConnection
 
         return connectionString + ";Timezone=UTC";
     }
+
+    /// <summary>
+    /// The ONE place every STORE connection string picks up its surface's <c>ApplicationName</c> (#4479) —
+    /// <c>DarlingManagedPostgres.WebApplicationName</c>/<c>McpApplicationName</c> (#4442) generalized to
+    /// every other surface that opens a store connection: the service's own collection loop, the CLI verbs,
+    /// the managed-runtime bootstrap/upgrade, and the viewer. Set-if-ABSENT, unlike
+    /// <see cref="PinSessionTimeZoneUtc"/>'s overwrite: a bring-your-own connection string that already
+    /// names an <c>ApplicationName</c> (an operator's own monitoring convention) keeps it, because there is
+    /// no store-side reading of "the caller meant it" here the way there is for the naive-UTC columns —
+    /// this is purely a courtesy label for <c>pg_stat_activity</c> and a store log's <c>%a</c>, and the
+    /// operator's own choice is the more informative one when they made one.
+    /// </summary>
+    public static string WithApplicationName(string connectionString, string applicationName)
+    {
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        if (!string.IsNullOrEmpty(builder.ApplicationName))
+        {
+            return connectionString;
+        }
+
+        builder.ApplicationName = applicationName;
+        return builder.ConnectionString;
+    }
 }

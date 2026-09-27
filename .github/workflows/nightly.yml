@@ -468,7 +468,7 @@ jobs:
           # mode's shape (DarlingManagedPostgres also initdbs its owner as "darling").
           & "$bin\initdb.exe" -D $dataDir -U darling -A trust --encoding=UTF8
           if ($LASTEXITCODE -ne 0) { throw "initdb failed ($LASTEXITCODE)" }
-          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb'"
+          Add-Content -Path "$dataDir\postgresql.conf" -Value "shared_preload_libraries = 'timescaledb,pg_stat_statements'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "port = 5541"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "listen_addresses = '127.0.0.1'"
           Add-Content -Path "$dataDir\postgresql.conf" -Value "timescaledb.max_background_workers = 74"

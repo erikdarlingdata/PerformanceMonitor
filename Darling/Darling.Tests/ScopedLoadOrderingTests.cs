@@ -225,6 +225,9 @@ public sealed class ScopedLoadOrderingTests
         new Site(s_finOps, "JobHistoryTab.xaml.cs", "Task", "LoadJobsAsync"),
         new Site(s_finOps, "JobHistoryTab.xaml.cs", "Task", "UpdateAgentStatusAsync"),
 
+        /* The Viewer's twin (#4478/#4488) — same fleet-wide read, same missing guard on its loading paint. */
+        new Site(s_viewer, "JobHistoryTab.xaml.cs", "Task", "LoadJobsAsync"),
+
         /* #2929's second and third sites, now ordered as well as scope-verified. Both twins, because the
            same-scope hole is identical in them and fixing one half is how a parity gap starts. */
         new Site(s_liteWindows, "DatabaseStateOverridesWindow.xaml.cs", "Task", "LoadAsync"),
@@ -521,7 +524,7 @@ public sealed class ScopedLoadOrderingTests
     // ── Site mechanics ────────────────────────────────────────────────────────────────────────
 
     private static void AssertEverySiteIsStillHere() =>
-        Assert.True(s_sites.Length == 27, $"{s_sites.Length} site(s) in the table; this pin covers 27");
+        Assert.True(s_sites.Length == 28, $"{s_sites.Length} site(s) in the table; this pin covers 28");
 
     /// <summary>A XAML-generated control and one of the UI properties a load paints into.</summary>
     private const string PaintTarget =
