@@ -14,7 +14,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4477: <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/> widened from 1 hour to 6 to cut the
+/// #4503: <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/> widened from 1 hour to 6 to cut the
 /// non-HOT WAL a hot dimension row takes on every re-sighting (measured on one production store:
 /// <c>query_plan_dim</c> took 894,656 non-HOT touches in 71 hours under the 1-hour guard, ~42 KB of WAL
 /// per row, because <c>last_seen</c> is indexed and the update can never go HOT).

@@ -80,7 +80,7 @@ public static class PayloadDimensions
     /// <summary>
     /// How stale a dimension row's <see cref="LastSeenColumn"/> may be before a re-sighting refreshes it
     /// (both the <c>WHERE NOT EXISTS</c> pre-filter and the <c>ON CONFLICT ... WHERE</c> guard in
-    /// <see cref="UpsertSql"/>, for every dimension table). Widened from 1 hour to 6 (#4477): measured on
+    /// <see cref="UpsertSql"/>, for every dimension table). Widened from 1 hour to 6 (#4503): measured on
     /// one production store, <c>query_plan_dim</c> took 894,656 non-HOT touches in 71 hours under the
     /// 1-hour guard — <c>last_seen</c> is indexed, so the update cannot go HOT — at ~42 KB of WAL per row
     /// (4.87 M full-page images against a large, scattered heap). The guard already caps a continuously-seen
@@ -336,7 +336,7 @@ public static class PayloadDimensions
     /// the current 6-hour width, down from 24 at the original 1-hour width), and stays correct as long
     /// as the GC margin exceeds the guard width (it is a full day).</para>
     ///
-    /// <para><b>#4477: <see cref="LastSeenColumn"/> is indexed on every dimension table (the prune's
+    /// <para><b>#4503: <see cref="LastSeenColumn"/> is indexed on every dimension table (the prune's
     /// <c>ORDER BY last_seen LIMIT</c> needs it), so the guarded UPDATE can never go HOT — it is a
     /// non-HOT update to a large, scattered heap on every touch that survives the guard. Measured on one
     /// production store at the original 1-hour width: <c>query_plan_dim</c> alone took 894,656 such

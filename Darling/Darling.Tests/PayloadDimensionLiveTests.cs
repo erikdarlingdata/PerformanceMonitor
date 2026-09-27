@@ -680,7 +680,7 @@ public sealed class PayloadDimensionLiveTests
             await FlushAtAsync(t0);
             Assert.Equal(t0, await LastSeenAsync());
 
-            /* Within the guard window (#4477: 6 hours, widened from 1): NOT refreshed. Every referenced
+            /* Within the guard window (#4503: 6 hours, widened from 1): NOT refreshed. Every referenced
                dim row would otherwise take an UPDATE every collection cycle — a dead tuple per row per
                minute on a hot table — for a watermark whose only consumer has a multi-day horizon. */
             await FlushAtAsync(t0.AddHours(3));
@@ -735,7 +735,7 @@ public sealed class PayloadDimensionLiveTests
     /// directly against the rows this test wrote, with no exposure to unrelated WAL traffic, so
     /// the WAL assertion was dropped as redundant and flaky (#4354).</para>
     ///
-    /// <para>(2) A row stamped past the guard window (#4477: 6 hours) is still refreshed — the
+    /// <para>(2) A row stamped past the guard window (#4503: 6 hours) is still refreshed — the
     /// pre-filter's own staleness read uses the same boundary the <c>ON CONFLICT ... WHERE</c> guard
     /// always used, so a genuinely stale row still reaches the <c>UPDATE</c>.</para>
     ///
@@ -813,7 +813,7 @@ public sealed class PayloadDimensionLiveTests
             Assert.Equal(0, await LockedRowCountAsync(freshDigests));
 
             // (1) Same batch, same digests, 3 hours later -- still inside the guard's freshness
-            // window (#4477: 6 hours). The pre-filter excludes every one of them before the statement
+            // window (#4503: 6 hours). The pre-filter excludes every one of them before the statement
             // ever reaches INSERT/ON CONFLICT: no lock taken, no last_seen change.
             await FlushAsync(freshPairs, t0.AddHours(3));
 

@@ -432,7 +432,7 @@ public sealed class PayloadDimensionTests
            content writes no new row. */
         Assert.Contains("ON CONFLICT (digest) DO UPDATE", sql, StringComparison.Ordinal);
 
-        /* The churn guard, now 6 hours (#4477, widened from 1 to cut non-HOT WAL on the indexed
+        /* The churn guard, now 6 hours (#4503, widened from 1 to cut non-HOT WAL on the indexed
            last_seen column). Without it, every referenced dim row takes an UPDATE every collection cycle —
            a dead tuple per row per minute — to maintain a watermark whose only consumer (the GC) has a
            multi-day horizon. */

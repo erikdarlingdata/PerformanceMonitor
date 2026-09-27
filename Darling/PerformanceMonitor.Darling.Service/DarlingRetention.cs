@@ -450,11 +450,11 @@ public static class DarlingRetention
                one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
                every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
                dim upsert's conflict arm at PayloadDimensions.LastSeenRefreshGuardHours hours (widened from 1
-               to 6 by #4477 to cut non-HOT WAL on the indexed last_seen column — measured at ~42 KB of WAL
+               to 6 by #4503 to cut non-HOT WAL on the indexed last_seen column — measured at ~42 KB of WAL
                per touch on one production store), and the Query Store liveness touch at
                QueryStoreLivenessTouchGuard.GuardHours (12 hours today) — which is itself a stated share of
                this margin, so the two cannot drift apart. The one-day margin below covers both: 12 hours is
-               already the wider of the two guards, so #4477's 6-hour width fits inside the SAME margin with
+               already the wider of the two guards, so #4503's 6-hour width fits inside the SAME margin with
                no widening needed (PayloadDimensionGuardMarginTests, in Darling.Tests, pins guard <= margin so
                a future guard change that outgrows it fails loudly rather than silently). */
             var widestFactRetentionDays = 1;
