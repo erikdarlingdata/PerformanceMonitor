@@ -131,7 +131,7 @@ public static class PgLogEntryAssembler
         + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + s_prefixRun + @")\[(?<pid>\d+)\]"
         + @"|(?<zone>[^ :\[\n]+) (?<mid>" + s_prefixGapBeforePid + @")\[(?<pid>\d+)\])"
         + @"(?<rest>" + s_prefixRun + ")"
-        + @"(?<![A-Z_])(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
+        + @"(?<![A-Z_])(?<label>INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  ?(?<text>.*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* %u@%d anywhere in the prefix's non-pid text, before the pid or after it. Both halves required: a background
