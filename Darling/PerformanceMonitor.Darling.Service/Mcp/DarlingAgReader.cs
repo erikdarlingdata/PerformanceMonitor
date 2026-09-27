@@ -87,8 +87,8 @@ internal static class DarlingAgReader
         NpgsqlDataSource postgres,
         int? serverIdFilter = null,
         DateTime? nowUtc = null,
-        CancellationToken cancellationToken = default,
-        int? limit = null)
+        int? limit = null,
+        CancellationToken cancellationToken = default)
     {
         var effectiveNow = nowUtc ?? DateTime.UtcNow;
         var replicas = await ReadReplicasAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);

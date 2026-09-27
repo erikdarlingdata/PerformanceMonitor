@@ -209,8 +209,9 @@ public sealed class DarlingAgReaderTests
         string? connected = "CONNECTED",
         string? operational = "ONLINE",
         string? recoveryHealth = "ONLINE",
-        bool? isLocal = null) =>
-        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022");
+        bool? isLocal = null,
+        string? groupId = null) =>
+        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022", groupId);
 
     private static Reader.DatabaseRow Database(
         int serverId,
@@ -221,8 +222,9 @@ public sealed class DarlingAgReaderTests
         string state = "SYNCHRONIZED",
         bool isSuspended = false,
         long? lagSeconds = 0,
-        int minutesAgo = 1) =>
-        new(serverId, serverName, At(minutesAgo), agName, databaseName, replicaName, true, state, "0x00", "0x00", 0, 0, 1024, 1024, isSuspended, isSuspended ? "USER_ACTION" : null, "SYNCHRONOUS_COMMIT", lagSeconds);
+        int minutesAgo = 1,
+        string? groupId = null) =>
+        new(serverId, serverName, At(minutesAgo), agName, databaseName, replicaName, true, state, "0x00", "0x00", 0, 0, 1024, 1024, isSuspended, isSuspended ? "USER_ACTION" : null, "SYNCHRONOUS_COMMIT", lagSeconds, groupId);
 
     [Fact]
     public void Build_OneAgSeenFromTwoServers_StaysTwoGroupsEachNamingItsReporter()

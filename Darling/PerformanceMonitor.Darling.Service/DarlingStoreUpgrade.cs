@@ -1509,7 +1509,9 @@ internal sealed class DarlingStoreUpgrade
             SearchPath = null,
         }.ConnectionString;
 
-        var sourceBuilder = new NpgsqlDataSourceBuilder(DarlingStoreConnection.PinSessionTimeZoneUtc(connectionString));
+        var sourceBuilder = new NpgsqlDataSourceBuilder(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.UpgradeApplicationName)));
         sourceBuilder.ConfigureTypeLoading(typeLoading => typeLoading.EnableTypeLoading(false));
         await using var source = sourceBuilder.Build();
         await using var connection = await WithTransportRetryAsync(
@@ -1790,7 +1792,8 @@ internal sealed class DarlingStoreUpgrade
                 $"the update could not prepare its private start ({ex.Message})");
         }
 
-        var owner = DarlingManagedPostgres.BuildConnectionString(port, password);
+        var owner = DarlingStoreConnection.WithApplicationName(
+            DarlingManagedPostgres.BuildConnectionString(port, password), DarlingManagedPostgres.UpgradeApplicationName);
 
         string? before = null;
         try
@@ -3543,7 +3546,8 @@ internal sealed class DarlingStoreUpgrade
             oldStarted = true;
 
             step = "read-cluster-identity";
-            var ownerConnection = DarlingManagedPostgres.BuildConnectionString(context.Port, context.Password);
+            var ownerConnection = DarlingStoreConnection.WithApplicationName(
+                DarlingManagedPostgres.BuildConnectionString(context.Port, context.Password), DarlingManagedPostgres.UpgradeApplicationName);
             var identity = await ReadClusterIdentityAsync(ownerConnection, cancellationToken);
             _logger.LogInformation(
                 "Old cluster identity: encoding {Encoding}, collate {Collate}, ctype {Ctype}, locale provider {Provider}, data checksums {Checksums} — the new cluster is initialized to match.",
@@ -4194,7 +4198,8 @@ internal sealed class DarlingStoreUpgrade
         string? oldRuntimeDefaultVersion,
         CancellationToken cancellationToken)
     {
-        var ownerConnection = DarlingManagedPostgres.BuildConnectionString(port, password);
+        var ownerConnection = DarlingStoreConnection.WithApplicationName(
+            DarlingManagedPostgres.BuildConnectionString(port, password), DarlingManagedPostgres.UpgradeApplicationName);
         var databases = new List<string>();
 
         var listBuilder = new NpgsqlConnectionStringBuilder(ownerConnection) { Database = "postgres", Pooling = false };

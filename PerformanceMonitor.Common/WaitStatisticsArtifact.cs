@@ -1,0 +1,134 @@
+/*
+ * Copyright (c) 2026 Erik Darling, Darling Data LLC
+ *
+ * This file is part of the SQL Server Performance Monitor.
+ *
+ * Licensed under the MIT License. See LICENSE file in the project root for full license information.
+ */
+
+using System;
+
+namespace PerformanceMonitor.Common;
+
+/// <summary>
+/// The one shared test for an isolated single-sample artifact in a <c>SQLServer:Wait Statistics</c> gauge
+/// counter (#4476). Field evidence from a production fleet (3 days, 43 servers): 141 rows of
+/// <c>Waits started per second</c> exceeded 10,000,000 (max 274,700,202) against a typical median of 76-504,
+/// each one ISOLATED — one server, one sample, with normal neighbours on both sides (318 → 214,396,451 →
+/// 1,021; 612 → 90,893,408 → 1,021; 40 → 32,713,827 → 878; 816 → 127,703,309 → 267). Every counter carries
+/// <c>cntr_type</c> 65792 (a gauge) on every affected server — the collector stores exactly what the DMV
+/// reported, so this is not a collector typing bug. The spike magnitude matches the counter's CUMULATIVE
+/// count since the instance started (~250/s over ~10 days is ~2x10^8), so the DMV intermittently hands back
+/// the lifetime cumulative count in a rate-family instance for one sample. The stored row is never rewritten;
+/// this predicate exists for the READ path to recognise and set the point aside, visibly.
+/// </summary>
+public static class WaitStatisticsArtifact
+{
+    /// <summary>The <c>object_name</c> suffix every SQL Server perfmon row from the Wait Statistics object
+    /// carries, with or without the <c>SQLServer:</c>/named-instance (<c>MSSQL$&lt;INSTANCE&gt;:</c>) prefix
+    /// the DMV puts in front of every object name — the same "match by suffix" idiom the rest of the perfmon
+    /// family uses to tolerate a named instance without spelling out every prefix shape.</summary>
+    public const string ObjectNameSuffix = ":Wait Statistics";
+
+    /// <summary>The floor below which a value is never judged an artifact, however large the ratio to its
+    /// neighbours — the measured fleet's normal medians (76-504) are nowhere near this, and a real burst in
+    /// these counters has stayed under it too.</summary>
+    public const long MinValue = 1_000_000;
+
+    /// <summary>How far above both neighbours a value must sit to be judged an artifact rather than a real
+    /// burst. The measured spike ratios were 10^4-10^6 to their neighbours; a real burst in these instances
+    /// has stayed under 10^3 of its neighbours, so 1,000 is the floor that separates the two populations
+    /// without being tuned to the exact field numbers.</summary>
+    public const long NeighborRatio = 1_000;
+
+    /// <summary>
+    /// True when <paramref name="value"/> is an isolated single-sample artifact in a Wait Statistics gauge
+    /// series: both neighbours are present (a first or last point in a window is never judged — it has only
+    /// one neighbour, or none), the row's object is Wait Statistics (matched by <see cref="ObjectNameSuffix"/>,
+    /// tolerating the SQLServer:/named-instance prefix), the row's stored type is a gauge (<see
+    /// cref="PerfmonCounterKind.Gauge"/> — a rate row's own cumulative count is not itself evidence of this
+    /// artifact; the field evidence is specifically a gauge instance carrying a cumulative-shaped number),
+    /// <paramref name="value"/> is at least <see cref="MinValue"/>, and it exceeds <see cref="NeighborRatio"/>
+    /// times the LARGER of the two neighbours.
+    /// </summary>
+    public static bool IsIsolatedSingleSampleArtifact(
+        string? objectName, PerfmonCounterKind kind, long? previousValue, long value, long? nextValue)
+    {
+        if (kind != PerfmonCounterKind.Gauge)
+        {
+            return false;
+        }
+
+        if (objectName is null || !objectName.EndsWith(ObjectNameSuffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (previousValue is not long prev || nextValue is not long next)
+        {
+            return false;
+        }
+
+        if (value < MinValue)
+        {
+            return false;
+        }
+
+        var neighborMax = Math.Max(prev, next);
+        return value > NeighborRatio * neighborMax;
+    }
+
+    /// <summary>
+    /// The SQL twin of <see cref="IsIsolatedSingleSampleArtifact"/> (#4476), for the raw INSTANCE rows a trend
+    /// read sums per collection BEFORE the artifact can be told apart from a real value — both perfmon trend
+    /// reads (the Viewer's <c>PerfmonTrendsSql</c> and the MCP's <c>PerfmonTrendBucketedSql</c>) SUM every
+    /// instance of a counter name into one point in SQL, so a C#-side check on the summed <c>PerfmonTrendPoint</c>
+    /// never sees the one spiking instance. The expression is built from THIS type's own constants — never a
+    /// second literal 1,000,000 or 1,000 typed into a SQL string — so the SQL and C# rules cannot drift apart;
+    /// the two gauge type ids come from <see cref="PerfmonCounterTypes.GaugeTypes"/>, the same set
+    /// <see cref="PerfmonCounterKind.Gauge"/> classifies.
+    /// <para>Every parameter is a bare column or window-function reference the caller supplies as text (never a
+    /// user value), because a lag/lead window differs by partition between the two callers (the MCP single-counter
+    /// read partitions by <c>object_name, instance_name</c> alone since <c>counter_name</c> is already a query
+    /// parameter; a caller reading several counters at once must add <c>counter_name</c> to the partition too).
+    /// The <see cref="ObjectNameSuffix"/> match is an exact suffix (Postgres <c>right(...) = '...'</c>), the same
+    /// tolerance for a named-instance prefix the C# side's <c>EndsWith</c> gives.</para>
+    /// </summary>
+    public static string ArtifactPredicateSql(string cntrTypeColumn, string objectNameColumn, string previousValueColumn, string valueColumn, string nextValueColumn) =>
+        $"""
+        {cntrTypeColumn} IN ({PerfmonCounterTypes.PerfCounterLargeRawCount}, {PerfmonCounterTypes.PerfCounterRawCount})
+        AND {objectNameColumn} IS NOT NULL
+        AND right({objectNameColumn}, {ObjectNameSuffix.Length}) = '{ObjectNameSuffix}'
+        AND {previousValueColumn} IS NOT NULL
+        AND {nextValueColumn} IS NOT NULL
+        AND {valueColumn} >= {MinValue}
+        AND {valueColumn} > {NeighborRatio} * GREATEST({previousValueColumn}, {nextValueColumn})
+        """;
+
+    /// <summary>
+    /// The bare <see cref="ObjectNameSuffix"/> match (#4476 cost review): a caller that must SPLIT its rows by
+    /// object before deciding whether to open a lag/lead window at all — the lag/lead window in
+    /// <see cref="ArtifactPredicateSql"/>'s caller forces a per-partition sort over every row it scans, so a
+    /// caller with non-Wait-Statistics rows in the same read (both perfmon trend reads: most counters never
+    /// carry this object) opens the window ONLY on the rows this predicate lets through, in a UNION ALL arm
+    /// with a plain <c>false AS is_artifact</c> for the rest — measured 3x faster (800 ms to 2.3 s for 12
+    /// counters over 7 days) than windowing every row, because the sort no longer touches rows that could
+    /// never be an artifact and the planner keeps an index scan instead of a parallel seq scan. Same suffix
+    /// constant as <see cref="ArtifactPredicateSql"/>, so the two conditions cannot drift apart.
+    /// </summary>
+    public static string ObjectNameSuffixMatchSql(string objectNameColumn) =>
+        $"{objectNameColumn} IS NOT NULL AND right({objectNameColumn}, {ObjectNameSuffix.Length}) = '{ObjectNameSuffix}'";
+
+    /// <summary>
+    /// The Viewer chart title / <c>get_perfmon_trend</c> notes-line sentence for a nonzero set-aside count
+    /// (#4476) — null when nothing was set aside, so a caller never appends an empty clause. Singular/plural
+    /// spelled out rather than left to a format string, matching the rest of the chart's caption idiom
+    /// (<c>ShowTrendCoverageTitle</c>).
+    /// </summary>
+    public static string? ChartCaption(long artifactsSetAside) => artifactsSetAside switch
+    {
+        <= 0 => null,
+        1 => "1 one-sample Wait Statistics spike set aside",
+        _ => $"{artifactsSetAside} one-sample Wait Statistics spikes set aside",
+    };
+}
