@@ -4686,41 +4686,10 @@ public sealed class DarlingWorker : BackgroundService
         return nowUtc + jitter;
     }
 
-    /// <summary>
-    /// One batched round-trip (#1575): the newest <c>collection_time</c> per collector for a server, keyed by
-    /// collector_name — the persisted last-run watermark <see cref="ComputeSeededNextDue"/> seeds the schedule
-    /// from on connect and on a newly-enabled collector, so a restart resumes the real cadence instead of
-    /// re-phasing it forward. ANY status counts (a failed attempt still wrote a row and still reset the cadence
-    /// clock, exactly as the steady-state advance retries every interval regardless of outcome). Bare
-    /// <c>collection_log</c> resolves through the store connection's collect/config search path, matching the
-    /// sibling readers (<c>DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync</c>). The naive-UTC
-    /// <c>timestamp</c> value is relabeled Kind=Utc (a relabel, NOT a shift) so every NextDue entry stays
-    /// uniformly Kind=Utc. Failure-isolated: a store hiccup returns an EMPTY map so the caller seeds every
-    /// collector as never-run (a prompt, jittered run) rather than aborting the connect — an observability read
-    /// must never break the collection loop. Internal so a gated live test can seed a row and assert the read.
-    ///
-    /// <para><b>Bounded to <see cref="WatermarkFloorLookback"/>, not the unbounded MAX/GROUP BY this
-    /// replaces (#4469).</b> On a busy store the old statement walked every retained <c>collection_log</c>
-    /// chunk, compressed ones included, because the newest instant per collector is not known until the
-    /// whole table has been read: measured 4,775 ms and 21,483 buffers read on a 32-chunk hypertable (30
-    /// compressed), enough to clear the connect path's 10 s deadline and cancel repeatedly on the busiest
-    /// store. Adding a literal floor on <c>collection_time</c> lets TimescaleDB exclude every chunk older
-    /// than the floor outright: the same read, same server, same statement shape, measured 69 ms and 20,703
-    /// buffers with a 2-day floor.</para>
-    ///
-    /// <para><b>Why 2 days is a safe floor.</b> This read only seeds <see cref="ComputeSeededNextDue"/>,
-    /// which only cares whether a collector ran within its OWN interval of "now" — a collector whose true
-    /// last run falls outside the floor is, by definition, already overdue on every cadence this product
-    /// schedules (the longest recurring cadence in <c>CollectorScheduleDefaults</c> is 1440 minutes = 1 day,
-    /// shared by <c>index_object_stats</c>, <c>pg_column_stats</c>, <c>pg_extension_availability</c> and
-    /// <c>pg_index_usage_stats</c>). A floor of one day would already catch every such collector's true
-    /// last run; two days is a full day of margin so a floor-excluded row (last run 1–2 days back, still
-    /// technically inside interval + slop for a collector whose interval is close to a day) cannot be
-    /// mistaken for never-run. A collector whose last run predates the floor entirely is seeded as never-run
-    /// — the SAME fallback this read already used on a query failure — so it runs promptly under jitter
-    /// instead of waiting out a remaining interval it does not actually have left; that is strictly safer
-    /// than the alternative (treating it as still-current and never rescheduling it).</para>
-    /// </summary>
+    /// <summary>The floor applied to the watermark read below (#4469): how far back
+    /// <see cref="ReadCollectorWatermarksAsync"/> is willing to look for a collector's last run. Two days,
+    /// not one, so a floor-excluded row (a true last run 1–2 days back) can't be mistaken for never-run —
+    /// see the method's own doc comment for why this is safe.</summary>
     internal static readonly TimeSpan WatermarkFloorLookback = TimeSpan.FromDays(2);
 
     /// <summary>The bounded statement itself (#4469), pinned by name so a live/plan test can assert its
@@ -4737,6 +4706,45 @@ public sealed class DarlingWorker : BackgroundService
         GROUP BY collector_name
         """;
 
+    /// <summary>
+    /// One batched round-trip (#1575): the newest <c>collection_time</c> per collector for a server, keyed by
+    /// collector_name — the persisted last-run watermark <see cref="ComputeSeededNextDue"/> seeds the schedule
+    /// from on connect and on a newly-enabled collector, so a restart resumes the real cadence instead of
+    /// re-phasing it forward. ANY status counts (a failed attempt still wrote a row and still reset the cadence
+    /// clock, exactly as the steady-state advance retries every interval regardless of outcome). Bare
+    /// <c>collection_log</c> resolves through the store connection's collect/config search path, matching the
+    /// sibling readers (<c>DarlingSelfAlertEvaluator.ReadCollectionSignalsAsync</c>). The naive-UTC
+    /// <c>timestamp</c> value is relabeled Kind=Utc (a relabel, NOT a shift) so every NextDue entry stays
+    /// uniformly Kind=Utc. Failure-isolated: a store hiccup returns an EMPTY map so the caller seeds every
+    /// collector as never-run (a prompt, jittered run) rather than aborting the connect — an observability read
+    /// must never break the collection loop. Internal so a gated live test can seed a row and assert the read.
+    ///
+    /// <para><b>Bounded to <see cref="WatermarkFloorLookback"/>, not the unbounded MAX/GROUP BY this
+    /// replaces (#4469).</b> On a busy store the old statement walked every retained <c>collection_log</c>
+    /// chunk, compressed ones included, because the newest instant per collector is not known until the
+    /// whole table has been read. Back-to-back field EXPLAINs on the busiest measured store: the unbounded
+    /// statement, cold, took 4,775 ms (3,166 hit + 21,483 read buffers, 13,957 ms of parallel-worker I/O read
+    /// time); adding a literal 2-day floor removed the 30 older compressed chunks from that scan, which had
+    /// accounted for only about 11% of the cold I/O (~1,540 ms) — the other 89% (~12,417 ms) was spent in a
+    /// Bitmap Heap Scan over the two newest, uncompressed chunks, and the floor keeps those chunks, so that
+    /// cost is unchanged. (The bounded run's own 69 ms/20,703-buffers-all-hit number came from running warm,
+    /// right after the unbounded run had already pulled the same pages into cache, so it is not a clean
+    /// before/after and is not cited as the floor's effect.) The floor still matters: the excluded 11% grows
+    /// with retention and chunk count, and a follow-up addresses the dominant newest-chunk cost.</para>
+    ///
+    /// <para><b>Why 2 days is a safe floor.</b> This read only seeds <see cref="ComputeSeededNextDue"/>,
+    /// which only cares whether a collector ran within its OWN interval of "now" — a collector whose true
+    /// last run falls outside the floor is, by definition, already overdue on every cadence this product
+    /// schedules (the longest recurring cadence in <c>CollectorScheduleDefaults</c> is 1440 minutes = 1 day,
+    /// shared by <c>index_object_stats</c>, <c>pg_column_stats</c>, <c>pg_extension_availability</c> and
+    /// <c>pg_index_usage_stats</c>). A floor of one day would already catch every such collector's true
+    /// last run; two days is a full day of margin so a floor-excluded row (last run 1–2 days back, still
+    /// technically inside interval + slop for a collector whose interval is close to a day) cannot be
+    /// mistaken for never-run. A collector whose last run predates the floor entirely is seeded as never-run
+    /// — the SAME fallback this read already used on a query failure — so it runs promptly under jitter
+    /// instead of waiting out a remaining interval it does not actually have left; that is strictly safer
+    /// than the alternative (treating it as still-current and never rescheduling it).</para>
+    /// </summary>
     internal static async Task<Dictionary<string, DateTime>> ReadCollectorWatermarksAsync(
         NpgsqlDataSource postgres, int serverId, ILogger? logger, CancellationToken cancellationToken)
     {

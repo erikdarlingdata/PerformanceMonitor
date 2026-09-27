@@ -21,10 +21,14 @@ namespace Darling.Tests;
 /// #4469: the connect-path watermark read (<see cref="DarlingWorker.ReadCollectorWatermarksAsync"/>) used to
 /// run <c>SELECT collector_name, MAX(collection_time) FROM collection_log WHERE server_id = $1 GROUP BY
 /// collector_name</c> with no bound on <c>collection_time</c>, so TimescaleDB had to read every retained
-/// chunk — compressed ones included — before it could know the newest instant per collector. A field EXPLAIN
-/// on the busiest measured store: 4,775 ms and 21,483 buffers read across a 32-chunk hypertable (30
-/// compressed); the same statement with a literal 2-day floor added: 69 ms and 20,703 buffers HIT (no
-/// physical read), because every chunk older than the floor is excluded before it is ever opened.
+/// chunk — compressed ones included — before it could know the newest instant per collector.
+/// Back-to-back field EXPLAINs on the busiest measured store: the unbounded statement, cold, took
+/// 4,775 ms (3,166 hit + 21,483 read buffers, 13,957 ms of parallel-worker I/O read time). Adding a
+/// literal 2-day floor removed the 30 older compressed chunks from that scan, but those chunks had
+/// only accounted for about 11% of the cold I/O (~1,540 ms); the other 89% (~12,417 ms) was a Bitmap
+/// Heap Scan over the two newest, uncompressed chunks, which the floor leaves unchanged. (The bounded
+/// run's own 69 ms / 20,703-buffers-all-hit number was measured warm, right after the unbounded run
+/// had cached the same pages, so it is not a clean before/after for the floor's effect.)
 ///
 /// <para>This class proves the SAME thing against a rig with compressed chunks: (1) the bounded statement
 /// returns the identical MAX-per-collector rows the unbounded statement returns, for collectors whose true
