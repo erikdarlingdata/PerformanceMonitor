@@ -1473,6 +1473,45 @@ namespace PerformanceMonitor.Common
             collectorName is not null && OnLoadCollectorNames.Contains(collectorName);
 
         /// <summary>
+        /// The collectors whose SOURCE advances once per Query Store INTERVAL rather than once per
+        /// collection cycle (#4473) — <c>query_store</c> polls <c>sys.query_store_runtime_stats</c> every
+        /// five minutes (<c>CollectorScheduleDefaults</c>), but that view only gains a new row when its
+        /// engine-side interval closes, and <c>INTERVAL_LENGTH_MINUTES</c> accepts 1/5/10/15/30/60/1440
+        /// (install/09_collect_query_store.sql). So ten or eleven zero-row cycles followed by one
+        /// productive cycle is this collector's ORDINARY shape, not a regression — <see cref="ProducedThenStopped"/>
+        /// gives it a much longer leash than <see cref="ProductiveZeroRunStreak"/> before it flags, because
+        /// the streak count alone cannot tell a normal gap between intervals from a stopped source.
+        ///
+        /// <para>Kept as an explicit name set for the same reason <see cref="OnLoadCollectorNames"/> is: so
+        /// this classifier stays free of a dependency on the collector catalog. No other collector's source
+        /// advances per Query Store interval today — <c>plan_correction</c> reads
+        /// <c>sys.dm_db_tuning_recommendations</c> joined to <c>sys.query_store_plan</c> by
+        /// (query_id, plan_id), a live catalog lookup keyed on the recommendation set rather than a per-
+        /// interval aggregate (PerformanceMonitor.Collectors/PlanCorrectionCollector.cs), and
+        /// <c>query_store_health</c> is a per-database configuration snapshot
+        /// (<c>sys.database_query_store_options</c>), not a runtime-stats read.</para>
+        /// </summary>
+        private static readonly HashSet<string> IntervalSourcedCollectorNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "query_store",
+        };
+
+        /// <summary>
+        /// True when this collector's source advances once per Query Store interval rather than once per
+        /// collection cycle (<see cref="IntervalSourcedCollectorNames"/>, #4473).
+        /// </summary>
+        public static bool IsIntervalSourcedCollector(string? collectorName) =>
+            collectorName is not null && IntervalSourcedCollectorNames.Contains(collectorName);
+
+        /// <summary>
+        /// The longest a Query Store interval can legally take to close (#4473): 1440 minutes is the
+        /// largest value <c>INTERVAL_LENGTH_MINUTES</c> accepts, and the extra 15 minutes is slack for the
+        /// collector's own cadence rather than a second guess at the engine's clock. Named so the reason
+        /// travels with the value rather than living only in a comment beside a bare literal.
+        /// </summary>
+        public static readonly TimeSpan QueryStoreLongestIntervalSlack = TimeSpan.FromMinutes(1440 + 15);
+
+        /// <summary>
         /// The collectors whose enumeration draws its item list from the target's USER DATABASES — exactly
         /// the collectors that override <c>BuildEnumerationQuery</c> today. For these, and only these,
         /// "the enumeration yielded 0 items" is worth qualifying against whether the target has any user
@@ -1813,7 +1852,30 @@ namespace PerformanceMonitor.Common
         public static bool ProducedThenStopped(
             string? collectorName,
             long trailingZeroRowSuccessRuns,
-            DateTime? lastProductiveTimeUtc)
+            DateTime? lastProductiveTimeUtc) =>
+            ProducedThenStopped(collectorName, trailingZeroRowSuccessRuns, lastProductiveTimeUtc, DateTime.UtcNow);
+
+        /// <summary>
+        /// The clock-aware overload (#4473): for an interval-sourced collector
+        /// (<see cref="IsIntervalSourcedCollector"/>) — one whose source only advances once per Query
+        /// Store interval rather than once per collection cycle — the streak count alone cannot tell a
+        /// normal gap between intervals from a stopped source, because <c>query_store</c> runs every five
+        /// minutes while its interval can be up to a day wide. So for that collector the flag also requires
+        /// <paramref name="nowUtc"/> to be more than <see cref="QueryStoreLongestIntervalSlack"/> PAST
+        /// <paramref name="lastProductiveTimeUtc"/> — strictly greater, so a target sitting exactly at the
+        /// slack boundary is still read as within its normal cadence. Every other collector keeps the
+        /// existing streak-only rule unchanged.
+        /// </summary>
+        /// <param name="nowUtc">
+        /// The instant to measure the gap against, in UTC. Every caller passes <see cref="DateTime.UtcNow"/>
+        /// — this parameter exists so a pin can hold the clock still rather than to change any caller's
+        /// semantics.
+        /// </param>
+        public static bool ProducedThenStopped(
+            string? collectorName,
+            long trailingZeroRowSuccessRuns,
+            DateTime? lastProductiveTimeUtc,
+            DateTime nowUtc)
         {
             if (lastProductiveTimeUtc is null || trailingZeroRowSuccessRuns < ProductiveZeroRunStreak)
             {
@@ -1824,7 +1886,22 @@ namespace PerformanceMonitor.Common
                rest, and an on-load read whose "consecutive runs" are tab opens rather than cycles. Both
                are resolved through the existing predicates rather than a third name list, so a collector
                cannot be an event capture for one sentence and a regression for another. */
-            return !IsEventCollector(collectorName) && !IsOnLoadCollector(collectorName);
+            if (IsEventCollector(collectorName) || IsOnLoadCollector(collectorName))
+            {
+                return false;
+            }
+
+            /* An interval-sourced collector's normal cadence is ten or eleven zero-row cycles between
+               productive ones, so the streak alone would flag it every day. It still needs the ~1-day-plus
+               backstop, both for a real stop (Query Store going READ_ONLY) and because get_query_store_health
+               already catches the common case earlier — this arm is the fallback for whatever that state
+               check misses. */
+            if (IsIntervalSourcedCollector(collectorName))
+            {
+                return nowUtc - lastProductiveTimeUtc.Value > QueryStoreLongestIntervalSlack;
+            }
+
+            return true;
         }
 
         /// <summary>
