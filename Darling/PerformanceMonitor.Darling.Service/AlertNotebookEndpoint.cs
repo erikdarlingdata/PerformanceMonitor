@@ -229,8 +229,8 @@ internal static partial class AlertNotebookEndpoint
             else
             {
                 (cells, templateId, templateVersion) = await BuildCellsAsync(
-                    metric, serverName, asOf, windowEnd, serverId, anchor, postgres, analysis, context.RequestAborted,
-                    logger, notes, matchedIncident, matchedRow, status, lookbackHours);
+                    metric, serverName, asOf, windowEnd, serverId, anchor, postgres, analysis,
+                    logger, notes, matchedIncident, matchedRow, status, lookbackHours, context.RequestAborted);
             }
 
             var body = new JsonObject
@@ -263,9 +263,9 @@ internal static partial class AlertNotebookEndpoint
     /// before this extraction.</summary>
     internal static async Task<(JsonArray Cells, string TemplateId, int TemplateVersion)> BuildCellsAsync(
         string? metric, string? serverName, string? asOf, DateTime windowEnd, int? serverId, DateTime anchor,
-        NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct,
+        NpgsqlDataSource postgres, DarlingAnalysisService analysis,
         ILogger? logger, JsonArray? notes, AlertIncident? matchedIncident,
-        DarlingAlertReader.AlertHistoryReadRow? matchedRow, string status, string lookbackHours)
+        DarlingAlertReader.AlertHistoryReadRow? matchedRow, string status, string lookbackHours, CancellationToken ct)
     {
         var trimmedMetric = string.IsNullOrWhiteSpace(metric) ? null : metric.Trim();
         var resolvedAuthored = ResolveAuthored(trimmedMetric);
@@ -275,7 +275,7 @@ internal static partial class AlertNotebookEndpoint
             var (authored, kind) = resolvedAuthored.Value;
             var windowStart = windowEnd - AuthoredLookback(trimmedMetric!);
             var authoredContext = ShouldPrefetch(authored, kind)
-                ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, ct, logger, notes)
+                ? await PrefetchAsync(kind, trimmedMetric!, serverId, anchor, postgres, analysis, logger, notes, ct)
                 : AuthoredContext.Empty;
             var authoredCells = authored.Invoke(
                 metric, serverName, asOf, windowStart, windowEnd, matchedIncident, matchedRow, status, authoredContext);
@@ -610,7 +610,7 @@ internal static partial class AlertNotebookEndpoint
         AuthoredContextKind kind, string metric, int? serverId, DateTime anchor,
         NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct)
     {
-        return await PrefetchAsync(kind, metric, serverId, anchor, postgres, analysis, ct, logger: null, notes: null);
+        return await PrefetchAsync(kind, metric, serverId, anchor, postgres, analysis, logger: null, notes: null, ct);
     }
 
     /// <summary>The full pre-fetch, with the optional logger/notes the endpoint's call site passes so a store
@@ -618,8 +618,8 @@ internal static partial class AlertNotebookEndpoint
     /// AND surfaces as a note on the response instead of vanishing silently.</summary>
     internal static async Task<AuthoredContext> PrefetchAsync(
         AuthoredContextKind kind, string metric, int? serverId, DateTime anchor,
-        NpgsqlDataSource postgres, DarlingAnalysisService analysis, CancellationToken ct,
-        ILogger? logger, JsonArray? notes)
+        NpgsqlDataSource postgres, DarlingAnalysisService analysis,
+        ILogger? logger, JsonArray? notes, CancellationToken ct)
     {
         Interlocked.Increment(ref s_prefetchCallsForTest);
 
@@ -629,10 +629,10 @@ internal static partial class AlertNotebookEndpoint
                 return AuthoredContext.Empty;
 
             case AuthoredContextKind.CustomRule:
-                return await PrefetchCustomRuleAsync(metric, postgres, ct, logger, notes);
+                return await PrefetchCustomRuleAsync(metric, postgres, logger, notes, ct);
 
             case AuthoredContextKind.AnalysisFinding:
-                return await PrefetchAnalysisFindingAsync(metric, serverId, anchor, analysis, ct, logger, notes);
+                return await PrefetchAnalysisFindingAsync(metric, serverId, anchor, analysis, logger, notes, ct);
 
             default:
                 return AuthoredContext.Empty;
@@ -643,7 +643,7 @@ internal static partial class AlertNotebookEndpoint
     /// <see cref="CustomAlertEvaluator.MetricNameFor"/>) and reads the rule. A bad parse or a store
     /// <c>NotFound</c>/null-<c>Ok</c> row is an honest missing context, not an error.</summary>
     private static async Task<AuthoredContext> PrefetchCustomRuleAsync(
-        string metric, NpgsqlDataSource postgres, CancellationToken ct, ILogger? logger, JsonArray? notes)
+        string metric, NpgsqlDataSource postgres, ILogger? logger, JsonArray? notes, CancellationToken ct)
     {
         var idText = metric.Length > "Custom:".Length ? metric["Custom:".Length..] : string.Empty;
         if (!long.TryParse(idText, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ruleId))
@@ -679,8 +679,8 @@ internal static partial class AlertNotebookEndpoint
     /// so two findings sharing a shorter prefix but differing at the 8th are never confused. None found (aged
     /// past retention, muted, or the parse itself failed) is an honest missing context.</summary>
     private static async Task<AuthoredContext> PrefetchAnalysisFindingAsync(
-        string metric, int? serverId, DateTime anchor, DarlingAnalysisService analysis, CancellationToken ct,
-        ILogger? logger, JsonArray? notes)
+        string metric, int? serverId, DateTime anchor, DarlingAnalysisService analysis,
+        ILogger? logger, JsonArray? notes, CancellationToken ct)
     {
         var openBracket = metric.LastIndexOf('[');
         var closeBracket = metric.LastIndexOf(']');

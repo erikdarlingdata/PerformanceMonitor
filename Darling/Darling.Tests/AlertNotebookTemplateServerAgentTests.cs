@@ -68,7 +68,10 @@ public sealed class AlertNotebookTemplateServerAgentTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
 
         Assert.Equal(4, cells.Count);
@@ -105,7 +108,10 @@ public sealed class AlertNotebookTemplateServerAgentTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
 
         Assert.Equal(4, cells.Count);
@@ -144,9 +150,12 @@ public sealed class AlertNotebookTemplateServerAgentTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var withIncident = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var withIncident = buildCells(
             metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
-        var withoutIncident = template.Value.BuildCells(
+        var withoutIncident = buildCells(
             metric, "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown");
 
         Assert.Equal(withIncident.Count, withoutIncident.Count);

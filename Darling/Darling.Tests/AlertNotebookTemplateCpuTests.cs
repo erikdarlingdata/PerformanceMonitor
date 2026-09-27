@@ -46,7 +46,10 @@ public sealed class AlertNotebookTemplateCpuTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("High CPU");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             "High CPU", "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
 
         Assert.Equal(7, cells.Count);
@@ -91,11 +94,14 @@ public sealed class AlertNotebookTemplateCpuTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("High CPU");
         Assert.NotNull(template);
 
-        var withoutIncident = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var withoutIncident = buildCells(
             "High CPU", "SRV1", AsOf, WindowStart, WindowEnd, null, null,
             "Unknown (not collected since " + AsOf + ")");
 
-        var withIncident = template.Value.BuildCells(
+        var withIncident = buildCells(
             "High CPU", "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
 
         Assert.Equal(withIncident.Count, withoutIncident.Count);

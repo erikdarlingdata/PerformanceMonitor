@@ -184,16 +184,16 @@ public sealed class GetReadLatencyLiveTests
             var bySurface = await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours: 48, surface: "compose", cancellationToken: ct);
             using var surfaceDoc = JsonDocument.Parse(bySurface);
             var surfaceReads = surfaceDoc.RootElement.GetProperty("reads").EnumerateArray().ToArray();
-            Assert.Equal(1, surfaceReads.Length);
-            Assert.Equal("compose", surfaceReads[0].GetProperty("surface").GetString());
-            Assert.Equal("custom-view", surfaceReads[0].GetProperty("route").GetString());
+            var surfaceRead = Assert.Single(surfaceReads);
+            Assert.Equal("compose", surfaceRead.GetProperty("surface").GetString());
+            Assert.Equal("custom-view", surfaceRead.GetProperty("route").GetString());
 
             var byRoute = await DarlingMcpReadLatencyTools.GetReadLatency(postgres, hours: 48, route: "get_wait_stats", cancellationToken: ct);
             using var routeDoc = JsonDocument.Parse(byRoute);
             var routeReads = routeDoc.RootElement.GetProperty("reads").EnumerateArray().ToArray();
-            Assert.Equal(1, routeReads.Length);
-            Assert.Equal("web", routeReads[0].GetProperty("surface").GetString());
-            Assert.Equal("get_wait_stats", routeReads[0].GetProperty("route").GetString());
+            var routeRead = Assert.Single(routeReads);
+            Assert.Equal("web", routeRead.GetProperty("surface").GetString());
+            Assert.Equal("get_wait_stats", routeRead.GetProperty("route").GetString());
 
             bodySucceeded = true;
         }

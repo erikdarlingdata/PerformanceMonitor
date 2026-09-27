@@ -54,7 +54,10 @@ public sealed class AlertNotebookTemplatePostgresTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("PostgreSQL Wraparound Risk");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             "PostgreSQL Wraparound Risk", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
 
@@ -85,7 +88,10 @@ public sealed class AlertNotebookTemplatePostgresTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("PostgreSQL Vacuum Horizon Blocked");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             "PostgreSQL Vacuum Horizon Blocked", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
 
@@ -115,7 +121,10 @@ public sealed class AlertNotebookTemplatePostgresTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("PostgreSQL Replication Slot Retention");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             "PostgreSQL Replication Slot Retention", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
 
@@ -147,9 +156,12 @@ public sealed class AlertNotebookTemplatePostgresTests
         var template = AlertNotebookEndpoint.AuthoredTemplate(metric);
         Assert.NotNull(template);
 
-        var withoutIncident = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var withoutIncident = buildCells(
             metric, "SRV1", AsOf, WindowStart, WindowEnd, null, null, "Unknown");
-        var withIncident = template.Value.BuildCells(
+        var withIncident = buildCells(
             metric, "SRV1", AsOf, WindowStart, WindowEnd, IncidentWithDatabase("SalesDb"), null, "Unknown");
 
         Assert.Equal(withIncident.Count, withoutIncident.Count);

@@ -294,6 +294,7 @@ public sealed class AlertNotebookAuthoredContextTests
             AlertNotebookEndpoint.PrefetchAsync(
                 AlertNotebookEndpoint.AuthoredContextKind.CustomRule, "Custom:1", serverId: null, DateTime.UtcNow,
                 postgres, analysis, cts.Token));
+
     }
 
     [Fact]
@@ -472,8 +473,8 @@ public sealed class AlertNotebookAuthoredContextTests
         await AlertNotebookEndpoint.BuildCellsAsync(
             metric: "Blocking Detected", serverName: "srv", asOf: AsOf, windowEnd: WindowEnd,
             serverId: null, anchor: WindowEnd, postgres: postgres, analysis: analysis,
-            ct: CancellationToken.None, logger: null, notes: null, matchedIncident: null, matchedRow: null,
-            status: "Unknown", lookbackHours: "24");
+            logger: null, notes: null, matchedIncident: null, matchedRow: null,
+            status: "Unknown", lookbackHours: "24", ct: CancellationToken.None);
 
         lock (PrefetchCounterLock)
         {

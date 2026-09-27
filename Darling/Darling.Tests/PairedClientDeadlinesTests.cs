@@ -65,7 +65,7 @@ public sealed class PairedClientDeadlinesTests
            cannot answer behaves like a store nobody has tuned"), so it is pinned at EQUALITY, not "above" —
            a fallback used only when the store's own row cannot be read, standing in for the ceiling rather
            than bounding it. */
-        Assert.Equal(ceiling, McpCommandDeadlines.ComposedQueryFallbackSeconds);
+        Assert.Equal(McpCommandDeadlines.ComposedQueryFallbackSeconds, ceiling);
     }
 
     /// <summary>
