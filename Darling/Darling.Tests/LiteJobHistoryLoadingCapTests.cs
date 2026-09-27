@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace Darling.Tests;
@@ -38,11 +39,20 @@ public sealed class LiteJobHistoryLoadingCapTests
 
         Assert.Contains("LoadingMessage.Visibility = Visibility.Visible;", body, StringComparison.Ordinal);
 
-        var finallyIndex = body.LastIndexOf("finally", StringComparison.Ordinal);
-        Assert.True(finallyIndex >= 0, "LoadJobsAsync has no finally block");
-        var finallyOpen = body.IndexOf('{', finallyIndex);
-        var finallyBody = CSharpSourceWalker.BraceBalanced(body, finallyOpen);
-        Assert.Contains("LoadingMessage.Visibility = Visibility.Collapsed;", finallyBody, StringComparison.Ordinal);
+        /* #4478/#4488: an unconditional finally collapsed the loading message for a SUPERSEDED load too, so
+           the earlier of two overlapping reads could hide the newer load's indicator. The collapse on both
+           exit paths (success and the caught exception) now sits behind the same _loads.Superseded check as
+           every other paint in this method — asserting on that shape rather than on a bare finally, which is
+           exactly the shape that was wrong. */
+        var collapseCount = Regex.Matches(body, @"LoadingMessage\s*\.\s*Visibility\s*=\s*Visibility\s*\.\s*Collapsed\s*;").Count;
+        Assert.True(collapseCount >= 2, "LoadJobsAsync should collapse the loading message on both the success and the caught-exception exit path");
+
+        var guardedCollapses = Regex.Matches(
+            body,
+            @"if\s*\(\s*_loads\s*\.\s*Superseded\s*\(\s*nameof\s*\(\s*LoadJobsAsync\s*\)\s*,\s*gen\s*\)\s*\)\s*return\s*;\s*\r?\n\s*\r?\n?\s*LoadingMessage\s*\.\s*Visibility\s*=\s*Visibility\s*\.\s*Collapsed\s*;").Count;
+        Assert.True(
+            guardedCollapses >= 2,
+            "LoadJobsAsync's loading-message collapse must sit behind its own supersession check, not run unconditionally for a superseded load");
     }
 
     [Fact]

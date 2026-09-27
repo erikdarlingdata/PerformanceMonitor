@@ -139,13 +139,15 @@ public partial class JobHistoryTab : UserControl
             UpdateStaleDataIndicator();
 
             await UpdateAgentStatusAsync(serverId);
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
+            LoadingMessage.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex)
         {
             AppLogger.Error("JobHistory", $"Failed to load job history: {ex.Message}");
-        }
-        finally
-        {
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
             LoadingMessage.Visibility = Visibility.Collapsed;
         }
     }

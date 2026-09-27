@@ -31,6 +31,7 @@ public partial class JobHistoryTab : UserControl
 {
     private ViewerDataService? _dataService;
     private DataGridFilterManager<ViewerJobHistoryRow>? _filterManager;
+    private readonly PerformanceMonitor.Ui.ScopedLoadGenerations _loads = new();
     private Popup? _filterPopup;
     private ColumnFilterPopup? _filterPopupContent;
     private DateTime? _lastRefreshed;
@@ -68,6 +69,8 @@ public partial class JobHistoryTab : UserControl
             return;
         }
 
+        var gen = _loads.Claim(nameof(LoadJobsAsync));
+
         NoJobsMessage.Visibility = Visibility.Collapsed;
         LoadingMessage.Visibility = Visibility.Visible;
 
@@ -78,6 +81,7 @@ public partial class JobHistoryTab : UserControl
             var sinceUtc = DateTime.UtcNow.AddHours(-hoursBack);
 
             var all = await _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap);
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* Populate the Server / Category combos from the full (pre status/category) result, then apply
                Status + Category client-side — those must NOT go into the reader's window (they'd skew the
@@ -118,13 +122,15 @@ public partial class JobHistoryTab : UserControl
             UpdateStaleDataIndicator();
 
             await UpdateAgentStatusAsync(serverId);
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
+            LoadingMessage.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex)
         {
             StatusChanged?.Invoke($"failed to load job history: {ex.Message}");
-        }
-        finally
-        {
+            if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
+
             LoadingMessage.Visibility = Visibility.Collapsed;
         }
     }
