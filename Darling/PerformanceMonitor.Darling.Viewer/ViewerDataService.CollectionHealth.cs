@@ -575,14 +575,26 @@ public sealed partial class ViewerDataService
         var now = DateTime.UtcNow;
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CollectionHealthRollupSupport.CeilingHour(windowStart);
-        var composed = await CollectionHealthRollupSupport.RollupUsableAsync(_dataSource, headEnd, CancellationToken.None);
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(_dataSource, headEnd, CancellationToken.None);
 
-        await using var command = _dataSource.CreateCommand(composed ? FleetCollectionHealthByServerComposedSql : FleetCollectionHealthByServerSql);
+        /* #4477: any hole hours below the watermark are read raw alongside the rollup instead of forcing this
+           whole 7-day window to the raw scan — the shape that sent the Viewer's fleet health read to the raw
+           arm 819 times in three days on a store measured at 6.6 s (raw) against 184 ms (composed). */
+        var composedSql = plan.Usable
+            ? (plan.HoleHours.Count > 0
+                ? CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthByServerSql, plan.HoleHours)
+                : FleetCollectionHealthByServerComposedSql)
+            : null;
+        await using var command = _dataSource.CreateCommand(composedSql ?? FleetCollectionHealthByServerSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
-        if (composed)
+        if (plan.Usable)
         {
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = headEnd });
+            if (plan.HoleHours.Count > 0)
+            {
+                command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
+            }
         }
 
         var byServer = new Dictionary<int, List<CollectorHealthRow>>();
