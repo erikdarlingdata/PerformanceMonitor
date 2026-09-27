@@ -1340,17 +1340,36 @@ public sealed class DarlingManagedPostgresTests
             /* The shape a store carrying the old, pre-cap value could still have in its managed file: replace
                the ONE maintenance_work_mem assignment the first start's own render just wrote (WriteManagedConfFile
                caps on <=17, so it is already at the capped value here) with the old, uncapped 2048MB, keeping
-               exactly one assignment. */
+               exactly one assignment. Then recompute the header's body hash over the edited body, the same way
+               WriteManagedConfFile itself would, so the file still reads as the product's own render (this is
+               simulating a store that carried this value in a file THE PRODUCT rendered -- e.g. rendered on
+               PostgreSQL 18 and then reverted to 17 -- not an operator hand edit, which would only ever reach
+               the last-good fallback in EnsureManagedConfReadyAsync, never the re-render this fact pins). */
             var managedTextBefore = await File.ReadAllTextAsync(managedConfPath, timeout.Token);
             Assert.Equal(1, CountOccurrences(managedTextBefore, "maintenance_work_mem = "));
-            var managedTextWithOldValue = System.Text.RegularExpressions.Regex.Replace(
-                managedTextBefore,
+            var parsedBefore = ManagedConfFile.ParseExisting(managedTextBefore);
+            Assert.True(parsedBefore.IsWellFormed);
+            var bodyWithOldValue = System.Text.RegularExpressions.Regex.Replace(
+                parsedBefore.Body,
                 @"maintenance_work_mem = '[^']*'",
                 "maintenance_work_mem = '2048MB'");
+            /* Rewrite only the header's body-sha256 line to match the edited body -- the rest of the header
+               (formula version, RAM, CPUs, ...) stays exactly what the first start's own render wrote. This is
+               what makes the edited file read as the product's own render rather than a hand edit: see the
+               remarks above. */
+            var headerBeforeHashLine = managedTextBefore[..managedTextBefore.IndexOf(ManagedConfFile.BodyHashPrefix, StringComparison.Ordinal)];
+            var managedTextWithOldValue = headerBeforeHashLine + ManagedConfFile.BodyHashPrefix + ManagedConfFile.ComputeBodyHash(bodyWithOldValue) + "\n" + bodyWithOldValue;
+            Assert.False(ManagedConfFile.IsHandEdited(managedTextWithOldValue));
             await File.WriteAllTextAsync(managedConfPath, managedTextWithOldValue, timeout.Token);
 
             second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             var connectionString = await second.EnsureRunningAsync(timeout.Token);
+
+            /* The second start re-rendered the file rather than falling back to a last-good copy: this is what
+               distinguishes this fact from an operator hand edit (the sibling fact below), which the last-good
+               fallback path would have to handle instead. */
+            Assert.True(second.LastManagedConfWriteResult is { Written: true, HandEdited: false });
+            Assert.False(second.LastStartUsedLastGoodManagedConf);
 
             var (live, expected) = await ReadSettingAndLiteralBytesAsync(
                 connectionString, "maintenance_work_mem", $"{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB", timeout.Token);
@@ -1398,9 +1417,14 @@ public sealed class DarlingManagedPostgresTests
     /// only appends that ever wrote it (v3, v7, v8, v14) always carry their own marker, and #4336 confined all
     /// of them to a <c>Legacy</c> (pre-migration) conf. So a bare, unmarked line after the include is an
     /// operator edit, and <see cref="DarlingManagedPostgres.EnsureManagedConfReadyAsync"/> validates the whole
-    /// merged conf with <c>postgres -C</c> before ever starting the server: PostgreSQL rejects the value,
-    /// there is no earlier last-good file to fall back to (this data directory has never had one), and the
-    /// start throws <see cref="InvalidOperationException"/> naming the fix
+    /// merged conf with <c>postgres -C</c> before ever starting the server: PostgreSQL rejects the value.
+    /// The first start above already succeeded, so <see cref="DarlingManagedPostgres.SaveLastGoodManagedConf"/>
+    /// saved a last-good copy of <c>darling-managed.conf</c> after it — this data directory does have one, and
+    /// <see cref="DarlingManagedPostgres.EnsureManagedConfReadyAsync"/> restores and re-validates it. That still
+    /// fails, because the rejected line lives in <c>postgresql.conf</c> below the include, not in
+    /// <c>darling-managed.conf</c>: restoring the last-good managed file leaves the operator's own line in
+    /// place untouched. So the fallback is tried and still refused, and the start throws
+    /// <see cref="InvalidOperationException"/> naming the fix
     /// (<see cref="DarlingManagedPostgres.BuildManagedConfValidationFailureMessage"/>) instead of starting on
     /// a value the render never sanctioned. Gated on DARLING_TEST_PGRUNTIME_OLD.
     /// </summary>
@@ -1437,6 +1461,11 @@ public sealed class DarlingManagedPostgresTests
             await first.StopIfStartedByThisProcessAsync();
             Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
             Assert.Contains(ManagedConfFile.IncludeLine, await File.ReadAllTextAsync(confPath, timeout.Token), StringComparison.Ordinal);
+
+            /* The first start above succeeded, so it saved a last-good managed-conf copy (design step 2
+               -- see the summary above): this data directory does have one to fall back to. */
+            var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+            Assert.True(File.Exists(lastGoodPath), $"Expected the first start to have saved {lastGoodPath}.");
 
             /* An operator's own line below the include -- never something this product wrote (see the
                summary above). PostgreSQL 17 rejects it outright. */
