@@ -165,6 +165,255 @@ public sealed class PgLogEventsPipelineTests
         Assert.Empty(PgLogEntryAssembler.Assemble(line));
     }
 
+    /* ---- #4501: the bounded, severity-disagreement forgery rule ------------------------------------- */
+
+    /// <summary>
+    /// K1: the separator check keeps a genuine statement whose literal happens to carry error-shaped text
+    /// within the bound, because the real label (<c>STATEMENT:</c>) is not preceded by the prefix's own
+    /// separator right where <c>ERROR:  </c> sits inside the quoted SQL.
+    /// </summary>
+    [Fact]
+    public void K1_AStatementCarryingAnErrorShapedLiteral_IsKept()
+    {
+        var line = P + "[4102] psql LOG:  statement: SELECT 'ERROR:  x'\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("LOG", entry.Severity);
+        Assert.Equal("statement: SELECT 'ERROR:  x'", entry.Message);
+    }
+
+    /// <summary>K2: the same shape with the second label pushed past the 63-byte-plus-separator bound.</summary>
+    [Fact]
+    public void K2_TheSameShapeWithTheSecondLabelPastTheBound_IsKept()
+    {
+        var line = P + "[4102] LOG:  statement: SELECT '" + new string('x', 64) + " ERROR:  y'\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("LOG", entry.Severity);
+    }
+
+    /// <summary>K3: non-ASCII in the window between the two labels also keeps the line — the printable-ASCII test fails.</summary>
+    [Fact]
+    public void K3_NonAsciiInTheWindow_IsKept()
+    {
+        var line = P + "[4102] LOG:  caf\u00e9 ERROR:  y\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("LOG", entry.Severity);
+    }
+
+    /// <summary>K4: an auto_explain-shaped LOG whose only <c>ERROR:  </c> text sits in a TAB continuation is kept whole.</summary>
+    [Fact]
+    public void K4_AnErrorShapedTabContinuation_IsKept()
+    {
+        var line = P + "[4102] LOG:  duration: 12.3 ms  plan:\n\tQuery Text: SELECT 1\n\tSeq Scan (cost=ERROR:  0.00..1.00)\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("LOG", entry.Severity);
+    }
+
+    /// <summary>K5: the <c>%Q</c>-glued query id, which has no separator between the pid and the digits, is kept.</summary>
+    [Fact]
+    public void K5_TheQGluedQueryId_IsKept()
+    {
+        var line = "2026-09-18 03:07:12.345 UTC [1549] 322048460535975151ERROR:  deadlock detected\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("ERROR", entry.Severity);
+    }
+
+    /// <summary>K6: a STATEMENT companion carrying <c>ERROR:  </c> only after the 64th byte is kept.</summary>
+    [Fact]
+    public void K6_AStatementCompanionWithErrorPastTheBound_IsKept()
+    {
+        var line = P + "[4102] LOG:  statement start\n"
+            + P + "[4102] STATEMENT:  SELECT '" + new string('x', 64) + " ERROR:  y'\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("LOG", entry.Severity);
+        Assert.NotNull(entry.Statement);
+    }
+
+    /// <summary>K7: same-severity pair (<c>psql ERROR:  ERROR:  x</c>, a RAISE EXCEPTION echoing its own label) is KEPT as ERROR.</summary>
+    [Fact]
+    public void K7_ASameSeverityPair_IsKeptUnderThatSeverity()
+    {
+        var line = P + "[4102] ERROR:  ERROR:  x\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("ERROR", entry.Severity);
+        Assert.Equal("ERROR:  x", entry.Message);
+    }
+
+    /// <summary>K8: a forged-looking <c>x LOG:  </c> ahead of a genuine LOG line is kept as LOG (same severity both ways).</summary>
+    [Fact]
+    public void K8_ASameSeverityLogPair_IsKeptAsLog()
+    {
+        var line = P + "[4102] x LOG:  y\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("LOG", entry.Severity);
+        Assert.Equal("y", entry.Message);
+    }
+
+    /// <summary>R1: the original misparse pin, now REFUSED rather than manufactured (RED at 596b9c9ea, where it read as ERROR/"LOG: checkpoint...").</summary>
+    [Fact]
+    public void R1_ErrorThenLog_IsRefused()
+    {
+        var line = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
+
+        Assert.Empty(PgLogEntryAssembler.Assemble(line));
+    }
+
+    /// <summary>R2: a forged token ahead of ERROR/LOG disagreement, same shape as R1 with free text in front of the forged label.</summary>
+    [Fact]
+    public void R2_TextThenErrorThenLog_IsRefused()
+    {
+        var line = P + "[4102] x ERROR:  LOG:  y\n";
+
+        Assert.Empty(PgLogEntryAssembler.Assemble(line));
+    }
+
+    /// <summary>R3: the companion forge — a STATEMENT line whose text opens with a different-severity label.</summary>
+    [Fact]
+    public void R3_AStatementCompanionForgingADifferentSeverityLabel_IsRefused()
+    {
+        var line = P + "[4102] LOG:  statement start\n"
+            + P + "[4102] STATEMENT:  ERROR:  y\n";
+
+        var entries = PgLogEntryAssembler.Assemble(line);
+        var entry = Assert.Single(entries);
+        Assert.Null(entry.Statement);
+    }
+
+    /// <summary>R4: a 63-byte name ending in a different-severity label at the boundary is refused; one byte more is kept.</summary>
+    [Fact]
+    public void R4_ABoundaryLengthName_IsRefusedAtTheBoundary_AndKeptOneByteOver()
+    {
+        var atBoundary = P + "[4102] LOG: " + new string('x', 62) + " ERROR:  y\n";
+        var overBoundary = P + "[4102] LOG: " + new string('x', 63) + " ERROR:  y\n";
+
+        Assert.Empty(PgLogEntryAssembler.Assemble(atBoundary));
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(overBoundary));
+        Assert.Equal("LOG", entry.Severity);
+    }
+
+    /// <summary>
+    /// A pin that goes through the product's own call path (#4501): the classifier's own <c>Classify</c>,
+    /// not the assembler's static method, still applies the rule and still keeps K7's same-severity pair.
+    /// </summary>
+    [Fact]
+    public void Classify_ThroughTheClassifiersOwnCallPath_AppliesTheRule()
+    {
+        var refused = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
+        Assert.Empty(Classify(refused));
+
+        var kept = P + "[4102] ERROR:  ERROR:  x\n";
+        var events = Classify(kept);
+        var single = Assert.Single(events);
+        Assert.Equal("ERROR", single.Severity);
+    }
+
+    /* ---- #4501: log_line_prefix plumbing --------------------------------------------------------------
+       ReadAsync -> PgLogEventClassifier.Classify -> PgLogEntryAssembler.Assemble, the same shape
+       logTimezoneIsUtc already has (see PgServerLogTail.LogLinePrefixSql / LogLinePrefix). */
+
+    /// <summary>Prefix known, no client field after the pid (<c>'%m [%p] '</c>): no forgery surface, R1's shape reads as it did before this PR.</summary>
+    [Fact]
+    public void ForgeryCheckFor_NoClientFieldAfterPid_DoesNotApply()
+    {
+        var (applyCheck, separator) = PgLogEntryAssembler.ForgeryCheckFor("%m [%p] ");
+
+        Assert.False(applyCheck);
+        Assert.Null(separator);
+
+        var r1 = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(r1, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] ", out _));
+        Assert.Equal("ERROR", entry.Severity);
+    }
+
+    /// <summary>Prefix known, <c>%a</c> after the pid (<c>'%m [%p] %a '</c>, the v17 marker): the rule applies with a one-space separator, and R1's shape is refused.</summary>
+    [Fact]
+    public void ForgeryCheckFor_AAfterPid_AppliesWithASpaceSeparator()
+    {
+        var (applyCheck, separator) = PgLogEntryAssembler.ForgeryCheckFor("%m [%p] %a ");
+
+        Assert.True(applyCheck);
+        Assert.Equal(" ", separator);
+
+        var r1 = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
+        Assert.Empty(PgLogEntryAssembler.Assemble(r1, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] %a ", out _));
+    }
+
+    /// <summary>The RDS default prefix (<c>%t:%r:%u@%d:[%p]:</c>) puts its client fields BEFORE the pid, not after: unchanged behaviour, same as the null fallback for this shape.</summary>
+    [Fact]
+    public void ForgeryCheckFor_TheRdsDefaultPrefix_ClientFieldsBeforePid_UnchangedBehaviour()
+    {
+        var (applyCheck, separator) = PgLogEntryAssembler.ForgeryCheckFor("%t:%r:%u@%d:[%p]:");
+
+        Assert.False(applyCheck);
+        Assert.Null(separator);
+    }
+
+    /// <summary>
+    /// Unknown prefix (null, not collected): the fallback applies the rule with no separator check, so K1
+    /// (the separator-dependent keep) is now REFUSED, K7 (severity-agreement) is still KEPT, and R1 stays refused.
+    /// </summary>
+    [Fact]
+    public void ForgeryCheckFor_UnknownPrefix_FallsBackToNoSeparatorCheck()
+    {
+        var (applyCheck, separator) = PgLogEntryAssembler.ForgeryCheckFor(null);
+        Assert.True(applyCheck);
+        Assert.Null(separator);
+
+        var k1 = P + "[4102] psql LOG:  statement: SELECT 'ERROR:  x'\n";
+        Assert.Empty(PgLogEntryAssembler.Assemble(k1, logTimezoneIsUtc: false, logLinePrefix: null, out _));
+
+        var r1 = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
+        Assert.Empty(PgLogEntryAssembler.Assemble(r1, logTimezoneIsUtc: false, logLinePrefix: null, out _));
+
+        var k7 = P + "[4102] ERROR:  ERROR:  x\n";
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(k7, logTimezoneIsUtc: false, logLinePrefix: null, out _));
+        Assert.Equal("ERROR", entry.Severity);
+    }
+
+    /// <summary>
+    /// The wiring pin (#4501): the collector's OWN tail query selects <c>log_line_prefix</c> beside the body
+    /// and the timezone, the same way <c>LogTimezoneSql</c> is pinned above — a text pin on
+    /// <see cref="PgLogEventsCollector.BuildQuery"/>'s own SQL, not a call to the helper directly.
+    /// </summary>
+    [Fact]
+    public void BuildQuery_SelectsLogLinePrefix_BesideTheTailAndTimezone()
+    {
+        var sql = PgLogEventsCollector.Instance.BuildQuery(TestContext()).Text;
+
+        Assert.Contains("pg_catalog.current_setting('log_line_prefix', true)", sql, StringComparison.Ordinal);
+        Assert.Contains("AS log_line_prefix", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The end-to-end wiring pin (#4501): ReadAsync, the product's own call path, reads the row's collected
+    /// <c>log_line_prefix</c> column and carries it through to the assembler, so a target whose prefix is the
+    /// v17 marker (<c>%a</c> after the pid) refuses R1's shape, and a target with no client field after the
+    /// pid keeps it — with no manual call to the assembler standing in for the collector's own read step.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_CarriesTheRowsLogLinePrefix_ThroughToTheAssembler()
+    {
+        var r1 = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
+
+        var context = TestContext();
+        using var reader = new FakeReader(new object?[][] { new object?[] { r1, "UTC", "%m [%p] %a " } });
+        var rows = await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        Assert.Empty(rows);
+
+        var toleratingContext = TestContext();
+        using var toleratingReader = new FakeReader(new object?[][] { new object?[] { r1, "UTC", "%m [%p] " } });
+        var toleratingRows = await PgLogEventsCollector.Instance.ReadAsync(toleratingReader, toleratingContext, CancellationToken.None);
+        Assert.Single(toleratingRows);
+    }
+
     private static List<PgLogEvent> Classify(string text) => new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(text);
 
     /* ---- assembly ------------------------------------------------------------------------------------ */
