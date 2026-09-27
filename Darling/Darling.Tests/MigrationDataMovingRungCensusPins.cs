@@ -171,6 +171,20 @@ public sealed class MigrationDataMovingRungCensusPins
             + "V62's and V137's shape on the same control-plane singleton (id = 1, CHECK (id = 1)), so the "
             + "UPDATE's WHERE compose_statement_timeout_seconds = 15 touches at most one row and spends none "
             + "of the budget"),
+        new(
+            150,
+            SetsTheFloor: false,
+            "two CREATE INDEXes over populated hypertables (#4469, #4477): idx_collection_log_watermark on "
+            + "collect.collection_log (created V2) and idx_job_history_server_run on collect.job_history "
+            + "(created V1/V24). V104's and V142's case rather than V22's/V23's/V39's: real collected series, "
+            + "but costed rather than assumed. Measured on a rig shaped like the field (43 servers, ~40 "
+            + "collectors, 15M collection_log rows, 9 of 11 chunks compressed): the collection_log index built "
+            + "in ~0.94 s. A separate rig for job_history (43 servers, ~2.7M rows over 4 days, 3 of 5 chunks "
+            + "compressed) built its index in well under a second too. CompressAfterDays leaves only the "
+            + "newest day or two of either table uncompressed at migration time, with every older chunk's "
+            + "decompressed relation an empty shell (one 8 KB page per compressed chunk, V142's own measured "
+            + "property) - so a store many times today's size would still build both in low seconds, nowhere "
+            + "near a MigrationCommandTimeoutSeconds window, and this rung does not move the multiple"),
     ];
 
     /// <summary>
