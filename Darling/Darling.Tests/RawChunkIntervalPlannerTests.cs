@@ -40,12 +40,12 @@ public sealed class RawChunkIntervalPlannerTests
            budget, so nothing narrows and nothing widens (everything is already at the ceiling). */
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("wait_stats", 5 * GB / 24, 24, null),
-            new RawChunkIntervalPlanner.TableInput("query_stats", 3 * GB / 24, 24, null),
-            new RawChunkIntervalPlanner.TableInput("deadlocks", 0.01 * GB, 24, null),
+            new RawChunkIntervalPlanner.TableInput("wait_stats", 5 * GB / 24, 24, null, NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 3 * GB / 24, 24, null, NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("deadlocks", 0.01 * GB, 24, null, NumChunks: 10),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 8 * GiB, currentTotalChunkCount: 30, AsOf);
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 8 * GiB, AsOf);
 
         Assert.All(decisions, d =>
         {
@@ -65,17 +65,17 @@ public sealed class RawChunkIntervalPlannerTests
     private static RawChunkIntervalPlanner.TableInput[] StoreADay2Tables() =>
         new[]
         {
-            new RawChunkIntervalPlanner.TableInput("query_stats", 0.9 * GB, 12, AsOf.AddDays(-2)),
-            new RawChunkIntervalPlanner.TableInput("other_raw", 0.58 * GB, 12, AsOf.AddDays(-2)),
-            new RawChunkIntervalPlanner.TableInput("query_snapshots", 0.5 * GB, 12, AsOf.AddDays(-2)),
-            new RawChunkIntervalPlanner.TableInput("wait_stats", 0.22 * GB, 12, AsOf.AddDays(-2)),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 0.9 * GB, 12, AsOf.AddDays(-2), NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("other_raw", 0.58 * GB, 12, AsOf.AddDays(-2), NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("query_snapshots", 0.5 * GB, 12, AsOf.AddDays(-2), NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("wait_stats", 0.22 * GB, 12, AsOf.AddDays(-2), NumChunks: 10),
         };
 
     [Fact]
     public void StoreA_SixtyThreeGiBHost_NarrowsTheThreeHeaviestAndHoldsTheLightestAtTwelve()
     {
         var budget = RawChunkIntervalPlanner.ManagedBudgetBytes((long)(63 * GiB));
-        var decisions = RawChunkIntervalPlanner.Plan(StoreADay2Tables(), budget, currentTotalChunkCount: 100, AsOf)
+        var decisions = RawChunkIntervalPlanner.Plan(StoreADay2Tables(), budget, AsOf)
             .ToDictionary(d => d.TableName, StringComparer.Ordinal);
 
         /* Heaviest-rate-first narrowing closes the gap after three of the four tables move — the budget is
@@ -94,7 +94,7 @@ public sealed class RawChunkIntervalPlannerTests
     public void StoreA_ThirtyOnePointFiveGiBHost_EveryTableReachesTheFloorAndStillDoesNotFit()
     {
         var budget = RawChunkIntervalPlanner.ManagedBudgetBytes((long)(31.5 * GiB));
-        var decisions = RawChunkIntervalPlanner.Plan(StoreADay2Tables(), budget, currentTotalChunkCount: 100, AsOf)
+        var decisions = RawChunkIntervalPlanner.Plan(StoreADay2Tables(), budget, AsOf)
             .ToDictionary(d => d.TableName, StringComparer.Ordinal);
 
         /* The smaller host's budget is too small for this rate even at the 6-hour floor — every table narrows
@@ -113,10 +113,10 @@ public sealed class RawChunkIntervalPlannerTests
         var tables = new[]
         {
             /* Way over any reasonable budget, but changed under an hour ago. */
-            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 24, AsOf.AddHours(-1)),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 24, AsOf.AddHours(-1), NumChunks: 10),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 1 * GB, currentTotalChunkCount: 10, AsOf);
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 1 * GB, AsOf);
 
         var decision = Assert.Single(decisions);
         Assert.False(decision.Changes);
@@ -128,10 +128,10 @@ public sealed class RawChunkIntervalPlannerTests
     {
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 24, AsOf.AddDays(-1)),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 24, AsOf.AddDays(-1), NumChunks: 10),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 1 * GB, currentTotalChunkCount: 10, AsOf);
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 1 * GB, AsOf);
 
         var decision = Assert.Single(decisions);
         Assert.True(decision.Changes);
@@ -146,10 +146,10 @@ public sealed class RawChunkIntervalPlannerTests
            boundary is inclusive, so this must widen, not hold. */
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, 6, AsOf.AddDays(-3)),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, 6, AsOf.AddDays(-3), NumChunks: 10),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 24 * GB, currentTotalChunkCount: 10, AsOf)
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 24 * GB, AsOf)
             .ToDictionary(d => d.TableName, StringComparer.Ordinal);
 
         Assert.Equal(12, decisions["query_stats"].TargetIntervalHours);
@@ -171,11 +171,11 @@ public sealed class RawChunkIntervalPlannerTests
            narrowing_table's TargetIntervalHours to 12 (Changes = true), where the ruling requires 6 (held). */
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("heavy_table", 10 * GB, 24, null),
-            new RawChunkIntervalPlanner.TableInput("narrowing_table", 1 * GB, 6, AsOf.AddDays(-3)),
+            new RawChunkIntervalPlanner.TableInput("heavy_table", 10 * GB, 24, null, NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("narrowing_table", 1 * GB, 6, AsOf.AddDays(-3), NumChunks: 10),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 300 * GB, currentTotalChunkCount: 10, AsOf)
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 300 * GB, AsOf)
             .ToDictionary(d => d.TableName, StringComparer.Ordinal);
 
         Assert.Equal(6, decisions["narrowing_table"].TargetIntervalHours);
@@ -192,11 +192,11 @@ public sealed class RawChunkIntervalPlannerTests
            42 GB, and its own move would push the total to 72 GB, over the line, so it is held. */
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("light_table", 1 * GB, 6, AsOf.AddDays(-3)),
-            new RawChunkIntervalPlanner.TableInput("heavy_table", 5 * GB, 6, AsOf.AddDays(-3)),
+            new RawChunkIntervalPlanner.TableInput("light_table", 1 * GB, 6, AsOf.AddDays(-3), NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("heavy_table", 5 * GB, 6, AsOf.AddDays(-3), NumChunks: 10),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 100 * GB, currentTotalChunkCount: 10, AsOf)
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 100 * GB, AsOf)
             .ToDictionary(d => d.TableName, StringComparer.Ordinal);
 
         Assert.Equal(12, decisions["light_table"].TargetIntervalHours);
@@ -218,16 +218,16 @@ public sealed class RawChunkIntervalPlannerTests
            rather than widening again to 24 h (24 GB would be over the 12 GB half-budget line). */
         var dayOne = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, 6, AsOf.AddDays(-3)),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, 6, AsOf.AddDays(-3), NumChunks: 10),
         };
-        var dayOneDecision = Assert.Single(RawChunkIntervalPlanner.Plan(dayOne, budgetBytes: 24 * GB, currentTotalChunkCount: 10, AsOf));
+        var dayOneDecision = Assert.Single(RawChunkIntervalPlanner.Plan(dayOne, budgetBytes: 24 * GB, AsOf));
         Assert.Equal(12, dayOneDecision.TargetIntervalHours);
 
         var dayTwo = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, dayOneDecision.TargetIntervalHours, AsOf),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 1 * GB, dayOneDecision.TargetIntervalHours, AsOf, NumChunks: 10),
         };
-        var dayTwoDecision = Assert.Single(RawChunkIntervalPlanner.Plan(dayTwo, budgetBytes: 24 * GB, currentTotalChunkCount: 10, AsOf.AddDays(1)));
+        var dayTwoDecision = Assert.Single(RawChunkIntervalPlanner.Plan(dayTwo, budgetBytes: 24 * GB, AsOf.AddDays(1)));
 
         Assert.Equal(12, dayTwoDecision.TargetIntervalHours);
         Assert.False(dayTwoDecision.Changes);
@@ -238,10 +238,10 @@ public sealed class RawChunkIntervalPlannerTests
     {
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("idle_table", 0.001 * GB, 24, AsOf.AddDays(-10)),
+            new RawChunkIntervalPlanner.TableInput("idle_table", 0.001 * GB, 24, AsOf.AddDays(-10), NumChunks: 10),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 100 * GB, currentTotalChunkCount: 10, AsOf);
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 100 * GB, AsOf);
 
         var decision = Assert.Single(decisions);
         Assert.Equal(24, decision.TargetIntervalHours);
@@ -249,37 +249,79 @@ public sealed class RawChunkIntervalPlannerTests
     }
 
     [Fact]
-    public void ChunkCountCap_BlocksNarrowingEvenWhenOverBudget()
+    public void PerTableChunkCountCap_BoundaryAtOneThousandForecastChunks()
     {
-        var tables = new[]
+        /* 24h -> 12h halves the interval, so it doubles the forecast chunk count. NumChunks 500 forecasts
+           exactly 1,000 — at the cap, so it narrows; 501 forecasts 1,002 — over the cap, so it holds, and the
+           reason names the forecast count. */
+        var atBoundary = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 24, null),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 24, null, NumChunks: 500),
         };
+        var narrowed = Assert.Single(RawChunkIntervalPlanner.Plan(atBoundary, budgetBytes: 1 * GB, AsOf));
+        Assert.True(narrowed.Changes);
+        Assert.Equal(12, narrowed.TargetIntervalHours);
 
-        var atCap = RawChunkIntervalPlanner.Plan(
-            tables, budgetBytes: 1 * GB, currentTotalChunkCount: RawChunkIntervalPlanner.ChunkCountCapThreshold, AsOf);
-        var capped = Assert.Single(atCap);
-        Assert.False(capped.Changes);
-        Assert.Contains("cap", capped.Reason, StringComparison.Ordinal);
-
-        /* Same inputs, one chunk under the cap: the move goes through. */
-        var underCap = RawChunkIntervalPlanner.Plan(
-            tables, budgetBytes: 1 * GB, currentTotalChunkCount: RawChunkIntervalPlanner.ChunkCountCapThreshold - 1, AsOf);
-        var allowed = Assert.Single(underCap);
-        Assert.True(allowed.Changes);
-        Assert.Equal(12, allowed.TargetIntervalHours);
+        var overBoundary = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 24, null, NumChunks: 501),
+        };
+        var held = Assert.Single(RawChunkIntervalPlanner.Plan(overBoundary, budgetBytes: 1 * GB, AsOf));
+        Assert.False(held.Changes);
+        Assert.Contains("1,002", held.Reason, StringComparison.Ordinal);
+        Assert.Contains("cap", held.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ChunkCountCap_NeverBlocksWidening()
+    public void PerTableChunkCountCap_BoundaryAtTwelveToSixHours()
+    {
+        /* 12h -> 6h also halves the interval. NumChunks 500 forecasts 1,000 (narrows); 501 forecasts 1,002
+           (held). */
+        var atBoundary = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 12, AsOf.AddDays(-3), NumChunks: 500),
+        };
+        var narrowed = Assert.Single(RawChunkIntervalPlanner.Plan(atBoundary, budgetBytes: 1 * GB, AsOf));
+        Assert.True(narrowed.Changes);
+        Assert.Equal(6, narrowed.TargetIntervalHours);
+
+        var overBoundary = new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("query_stats", 5 * GB, 12, AsOf.AddDays(-3), NumChunks: 501),
+        };
+        var held = Assert.Single(RawChunkIntervalPlanner.Plan(overBoundary, budgetBytes: 1 * GB, AsOf));
+        Assert.False(held.Changes);
+        Assert.Contains("1,002", held.Reason, StringComparison.Ordinal);
+        Assert.Contains("cap", held.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PerTableChunkCountCap_StoreWideTotalNoLongerMatters()
+    {
+        /* 20 tables of 60 chunks each — 1,200 total, well past the old store-wide 1,000 cap — but every
+           table's OWN forecast at 12h is only 120, far under the per-table cap. The heaviest-rate table still
+           narrows: the store-wide total plays no part in the decision any more. */
+        var tables = Enumerable.Range(0, 20)
+            .Select(i => new RawChunkIntervalPlanner.TableInput($"table_{i:D2}", (20 - i) * GB, 24, null, NumChunks: 60))
+            .ToArray();
+
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 1 * GB, AsOf)
+            .ToDictionary(d => d.TableName, StringComparer.Ordinal);
+
+        Assert.True(decisions["table_00"].Changes);
+        Assert.Equal(12, decisions["table_00"].TargetIntervalHours);
+    }
+
+    [Fact]
+    public void PerTableChunkCountCap_NeverBlocksWidening()
     {
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("idle_table", 0.001 * GB, 6, AsOf.AddDays(-5)),
+            new RawChunkIntervalPlanner.TableInput("idle_table", 0.001 * GB, 6, AsOf.AddDays(-5), NumChunks: 2_000),
         };
 
         var decisions = RawChunkIntervalPlanner.Plan(
-            tables, budgetBytes: 100 * GB, currentTotalChunkCount: RawChunkIntervalPlanner.ChunkCountCapThreshold + 500, AsOf);
+            tables, budgetBytes: 100 * GB, AsOf);
 
         var decision = Assert.Single(decisions);
         Assert.Equal(12, decision.TargetIntervalHours);
@@ -293,10 +335,10 @@ public sealed class RawChunkIntervalPlannerTests
            Plan must not guess a rung for it in either direction. */
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("legacy_table", 50 * GB, 168, null),
+            new RawChunkIntervalPlanner.TableInput("legacy_table", 50 * GB, 168, null, NumChunks: 10),
         };
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 1 * GB, currentTotalChunkCount: 10, AsOf);
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 1 * GB, AsOf);
 
         var decision = Assert.Single(decisions);
         Assert.Equal(168, decision.TargetIntervalHours);
@@ -308,7 +350,7 @@ public sealed class RawChunkIntervalPlannerTests
     public void Plan_ThrowsOnNullTables()
     {
         Assert.Throws<ArgumentNullException>(() =>
-            RawChunkIntervalPlanner.Plan(null!, budgetBytes: 1, currentTotalChunkCount: 0, AsOf));
+            RawChunkIntervalPlanner.Plan(null!, budgetBytes: 1, AsOf));
     }
 
     [Fact]
@@ -344,14 +386,14 @@ public sealed class RawChunkIntervalPlannerTests
            its own. */
         var tables = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("a", 0.3 * GB, 24, null),
-            new RawChunkIntervalPlanner.TableInput("b", 0.3 * GB, 24, null),
-            new RawChunkIntervalPlanner.TableInput("c", 0.3 * GB, 24, null),
+            new RawChunkIntervalPlanner.TableInput("a", 0.3 * GB, 24, null, NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("b", 0.3 * GB, 24, null, NumChunks: 10),
+            new RawChunkIntervalPlanner.TableInput("c", 0.3 * GB, 24, null, NumChunks: 10),
         };
 
         /* 24h * 0.9 GB/h combined = 21.6 GB, over a 10 GB budget, even though each table alone is only
            7.2 GB. */
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 10 * GB, currentTotalChunkCount: 10, AsOf)
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes: 10 * GB, AsOf)
             .ToDictionary(d => d.TableName, StringComparer.Ordinal);
 
         Assert.True(decisions.Values.Any(d => d.Changes), "expected at least one table to narrow once the combined total exceeded budget");
@@ -372,9 +414,9 @@ public sealed class RawChunkIntervalPlannerTests
 
         var narrowing = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("query_stats", 1_000_000, 24, null),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 1_000_000, 24, null, NumChunks: 10),
         };
-        var narrowed = RawChunkIntervalPlanner.Plan(narrowing, budgetBytes: 1_000_000, currentTotalChunkCount: 10, AsOf).Single();
+        var narrowed = RawChunkIntervalPlanner.Plan(narrowing, budgetBytes: 1_000_000, AsOf).Single();
         Assert.True(narrowed.Changes);
         Assert.Equal(
             "moved to 12 h: store-wide open-chunk bytes exceeded the 1,000,000 B budget (rate-ordered, 1,000,000 B/h)",
@@ -382,13 +424,93 @@ public sealed class RawChunkIntervalPlannerTests
 
         var widening = new[]
         {
-            new RawChunkIntervalPlanner.TableInput("query_stats", 100_000, 6, AsOf.AddDays(-3)),
+            new RawChunkIntervalPlanner.TableInput("query_stats", 100_000, 6, AsOf.AddDays(-3), NumChunks: 10),
         };
-        var widened = RawChunkIntervalPlanner.Plan(widening, budgetBytes: 2_400_000, currentTotalChunkCount: 10, AsOf).Single();
+        var widened = RawChunkIntervalPlanner.Plan(widening, budgetBytes: 2_400_000, AsOf).Single();
         Assert.True(widened.Changes);
         Assert.Equal(
             "moved up to 12 h: the store holds 1,200,000 B, under half the 2,400,000 B budget",
             widened.Reason);
+    }
+
+    private const double MB = 1024.0 * 1024.0;
+
+    /// <summary>A production SQL Server store's raw hypertable shape (#4457): 12 named tables (rates in MB/h,
+    /// chunk counts from the store's catalog) plus one <c>remaining_27_tables</c> row standing in for the
+    /// other 27 raw hypertables at their combined ≈0.39 GB open total (≈16.25 MB/h) — 13 rows covering the
+    /// whole 19.79 GB store, 2.55x the 7.75 GB budget B. Every row starts at the 24 h ceiling with chunk
+    /// counts far under the per-table cap (job_history's 73 is the largest), so this shape exercises "which
+    /// tables move" and the store's own numbers, not the cap.</summary>
+    private static RawChunkIntervalPlanner.TableInput[] ProductionStoreShapeTables(int currentIntervalHours, DateTime? lastChangedUtc) =>
+        new[]
+        {
+            new RawChunkIntervalPlanner.TableInput("query_stats", 436.9 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 5),
+            new RawChunkIntervalPlanner.TableInput("procedure_stats", 128.6 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 5),
+            new RawChunkIntervalPlanner.TableInput("perfmon_stats", 96.6 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 32),
+            new RawChunkIntervalPlanner.TableInput("spinlock_stats", 46.5 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 32),
+            new RawChunkIntervalPlanner.TableInput("wait_stats", 42.2 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 32),
+            new RawChunkIntervalPlanner.TableInput("query_snapshots", 23.0 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 9),
+            new RawChunkIntervalPlanner.TableInput("index_object_stats", 14.6 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 71),
+            new RawChunkIntervalPlanner.TableInput("file_io_stats", 11.8 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 32),
+            new RawChunkIntervalPlanner.TableInput("collection_log", 11.3 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 32),
+            new RawChunkIntervalPlanner.TableInput("system_health_events", 5.9 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 32),
+            new RawChunkIntervalPlanner.TableInput("latch_stats", 5.5 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 32),
+            new RawChunkIntervalPlanner.TableInput("job_history", 4.9 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 73),
+            /* Stands in for the other 27 raw hypertables' combined ≈0.39 GB open total at 24 h. */
+            new RawChunkIntervalPlanner.TableInput("remaining_27_tables", 16.25 * MB, currentIntervalHours, lastChangedUtc, NumChunks: 30),
+        };
+
+    [Fact]
+    public void ProductionStoreShape_DayOne_EveryTableNarrowsOnceToTwelveHours()
+    {
+        var budget = 7.75 * GiB;
+        var tables = ProductionStoreShapeTables(currentIntervalHours: 24, lastChangedUtc: null);
+
+        var initialTotal = tables.Sum(t => t.IngestBytesPerHour * t.CurrentIntervalHours);
+        Assert.True(initialTotal > 2.5 * budget && initialTotal < 2.6 * budget,
+            $"expected the store's 24h total near 2.55x budget, got {initialTotal / budget:N2}x");
+
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budget, AsOf)
+            .ToDictionary(d => d.TableName, StringComparer.Ordinal);
+
+        /* Halving every table only reaches ≈9.9 GB, still over the 7.75 GB budget, so pass 1 narrows all 13
+           rows one rung each, heaviest-rate first — query_stats first. */
+        Assert.All(decisions.Values, d =>
+        {
+            Assert.Equal(12, d.TargetIntervalHours);
+            Assert.True(d.Changes);
+        });
+
+        var afterTotal = tables.Sum(t => t.IngestBytesPerHour * 12);
+        Assert.True(afterTotal > budget, $"expected the 12h total to still exceed budget, got {afterTotal:N0}");
+    }
+
+    [Fact]
+    public void ProductionStoreShape_DayTwo_OnlyQueryStatsNarrowsToSixHours()
+    {
+        var budget = 7.75 * GiB;
+        var tables = ProductionStoreShapeTables(currentIntervalHours: 12, lastChangedUtc: AsOf.AddDays(-1));
+
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budget, AsOf)
+            .ToDictionary(d => d.TableName, StringComparer.Ordinal);
+
+        Assert.Equal(6, decisions["query_stats"].TargetIntervalHours);
+        Assert.True(decisions["query_stats"].Changes);
+
+        foreach (var name in new[]
+        {
+            "procedure_stats", "perfmon_stats", "spinlock_stats", "wait_stats", "query_snapshots",
+            "index_object_stats", "file_io_stats", "collection_log", "system_health_events", "latch_stats",
+            "job_history", "remaining_27_tables",
+        })
+        {
+            Assert.Equal(12, decisions[name].TargetIntervalHours);
+            Assert.False(decisions[name].Changes, $"expected {name} to hold at 12 h");
+        }
+
+        var finalTotal = tables.Where(t => t.TableName != "query_stats").Sum(t => t.IngestBytesPerHour * 12)
+            + tables.Single(t => t.TableName == "query_stats").IngestBytesPerHour * 6;
+        Assert.True(finalTotal <= budget, $"expected the final total to fit under budget, got {finalTotal:N0} vs {budget:N0}");
     }
 
     /// <summary>Sets the thread's culture for the scope and restores it on dispose — same pattern as

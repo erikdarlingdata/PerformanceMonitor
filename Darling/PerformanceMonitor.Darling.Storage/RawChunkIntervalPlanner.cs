@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Darling.Storage;
 ///
 /// <para><b>Which tables move.</b> When the sum exceeds B, tables narrow one rung at a time, heaviest RATE
 /// first — never a fixed "B/20 is heavy" threshold (#4211 ruling decision 3) — until the sum fits, every
-/// remaining table has reached the floor, or <see cref="ChunkCountCapThreshold"/> refuses the next move. A
+/// remaining table has reached the floor, or <see cref="PerTableChunkCountCap"/> refuses the next move. A
 /// rate tie breaks on table name, ordinally, so the order is deterministic. A table changed within the last
 /// <see cref="MinimumDaysBetweenMoves"/> day is left exactly as it is — neither narrowed nor widened —
 /// because <see cref="Plan"/> is meant to run once a day and this is what keeps two calls (a restart loop
@@ -53,12 +53,13 @@ namespace PerformanceMonitor.Darling.Storage;
 /// on the table name, as in the narrowing pass.</para>
 ///
 /// <para><b>The chunk-count cap.</b> TimescaleDB's own guidance treats maintaining over ~1,000 chunks on one
-/// hypertable as an anti-pattern. This class has no per-table retention input to forecast an exact per-table
-/// count (a database read, out of scope here), so it takes the store's CURRENT total chunk count, across
-/// every hypertable, as a single input and refuses every narrowing move once that total is at or past
-/// <see cref="ChunkCountCapThreshold"/> — a coarse, store-wide brake, not a per-table forecast, deliberately
-/// on the safe side of "about 1,000" (#4211 ruling decision 3). Widening is never blocked by the cap: it can
-/// only reduce a table's future chunk count.</para>
+/// hypertable as an anti-pattern. Each <see cref="TableInput"/> now carries its OWN current chunk count
+/// (<see cref="TableInput.NumChunks"/>), so the cap is a PER-TABLE forecast: a table narrows one rung only
+/// while its forecast chunk count at the narrower interval — <c>NumChunks * CurrentIntervalHours /
+/// narrowerHours</c>, rounded up — is at or under <see cref="PerTableChunkCountCap"/>. A table whose forecast
+/// exceeds the cap is held at its current interval, with a reason naming the forecast count, the narrower
+/// rung it would have moved to, and the cap; pass 1 then moves on to the next table. Widening is never capped:
+/// it can only reduce a table's future chunk count.</para>
 ///
 /// <para><b>A current interval outside the ladder.</b> An adopted bring-your-own store can carry a hypertable
 /// whose <c>chunk_time_interval</c> was set by hand to something other than 24, 12 or 6 hours before this
@@ -83,9 +84,12 @@ public static class RawChunkIntervalPlanner
     public const int MinimumDaysBetweenMoves = 1;
 
     /// <summary>TimescaleDB's own docs call maintaining over 1,000 chunks per hypertable an anti-pattern.
-    /// <see cref="Plan"/> stops narrowing at this store-wide total — on the safe side of that line, since it
-    /// has no per-table retention input to forecast an exact per-table count (#4211 ruling decision 3).</summary>
-    public const long ChunkCountCapThreshold = 1_000;
+    /// <see cref="Plan"/> refuses a table's narrowing move once its OWN forecast chunk count at the narrower
+    /// interval — <c>NumChunks * CurrentIntervalHours / narrowerHours</c>, rounded up — would exceed this
+    /// per-table cap (#4457, replacing the earlier store-wide-total brake, which blocked every narrowing move
+    /// once ANY table's chunks pushed the store's total past 1,000, however far under this line any individual
+    /// table actually sat).</summary>
+    public const long PerTableChunkCountCap = 1_000;
 
     /// <summary>One raw hypertable's planning inputs, all plain values so <see cref="Plan"/> takes no
     /// database dependency.</summary>
@@ -98,11 +102,16 @@ public static class RawChunkIntervalPlanner
     /// <see cref="RungHours"/>; see the class remarks for a value outside the ladder.</param>
     /// <param name="IntervalLastChangedUtc">When the interval last moved a rung under this rule, or
     /// <c>null</c> if it never has — treated as eligible to move today.</param>
+    /// <param name="NumChunks">The table's OWN current chunk count, from
+    /// <c>timescaledb_information.hypertables.num_chunks</c> — the input <see cref="PerTableChunkCountCap"/>
+    /// forecasts from (#4457). Required, like every other field here: a table with no compressed chunk still
+    /// drops out of the JOIN that builds <see cref="TableInput"/> before <see cref="Plan"/> ever sees it.</param>
     public readonly record struct TableInput(
         string TableName,
         double IngestBytesPerHour,
         int CurrentIntervalHours,
-        DateTime? IntervalLastChangedUtc);
+        DateTime? IntervalLastChangedUtc,
+        long NumChunks);
 
     /// <summary>One table's decision: stay, narrow, or widen, with the reason a log line can carry
     /// verbatim.</summary>
@@ -153,14 +162,11 @@ public static class RawChunkIntervalPlanner
     /// review finding H3).</param>
     /// <param name="budgetBytes">B, from <see cref="ManagedBudgetBytes"/> or
     /// <see cref="BringYourOwnBudgetBytes"/>.</param>
-    /// <param name="currentTotalChunkCount">The store's current chunk count across every hypertable, checked
-    /// against <see cref="ChunkCountCapThreshold"/> before any narrowing move.</param>
     /// <param name="asOfUtc">"Now", for the <see cref="MinimumDaysBetweenMoves"/> check — passed in rather
     /// than read from the clock so a test can hold it fixed.</param>
     public static IReadOnlyList<Decision> Plan(
         IReadOnlyList<TableInput> tables,
         double budgetBytes,
-        long currentTotalChunkCount,
         DateTime asOfUtc)
     {
         if (tables is null)
@@ -222,8 +228,6 @@ public static class RawChunkIntervalPlanner
             }
         }
 
-        var chunkCapReached = currentTotalChunkCount >= ChunkCountCapThreshold;
-
         /* Pass 1 — narrow, heaviest rate first, one rung per table, only while the store-wide total still
            exceeds budget at that table's turn. A table visited while the total already fits is left for
            pass 2 to consider for widening instead. */
@@ -245,15 +249,22 @@ public static class RawChunkIntervalPlanner
                 continue; /* already at the floor — pass 2 may still consider widening it */
             }
 
-            if (chunkCapReached)
+            var narrower = RungHours[rungIndex + 1];
+
+            /* Forecast this table's OWN chunk count at the narrower interval — a shorter interval means MORE
+               chunks over the same retained span, in inverse proportion to the interval — rounded up so a
+               forecast that lands just over the cap (e.g. 1,000.4) still holds rather than rounding down into
+               "fits". Integer math throughout: NumChunks and CurrentIntervalHours are both bounded well under
+               a value that could overflow a long once multiplied together. */
+            var forecastChunks = (table.NumChunks * table.CurrentIntervalHours + narrower - 1) / narrower;
+            if (forecastChunks > PerTableChunkCountCap)
             {
                 decisions[table.TableName] = new Decision(
                     table.TableName, table.CurrentIntervalHours, table.CurrentIntervalHours,
-                    string.Create(CultureInfo.InvariantCulture, $"held at {table.CurrentIntervalHours} h: store chunk count {currentTotalChunkCount:N0} is at or past the {ChunkCountCapThreshold:N0} cap"));
+                    string.Create(CultureInfo.InvariantCulture, $"held at {table.CurrentIntervalHours} h: moving to {narrower} h would forecast {forecastChunks:N0} chunks, over the {PerTableChunkCountCap:N0} per-table cap"));
                 continue;
             }
 
-            var narrower = RungHours[rungIndex + 1];
             current[table.TableName] = narrower;
             decisions[table.TableName] = new Decision(
                 table.TableName, table.CurrentIntervalHours, narrower,

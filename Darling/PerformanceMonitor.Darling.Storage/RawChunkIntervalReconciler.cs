@@ -72,16 +72,14 @@ SELECT
     i.hypertable_name,
     r.ingest_bytes_per_hour,
     i.current_interval_hours,
-    lc.last_changed_at
+    lc.last_changed_at,
+    h.num_chunks
 FROM intervals i
 JOIN rates r ON r.hypertable_name = i.hypertable_name
+JOIN timescaledb_information.hypertables h
+  ON h.hypertable_schema = 'collect' AND h.hypertable_name = i.hypertable_name
 LEFT JOIN last_changed lc ON lc.table_name = i.hypertable_name
 ORDER BY i.hypertable_name";
-
-    /// <summary>The store-wide chunk count the cap in <see cref="RawChunkIntervalPlanner.ChunkCountCapThreshold"/>
-    /// checks — every hypertable <c>timescaledb_information.hypertables</c> enumerates, the same view (and the
-    /// same "every hypertable" reach) <c>StoreSelfMetrics.HypertableInsertSql</c> already sweeps hourly.</summary>
-    internal const string TotalChunkCountSql = "SELECT COALESCE(SUM(num_chunks), 0)::bigint FROM timescaledb_information.hypertables";
 
     /// <summary><c>set_chunk_time_interval</c> affects chunks created AFTER the call only (measured, see
     /// <see cref="TimescaleSupport.SetMaterializationChunkIntervalSql"/>) — existing chunks keep their range.
@@ -140,14 +138,9 @@ SELECT $1, wal_bytes FROM pg_stat_wal";
                     TableName: reader.GetString(0),
                     IngestBytesPerHour: reader.GetDouble(1),
                     CurrentIntervalHours: reader.GetInt32(2),
-                    IntervalLastChangedUtc: reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)));
+                    IntervalLastChangedUtc: reader.IsDBNull(3) ? null : DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc),
+                    NumChunks: reader.GetInt64(4)));
             }
-        }
-
-        long totalChunkCount;
-        await using (var count = new NpgsqlCommand(TotalChunkCountSql, connection) { CommandTimeout = 60 })
-        {
-            totalChunkCount = (long)(await count.ExecuteScalarAsync(cancellationToken))!;
         }
 
         /* The pre-run store-wide open-chunk total every decision below is made against — see
@@ -158,13 +151,27 @@ SELECT $1, wal_bytes FROM pg_stat_wal";
             storeTotalBytes += table.IngestBytesPerHour * table.CurrentIntervalHours;
         }
 
-        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes, totalChunkCount, asOfUtc);
+        var decisions = RawChunkIntervalPlanner.Plan(tables, budgetBytes, asOfUtc);
 
         var changed = 0;
         foreach (var decision in decisions)
         {
             if (!decision.Changes)
             {
+                var heldIngestBytesPerHour = 0.0;
+                foreach (var table in tables)
+                {
+                    if (string.Equals(table.TableName, decision.TableName, StringComparison.Ordinal))
+                    {
+                        heldIngestBytesPerHour = table.IngestBytesPerHour;
+                        break;
+                    }
+                }
+
+                logger?.LogInformation(
+                    "raw chunk interval: {Table} held at {Hours}h ({Reason}); ingest {IngestBytesPerHour:N0} B/h, budget {Budget:N0} B, store total {StoreTotal:N0} B",
+                    decision.TableName, decision.CurrentIntervalHours, decision.Reason,
+                    heldIngestBytesPerHour, budgetBytes, storeTotalBytes);
                 continue;
             }
 
@@ -215,12 +222,10 @@ SELECT $1, wal_bytes FROM pg_stat_wal";
             await run.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        if (changed == 0)
-        {
-            logger?.LogDebug(
-                "raw chunk interval reconcile: no changes ({Tables} table(s) evaluated, store total {StoreTotal:N0} B, budget {Budget:N0} B)",
-                tables.Count, storeTotalBytes, budgetBytes);
-        }
+        var budgetRatio = budgetBytes > 0 ? storeTotalBytes / budgetBytes : 0.0;
+        logger?.LogInformation(
+            "raw chunk interval reconcile: {Tables} table(s) evaluated, {Changed} moved, store total {StoreTotal:N0} B, budget {Budget:N0} B ({Ratio:N2}x budget)",
+            tables.Count, changed, storeTotalBytes, budgetBytes, budgetRatio);
 
         return changed;
     }
