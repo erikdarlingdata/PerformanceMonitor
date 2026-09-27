@@ -185,7 +185,14 @@ internal static class DarlingAgReader
             GeneratedAt = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified),
             AvailabilityGroupCount = groups.Count,
             ReportingServerCount = groups.Select(g => g.ServerId).Distinct().Count(),
-            DistinctAgCount = groups.Select(g => Key(g.AgName)).Distinct(StringComparer.Ordinal).Count(),
+            /* #4475: identity is the AG name PLUS its replica set, not the name alone — every Amazon RDS for
+               SQL Server Multi-AZ instance's internal AG is named RDSAG0, so counting by name alone collapses
+               a whole fleet of them into "1". Shares AgTopology's group-identity key so the viewer and this
+               read cannot drift back apart. */
+            DistinctAgCount = groups
+                .Select(g => AgTopology.GroupIdentityKey(g.AgName, g.Replicas.Select(r => r.ReplicaServerName)))
+                .Distinct(StringComparer.Ordinal)
+                .Count(),
             WorstSeverity = groups.Count == 0 ? HealthSeverity.Unknown : groups.Max(g => g.Severity),
             AvailabilityGroups = groups,
         };
@@ -601,8 +608,10 @@ public sealed class AgHealthResult
     /// <summary>How many monitored servers reported any AG.</summary>
     [JsonPropertyName("reporting_server_count")] public int ReportingServerCount { get; init; }
 
-    /// <summary>How many distinct <c>ag_name</c>s are represented, collapsing the multiple monitored replicas that
-    /// report the same AG.</summary>
+    /// <summary>How many distinct AGs are represented, by identity (AG name plus replica set, #4475) rather than
+    /// name alone — so two monitored replicas of the SAME AG still collapse to one, but two different AGs that
+    /// happen to share a name (every Amazon RDS for SQL Server Multi-AZ instance's internal <c>RDSAG0</c>) do
+    /// not.</summary>
     [JsonPropertyName("distinct_ag_count")] public int DistinctAgCount { get; init; }
 
     [JsonPropertyName("worst_severity")] public HealthSeverity WorstSeverity { get; init; }

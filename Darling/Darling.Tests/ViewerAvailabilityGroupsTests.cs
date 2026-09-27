@@ -262,4 +262,48 @@ public sealed class AgTopologyCardsTests
     {
         Assert.Equal("none observed", AvailabilityGroupsTab.BuildSummary(Array.Empty<AgTopologyCard>()));
     }
+
+    /* ─────────────────────────── #4475: group identity is name + replica set ─────────────────────────── */
+
+    [Fact]
+    public void Counts_FortyTwoSameNamedAgsWithDistinctReplicaSets_AreFortyTwoGroups()
+    {
+        /* The exact field shape: every Amazon RDS for SQL Server Multi-AZ instance's internal AG is named
+           RDSAG0, but each instance's replica set (itself + its own standby) is distinct. Counting by name
+           alone reads this as "1 group"; the fix must read it as 42. */
+        var replicas = new System.Collections.Generic.List<AgTopologyReplicaRow>();
+        for (var i = 1; i <= 42; i++)
+        {
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}A", "PRIMARY"));
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}B", "SECONDARY"));
+        }
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, servers, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(42, groups);
+        Assert.Equal(42, servers);
+        Assert.Equal(42, views);
+    }
+
+    [Fact]
+    public void Counts_TwoReplicasOfTheSameAg_AreOneGroupWithTwoViews()
+    {
+        /* Two monitored replicas of the SAME real AG report the SAME replica set, so identity (name + replica
+           set) still collapses them to one group — the case Views exists to distinguish from Groups. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE1", "PRIMARY", operational: null),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var cards = AgTopology.BuildCards(replicas, Array.Empty<AgTopologyDatabaseRow>());
+        var (groups, servers, views) = AgTopology.Counts(cards);
+
+        Assert.Equal(1, groups);
+        Assert.Equal(2, servers);
+        Assert.Equal(2, views);
+    }
 }

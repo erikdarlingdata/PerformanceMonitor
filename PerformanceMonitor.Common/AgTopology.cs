@@ -247,15 +247,38 @@ public static class AgTopology
     }
 
     /// <summary>The header counts. Groups and views differ exactly when an AG has more than one monitored
-    /// reporter, and that difference is what a reader seeing one AG name twice needs said out loud.</summary>
+    /// reporter, and that difference is what a reader seeing one AG name twice needs said out loud.
+    ///
+    /// <para><b>#4475:</b> a group's identity is the AG NAME plus the SET of replica server names its cards
+    /// carry, not the name alone. Every Amazon RDS for SQL Server Multi-AZ instance carries its own internal AG
+    /// named <c>RDSAG0</c>, so a fleet of them would otherwise collapse into "1 group" by name. Two monitored
+    /// replicas of the SAME real AG report the SAME replica set, so they still count once — which is exactly the
+    /// case the Views count exists to distinguish from Groups.</para></summary>
     public static (int DistinctGroups, int ReportingServers, int Views) Counts(IReadOnlyList<AgTopologyCard> cards)
     {
         ArgumentNullException.ThrowIfNull(cards);
 
         return (
-            cards.Select(c => Key(c.AgName)).Distinct(StringComparer.Ordinal).Count(),
+            cards.Select(c => GroupIdentityKey(c.AgName, c.Replicas.Select(r => r.ReplicaServerName))).Distinct(StringComparer.Ordinal).Count(),
             cards.Select(c => c.ServerId).Distinct().Count(),
             cards.Count);
+    }
+
+    /// <summary>A group's identity for counting purposes (#4475): the AG name plus its replica set, compared
+    /// case-insensitively and order-independently. Shared by <see cref="Counts"/> and the MCP/web AG reader's
+    /// equivalent distinct-AG count (<c>DarlingAgReader.Build</c>), so the two surfaces cannot drift back apart.
+    /// No store read: both callers already carry the replica names on the rows they group.</summary>
+    public static string GroupIdentityKey(string? agName, IEnumerable<string?> replicaServerNames)
+    {
+        ArgumentNullException.ThrowIfNull(replicaServerNames);
+
+        var sortedReplicas = replicaServerNames
+            .Select(name => (name ?? "").ToUpperInvariant())
+            .Where(name => name.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(name => name, StringComparer.Ordinal);
+
+        return Key(agName) + "|" + string.Join(",", sortedReplicas);
     }
 
     /// <summary>The identity a card keeps across refreshes (#4238): the (reporting server, AG) pair BuildCards

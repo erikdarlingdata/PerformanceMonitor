@@ -208,6 +208,14 @@
                        FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
                        HorizontalAlignment="Center" VerticalAlignment="Center"
                        Visibility="Collapsed"/>
+
+            <!-- Loading State (#4478): shown while a read is in flight, so an empty grid does not read as
+                 "no jobs in the last 24 hours" for the several seconds a fleet-wide read takes. -->
+            <TextBlock x:Name="LoadingMessage"
+                       Text="Loading job history…"
+                       FontSize="14" Foreground="{DynamicResource ForegroundMutedBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Visibility="Collapsed"/>
         </Grid>
     </Grid>
 </UserControl>

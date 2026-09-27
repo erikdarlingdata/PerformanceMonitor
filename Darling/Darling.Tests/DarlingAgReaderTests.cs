@@ -396,4 +396,45 @@ public sealed class DarlingAgReaderTests
        copy moved to DarlingAgStatesReaderTests (#4228) along with the statement text itself — see
        DarlingAgStatesReader in PerformanceMonitor.Darling.Storage, now the one implementation ReadReplicasAsync
        and ReadDatabasesAsync above map into this file's ReplicaRow / DatabaseRow. */
+
+    /* ────────────────── #4475: DistinctAgCount by identity (name + replica set), not name alone ────────────────── */
+
+    [Fact]
+    public void DistinctAgCount_FortyTwoSameNamedAgsWithDistinctReplicaSets_IsFortyTwo()
+    {
+        /* Every Amazon RDS for SQL Server Multi-AZ instance's internal AG is named RDSAG0; each instance's
+           replica set is distinct, so identity (name + replica set) must count 42, not 1. */
+        var replicas = new List<Reader.ReplicaRow>();
+        for (var i = 1; i <= 42; i++)
+        {
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}A", "PRIMARY"));
+            replicas.Add(Replica(i, $"NODE{i}A", "RDSAG0", $"NODE{i}B", "SECONDARY"));
+        }
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(42, result.DistinctAgCount);
+        Assert.Equal(42, result.AvailabilityGroupCount);
+        Assert.Equal(42, result.ReportingServerCount);
+    }
+
+    [Fact]
+    public void DistinctAgCount_TwoReplicasOfTheSameAg_IsOne()
+    {
+        /* Two monitored replicas of the SAME real AG report the SAME replica set, so identity still collapses
+           them to one — the pre-existing case Build_OneAgSeenFromTwoServers_StaysTwoGroupsEachNamingItsReporter
+           already covers for AvailabilityGroupCount; this is the same fixture asserted on DistinctAgCount. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY", operational: null),
+            Replica(2, "NODE2", "AG1", "NODE1", "PRIMARY", operational: null),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(1, result.DistinctAgCount);
+        Assert.Equal(2, result.AvailabilityGroupCount);
+    }
 }
