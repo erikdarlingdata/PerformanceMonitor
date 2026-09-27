@@ -990,6 +990,22 @@ public partial class RemoteCollectorService
             return 0;
         }
 
+        /* #4487: job_history's failback lookback can honestly re-read up to FailbackLookbackDays of an
+           epoch this server already stored — see PerformanceMonitor.Collectors.JobHistoryCollector's
+           class remarks. Read the batch's own natural keys back from the store ONCE, here, before the
+           appender opens, and keep only the rows not already stored. Every other collector's definition
+           does not implement the contract, so this is a null check and nothing else for them. No chunk
+           bound needed here (unlike Darling): DuckDB is not partitioned, and job_history is small. */
+        if (definition is INaturalKeyDedupedCollector<TRow> dedupe)
+        {
+            rows = DropAlreadyStoredJobHistoryRows(duckConnection, definition, dedupe, rows, serverId);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
         var rowsWritten = 0;
         using (var appender = duckConnection.CreateAppender(definition.TargetTable))
         {
@@ -1017,6 +1033,54 @@ public partial class RemoteCollectorService
         }
 
         return rowsWritten;
+    }
+
+    /// <summary>
+    /// The keyed pre-insert dedupe (#4487), DuckDB's twin of Darling's
+    /// <c>DarlingCollectorRunner.DropAlreadyStoredJobHistoryRowsAsync</c>: reads the batch's own natural
+    /// keys back from <c>job_history</c> (the only table this runs against — only
+    /// <see cref="PerformanceMonitor.Collectors.JobHistoryCollector"/> implements
+    /// <see cref="INaturalKeyDedupedCollector{TRow}"/>) via one keyed query against the DuckDB list
+    /// binding idiom, and drops any row this server already stored under either the current epoch or a
+    /// returning one, before the appender opens.
+    /// </summary>
+    private static List<TRow> DropAlreadyStoredJobHistoryRows<TRow>(
+        DuckDBConnection duckConnection,
+        ICollectorDefinition<TRow> definition,
+        INaturalKeyDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        int serverId)
+    {
+        var storedKeys = new HashSet<(long InstanceId, string JobId, int StepId, DateTime RunDateTime)>();
+
+        using (var command = duckConnection.CreateCommand())
+        {
+            command.CommandText =
+                $"SELECT jh.instance_id, jh.job_id, jh.step_id, jh.run_datetime " +
+                $"FROM {definition.TargetTable} AS jh " +
+                "JOIN (SELECT UNNEST($2) AS run_datetime, UNNEST($3) AS instance_id, " +
+                "             UNNEST($4) AS job_id, UNNEST($5) AS step_id) AS k " +
+                "ON jh.run_datetime = k.run_datetime AND jh.instance_id = k.instance_id " +
+                "AND jh.job_id = k.job_id AND jh.step_id = k.step_id " +
+                "WHERE jh.server_id = $1";
+            command.Parameters.Add(new DuckDBParameter { Value = serverId });
+            command.Parameters.Add(new DuckDBParameter { Value = rows.Select(r => dedupe.GetNaturalKey(r).RunDateTime).ToArray() });
+            command.Parameters.Add(new DuckDBParameter { Value = rows.Select(r => dedupe.GetNaturalKey(r).InstanceId).ToArray() });
+            command.Parameters.Add(new DuckDBParameter { Value = rows.Select(r => dedupe.GetNaturalKey(r).JobId).ToArray() });
+            command.Parameters.Add(new DuckDBParameter { Value = rows.Select(r => dedupe.GetNaturalKey(r).StepId).ToArray() });
+
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                storedKeys.Add((
+                    reader.GetInt64(0),
+                    reader.GetString(1),
+                    reader.GetInt32(2),
+                    reader.GetDateTime(3)));
+            }
+        }
+
+        return dedupe.DropAlreadyStored(rows, storedKeys);
     }
 
     private static SqlCommand CreateCollectorCommand(CollectorQuery plan, SqlConnection connection, int commandTimeoutSeconds)

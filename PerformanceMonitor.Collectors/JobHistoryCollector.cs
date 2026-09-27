@@ -52,9 +52,49 @@ namespace PerformanceMonitor.Collectors;
 /// failed-jobs alert path. Managed Instance (edition 8), on-prem, and AWS RDS all have Agent and collect
 /// normally.</para>
 /// </summary>
-public sealed class JobHistoryCollector : CollectorDefinitionBase<JobHistoryCollector.Row>
+public sealed class JobHistoryCollector : CollectorDefinitionBase<JobHistoryCollector.Row>, INaturalKeyDedupedCollector<JobHistoryCollector.Row>
 {
     public static JobHistoryCollector Instance { get; } = new();
+
+    /// <summary>
+    /// The natural key <see cref="INaturalKeyDedupedCollector{TRow}"/> dedupes on, EXCLUDING server_id
+    /// (the host's stored-key read already scopes to one server): <c>instance_id</c> alone is ambiguous
+    /// across an identity epoch that returns (two different runs can share the same id under two epochs),
+    /// so the pre-insert dedupe keys on the full tuple instead.
+    /// </summary>
+    public IReadOnlyList<string> NaturalKeyColumns { get; } =
+        new[] { "instance_id", "job_id", "step_id", "run_datetime" };
+
+    /// <inheritdoc />
+    public (long InstanceId, string JobId, int StepId, DateTime RunDateTime) GetNaturalKey(Row row) =>
+        (row.InstanceId, row.JobId, row.StepId, row.RunDateTime ?? DateTime.MinValue);
+
+    /// <summary>
+    /// Pure filter (#4487): drops rows whose natural key the host says is already stored, in the same
+    /// relative order, mutating neither argument. <c>run_datetime</c> is nullable on the row but not
+    /// part of the SQL Server payload's actual domain (every real history row carries one); a null maps
+    /// to <see cref="DateTime.MinValue"/> so it still participates in the key rather than throwing.
+    /// </summary>
+    public List<Row> DropAlreadyStored(
+        List<Row> rows,
+        IReadOnlySet<(long InstanceId, string JobId, int StepId, DateTime RunDateTime)> storedKeys)
+    {
+        if (storedKeys.Count == 0)
+        {
+            return rows;
+        }
+
+        var kept = new List<Row>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (!storedKeys.Contains(GetNaturalKey(row)))
+            {
+                kept.Add(row);
+            }
+        }
+
+        return kept;
+    }
 
     private JobHistoryCollector()
     {
@@ -295,24 +335,31 @@ AND   DATEADD
     /// <c>JobHistoryIdentityEpochTests</c>; the host-side watermark and cache behaviour is pinned where the
     /// host lives.</para>
     ///
-    /// <para><b>An epoch that returns (a failover and failback) is now BOUNDED, not closed by dedup
-    /// (#4487).</b> If the identity later flips back to an epoch this server already stored rows under — a
-    /// failover away and back, or a restore reverted — the newest-batch watermark by itself is not enough:
-    /// it sits at the LOWER epoch's max after the away leg, and the following incremental read
-    /// (<c>instance_id &gt; @last_instance_id</c>, unbounded in time) would otherwise re-collect every
-    /// already-stored row from the higher epoch that is still above that lower number. The honest arm now
-    /// ALSO requires <c>run_datetime &gt;= @min_run_datetime</c> whenever the host supplies a watermark —
-    /// <see cref="MinRunDateTimeBoundPredicate"/>, composed the same sargable way as
-    /// <see cref="ArchivalEmptyWindowPredicate"/>, anchored on the host's own newest stored
+    /// <para><b>An epoch that returns (a failover and failback) re-reads the returning epoch's own history,
+    /// and the pre-insert dedupe is what keeps that honest (#4487).</b> If the identity later flips back to
+    /// an epoch this server already stored rows under — a failover away and back, or a restore reverted —
+    /// the newest-batch watermark by itself is not enough: it sits at the LOWER epoch's max after the away
+    /// leg, and the following incremental read (<c>instance_id &gt; @last_instance_id</c>, unbounded in
+    /// time) would otherwise re-read every already-stored row from the higher epoch that is still above
+    /// that lower number. The honest arm ALSO requires <c>run_datetime &gt;= @min_run_datetime</c> whenever
+    /// the host supplies a watermark — <see cref="MinRunDateTimeBoundPredicate"/>, composed the same
+    /// sargable way as <see cref="ArchivalEmptyWindowPredicate"/>, anchored on the host's own newest stored
     /// <c>run_datetime</c> minus <see cref="FailbackLookbackDays"/> days instead of <c>GETDATE()</c>. That
-    /// bounds a post-failback re-read to at most <see cref="FailbackLookbackDays"/> days of the returning
-    /// epoch's rows, once per failback, the same shape the regressed arm already gives the reseed case. The
-    /// cost: a job STEP that runs longer than <see cref="FailbackLookbackDays"/> days is missed by this
-    /// bound — <c>sysjobhistory</c> stamps a step row with its START time and writes it only when the step
-    /// ENDS, so a step that has been running for more than the lookback window when it finally completes
-    /// falls outside <c>run_datetime &gt;= @min_run_datetime</c> and is silently dropped. No bound at all
-    /// applies when the host has no watermark yet (first run, or an archival-emptied Lite store) — nothing
-    /// stored means nothing to fail back FROM.</para>
+    /// bounds a post-failback RE-READ to at most <see cref="FailbackLookbackDays"/> days of the returning
+    /// epoch's rows — the lookback stays this wide on purpose, for a job STEP that has been running for
+    /// longer than that when it finally completes (<c>sysjobhistory</c> stamps a step row with its START
+    /// time and writes it only when the step ENDS) and for the clock skew a failback can carry. What the
+    /// re-read is NOT allowed to do is turn back into duplicates: this class implements
+    /// <see cref="INaturalKeyDedupedCollector{TRow}"/>, and each host's write path
+    /// (Darling's <c>DarlingCollectorRunner.WriteBatchAsync</c>, Lite's
+    /// <c>RemoteCollectorService.DefinitionRunner.WriteBatch</c>) reads the batch's own natural keys
+    /// (<see cref="NaturalKeyColumns"/>: <c>instance_id</c>, <c>job_id</c>, <c>step_id</c>,
+    /// <c>run_datetime</c> — <c>instance_id</c> alone is ambiguous across an epoch that returns) back from
+    /// the store once, before the write, and calls <see cref="DropAlreadyStored"/> so a row this server
+    /// already stored under either epoch is never inserted twice. The lookback bounds how much gets
+    /// RE-READ; the dedupe is what closes the loop on what gets RE-STORED. No bound at all applies when the
+    /// host has no watermark yet (first run, or an archival-emptied Lite store) — nothing stored means
+    /// nothing to fail back FROM, and the dedupe read against an empty store finds nothing to drop.</para>
     /// </summary>
     private static readonly string IdentityGuardedWatermarkFilter = string.Format(
         CultureInfo.InvariantCulture,
