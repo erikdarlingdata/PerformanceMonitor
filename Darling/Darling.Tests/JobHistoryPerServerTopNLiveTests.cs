@@ -298,11 +298,14 @@ public sealed class JobHistoryPerServerTopNLiveTests
                the exact same instant — instance_id DESC must decide it identically old vs new. Chosen to be
                the two newest rows in the whole plant, so they sit right at the top the LIMIT boundary would
                see first. */
+            /* utc = raw - offset, so a raw gap of (offsetA - offsetB) = 60 - (-300) = 360 minutes between
+               the two rows' raw run_datetime makes their run_datetime_utc equal; cross_tie_a gets the higher
+               instance_id so instance_id DESC picks it first, matching the assertion below. */
             var crossTie = now.AddMinutes(-1);
             await InsertJobHistoryAsync(connection, ct, id: id++, at: crossTie.AddMinutes(1), jobId: "cross_tie_a",
-                stepId: 0, runStatus: 1, durationSeconds: 9, instanceId: 90001, serverId: ServerPlus60);
-            await InsertJobHistoryAsync(connection, ct, id: id++, at: crossTie.AddMinutes(-5), jobId: "cross_tie_b",
-                stepId: 0, runStatus: 1, durationSeconds: 9, instanceId: 90002, serverId: ServerMinus300);
+                stepId: 0, runStatus: 1, durationSeconds: 9, instanceId: 90002, serverId: ServerPlus60);
+            await InsertJobHistoryAsync(connection, ct, id: id++, at: crossTie.AddMinutes(1).AddMinutes(-360), jobId: "cross_tie_b",
+                stepId: 0, runStatus: 1, durationSeconds: 9, instanceId: 90001, serverId: ServerMinus300);
 
             /* TIE #2 (same-server): two rows on the SAME server with the identical raw run_datetime (offset
                cancels out, so run_datetime_utc ties too) — instance_id DESC decides within one server's own
