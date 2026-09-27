@@ -126,12 +126,40 @@ public static class PgLogEntryAssembler
 
     private static readonly string s_prefixGapBeforePid = @"(?:" + s_prefixRunStep + @"[^\[\n])*?";
 
+    /// <summary>Every label this reader knows, the severities and the companion fields alike, as the same
+    /// alternation <see cref="s_prefixLine"/>'s own label group uses. Shared with <see cref="s_textOpensWithALabel"/>
+    /// so the "is this a label" shape is written once.</summary>
+    private const string LabelAlternation =
+        "LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION";
+
     private static readonly Regex s_prefixLine = new(
         @"^(?<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) "
         + @"(?:(?<zone>[^ \n]+) \[(?<pid>\d+)\]|(?<zone>[^ :\n]+):(?<mid>" + s_prefixRun + @")\[(?<pid>\d+)\]"
         + @"|(?<zone>[^ :\[\n]+) (?<mid>" + s_prefixGapBeforePid + @")\[(?<pid>\d+)\])"
         + @"(?<rest>" + s_prefixRun + ")"
-        + @"(?<![A-Z_])(?<label>LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION):  (?<text>.*)$",
+        + @"(?<![A-Z_])(?<label>" + LabelAlternation + @"):  (?<text>.*)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Whether the matched <c>text</c> itself OPENS with another exact two-space label (#4426 v17, closing the
+    /// known misparse the pipeline test named <c>ApplicationNameRenderingATwoSpacedLabel_IsAKnownMisparse</c>):
+    /// an <c>application_name</c> rendering <c>ERROR:  </c> under <c>%a</c> reads as a genuine <c>ERROR</c>
+    /// primary line, with the real line's own label and message becoming its "message" — <c>… ERROR:  LOG:
+    /// checkpoint starting: time</c> loses the checkpoint LOG and gains a manufactured ERROR nothing on the
+    /// server actually raised.
+    ///
+    /// <para>This reader also serves self-hosted targets, whose operators set their own <c>%a</c>: a forgery
+    /// case, not a formatting one, so the store's own rule for the same trade governs — a missed line is
+    /// accepted over a manufactured one. A match here is treated exactly as a line the prefix regex never
+    /// matched at all: dropped, ending the open entry, never opening a new one.</para>
+    ///
+    /// <para><b>Accepted trade:</b> a genuine line whose MESSAGE itself starts with a two-space label — a
+    /// <c>RAISE LOG 'ERROR:  x'</c> renders <c>LOG:  ERROR:  x</c> — is refused by this same check. Nothing in
+    /// stderr text tells a forged label from a genuine message that happens to start with one, so this reader
+    /// picks the missed line both times.</para>
+    /// </summary>
+    private static readonly Regex s_textOpensWithALabel = new(
+        @"^(?:" + LabelAlternation + @"):  ",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* %u@%d anywhere in the prefix's non-pid text, before the pid or after it. Both halves required: a background
@@ -221,7 +249,12 @@ public static class PgLogEntryAssembler
 
             var match = s_prefixLine.Match(line);
 
-            if (!match.Success)
+            /* #4426 v17: the matched label is genuine only if the text after it does NOT itself open with
+               another exact two-space label. A forged one in application_name (%a) would otherwise read as
+               the line's real severity, with the real label and message becoming its "message" — see
+               s_textOpensWithALabel's doc for the accepted trade this refusal makes instead. Treated exactly
+               as a line the prefix never matched: dropped, closing the open entry, opening none. */
+            if (!match.Success || s_textOpensWithALabel.IsMatch(match.Groups["text"].Value))
             {
                 /* Not a prefix line and not a continuation: the cut head, a line the server wrote to stderr
                    outside its own format (a loader's chatter, a crash dump), or a line whose label this reader

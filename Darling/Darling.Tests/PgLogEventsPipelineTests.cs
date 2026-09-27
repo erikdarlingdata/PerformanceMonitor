@@ -132,25 +132,37 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
-    /// #4426 v17 (KNOWN LIMITATION, pinned rather than fixed here — see the PR body): when
-    /// <c>application_name</c> itself renders a label followed by the EXACT two spaces PostgreSQL's own
-    /// labels use (<c>%a</c> = <c>"ERROR: "</c>, whose trailing space plus the prefix's own space before the
-    /// label gives <c>"ERROR:  "</c> on the wire), the line is genuinely ambiguous in stderr: nothing in it
-    /// distinguishes that token from a real <c>ERROR</c> primary line, so <see cref="PgLogEntryAssembler"/>
-    /// still reads it as the severity and the real <c>LOG:</c> line's text becomes the message. The single-
-    /// spaced case above is fixed; this exact-two-space case is not, because closing it needs the same
-    /// label-shaped-lookbehind check <c>StoreLogClassifier.ContinuesAnUpperCaseToken</c> uses, which is a
-    /// larger change to this class's shared prefix-run steps than this fix makes. Pinned so a future fix
-    /// changes this assertion, not silently regresses it.
+    /// #4426 v17: when <c>application_name</c> itself renders a label followed by the EXACT two spaces
+    /// PostgreSQL's own labels use (<c>%a</c> = <c>"ERROR: "</c>, whose trailing space plus the prefix's own
+    /// space before the label gives <c>"ERROR:  "</c> on the wire), nothing in stderr text distinguishes that
+    /// token from a real <c>ERROR</c> primary line — reading it as the severity would manufacture an entry,
+    /// with the real <c>LOG:</c> line's own text becoming its message. <see cref="PgLogEntryAssembler"/> now
+    /// refuses such a line instead: the matched label's own text opens with another exact two-space label, so
+    /// the line is treated exactly as one whose prefix never matched at all, and it yields no entry. A missed
+    /// line is the accepted trade over a manufactured one (also true for a self-hosted target whose operator
+    /// sets its own <c>%a</c>).
     /// </summary>
     [Fact]
-    public void ApplicationNameRenderingATwoSpacedLabel_IsAKnownMisparse()
+    public void ApplicationNameRenderingATwoSpacedLabel_IsRefusedNotManufactured()
     {
         var line = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
-        Assert.Equal("ERROR", entry.Severity);
-        Assert.StartsWith("LOG:", entry.Message, StringComparison.Ordinal);
+        Assert.Empty(PgLogEntryAssembler.Assemble(line));
+    }
+
+    /// <summary>
+    /// #4426 v17: the same refusal costs a genuine line whose MESSAGE itself opens with a two-space label —
+    /// PL/pgSQL's <c>RAISE LOG 'ERROR:  x'</c> writes exactly that shape, <c>LOG:  ERROR:  x</c>. Nothing in
+    /// stderr distinguishes a forged label in <c>application_name</c> from a genuine message that happens to
+    /// start with one, so the reader picks the missed line here too, the accepted trade stated on the check
+    /// itself.
+    /// </summary>
+    [Fact]
+    public void ARaiseShapedMessageOpeningWithATwoSpacedLabel_IsAlsoRefused()
+    {
+        var line = P + "[4102] LOG:  ERROR:  bad input\n";
+
+        Assert.Empty(PgLogEntryAssembler.Assemble(line));
     }
 
     private static List<PgLogEvent> Classify(string text) => new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(text);
