@@ -259,8 +259,12 @@ ORDER BY batch.server_id, batch.database_name, batch.plan_id";
         PruneMarginDays < chunkIntervalDays + 1;
 
     /// <summary>
-    /// Retires map rows whose facts have all aged out: an index range scan on <see cref="LastSeenColumn"/>
-    /// against the fact horizon plus <see cref="PruneMarginDays"/>, time-sliced like every sibling purge.
+    /// Retires map rows whose facts have all aged out: since V149 (#4250) dropped <see cref="LastSeenColumn"/>'s
+    /// btree index, this runs as a sequential scan per slice instead of an index range scan. Measured on a
+    /// 4.04 M row / 709 MB table (field scale), one slice's predicate went from ~1.3 s (indexed) to ~1.7 s
+    /// (sequential) warm — acceptable because the drain loop only runs a couple of slices per table twice a
+    /// day, and the seq scan cost is what buys the liveness touch's HOT update on every one of the ~1.43 M
+    /// touches/day that outnumber prune calls by many orders of magnitude.
     ///
     /// <para>Timestamp-driven, NOT an existence check against <c>query_store_stats</c>. An anti-join against a
     /// 43 GB hypertable per map row is exactly the cost this architecture avoids, and it is unnecessary here

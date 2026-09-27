@@ -154,7 +154,14 @@ ORDER BY batch.server_id, batch.database_name, batch.query_id";
     /// <summary>
     /// Retires text whose facts have all aged out, bounded to roughly one chunk-width of the oldest rows
     /// per call so a single sweep cannot take an unbounded row lock — the same shape and the same reason as
-    /// <see cref="QueryStorePlanMap.PruneSql"/>.
+    /// <see cref="QueryStorePlanMap.PruneSql"/>. Since V149 (#4250) dropped <see cref="LastSeenColumn"/>'s
+    /// btree index, each slice runs a sequential scan of the TOAST-heavy table instead of an index range
+    /// scan. Measured on a field-scale table (6.86 M rows, ~5 GB main fork plus ~4.35 GB TOAST), one slice's
+    /// predicate went from ~10.2 s indexed to ~7.5 s sequential warm, but the sequential scan reads roughly
+    /// 29 GB of logical buffers per slice (2.27 M read from outside shared_buffers) against three scans per
+    /// statement — call this at scale, twice a day, and it is on the order of tens of GB/day of extra reads
+    /// this table now takes on to buy the touch's HOT update. See #4250's measurement notes for the exact
+    /// numbers and the standing recommendation on this table's index.
     ///
     /// <para>Safe to run against live data because <c>last_seen</c> is refreshed by every pass that
     /// re-observes a statement: a row can only fall behind the cutoff once nothing has referenced it for
