@@ -304,9 +304,19 @@ internal static class ManagedConfMigrationRunner
     /// (#4336; <see cref="Path.GetFileName(string)"/>, not a suffix match — a stray <c>old-darling-managed.conf</c>
     /// in an include directory is a different file). A row's
     /// <c>applied</c> may be false — an operator line below the include can legitimately override it; only
-    /// the value and the absence of an error matter here. All keys match: stamp the new text as verified. Any
-    /// key fails: restore <paramref name="previousText"/> (when there was one) so the old stamp matches
-    /// again, and report <c>Failed</c>.
+    /// the value and the absence of an error matter here.
+    ///
+    /// <para><see cref="DarlingStoreHostProfile.CommandLineOnlyKeys"/> (<c>port</c>, <c>listen_addresses</c>) are
+    /// skipped entirely here — never looked up in <paramref name="renderedText"/>'s keys, never compared —
+    /// because <c>BuildServerRuntimeOptions</c> always starts PostgreSQL with both on the <c>pg_ctl -o "-c
+    /// ..."</c> command line, which outranks the conf file unconditionally (confirmed live). An exposed
+    /// store's running <c>listen_addresses</c> carries the network IP the rendered file line never does
+    /// (the file always renders loopback-only, #4215/BuildConfAppend); PostgreSQL's own <c>pg_file_settings</c>
+    /// then reports that file row with <c>error = 'setting could not be applied'</c> — not merely
+    /// <c>applied = false</c> — because the value differs from what's actually in force, same as any
+    /// operator line the command line has already overridden. Comparing this key here would fail Step B on
+    /// every start for any store with a configured network endpoint, even though the store's listener is
+    /// exactly what it should be; there is nothing this file could ever own for either key.</para>
     /// </summary>
     internal static ManagedConfMigrationOutcome VerifyStepB(
         string dataDir,
@@ -335,6 +345,11 @@ internal static class ManagedConfMigrationRunner
         var mismatchedKeys = new List<string>();
         foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(renderedText))
         {
+            if (Array.IndexOf(DarlingStoreHostProfile.CommandLineOnlyKeys, name) >= 0)
+            {
+                continue;
+            }
+
             var ok = byKey.TryGetValue(name, out var candidates)
                 && candidates.Exists(r => r.Error is null && string.Equals(r.Setting, value, StringComparison.Ordinal));
             if (!ok)

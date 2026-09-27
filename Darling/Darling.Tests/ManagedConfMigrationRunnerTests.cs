@@ -503,6 +503,94 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Contains("work_mem", outcome.MismatchedKeys);
     }
 
+    /// <summary>Pin: a store with a configured network endpoint always starts PostgreSQL with
+    /// <c>listen_addresses</c> forced onto the command line (<see cref="DarlingManagedPostgres.BuildServerRuntimeOptions"/>).
+    /// The rendered <c>darling-managed.conf</c> line stays loopback-only, so PostgreSQL reports THAT file
+    /// row with <c>error = "setting could not be applied"</c> once its command-line value differs —
+    /// confirmed against a live PostgreSQL 18 instance. <see cref="ManagedConfMigrationRunner.VerifyStepB"/>
+    /// must not treat that as a mismatch: <c>listen_addresses</c> is skipped, but a REAL mismatch on another
+    /// key in the same batch still fails.</summary>
+    [Fact]
+    public void VerifyStepB_ListenAddressesOverriddenByCommandLine_IsNotAMismatch_OtherKeyStillFails()
+    {
+        var rendered = "listen_addresses = '127.0.0.1'\nwork_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            new(SourceFile: managedPath, SourceLine: 2, Name: "work_mem", Setting: "8MB", Applied: true, Error: null),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.DoesNotContain("listen_addresses", outcome.MismatchedKeys);
+        Assert.Contains("work_mem", outcome.MismatchedKeys);
+    }
+
+    /// <summary>Pin: when EVERY other key matches and the only rendered key that doesn't is
+    /// <c>listen_addresses</c> — overridden by the command line, same as above — Step B now completes
+    /// (<c>Verified</c>), writes the verified stamp against the rendered text, and leaves the managed file
+    /// in place (no restore of <paramref name="previousText"/>). Before this fix, this row alone drove Step
+    /// B to <c>Failed</c> on every start of any store with a configured network endpoint. The row's exact
+    /// shape (<c>setting</c> reads the file's rendered value, not the command line's; <c>error</c> reads
+    /// <c>"setting could not be applied"</c>; <c>applied</c> is <c>false</c>) was captured from a real
+    /// <c>pg_file_settings</c> row on a PostgreSQL 18 container started with a command-line
+    /// <c>listen_addresses</c> set to loopback plus the container's own address (<c>docker run
+    /// timescale/timescaledb:2.30.1-pg18 -c listen_addresses=127.0.0.1,&lt;container address&gt;</c>, with an
+    /// included conf file rendering the product's usual loopback-only <c>listen_addresses = '127.0.0.1'</c>
+    /// line), then querying <see cref="ManagedConfFileSettings.SnapshotSql"/> directly against it. The address
+    /// below (<c>192.0.2.10</c>) is the RFC 5737 documentation range, standing in for the container's own
+    /// address — the captured row shape does not depend on which address is used.</summary>
+    [Fact]
+    public void VerifyStepB_OnlyListenAddressesOverriddenByCommandLine_Verifies()
+    {
+        var rendered = "listen_addresses = '127.0.0.1'\nwork_mem = '16MB'\nmax_connections = '200'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            Applied("work_mem", "16MB", file: managedPath, line: 2),
+            Applied("max_connections", "200", file: managedPath, line: 3),
+        };
+
+        var previousText = "work_mem = '8MB'\n";
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Equal(ManagedConfMigrationStep.B, outcome.Step);
+        Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
+        Assert.Equal(rendered, File.ReadAllText(managedPath));
+    }
+
+    /// <summary>Pin: the same completion for <c>port</c> — also command-line-owned
+    /// (<see cref="DarlingStoreHostProfile.CommandLineOnlyKeys"/>) — whose file row is overridden the same
+    /// way when the command line pins a different port than the rendered file line.</summary>
+    [Fact]
+    public void VerifyStepB_OnlyPortOverriddenByCommandLine_Verifies()
+    {
+        var rendered = "port = '5555'\nwork_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "port", Setting: "5555", Applied: false, Error: "setting could not be applied"),
+            Applied("work_mem", "16MB", file: managedPath, line: 2),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Verified, outcome.Status);
+        Assert.Equal(ManagedConfMigrationStep.B, outcome.Step);
+        Assert.True(ManagedConfMigrationSteps.IsVerified(_dataDir));
+    }
+
     /// <summary>Pin (#4336): the exact change-log line for two changed keys.</summary>
     [Fact]
     public void FormatStepBChangeLog_TwoKeys_ExactLine()
