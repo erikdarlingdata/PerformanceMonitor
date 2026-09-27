@@ -179,6 +179,8 @@ public sealed class RepoFileAdoptionTests
            call sites that sit on their own lines — anchors spanning line breaks on every arm. */
         "RecurrenceLabelStoreReadTests.cs",
         "ServerPageTabsTests.cs",
+        // #4218: reads build.yml to pin the SignPath action version.
+        "SignPathActionVersionTests.cs",
         "StartupFailureTriageTests.cs",
         "StoreCopyPhaseTests.cs",
         /* #3754: its reconcile and worker pins anchor multi-statement arms across their line breaks - the
