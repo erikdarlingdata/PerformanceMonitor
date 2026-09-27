@@ -1292,14 +1292,19 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
-    /// #3909 through the product's own bootstrap. A store on PostgreSQL 17 whose conf ends with the old 2048 MB
-    /// value (the shape a reverted upgrade left on a 40 GB+ host) comes back up through
-    /// <see cref="DarlingManagedPostgres.EnsureRunningAsync"/> with the capped value in force. The 17 runtime is
-    /// the runtime here, with no package beside it, so nothing is upgraded: this is the store that stays on 17.
-    /// Gated on DARLING_TEST_PGRUNTIME_OLD.
+    /// #3909 through the product's own bootstrap, after #4336 moved the settings into one included file. A
+    /// store on PostgreSQL 17 whose <c>darling-managed.conf</c> still carries the old, uncapped 2048 MB value
+    /// (the shape a store upgraded to #4336 without a fresh render since, or a reverted upgrade, could leave
+    /// on a 40 GB+ host) comes back up through <see cref="DarlingManagedPostgres.EnsureRunningAsync"/> with
+    /// the value capped, because every start re-renders <c>darling-managed.conf</c>
+    /// (<see cref="DarlingManagedPostgres.WriteManagedConfFile"/>) and its v14 block
+    /// (<see cref="DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap"/>) caps any value over PostgreSQL
+    /// 17's limit on every major at or below 17 — not only the value the render's own formula would derive.
+    /// The 17 runtime is the runtime here, with no package beside it, so nothing is upgraded: this is the
+    /// store that stays on 17. Gated on DARLING_TEST_PGRUNTIME_OLD.
     /// </summary>
     [Fact]
-    public async Task Postgres17Store_WithTheOldCapInItsConf_StartsThroughTheBootstrap_Gated()
+    public async Task Postgres17Store_WithTheOldValueInItsManagedConf_StartsWithTheCap_Gated()
     {
         var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_OLD");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime),
@@ -1309,6 +1314,107 @@ public sealed class DarlingManagedPostgresTests
             $"DARLING_TEST_PGRUNTIME_OLD={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
 
         var root = Directory.CreateTempSubdirectory("darling-pg17boot-");
+        var runtimeRoot = Path.Combine(root.FullName, "deploy", "pg-runtime");
+        var source = Path.Combine(oldRuntime!, "pgsql");
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var target = Path.Combine(runtimeRoot, "pgsql", Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
+        }
+
+        var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var config = new PostgresConfig { Managed = true, Port = FindFreeTcpPort(), DataDirectory = dataDirectory };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+        DarlingManagedPostgres? first = null;
+        DarlingManagedPostgres? second = null;
+        try
+        {
+            first = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await first.EnsureRunningAsync(timeout.Token);
+            await first.StopIfStartedByThisProcessAsync();
+            Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
+
+            /* The shape a store carrying the old, pre-cap value could still have in its managed file: replace
+               the ONE maintenance_work_mem assignment the first start's own render just wrote (WriteManagedConfFile
+               caps on <=17, so it is already at the capped value here) with the old, uncapped 2048MB, keeping
+               exactly one assignment. */
+            var managedTextBefore = await File.ReadAllTextAsync(managedConfPath, timeout.Token);
+            Assert.Equal(1, CountOccurrences(managedTextBefore, "maintenance_work_mem = "));
+            var managedTextWithOldValue = System.Text.RegularExpressions.Regex.Replace(
+                managedTextBefore,
+                @"maintenance_work_mem = '[^']*'",
+                "maintenance_work_mem = '2048MB'");
+            await File.WriteAllTextAsync(managedConfPath, managedTextWithOldValue, timeout.Token);
+
+            second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            var connectionString = await second.EnsureRunningAsync(timeout.Token);
+
+            var (live, expected) = await ReadSettingAndLiteralBytesAsync(
+                connectionString, "maintenance_work_mem", $"{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB", timeout.Token);
+            Assert.Equal(expected, live);
+
+            var managedTextAfter = await File.ReadAllTextAsync(managedConfPath, timeout.Token);
+            Assert.Equal(1, CountOccurrences(managedTextAfter, "maintenance_work_mem = "));
+            Assert.Contains(
+                $"maintenance_work_mem = '{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB'", managedTextAfter, StringComparison.Ordinal);
+
+            var postgresqlConfText = await File.ReadAllTextAsync(confPath, timeout.Token);
+            Assert.Contains(ManagedConfFile.IncludeLine, postgresqlConfText, StringComparison.Ordinal);
+            Assert.DoesNotContain("maintenance_work_mem", postgresqlConfText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (first is not null)
+            {
+                await first.StopIfStartedByThisProcessAsync();
+            }
+
+            if (second is not null)
+            {
+                await second.StopIfStartedByThisProcessAsync();
+            }
+
+            try
+            {
+                root.Delete(recursive: true);
+            }
+            catch (IOException)
+            {
+                /* A temp directory the OS still holds is not this test's failure. */
+            }
+        }
+    }
+
+    /// <summary>
+    /// #4405: an operator's own line below the managed include, out of PostgreSQL 17's range, is the
+    /// operator's line to fix — the store must refuse to start rather than silently absorb it, and its
+    /// refusal must name the fix. Unlike a value inside <c>darling-managed.conf</c> (the sibling fact above),
+    /// this line is NEVER something the product wrote: every start re-renders <c>darling-managed.conf</c>
+    /// itself (<see cref="DarlingManagedPostgres.WriteManagedConfFile"/>), and no code path in this service
+    /// ever appends a bare <c>maintenance_work_mem</c> line to <c>postgresql.conf</c> below the include — the
+    /// only appends that ever wrote it (v3, v7, v8, v14) always carry their own marker, and #4336 confined all
+    /// of them to a <c>Legacy</c> (pre-migration) conf. So a bare, unmarked line after the include is an
+    /// operator edit, and <see cref="DarlingManagedPostgres.EnsureManagedConfReadyAsync"/> validates the whole
+    /// merged conf with <c>postgres -C</c> before ever starting the server: PostgreSQL rejects the value,
+    /// there is no earlier last-good file to fall back to (this data directory has never had one), and the
+    /// start throws <see cref="InvalidOperationException"/> naming the fix
+    /// (<see cref="DarlingManagedPostgres.BuildManagedConfValidationFailureMessage"/>) instead of starting on
+    /// a value the render never sanctioned. Gated on DARLING_TEST_PGRUNTIME_OLD.
+    /// </summary>
+    [Fact]
+    public async Task Postgres17Store_OperatorLineBelowIncludeOutOfRange_RefusesToStartNamingTheFix_Gated()
+    {
+        var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_OLD");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime),
+            "Set DARLING_TEST_PGRUNTIME_OLD to an assembled PostgreSQL 17 pg-runtime (new-upgraded-store-fixture.ps1 builds one).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(oldRuntime!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME_OLD={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-pg17op-");
         var runtimeRoot = Path.Combine(root.FullName, "deploy", "pg-runtime");
         var source = Path.Combine(oldRuntime!, "pgsql");
         foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
@@ -1330,16 +1436,30 @@ public sealed class DarlingManagedPostgresTests
             await first.EnsureRunningAsync(timeout.Token);
             await first.StopIfStartedByThisProcessAsync();
             Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
+            Assert.Contains(ManagedConfFile.IncludeLine, await File.ReadAllTextAsync(confPath, timeout.Token), StringComparison.Ordinal);
 
-            await File.AppendAllTextAsync(confPath, "\n# written by a build before #3909\nmaintenance_work_mem = 2048MB\n", timeout.Token);
+            /* An operator's own line below the include -- never something this product wrote (see the
+               summary above). PostgreSQL 17 rejects it outright. */
+            await File.AppendAllTextAsync(confPath, "\n# an operator's own line\nmaintenance_work_mem = 2048MB\n", timeout.Token);
 
             second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
-            var connectionString = await second.EnsureRunningAsync(timeout.Token);
+            var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await second.EnsureRunningAsync(timeout.Token));
 
-            var (live, expected) = await ReadSettingAndLiteralBytesAsync(
-                connectionString, "maintenance_work_mem", $"{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB", timeout.Token);
-            Assert.Equal(expected, live);
-            Assert.Equal(1, CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV14));
+            Assert.Contains("maintenance_work_mem", thrown.Message, StringComparison.Ordinal);
+            Assert.Contains(
+                "Fix the rejected setting with a line after 'include ''darling-managed.conf'''",
+                thrown.Message, StringComparison.Ordinal);
+
+            /* Not left running on the rejected conf: stopping is safe (there is nothing to stop), and a
+               connection to the configured port fails. */
+            await second.StopIfStartedByThisProcessAsync();
+            await Assert.ThrowsAnyAsync<Exception>(async () =>
+            {
+                await using var connection = new NpgsqlConnection(
+                    $"Host=127.0.0.1;Port={config.Port};Username=darling;Database=postgres;Pooling=false;Timeout=5");
+                await connection.OpenAsync(timeout.Token);
+            });
         }
         finally
         {
