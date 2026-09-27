@@ -449,9 +449,14 @@ public static class DarlingRetention
                nominal horizon: drop_chunks only drops a chunk once its WHOLE range is past the cutoff (up to
                one ChunkIntervalDays of extra rows), and last_seen is refreshed under a guard rather than on
                every sighting. Two guards write it and the WIDER one is what the margin has to absorb: the
-               dim upsert's conflict arm at one hour, and the Query Store liveness touch at
-               QueryStoreLivenessTouchGuard.GuardHours — which is itself a stated share of this margin, so
-               the two cannot drift apart. */
+               dim upsert's conflict arm at PayloadDimensions.LastSeenRefreshGuardHours hours (widened from 1
+               to 6 by #4477 to cut non-HOT WAL on the indexed last_seen column — measured at ~42 KB of WAL
+               per touch on one production store), and the Query Store liveness touch at
+               QueryStoreLivenessTouchGuard.GuardHours (12 hours today) — which is itself a stated share of
+               this margin, so the two cannot drift apart. The one-day margin below covers both: 12 hours is
+               already the wider of the two guards, so #4477's 6-hour width fits inside the SAME margin with
+               no widening needed (PayloadDimensionGuardMarginTests, in Darling.Tests, pins guard <= margin so
+               a future guard change that outgrows it fails loudly rather than silently). */
             var widestFactRetentionDays = 1;
             foreach (var definition in CollectorCatalog.All)
             {
@@ -1141,10 +1146,13 @@ public static class DarlingRetention
     /// <c>last_seen</c> refresh guard), CLAMPED to one day before the oldest surviving digest-carrying
     /// fact row when that measured floor reaches further back — held history bounds the GC instead of
     /// deferring it. The measured side carries the SAME one-day margin, for the same reason: a dim row's
-    /// <c>last_seen</c> can trail its newest referencing fact by up to the refresh guard's width
-    /// (<see cref="QueryStoreLivenessTouchGuard.GuardHours"/> hours, which is a stated share of this very
-    /// margin — see <see cref="QueryStoreLivenessTouchGuard"/>), so pruning right AT the floor could take
-    /// content the floor row still references. A null floor (no
+    /// <c>last_seen</c> can trail its newest referencing fact by up to the WIDER of the two guards that
+    /// write it — <see cref="PayloadDimensions.LastSeenRefreshGuardHours"/> hours (the dim upsert's own
+    /// conflict guard) or <see cref="QueryStoreLivenessTouchGuard.GuardHours"/> hours (the Query Store
+    /// liveness touch, a stated share of this very margin — see <see cref="QueryStoreLivenessTouchGuard"/>)
+    /// — so pruning right AT the floor could take content the floor row still references. Both guards stay
+    /// well inside the one-day margin (<c>PayloadDimensionGuardMarginTests</c> pins it), so neither
+    /// can outgrow it silently. A null floor (no
     /// digest-carrying facts anywhere — a fresh or fully-aged store) leaves the assumed horizon alone:
     /// with no facts, nothing can dangle, and last_seen still bounds what is old enough to take.
     /// </summary>

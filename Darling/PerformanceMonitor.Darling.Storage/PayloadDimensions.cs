@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.IO;
 using System.IO.Compression;
@@ -75,6 +76,19 @@ public static class PayloadDimensions
 
     /// <summary>The digest primary-key column both dimension tables share.</summary>
     public const string DigestColumn = "digest";
+
+    /// <summary>
+    /// How stale a dimension row's <see cref="LastSeenColumn"/> may be before a re-sighting refreshes it
+    /// (both the <c>WHERE NOT EXISTS</c> pre-filter and the <c>ON CONFLICT ... WHERE</c> guard in
+    /// <see cref="UpsertSql"/>, for every dimension table). Widened from 1 hour to 6 (#4477): measured on
+    /// one production store, <c>query_plan_dim</c> took 894,656 non-HOT touches in 71 hours under the
+    /// 1-hour guard — <c>last_seen</c> is indexed, so the update cannot go HOT — at ~42 KB of WAL per row
+    /// (4.87 M full-page images against a large, scattered heap). The guard already caps a continuously-seen
+    /// plan to 24 touches a day; widening it to 6 hours caps the same plan to 4. It must stay no wider than
+    /// <see cref="DarlingRetention.ComputeDimensionCutoff"/>'s trailing margin, which reserves room for
+    /// exactly this staleness — see that method's summary.
+    /// </summary>
+    public const int LastSeenRefreshGuardHours = 6;
 
     /// <summary>
     /// The GC watermark column both dimension tables share — the newest collection that referenced
@@ -299,26 +313,44 @@ public static class PayloadDimensions
     }
 
     /// <summary>
+    /// The rendered SQL interval for <see cref="LastSeenRefreshGuardHours"/> — the ONE place
+    /// <see cref="UpsertSql"/>'s four guard sites (pre-filter and conflict arm, times the compressed and
+    /// text branches) get the width from, so the guard cannot drift between sites or between the two dim
+    /// tables. Plural unconditionally — PostgreSQL accepts <c>interval '1 hours'</c>.
+    /// </summary>
+    internal static readonly string LastSeenRefreshGuardInterval =
+        "INTERVAL '" + LastSeenRefreshGuardHours.ToString(CultureInfo.InvariantCulture) + " hours'";
+
+    /// <summary>
     /// The batch upsert: ONE statement, two array parameters plus the collection timestamp, so it
     /// carries no multi-statement/positional-parameter hazard (an Npgsql batch mixing the two fails
     /// SILENTLY). <c>ON CONFLICT DO NOTHING</c> is what makes the write path idempotent and is the
     /// whole dedup mechanism — the second and every later sighting of the same content writes
     /// nothing.
     ///
-    /// <para>The conflict arm refreshes <see cref="LastSeenColumn"/> only when it is more than an
-    /// hour stale. Without that guard every referenced dim row would take an UPDATE every collection
-    /// cycle — a dead tuple per row per minute on a hot table — for a watermark whose consumer
-    /// (the <see cref="LastSeenColumn"/> sweep) has a multi-day horizon. The guard caps it at one UPDATE per row per
-    /// hour, 60x less churn, and stays correct as long as the GC margin exceeds an hour (it is a
-    /// full day).</para>
+    /// <para>The conflict arm refreshes <see cref="LastSeenColumn"/> only when it is more than
+    /// <see cref="LastSeenRefreshGuardHours"/> stale. Without that guard every referenced dim row would
+    /// take an UPDATE every collection cycle — a dead tuple per row per minute on a hot table — for a
+    /// watermark whose consumer (the <see cref="LastSeenColumn"/> sweep) has a multi-day horizon. The
+    /// guard caps a continuously-seen row to <c>24 / LastSeenRefreshGuardHours</c> UPDATEs a day (4 at
+    /// the current 6-hour width, down from 24 at the original 1-hour width), and stays correct as long
+    /// as the GC margin exceeds the guard width (it is a full day).</para>
+    ///
+    /// <para><b>#4477: <see cref="LastSeenColumn"/> is indexed on every dimension table (the prune's
+    /// <c>ORDER BY last_seen LIMIT</c> needs it), so the guarded UPDATE can never go HOT — it is a
+    /// non-HOT update to a large, scattered heap on every touch that survives the guard. Measured on one
+    /// production store at the original 1-hour width: <c>query_plan_dim</c> alone took 894,656 such
+    /// touches in 71 hours, ~4.87 M full-page images, ~42 KB of WAL per row. Widening the guard to 6
+    /// hours is a 6x cut in how often that cost can recur per row, with retention widened to match (see
+    /// <see cref="DarlingRetention.ComputeDimensionCutoff"/>).</para>
     ///
     /// <para><b>#4249: the conflict guard only stops the UPDATE, not the WRITE.</b> Postgres locks every
     /// conflicting row BEFORE evaluating the <c>WHERE</c> on <c>DO UPDATE</c> — "all rows will be locked
     /// when the ON CONFLICT DO UPDATE action is taken" per the INSERT reference — so a digest re-sighted
-    /// inside the hour still took a <c>Heap/LOCK</c> WAL record and a dirtied page every cycle, measured
-    /// at 12-23% of one store's WAL. The <c>WHERE NOT EXISTS</c> pre-filter on the <c>SELECT</c> fixes
-    /// that: it is a plain MVCC read, which takes no lock, so a digest whose stored <see
-    /// cref="LastSeenColumn"/> is already within the hour never reaches <c>INSERT</c> or <c>ON
+    /// inside the guard window still took a <c>Heap/LOCK</c> WAL record and a dirtied page every cycle,
+    /// measured at 12-23% of one store's WAL. The <c>WHERE NOT EXISTS</c> pre-filter on the <c>SELECT</c>
+    /// fixes that: it is a plain MVCC read, which takes no lock, so a digest whose stored <see
+    /// cref="LastSeenColumn"/> is already within the guard window never reaches <c>INSERT</c> or <c>ON
     /// CONFLICT</c> at all and writes nothing. The <c>ON CONFLICT ... WHERE</c> arm stays for the race
     /// the pre-filter cannot close: two sessions whose pre-filter reads both land before either commits
     /// can both decide the same digest is stale and both attempt the insert.</para>
@@ -366,10 +398,10 @@ public static class PayloadDimensions
                 $"WHERE NOT EXISTS (\n" +
                 $"    SELECT 1 FROM {dimTable} d\n" +
                 $"    WHERE d.{DigestColumn} = u.digest\n" +
-                $"    AND   d.{LastSeenColumn} >= $3 - INTERVAL '1 hour')\n" +
+                $"    AND   d.{LastSeenColumn} >= $3 - {LastSeenRefreshGuardInterval})\n" +
                 $"ORDER BY u.digest\n" +
                 $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
-                $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - INTERVAL '1 hour'";
+                $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - {LastSeenRefreshGuardInterval}";
         }
 
         var payloadColumn = PayloadColumnOf(dimTable);
@@ -380,10 +412,10 @@ public static class PayloadDimensions
             $"WHERE NOT EXISTS (\n" +
             $"    SELECT 1 FROM {dimTable} d\n" +
             $"    WHERE d.{DigestColumn} = u.digest\n" +
-            $"    AND   d.{LastSeenColumn} >= $3 - INTERVAL '1 hour')\n" +
+            $"    AND   d.{LastSeenColumn} >= $3 - {LastSeenRefreshGuardInterval})\n" +
             $"ORDER BY u.digest\n" +
             $"ON CONFLICT ({DigestColumn}) DO UPDATE SET {LastSeenColumn} = EXCLUDED.{LastSeenColumn}\n" +
-            $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - INTERVAL '1 hour'";
+            $"WHERE {dimTable}.{LastSeenColumn} < EXCLUDED.{LastSeenColumn} - {LastSeenRefreshGuardInterval}";
     }
 
 }
