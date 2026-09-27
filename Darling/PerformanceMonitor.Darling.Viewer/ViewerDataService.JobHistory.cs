@@ -155,10 +155,14 @@ public sealed partial class ViewerDataService
     /// <c>CROSS JOIN LATERAL</c> per server, each an index-only top-<c>limit</c> descent; <c>base</c> merges
     /// those (at most <c>servers × limit</c>, never more) and re-applies the SAME final ORDER BY/LIMIT to pick
     /// the fleet-wide top <c>limit</c> — identical rows, identical order, identical tie-break to the old text.
-    /// The LATERAL now drives off the <c>servers</c> registry rather than <c>job_history</c> itself — a row
-    /// for a <c>server_id</c> with no <c>servers</c> row would no longer surface. Every collector writes
-    /// through a connection registered in <c>servers</c> at connect time and nothing in this codebase deletes
-    /// from it, so a real <c>job_history</c> row's server is always present there.
+    /// <c>active_servers</c> drives off <c>job_history</c> itself (<c>DISTINCT server_id</c> for rows with
+    /// <c>collection_time &gt;= {floorParam}</c>, the same superset floor the per-server LATERAL already
+    /// filters on) rather than the <c>servers</c> registry — an earlier draft drove off <c>servers</c>
+    /// directly, which would have silently dropped every row for a <c>server_id</c> the registry no longer
+    /// carries (a decommissioned server whose retained history the old <c>LEFT JOIN reg</c> still showed,
+    /// under the raw collected name). <c>server_offsets</c> LEFT JOINs <c>servers</c> onto that driving set for
+    /// the display-name fallback (NULL when unregistered, exactly like the old COALESCE), so a
+    /// <c>job_history</c> row survives regardless of whether its server is still registered.
     /// </para>
     /// <para>
     /// <b>job_stats stays a bounded per-server window, not a second fleet-wide scan.</b> The average/max a row
@@ -176,7 +180,7 @@ public sealed partial class ViewerDataService
     /// </summary>
     internal static string BuildJobHistorySql(bool scopedToServer)
     {
-        var serverFilter = scopedToServer ? "WHERE s.server_id = $2" : string.Empty;
+        var serverFilter = scopedToServer ? "AND   jh.server_id = $2" : string.Empty;
         var floorParam = scopedToServer ? "$3" : "$2";
         var limitParam = scopedToServer ? "$4" : "$3";
 
@@ -189,14 +193,20 @@ WITH svr AS (
     WHERE utc_offset_minutes IS NOT NULL
     ORDER BY server_id, collection_time DESC
 ),
+active_servers AS (
+    SELECT DISTINCT jh.server_id
+    FROM job_history AS jh
+    WHERE jh.collection_time >= {floorParam}
+    {serverFilter}
+),
 server_offsets AS (
     SELECT
-        s.server_id,
-        s.display_name,
+        a.server_id,
+        reg.display_name,
         COALESCE(svr.utc_offset_minutes, 0) AS offset_minutes
-    FROM servers AS s
-    LEFT JOIN svr ON svr.server_id = s.server_id
-    {serverFilter}
+    FROM active_servers AS a
+    LEFT JOIN svr ON svr.server_id = a.server_id
+    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
 ),
 top_by_server AS (
     SELECT
