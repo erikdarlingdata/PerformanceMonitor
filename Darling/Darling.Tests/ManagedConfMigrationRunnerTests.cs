@@ -503,6 +503,33 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Contains("work_mem", outcome.MismatchedKeys);
     }
 
+    /// <summary>Pin: a store with a configured network endpoint always starts PostgreSQL with
+    /// <c>listen_addresses</c> forced onto the command line (<see cref="DarlingManagedPostgres.BuildServerRuntimeOptions"/>).
+    /// The rendered <c>darling-managed.conf</c> line stays loopback-only, so PostgreSQL reports THAT file
+    /// row with <c>error = "setting could not be applied"</c> once its command-line value differs —
+    /// confirmed against a live PostgreSQL 18 instance. <see cref="ManagedConfMigrationRunner.VerifyStepB"/>
+    /// must not treat that as a mismatch: <c>listen_addresses</c> is skipped, but a REAL mismatch on another
+    /// key in the same batch still fails.</summary>
+    [Fact]
+    public void VerifyStepB_ListenAddressesOverriddenByCommandLine_IsNotAMismatch_OtherKeyStillFails()
+    {
+        var rendered = "listen_addresses = '127.0.0.1'\nwork_mem = '16MB'\n";
+        WriteManaged(rendered);
+
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            new(SourceFile: managedPath, SourceLine: 2, Name: "work_mem", Setting: "8MB", Applied: true, Error: null),
+        };
+
+        var outcome = ManagedConfMigrationRunner.VerifyStepB(_dataDir, rows, rendered, previousText: null);
+
+        Assert.Equal(ManagedConfVerificationStatus.Failed, outcome.Status);
+        Assert.DoesNotContain("listen_addresses", outcome.MismatchedKeys);
+        Assert.Contains("work_mem", outcome.MismatchedKeys);
+    }
+
     /// <summary>Pin (#4336): the exact change-log line for two changed keys.</summary>
     [Fact]
     public void FormatStepBChangeLog_TwoKeys_ExactLine()
