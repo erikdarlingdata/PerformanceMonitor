@@ -89,6 +89,48 @@ public sealed class PgLogEventsPipelineTests
         + "\tProcess 1556 waits for ShareLock on transaction 808; blocked by process 1549.\n"
         + "2026-09-18 03:07:12.345 UTC [1549] 322048460535975151HINT:  See server log for query details.\n";
 
+    /// <summary>
+    /// #4426 v17: <c>%m [%p] %a </c> puts <c>application_name</c> in the <c>rest</c> run after the pid and
+    /// before the label — client-set, free text, including empty. The assembler must still find the REAL
+    /// label at the line's end and lift the real fields.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("psql")]
+    [InlineData("PerformanceMonitorDarling-Service")]
+    [InlineData("DBeaver 24.1.0 - Main")]
+    public void ApplicationNameBetweenPidAndLabel_IsToleratedAndDoesNotDistortTheEntry(string applicationName)
+    {
+        var line = P + "[4102] " + applicationName + " ERROR:  canceling statement due to user request\n"
+            + P + "[4102] " + applicationName + " STATEMENT:  SELECT count(*) FROM collect.query_stats\n";
+
+        var entries = PgLogEntryAssembler.Assemble(line);
+        var entry = Assert.Single(entries);
+        Assert.Equal(4102, entry.Pid);
+        Assert.Equal("ERROR", entry.Severity);
+        Assert.Equal("canceling statement due to user request", entry.Message);
+        Assert.Equal("SELECT count(*) FROM collect.query_stats", entry.Statement);
+    }
+
+    /// <summary>
+    /// #4426 v17 (KNOWN LIMITATION, documented rather than fixed here — see the PR body): an
+    /// <c>application_name</c> containing the literal text <c>"LOG:"</c> is read as the line's real label by
+    /// <see cref="s_prefixLine"/>'s earliest-match rule, because <see cref="PgLogEntryAssembler"/> — unlike
+    /// <c>StoreLogClassifier.ContinuesAnUpperCaseToken</c> — has no check for a label-shaped token still
+    /// inside the prefix. The result is a MANUFACTURED entry: severity <c>LOG</c> instead of <c>ERROR</c>, and
+    /// a message that starts with the real severity's text. This pins the CURRENT (wrong) behavior so a fix
+    /// changes this assertion, not silently regresses it.
+    /// </summary>
+    [Fact]
+    public void ApplicationNameContainingALogLabel_IsAKnownMisparse()
+    {
+        var line = P + "[4102] My App [x]: LOG: ERROR:  canceling statement due to user request\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("LOG", entry.Severity);
+        Assert.StartsWith("ERROR:", entry.Message, StringComparison.Ordinal);
+    }
+
     private static List<PgLogEvent> Classify(string text) => new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(text);
 
     /* ---- assembly ------------------------------------------------------------------------------------ */

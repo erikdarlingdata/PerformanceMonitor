@@ -42,6 +42,38 @@ public class StoreLogClassifierTests
     private const string NoPrefix = "";
 
     /// <summary>
+    /// #4426 v17: <c>%m [%p] %a </c> puts <c>application_name</c> between the pid and the severity — client-set,
+    /// free text, including empty. The classifier reads only the severity field after PostgreSQL's own
+    /// <c>"%s:  "</c> anchor (the type header, ~52 and ~489), so it must classify identically whatever sits
+    /// before that anchor. This proves it for empty, a normal name, one with spaces and brackets, and one that
+    /// LOOKS like a log field.
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("psql")]
+    [InlineData("PerformanceMonitorDarling-Service")]
+    [InlineData("My App [x]: LOG:")]
+    [InlineData("DBeaver 24.1.0 - Main")]
+    public void Classify_IsIndifferentToApplicationNameBetweenPidAndSeverity(string applicationName)
+    {
+        var baseline = StoreLogClassifier.Classify(
+            DefaultPrefix + "ERROR:  canceling statement due to user request\n"
+            + DefaultPrefix + "STATEMENT:  SELECT count(*) FROM collect.query_stats\n");
+
+        var withApplicationName = StoreLogClassifier.Classify(
+            "2026-09-05 14:03:02.551 UTC [5288] " + applicationName + " ERROR:  canceling statement due to user request\n"
+            + "2026-09-05 14:03:02.551 UTC [5288] " + applicationName + " STATEMENT:  SELECT count(*) FROM collect.query_stats\n");
+
+        var baselineGroup = Assert.Single(baseline.Groups);
+        var withNameGroup = Assert.Single(withApplicationName.Groups);
+        Assert.Equal(baselineGroup.EventClass, withNameGroup.EventClass);
+        Assert.Equal(baselineGroup.Severity, withNameGroup.Severity);
+        Assert.Equal(baselineGroup.Occurrences, withNameGroup.Occurrences);
+        Assert.Equal(baseline.EntriesRead, withApplicationName.EntriesRead);
+        Assert.Equal(baseline.ContinuationLines, withApplicationName.ContinuationLines);
+    }
+
+    /// <summary>
     /// One synthesised slab exercising every class this build has, plus the four adversarial shapes the
     /// design turns on. Deliberately ONE slab rather than a case per class: a real capture holds several
     /// unrelated situations at once, and a fixture of isolated cases cannot expose a cross-situation defect
