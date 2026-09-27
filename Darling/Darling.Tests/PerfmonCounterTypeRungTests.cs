@@ -233,13 +233,23 @@ public sealed class PerfmonCounterTypeRungTests
         Assert.Contains("collection_time,\n    cntr_type\nFROM v_perfmon_stats", latest, StringComparison.Ordinal);
         Assert.Contains("collection_time,\n    cntr_type\nFROM v_perfmon_stats", lite.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
 
-        /* The SUMs and the MAX are as they were — the type rides beside them, it does not change them. */
-        foreach (var sql in new[] { mcpTrend, viewerTrend })
-        {
-            Assert.Contains("CAST(SUM(cntr_value) AS bigint) AS cntr_value", sql, StringComparison.Ordinal);
-            Assert.Contains("CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value", sql, StringComparison.Ordinal);
-            Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds", sql, StringComparison.Ordinal);
-        }
+        /* #4476: both the MCP and the Viewer twins' per-collection SUMs exclude a Wait Statistics isolated
+           single-sample artifact — FILTER (WHERE NOT is_artifact) — while the MAX interval and the MIN=MAX
+           type rule keep reading every row (an artifact row's own type and interval are not themselves
+           suspect). The MCP twin (get_perfmon_trend, one counter at a time) carries its own per-collection
+           artifacts count; PerfmonTrendBucketedSql SUMs it into artifacts_set_aside the same way the
+           Viewer's outer bucket layer does. */
+        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value", mcpTrend, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value", mcpTrend, StringComparison.Ordinal);
+        Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds", mcpTrend, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) FILTER (WHERE is_artifact) AS artifacts", mcpTrend, StringComparison.Ordinal);
+        Assert.Contains("SUM(artifacts) AS artifacts_set_aside", DarlingTrendReader.PerfmonTrendBucketedSql.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+
+        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value", viewerTrend, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value", viewerTrend, StringComparison.Ordinal);
+        Assert.Contains("CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds", viewerTrend, StringComparison.Ordinal);
+        Assert.Contains("COUNT(*) FILTER (WHERE is_artifact) AS artifacts", viewerTrend, StringComparison.Ordinal);
+        Assert.Contains("SUM(artifacts) AS artifacts_set_aside", viewerTrend, StringComparison.Ordinal);
 
         /* The row shapes: nullable where a gauge stores nothing, the type nullable where the row predates it. */
         Assert.Equal(typeof(long?), typeof(DarlingTrendReader.PerfmonTrendPoint).GetProperty("DeltaValue")!.PropertyType);

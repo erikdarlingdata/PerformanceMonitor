@@ -73,8 +73,12 @@ internal static class DarlingTrendReader
     /// summed into the point agrees on one, else null (a pre-rung row, or a family whose instances mix
     /// types); <c>DeltaValue</c> and <c>SampleIntervalSeconds</c> are nullable because a GAUGE row stores
     /// neither — its <c>Value</c> is the reading — and a 0 manufactured in their place would be #3642's
-    /// fabricated zero on a level that has no delta.</para></summary>
-    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType = null);
+    /// fabricated zero on a level that has no delta.</para>
+    /// <para><c>Artifacts</c> (#4476) is how many of this point's instance rows were an isolated single-sample
+    /// Wait Statistics spike, excluded from <c>Value</c>/<c>DeltaValue</c> before they were summed. This
+    /// per-collection type is Darling's own (Lite's <c>PerfmonTrendPoint</c> is a different type in a different
+    /// namespace), so the field is appended here rather than defaulted.</para></summary>
+    public sealed record PerfmonTrendPoint(DateTime CollectionTime, long Value, long? DeltaValue, long? SampleIntervalSeconds, int? CntrType, long Artifacts = 0);
 
     /// <summary>
     /// One query-duration / execution-count trend point, shared by the three Performance-Trends siblings:
@@ -362,22 +366,87 @@ internal static class DarlingTrendReader
     /// NULL and so does a mixed-type family (the wait-statistics object's instances are a rate, a gauge and
     /// an average under one counter name) — the equality is what stops a mixed sum being classified by
     /// whichever instance's id sorts first. Byte-identical to the viewer's and Lite's expression.</para>
+    /// <para>#4476: a raw-row layer sits under the per-collection SUM, carrying <c>lag</c>/<c>lead</c> of
+    /// <c>cntr_value</c> per instance (<c>PARTITION BY object_name, instance_name ORDER BY collection_time</c>
+    /// — this read is already scoped to one counter name by <c>$2</c>, unlike the viewer's several-counter
+    /// read, so <c>counter_name</c> does not need to join the window) so
+    /// <see cref="WaitStatisticsArtifact.ArtifactPredicateSql"/> can tell an isolated single-sample artifact
+    /// (a <c>SQLServer:Wait Statistics</c> gauge instance whose one collection reads its lifetime cumulative
+    /// count, #4476) apart from a real value BEFORE the instances are summed into a per-collection point. Every
+    /// artifact instance-row is excluded from the <c>cntr_value</c>/<c>delta_cntr_value</c> SUMs via <c>FILTER
+    /// (WHERE NOT is_artifact)</c>, while the MAX interval and the MIN=MAX type rule keep reading every row (an
+    /// artifact row's own type and interval are not themselves suspect). <c>artifacts</c>, appended LAST, is how
+    /// many of the point's rows were set aside — <see cref="PerfmonTrendBucketedSql"/> SUMs it into
+    /// <c>artifacts_set_aside</c>.</para>
+    /// <para>A <c>const string</c> could not carry <see cref="WaitStatisticsArtifact.ArtifactPredicateSql"/>'s
+    /// runtime-built fragment, so this is a <c>static readonly string</c> instead — every reference (this
+    /// class's own <see cref="PerfmonTrendBucketedSql"/>) still resolves at static-init time, before either
+    /// field is ever read.</para>
     /// </summary>
-    public const string PerfmonTrendSql = """
-        SELECT
-            collection_time,
-            CAST(SUM(cntr_value) AS bigint) AS cntr_value,
-            CAST(SUM(delta_cntr_value) AS bigint) AS delta_cntr_value,
-            CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
-            CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
-        FROM v_perfmon_stats
-        WHERE server_id = $1
-        AND   counter_name = $2
-        AND   collection_time >= $3
-        AND   collection_time <= $4
-        GROUP BY collection_time
-        ORDER BY collection_time
-        """;
+    public static readonly string PerfmonTrendSql = BuildPerfmonTrendSql();
+
+    private static string BuildPerfmonTrendSql()
+    {
+        var isArtifact = "COALESCE((" + WaitStatisticsArtifact.ArtifactPredicateSql(
+            "cntr_type", "object_name", "prev_value", "cntr_value", "next_value") + "), false)";
+        var isWaitStatistics = WaitStatisticsArtifact.ObjectNameSuffixMatchSql("object_name");
+        return $$"""
+            SELECT
+                collection_time,
+                CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS cntr_value,
+                CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint) AS delta_cntr_value,
+                CAST(MAX(sample_interval_seconds) AS bigint) AS sample_interval_seconds,
+                CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+                COUNT(*) FILTER (WHERE is_artifact) AS artifacts
+            FROM (
+                SELECT
+                    collection_time,
+                    cntr_value,
+                    delta_cntr_value,
+                    sample_interval_seconds,
+                    cntr_type,
+                    {{isArtifact}} AS is_artifact
+                FROM (
+                    SELECT
+                        collection_time,
+                        object_name,
+                        cntr_value,
+                        delta_cntr_value,
+                        sample_interval_seconds,
+                        cntr_type,
+                        lag(cntr_value) OVER w AS prev_value,
+                        lead(cntr_value) OVER w AS next_value
+                    FROM v_perfmon_stats
+                    WHERE server_id = $1
+                    AND   counter_name = $2
+                    AND   collection_time >= $3
+                    AND   collection_time <= $4
+                    AND   {{isWaitStatistics}}
+                    WINDOW w AS (PARTITION BY object_name, instance_name ORDER BY collection_time)
+
+                    UNION ALL
+
+                    SELECT
+                        collection_time,
+                        object_name,
+                        cntr_value,
+                        delta_cntr_value,
+                        sample_interval_seconds,
+                        cntr_type,
+                        NULL AS prev_value,
+                        NULL AS next_value
+                    FROM v_perfmon_stats
+                    WHERE server_id = $1
+                    AND   counter_name = $2
+                    AND   collection_time >= $3
+                    AND   collection_time <= $4
+                    AND   NOT ({{isWaitStatistics}})
+                ) AS raw
+            ) AS flagged
+            GROUP BY collection_time
+            ORDER BY collection_time
+            """;
+    }
 
     public static async Task<List<PerfmonTrendPoint>> GetPerfmonTrendAsync(
         NpgsqlDataSource postgres, int serverId, string counterName, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default)
@@ -399,7 +468,8 @@ internal static class DarlingTrendReader
                    NULL interval is #3540's third state; 0 is the marker and must not be manufactured. */
                 reader.IsDBNull(2) ? null : reader.GetInt64(2),
                 reader.IsDBNull(3) ? null : reader.GetInt64(3),
-                reader.IsDBNull(4) ? null : reader.GetInt32(4)));
+                reader.IsDBNull(4) ? null : reader.GetInt32(4),
+                reader.GetInt64(5)));
         }
 
         return items;
@@ -413,10 +483,19 @@ internal static class DarlingTrendReader
     /// (<see cref="TrendPayloads.PerfmonTrend"/>). The rate's peak is the busiest single rated collection, through
     /// the NULLIF the stored interval always takes. $1 server_id, $2 counter_name, $3/$4 window (naive UTC), $5 the
     /// bucket width in minutes.
+    /// <para>#4476: <c>artifacts_set_aside</c>, appended LAST so ordinals 0-10 do not move, SUMs the inner
+    /// per-collection layer's own <c>artifacts</c> count — how many instance rows this bucket set aside as an
+    /// isolated single-sample Wait Statistics spike. The inner SUMs already exclude those rows, so nothing else
+    /// here changes; <see cref="GetPerfmonBucketsAsync"/> is the one place a bucket that set aside every row
+    /// (a NULL summed value with a positive count) is told apart from "nothing collected".</para>
+    /// <para>Interpolates <see cref="PerfmonTrendSql"/>, which is itself built at static-init time (not a
+    /// compile-time constant, since it carries <see cref="WaitStatisticsArtifact.ArtifactPredicateSql"/>'s
+    /// runtime-built fragment) — so this field is a <c>static readonly string</c> too, built the same way,
+    /// after <see cref="PerfmonTrendSql"/> in field-initializer order.</para>
     /// </summary>
-    public const string PerfmonTrendBucketedSql = $"""
+    public static readonly string PerfmonTrendBucketedSql = $$"""
         SELECT
-            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {TrendBucketSql.OriginSql}), $3) AS bucket_start,
+            GREATEST(date_bin(CAST($5 AS integer) * INTERVAL '1 minute', collection_time, {{TrendBucketSql.OriginSql}}), $3) AS bucket_start,
             AVG(cntr_value) AS avg_value,
             MAX(cntr_value) AS max_value,
             (array_agg(cntr_value ORDER BY collection_time DESC))[1] AS last_value,
@@ -426,20 +505,27 @@ internal static class DarlingTrendReader
             SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds = 0) AS unknowable_delta,
             SUM(delta_cntr_value) FILTER (WHERE sample_interval_seconds IS NULL) AS unrecorded_delta,
             MAX(CAST(delta_cntr_value AS double precision) / NULLIF(sample_interval_seconds, 0)) AS peak_per_second,
-            CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type
+            CASE WHEN MIN(cntr_type) = MAX(cntr_type) THEN MAX(cntr_type) END AS cntr_type,
+            SUM(artifacts) AS artifacts_set_aside
         FROM (
-        {PerfmonTrendSql}
+        {{PerfmonTrendSql}}
         ) AS collections
         GROUP BY 1
         ORDER BY 1
         """;
 
-    /// <summary>Runs <see cref="PerfmonTrendBucketedSql"/>.</summary>
-    public static async Task<List<PerfmonBucketPoint>> GetPerfmonBucketsAsync(
+    /// <summary>Runs <see cref="PerfmonTrendBucketedSql"/>. A bucket every one of whose instance rows was set
+    /// aside as an artifact reads a NULL summed value with a positive <c>artifacts_set_aside</c> (#4476) — that
+    /// bucket is dropped from <see cref="PerfmonBucketsResult.Points"/> rather than published as a fabricated 0
+    /// (the same care <c>Number</c>/<c>IsDBNull ? 0</c> take everywhere else in this class for a genuinely-absent
+    /// reading), but its own artifact count still rides into <see cref="PerfmonBucketsResult.ArtifactsSetAside"/>
+    /// so a dropped bucket does not silently drop its own count too.</summary>
+    public static async Task<PerfmonBucketsResult> GetPerfmonBucketsAsync(
         NpgsqlDataSource postgres, int serverId, string counterName, DateTime startUtc, DateTime endUtc, int bucketMinutes,
         CancellationToken cancellationToken = default)
     {
         var items = new List<PerfmonBucketPoint>();
+        long artifactsSetAsideTotal = 0;
         await using var command = postgres.CreateCommand(PerfmonTrendBucketedSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -450,6 +536,16 @@ internal static class DarlingTrendReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var artifactsSetAside = reader.IsDBNull(11) ? 0 : Convert.ToInt64(reader.GetValue(11));
+            artifactsSetAsideTotal += artifactsSetAside;
+            if (reader.IsDBNull(1) && artifactsSetAside > 0)
+            {
+                /* Every row in this bucket was set aside: no genuine reading survived to average, so this
+                   is not a bucket with nothing collected — skip it rather than manufacture a 0. Its count
+                   is already folded into artifactsSetAsideTotal above. */
+                continue;
+            }
+
             items.Add(new PerfmonBucketPoint(
                 reader.GetDateTime(0),
                 Number(reader, 1),
@@ -461,11 +557,19 @@ internal static class DarlingTrendReader
                 reader.IsDBNull(7) ? null : Convert.ToInt64(reader.GetValue(7)),
                 reader.IsDBNull(8) ? null : Convert.ToInt64(reader.GetValue(8)),
                 reader.IsDBNull(9) ? null : Convert.ToDouble(reader.GetValue(9)),
-                reader.IsDBNull(10) ? null : reader.GetInt32(10)));
+                reader.IsDBNull(10) ? null : reader.GetInt32(10),
+                artifactsSetAside));
         }
 
-        return items;
+        return new PerfmonBucketsResult(items, artifactsSetAsideTotal);
     }
+
+    /// <summary>Return shape of <see cref="GetPerfmonBucketsAsync"/> (#4476): the published points, plus the
+    /// TOTAL artifacts set aside across the whole window — a separate figure because a bucket every one of
+    /// whose rows was an artifact is dropped from <paramref name="Points"/>, so summing <see
+    /// cref="PerfmonBucketPoint.ArtifactsSetAside"/> back out of the published points would silently lose
+    /// that bucket's own count.</summary>
+    public sealed record PerfmonBucketsResult(List<PerfmonBucketPoint> Points, long ArtifactsSetAside);
 
     /// <summary>
     /// The distinct counter names collected over the window, ordered by name — feeds the get_perfmon_trend
