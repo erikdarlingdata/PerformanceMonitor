@@ -702,4 +702,245 @@ VALUES (49000000, 1, 'srv-1', 'collector_2', (now() AT TIME ZONE 'UTC') - INTERV
 
     private static long TotalRuns(string row) =>
         long.Parse(row.Split(' ').Single(f => f.StartsWith("total_runs=", StringComparison.Ordinal))["total_runs=".Length..], CultureInfo.InvariantCulture);
+
+    /// <summary>Every chunk relation <c>collect.collection_log</c> now has, with its range in UTC — the same
+    /// shape <see cref="DarlingWatermarkFloorScanBoundLiveTests"/> reads, but against the scratch store's own
+    /// hypertable rather than the shared live one.</summary>
+    private static async Task<List<(string Schema, string Name, DateTime RangeStart, DateTime RangeEnd)>> ListChunkRelationsAsync(
+        NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(@"
+SELECT chunk_schema, chunk_name, range_start AT TIME ZONE 'UTC', range_end AT TIME ZONE 'UTC'
+FROM timescaledb_information.chunks
+WHERE hypertable_schema = 'collect' AND hypertable_name = 'collection_log'
+ORDER BY range_start", connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var result = new List<(string, string, DateTime, DateTime)>();
+        while (await reader.ReadAsync(ct))
+        {
+            result.Add((reader.GetString(0), reader.GetString(1),
+                DateTime.SpecifyKind(reader.GetDateTime(2), DateTimeKind.Utc),
+                DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc)));
+        }
+        return result;
+    }
+
+    /// <summary>seq_scan + idx_scan for one chunk relation.</summary>
+    private static async Task<(long Seq, long Idx)> ScanCountersAsync(NpgsqlConnection connection, string schema, string name, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT COALESCE(seq_scan, 0), COALESCE(idx_scan, 0) FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = $2", connection);
+        command.Parameters.AddWithValue(schema);
+        command.Parameters.AddWithValue(name);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            return (0, 0);
+        }
+        return (reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    private static async Task ForceStatsFlushAsync(NpgsqlDataSource postgres, NpgsqlConnection ownConnection, CancellationToken ct)
+    {
+        await using (var ownFlush = new NpgsqlCommand("SELECT pg_stat_force_next_flush()", ownConnection))
+        {
+            await ownFlush.ExecuteScalarAsync(ct);
+        }
+        await using var pooled = await postgres.OpenConnectionAsync(ct);
+        await using var pooledFlush = new NpgsqlCommand("SELECT pg_stat_force_next_flush()", pooled);
+        await pooledFlush.ExecuteScalarAsync(ct);
+    }
+
+    /// <summary>Deletes the aggregate's materialized bucket for exactly one whole hour, engineering a
+    /// continuity hole below the watermark the same way <c>ContinuityGuard_HourMissingBelowWatermark…</c>
+    /// does.</summary>
+    private static async Task<DateTime> DeleteOneBucketAsync(NpgsqlConnection connection, DateTime hour, CancellationToken ct)
+    {
+        string materialization;
+        await using (var find = new NpgsqlCommand(
+            "SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) " +
+            "FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '" +
+            TimescaleSupport.CollectionHealthHourlyView + "'", connection))
+        {
+            materialization = (string)(await find.ExecuteScalarAsync(ct))!;
+        }
+        await using var deleteBucket = new NpgsqlCommand($"DELETE FROM {materialization} WHERE bucket = $1", connection);
+        deleteBucket.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(hour, DateTimeKind.Unspecified) });
+        Assert.True(await deleteBucket.ExecuteNonQueryAsync(ct) > 0);
+        return hour;
+    }
+
+    /// <summary>
+    /// THE SCAN-BOUND PROOF (#4477, pin b). One hole hour, three days back, below the watermark. The
+    /// PRODUCT's own call path (<see cref="ReadBandedAsync"/>, reaching
+    /// <c>DarlingFleetReader.ReadFailingCollectorCountsAsync</c>) must touch no <c>collect.collection_log</c>
+    /// chunk older than the head window except the one chunk the hole hour itself falls in — never the whole
+    /// eight-day history a pre-#4477 build would have scanned raw for this one missing hour.
+    ///
+    /// <para><b>RUNTIME RED on dev, not a compile-time one.</b> This test references only members
+    /// (<c>DarlingFleetReader.CeilingHour</c>, the private <c>ReadFailingCollectorCountsAsync</c> reached by
+    /// reflection, <see cref="RunPolicyAsync"/>) that already exist on <c>origin/dev</c>, so it compiles
+    /// there. It fails at RUNTIME there because dev's guard has no hole-hours plan: ANY missing hour makes it
+    /// return unusable, the caller falls back to <see cref="DarlingFleetReader.FleetCollectionHealthSql"/> for
+    /// the WHOLE window, and every old chunk this test asserts untouched gets scanned instead.</para>
+    /// </summary>
+    [Fact]
+    public async Task ProductPath_OneHoleHour_NeverScansAChunkOlderThanTheHeadOrTheHole_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live scan-bound test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        /* Same de-flake as #4469's DarlingWatermarkFloorScanBoundLiveTests: no autovacuum/autoanalyze on this
+           hypertable can independently scan an old chunk between the two snapshots and be mistaken for the
+           read under test. OpenStoreAsync already stopped this scratch database's background workers. */
+        await using (var noAutovacuum = new NpgsqlCommand("ALTER TABLE collect.collection_log SET (autovacuum_enabled = false)", connection))
+        {
+            await noAutovacuum.ExecuteNonQueryAsync(ct);
+        }
+
+        await PlantEveryArmAsync(connection, 50_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        var now = NaiveUtcNow();
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        var holeHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-3);
+        await DeleteOneBucketAsync(connection, holeHour, ct);
+
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
+        Assert.True(plan.Usable);
+        Assert.Single(plan.HoleHours);
+
+        var chunks = await ListChunkRelationsAsync(connection, ct);
+        Assert.True(chunks.Count >= 3, $"expected several daily chunks from eight days of history; got {chunks.Count}");
+
+        /* Everything at or after windowStart is legitimately in play: the head raw slice, the rollup's whole
+           buckets, the hole hour read raw, AND — above the aggregate's watermark — the cagg's own real-time
+           computation over the freshest raw chunk(s), since materialized_only = false. "Old" here means
+           strictly BEFORE the 7-day consumer window: the plant seeds 8 days of history precisely so at least
+           one chunk falls outside the window and must never be touched at all. */
+        var windowStartUtc = DateTime.SpecifyKind(windowStart, DateTimeKind.Utc);
+        var oldChunks = chunks.Where(c => c.RangeEnd <= windowStartUtc).ToList();
+        Assert.True(oldChunks.Count >= 1, "expected at least one chunk entirely before the 7-day window to prove untouched");
+
+        await ForceStatsFlushAsync(postgres, connection, ct);
+        var before = new Dictionary<(string, string), (long Seq, long Idx)>();
+        foreach (var chunk in oldChunks)
+        {
+            before[(chunk.Schema, chunk.Name)] = await ScanCountersAsync(connection, chunk.Schema, chunk.Name, ct);
+        }
+
+        /* THE PRODUCT'S OWN CALL PATH. */
+        _ = await ReadBandedAsync(postgres, now, ct);
+
+        await ForceStatsFlushAsync(postgres, connection, ct);
+        foreach (var chunk in oldChunks)
+        {
+            var after = await ScanCountersAsync(connection, chunk.Schema, chunk.Name, ct);
+            var beforeCounters = before[(chunk.Schema, chunk.Name)];
+            Assert.Equal(beforeCounters, after);
+        }
+    }
+
+    /// <summary>
+    /// THE NO-RAW-ROWS HOLE (#4477, pin c). The missing hour is a real collection outage: no
+    /// <c>collection_log</c> rows exist for it at all, materialized or not. The composed-with-holes read must
+    /// equal the raw arm exactly (the hole contributes nothing, exactly what the raw scan would also return
+    /// for an hour with nothing in it), and the only raw chunks touched are the head, the tail and the hole's
+    /// own chunk.
+    /// </summary>
+    [Fact]
+    public async Task HoleHourWithNoRawRows_EqualsRawScan_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live no-raw-rows hole test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 60_000_000, ct);
+
+        var now = NaiveUtcNow();
+        var holeHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-4);
+        await using (var wipe = new NpgsqlCommand(
+            "DELETE FROM collect.collection_log WHERE collection_time >= $1 AND collection_time < $2", connection))
+        {
+            wipe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = holeHour });
+            wipe.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = holeHour.AddHours(1) });
+            await wipe.ExecuteNonQueryAsync(ct);
+        }
+
+        await RunPolicyAsync(connection, jobId, ct);
+        /* The materialized run's own bucket for that hour never had rows to aggregate either — a real outage
+           already leaves no bucket AND no raw rows, so no extra deletion is needed here. */
+
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
+
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
+        Assert.True(plan.Usable);
+        Assert.Single(plan.HoleHours);
+
+        var repairedSql = CollectionHealthRollupSupport.ComposeFleetSql(DarlingFleetReader.FleetCollectionHealthSql, plan.HoleHours);
+        var repaired = await ReadRowsAsync(postgres, repairedSql, windowStart, headEnd, plan.HoleHours, ct);
+        AssertSameRows(raw, repaired);
+    }
+
+    /// <summary>
+    /// THE TOO-MANY-HOLES FALLBACK (#4477, pin d). More than
+    /// <see cref="CollectionHealthRollupSupport.MaxRepairableHoleHours"/> whole hours missing below the
+    /// watermark → unusable, unchanged from before #4477: patching that many holes individually is no longer
+    /// cheaper than the plain raw scan.
+    /// </summary>
+    [Fact]
+    public async Task MoreHolesThanTheRepairCap_IsUnusable_AgainstDevPostgres()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var store = await OpenStoreAsync(ct);
+        Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live too-many-holes test.");
+        var (scratch, connection, jobId) = store!.Value;
+        await using var _s = scratch;
+        await using var _c = connection;
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        await PlantEveryArmAsync(connection, 70_000_000, ct);
+        await RunPolicyAsync(connection, jobId, ct);
+
+        string materialization;
+        await using (var find = new NpgsqlCommand(
+            "SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name) " +
+            "FROM timescaledb_information.continuous_aggregates WHERE view_schema = 'collect' AND view_name = '" +
+            TimescaleSupport.CollectionHealthHourlyView + "'", connection))
+        {
+            materialization = (string)(await find.ExecuteScalarAsync(ct))!;
+        }
+        var now = NaiveUtcNow();
+        var deleteFrom = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-6);
+        await using (var wipeMany = new NpgsqlCommand(
+            $"DELETE FROM {materialization} WHERE bucket >= $1 AND bucket < $1 + INTERVAL '{CollectionHealthRollupSupport.MaxRepairableHoleHours + 1} hours'", connection))
+        {
+            wipeMany.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = deleteFrom });
+            Assert.True(await wipeMany.ExecuteNonQueryAsync(ct) > CollectionHealthRollupSupport.MaxRepairableHoleHours);
+        }
+
+        var windowStart = now.AddDays(-7);
+        var headEnd = DarlingFleetReader.CeilingHour(windowStart);
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
+        Assert.False(plan.Usable);
+        Assert.Empty(plan.HoleHours);
+
+        /* The product's own call path falls all the way back to the exact raw scan for the whole window. */
+        var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
+        var bandedRaw = await ReadBandedAsync(postgres, now, ct);
+        Assert.NotEmpty(raw);
+        Assert.NotEmpty(bandedRaw);
+    }
 }
