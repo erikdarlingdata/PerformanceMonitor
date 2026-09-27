@@ -2343,7 +2343,7 @@ CREATE INDEX IF NOT EXISTS idx_read_latency_time
     /// <para>Plain <c>DROP INDEX</c> and <c>ALTER TABLE ... SET (fillfactor = ...)</c>, not <c>CONCURRENTLY</c>:
     /// <c>MigrateAsync</c> wraps every rung in a transaction, and <c>CREATE/DROP INDEX CONCURRENTLY</c> cannot
     /// run inside one. Both operations here are metadata-only — the index drop does not touch the heap, and
-    /// the fillfactor change only affects pages written from here on — so the brief <c>ACCESS EXCLUSIVE</c>
+    /// the fillfactor change only affects pages written from here on — so the short <c>ACCESS EXCLUSIVE</c>
     /// each takes is a catalog update, not a rewrite; nothing else in the migrate session holds a competing
     /// lock on either table at that moment.</para>
     ///
