@@ -33,6 +33,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 [McpServerToolType]
 public sealed class DarlingMcpAgTools
 {
+    /// <summary>
+    /// #4471: the fleet-wide page cap on groups (one card per reporting server's view of one AG), the same shape
+    /// as <c>get_analysis_findings</c>' <c>limit</c>. An uncapped fleet-wide call on a production fleet (43
+    /// servers, several AGs with many databases) measured 265,794 characters — over 8x the shared
+    /// <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). On a 43-server/3-AG/2-replica/3-database fixture
+    /// (~2.7 KB/group, close to that reported shape), 11 groups measured 30,115 bytes and 12 measured 32,812 —
+    /// so 11 is the largest default that stays under budget on that shape; see <c>DarlingMcpAgToolsTests</c> for
+    /// the before/after this was set from.
+    /// </summary>
+    public const int DefaultGroupLimit = 11;
+
     [McpServerTool(Name = "get_ag_health"), Description(
         "AG health fleet-wide from each server's latest collection: replica role/state and per-database " +
         "secondary state (queue KB, rate KB/s, lag sec, drain min, suspended+why). One row per REPLICA's view: " +
@@ -55,10 +66,17 @@ public sealed class DarlingMcpAgTools
         "movement is suspended). Each group carries its collection_time: the collectors write NO row for a server " +
         "with no AGs, so a server whose AGs were dropped keeps returning its last non-empty snapshot until then — " +
         "an old collection_time on a group is that case, not a live reading. Returns an empty result on a fleet " +
-        "with no Availability Groups.")]
+        "with no Availability Groups. limit pages the groups, MOST SEVERE FIRST then by the largest " +
+        "secondary_lag_seconds/queue depth in the group, so the cap never hides a problem — an uncapped fleet-wide " +
+        "call measured 265,794 characters on a 43-server production fleet with several many-database AGs, well " +
+        "over an MCP client's typical per-result limit. Default 11 groups; groups_truncated (with " +
+        "groups_truncated_note) flags when the scope held more than that — groups_total says how many, " +
+        "groups_returned says how many came back, and the fix is to scope by server_name (one server's view is " +
+        "rarely more than a handful of groups) or raise limit for the rest.")]
     public static async Task<string> GetAgHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name to limit the topology to one monitored server's view. Optional — omit for the whole fleet.")] string? server_name = null,
+        [Description("Maximum groups to return, most severe first, then by the largest lag/queue depth in the group. Default 11. groups_truncated flags a cut here.")] int limit = DefaultGroupLimit,
         CancellationToken cancellationToken = default)
     {
         /* Fleet-wide by default: only resolve when a name was actually supplied. The shared resolver auto-selects
@@ -76,7 +94,7 @@ public sealed class DarlingMcpAgTools
 
         try
         {
-            var result = await DarlingAgReader.GetAgHealthAsync(postgres, serverIdFilter, cancellationToken: cancellationToken);
+            var result = await DarlingAgReader.GetAgHealthAsync(postgres, serverIdFilter, cancellationToken: cancellationToken, limit: limit);
 
             if (result.AvailabilityGroupCount == 0)
             {
