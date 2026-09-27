@@ -166,6 +166,45 @@ public sealed class CaggGroupIndexDropLiveTests
         }
     }
 
+    /// <summary>
+    /// V152 on a store WITHOUT TimescaleDB is a no-op: a plain migrate (never calling
+    /// <see cref="LiveTimescaleProbe.TryEnableAsync"/>) reaches the top with no exception, and the
+    /// recorded schema version is 152. RED at bab1c4114 (pre-guard): the DO block reaches
+    /// timescaledb_information unconditionally and raises 42P01, relation "timescaledb_information.
+    /// continuous_aggregates" does not exist.
+    /// </summary>
+    [Fact]
+    public async Task V152_OnAStoreWithoutTimescaleDb_CompletesAsANoOp()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the V152 no-TimescaleDB no-op pin (it mints its own scratch database and never enables TimescaleDB on it).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Deliberately never calls LiveTimescaleProbe.TryEnableAsync — this is the plain-PostgreSQL
+               case the migration guard must no-op on. */
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            using var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection);
+            var recorded = Convert.ToInt32(await version.ExecuteScalarAsync(ct));
+            Assert.Equal(StorageVersion.SchemaVersion, recorded);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
     private static async Task<(string Schema, string Name)> MaterializationOfAsync(NpgsqlConnection connection, string view, CancellationToken ct)
     {
         await using var command = new NpgsqlCommand(

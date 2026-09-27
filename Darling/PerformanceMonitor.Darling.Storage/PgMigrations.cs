@@ -2479,11 +2479,22 @@ ALTER TABLE collect.ag_database_replica_states
     /// <c>create_group_indexes</c>'s default builds — and drops whatever index actually carries that shape,
     /// by its real (possibly-truncated) name via <c>::regclass</c>. A single-column index (the kept
     /// <c>bucket_idx</c>) and a two-key index whose kept column ISN'T in the drop list both fail the match
-    /// and are never touched. A store missing one of the six CAGGs (a plain-PostgreSQL store, or one that
-    /// never enabled a given rollup) skips it rather than erroring, and re-running the block after the
+    /// and are never touched. A plain-PostgreSQL store, which has never created the extension, has no
+    /// <c>timescaledb_information</c> catalog to read at all, so the whole block returns before the loop —
+    /// a no-op there, not a per-view skip. A TimescaleDB store missing one of the six CAGGs (one that never
+    /// enabled a given rollup) skips just that view rather than erroring, and re-running the block after the
     /// indexes are already gone is a no-op — the catalog read finds nothing to drop.</para>
+    ///
+    /// <para><b><c>SET LOCAL lock_timeout = '5s'</c>.</b> <c>DROP INDEX</c> takes <c>AccessExclusiveLock</c> on
+    /// the materialization hypertable and on every one of its chunks, across six hypertables in one
+    /// transaction, while a background refresh policy can hold the same lock for as long as its own run takes
+    /// — minutes, on the hourly rollups. A short lock_timeout fails the rung rather than queuing behind a
+    /// refresh for the whole migration command timeout; the failure is retryable (lock-not-available is
+    /// already in the retryable set the service's startup triage carries), so the next start retries the
+    /// same rung, still at V151, rather than blocking collection.</para>
     /// </summary>
     private const string V152Sql = @"
+SET LOCAL lock_timeout = '5s';
 DO $$
 DECLARE
     v_view text;
@@ -2493,6 +2504,15 @@ DECLARE
     v_mat_oid regclass;
     r record;
 BEGIN
+    /* timescaledb_information only exists once the extension has been created, and this runs on stores
+       where it never was -- reaching it unconditionally raises 42P01. Probed with to_regclass (NULL rather
+       than an error when absent); no extension means there are no continuous aggregates and so no rollup
+       group indexes to drop, which makes this rung a no-op there. The per-view read below goes through
+       EXECUTE so the timescaledb_information reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
     FOR v_view, v_drop_cols IN VALUES
         ('query_store_stats_hourly',          ARRAY['database_name', 'module_name', 'query_hash']),
         ('query_store_stats_corrected_hourly', ARRAY['database_name', 'module_name', 'query_hash']),
@@ -2501,10 +2521,11 @@ BEGIN
         ('query_store_stats_interval_daily',   ARRAY['database_name', 'execution_type_desc', 'first_execution_time', 'module_name', 'plan_id', 'query_hash', 'query_id', 'replica_role', 'runtime_stats_interval_id', 'server_name']),
         ('query_store_stats_daygrain_daily',   ARRAY['database_name', 'module_name', 'query_hash', 'server_name'])
     LOOP
-        SELECT materialization_hypertable_schema, materialization_hypertable_name
+        EXECUTE 'SELECT materialization_hypertable_schema, materialization_hypertable_name
+                 FROM timescaledb_information.continuous_aggregates
+                 WHERE view_schema = ''collect'' AND view_name = $1'
         INTO v_mat_schema, v_mat_table
-        FROM timescaledb_information.continuous_aggregates
-        WHERE view_schema = 'collect' AND view_name = v_view;
+        USING v_view;
 
         IF v_mat_table IS NULL THEN
             CONTINUE;
@@ -2518,7 +2539,8 @@ BEGIN
             JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
             JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
             WHERE i.indrelid = v_mat_oid
-            AND   i.indnatts = 2
+            AND   i.indnkeyatts = 2
+            AND   NOT i.indisunique
             AND   a1.attname = ANY (v_drop_cols)
             AND   a2.attname = 'bucket'
         LOOP

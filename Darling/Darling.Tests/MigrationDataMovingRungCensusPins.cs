@@ -461,12 +461,15 @@ public sealed class MigrationDataMovingRungCensusPins
 
     /// <summary>
     /// The one rung today whose dynamic SQL is an accepted, hand-costed exception — the scan cannot read
-    /// past <c>EXECUTE format(...)</c>, so this name has to be kept in sync by hand rather than derived.
-    /// V152's <c>DO $$ ... EXECUTE format('DROP INDEX IF EXISTS %s', ...) $$</c> (#4503) resolves a
-    /// catalog index via <c>pg_index</c>/<c>pg_attribute</c> (metadata, not collected rows) and then
-    /// DROPS it — the opposite direction from every shape <see cref="s_declared"/> tracks (which are all
-    /// index BUILDS or DML over pre-existing rows), so it gets no <see cref="s_declared"/> entry at all:
-    /// there is no data-moving cost to declare, only a scan blind spot to name.
+    /// past <c>EXECUTE format(...)</c> or a parameterised <c>EXECUTE '...' USING ...</c>, so this name has
+    /// to be kept in sync by hand rather than derived. V152's <c>DO $$ ... $$</c> (#4503) uses both forms
+    /// against the catalog only: <c>EXECUTE '...' INTO ... USING v_view</c> reads a continuous aggregate's
+    /// materialization name from <c>timescaledb_information</c>, and <c>EXECUTE format('DROP INDEX IF
+    /// EXISTS %s', ...)</c> then drops a catalog index resolved via <c>pg_index</c>/<c>pg_attribute</c>
+    /// (metadata, not collected rows) — the opposite direction from every shape <see cref="s_declared"/>
+    /// tracks (which are all index BUILDS or DML over pre-existing rows), so it gets no
+    /// <see cref="s_declared"/> entry at all: there is no data-moving cost to declare, only a scan blind
+    /// spot to name.
     /// </summary>
     private static readonly int[] s_dynamicSqlExemptedRungs = [152];
 

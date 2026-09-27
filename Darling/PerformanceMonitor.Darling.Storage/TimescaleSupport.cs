@@ -2608,7 +2608,9 @@ WITH NO DATA";
     /// <summary>
     /// The two group indexes #4503 KEEPS on <see cref="CreateQueryStoreStatsCorrectedHourlySql"/>'s
     /// materialization: <c>(server_id, bucket)</c> for every reader's server + time-range filter, and
-    /// <c>(server_name, bucket)</c> for the same measured 131-scan reason as the legacy hourly view above.
+    /// <c>(server_name, bucket)</c> for a scoped composer read — not the same measured-131-scan reason as
+    /// the legacy hourly view above; this materialization's own <c>server_name</c> index showed 0 lifetime
+    /// scans in the production catalog read, and is kept for the composer's scoped-panel reads instead.
     /// <c>database_name</c>'s group index is DROPPED even though
     /// <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> can filter on it (<c>rollupFilter</c>): that
     /// same read also filters <c>server_id = $1</c> plus the bucket range, so it is served by the
@@ -5551,8 +5553,9 @@ WITH NO DATA";
                 }
 
                 /* #4503: a fresh migrate gets the SAME kept-index shape an upgraded store reaches through
-                   V152's DO block — the explicit CREATE INDEX statements ride right after this view's own
-                   CREATE, exactly once (IF NOT EXISTS), on every start. */
+                   V152's DO block — the CREATE INDEX statements ride right after this view's own CREATE,
+                   idempotent by a catalog read rather than IF NOT EXISTS (an unnamed CREATE INDEX has no
+                   name to guard with one), so every start after the first is a read with no write. */
                 if (QueryStoreRollupKeptIndexesSql.TryGetValue(view, out var keptIndexesSql))
                 {
                     using var keptIndexes = new NpgsqlCommand(keptIndexesSql, connection) { CommandTimeout = SetupTimeoutSeconds };
@@ -9930,11 +9933,13 @@ WITH NO DATA";
     /// column, so a view keeping two (the hourly pair's <c>server_id</c> and <c>server_name</c>) gets two
     /// separate statements concatenated by <see cref="KeptIndexesSql(string, string[])"/>.
     ///
-    /// <para><b>Why an unnamed <c>CREATE INDEX ... ON &lt;view&gt;</c>, not a hand-typed name on the
-    /// materialization.</b> TimescaleDB's own <c>create_group_indexes</c> issues exactly this shape — an
-    /// unnamed index on the continuous aggregate's VIEW, which PostgreSQL routes to the materialization and
-    /// names by ITS OWN default-naming rule (<c>&lt;table&gt;_&lt;column&gt;_bucket_idx</c>, truncated to 63
-    /// bytes with PostgreSQL's own de-duplicating suffix if that truncation collides) — never a string this
+    /// <para><b>Why an unnamed <c>CREATE INDEX</c> resolved onto the materialization from the catalog, not
+    /// a hand-typed name.</b> The <c>DO</c> block below issues its <c>CREATE INDEX</c> directly against the
+    /// materialization OID it just resolved (<c>v_mat_oid</c>), not against the view — TimescaleDB's own
+    /// <c>create_group_indexes</c> is what issues an unnamed index against the continuous aggregate's VIEW
+    /// and lets PostgreSQL route it to the materialization, which names it by ITS OWN default-naming rule
+    /// (<c>&lt;table&gt;_&lt;column&gt;_bucket_idx</c>, truncated to 63 bytes with PostgreSQL's own
+    /// de-duplicating suffix if that truncation collides) — the same result this code reaches, never a string this
     /// code builds. A hand-built name matching that pattern for five of the six views would still be WRONG
     /// for the sixth: <c>query_store_stats_interval_daily</c>'s materialization name is itself a generated
     /// <c>_materialized_hypertable_N</c>, wider than the fixed views' own table names, so a name built from

@@ -998,12 +998,17 @@ SELECT
     /* V152 (#4503) probes NEGATIVELY, the V149 shape: the six Query Store rollups' auto-created two-key
        group index (first key one of the rung's drop-list columns, second key bucket) is ABSENT. This walks
        query_store_stats_hourly's own pg_rewrite/pg_depend dependency to its materialization hypertable
-       rather than querying timescaledb_information.continuous_aggregates directly, so it needs no
-       pg_extension guard: on a plain-PostgreSQL store (no TimescaleDB), the view is absent so
-       to_regclass(...) resolves nothing and the dependency walk finds no rows, which is also the
-       absent answer this sentinel wants. It is not yet read by any viewer surface, so this gate rests on
-       the standing invariant alone. Named only in this probe line, never in prose, per the V71 finding. */
-    NOT EXISTS (
+       rather than the TimescaleDB information views, so it needs no
+       pg_extension guard. ANDed with a POSITIVE existence check on the view itself, the same shape V149's
+       negative probe uses: without it, a plain-PostgreSQL store or a TimescaleDB store whose rollup is not
+       yet materialized has to_regclass(...) resolve to NULL, the dependency walk then finds no rows, and
+       the bare NOT EXISTS would read that absence as ""index dropped"" and misreport the store as 152 at
+       any real version. Requiring the view to exist first closes that: on a plain-PG store, or a rollup
+       not yet created, this whole sentinel is false and the version falls through to the next arm. It is
+       not yet read by any viewer surface, so this gate rests on the standing invariant alone. Named only
+       in this probe line, never in prose, per the V71 finding. */
+    (to_regclass('collect.query_store_stats_hourly') IS NOT NULL
+     AND NOT EXISTS (
         SELECT 1
         FROM pg_rewrite r
         JOIN pg_depend d ON d.objid = r.oid
@@ -1012,7 +1017,7 @@ SELECT
         JOIN pg_attribute a1 ON a1.attrelid = matc.oid AND a1.attnum = i.indkey[0] AND a1.attname = 'query_hash'
         JOIN pg_attribute a2 ON a2.attrelid = matc.oid AND a2.attnum = i.indkey[1] AND a2.attname = 'bucket'
         WHERE r.ev_class = to_regclass('collect.query_store_stats_hourly')
-    )";
+    ))";
 
     /// <summary>The store schema version this viewer build requires — the highest migration it knows
     /// (<see cref="StorageVersion.SchemaVersion"/>). The connect-time gate blocks a store below this.</summary>
