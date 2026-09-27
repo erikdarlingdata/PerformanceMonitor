@@ -98,21 +98,24 @@ public sealed class ViewerSystemEventsTests
         }
     }
 
-    // ── Significance: Scheduler Issues (status = WARNING) ──
+    // ── Significance: Scheduler Issues (SQL CPU >= 90, other-process CPU >= 50, or memory <= 50) ──
 
     [Theory]
-    [InlineData("WARNING", true)]
-    [InlineData("OK", false)]
-    [InlineData("", false)]
-    [InlineData(null, false)]
-    public void SchedulerIssue_SignificantOnlyWhenWarning(string? status, bool expected) =>
-        Assert.Equal(expected, SystemEventSignificance.IsSignificant(new SchedulerIssueRecord { Status = status }));
+    [InlineData(90, 0, 100, true)]
+    [InlineData(89, 0, 100, false)]
+    [InlineData(0, 50, 100, true)]
+    [InlineData(0, 49, 100, false)]
+    [InlineData(0, 0, 50, true)]
+    [InlineData(0, 0, 51, false)]
+    [InlineData(null, null, null, false)]
+    public void SchedulerIssue_SignificantOnThresholds(int? sqlCpu, int? other, int? mem, bool expected) =>
+        Assert.Equal(expected, SystemEventSignificance.IsSignificant(new SchedulerIssueRecord { SqlCpuUtilization = sqlCpu, OtherProcessCpu = other, MemoryUtilization = mem }));
 
     [Fact]
     public void SchedulerIssue_Fixture_IsSignificant()
     {
-        var record = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor.xml"))!;
-        Assert.Equal("WARNING", record.Status);
+        var record = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor_high_sql_cpu.xml"))!;
+        Assert.Equal(94, record.SqlCpuUtilization);
         Assert.True(SystemEventSignificance.IsSignificant(record));
     }
 

@@ -1,0 +1,16 @@
+<!-- #4452: real scheduler_monitor_system_health_ring_buffer_recorded event from a monitored field
+     store, call_stack stripped. process_utilization=94, system_idle=73->2 (other-process CPU =
+     100-94-2=4), memory_utilization=100, page_faults=505, working_set_delta=4096 bytes ->
+     4096/1048576 = 0.0039... MB, rounded to 0.00. SqlCpuUtilization 94 >= 90, so this sample is
+     significant on the SQL-CPU arm. -->
+<event name="scheduler_monitor_system_health_ring_buffer_recorded" package="sqlos" timestamp="2026-09-26T22:08:48.939Z">
+  <data name="id"><type name="uint32" package="package0"/><value>0</value></data>
+  <data name="timestamp"><type name="uint64" package="package0"/><value>0</value></data>
+  <data name="process_utilization"><type name="uint32" package="package0"/><value>94</value></data>
+  <data name="system_idle"><type name="uint32" package="package0"/><value>2</value></data>
+  <data name="user_mode_time"><type name="uint64" package="package0"/><value>2233593750</value></data>
+  <data name="kernel_mode_time"><type name="uint64" package="package0"/><value>30312500</value></data>
+  <data name="page_faults"><type name="uint32" package="package0"/><value>505</value></data>
+  <data name="working_set_delta"><type name="int64" package="package0"/><value>4096</value></data>
+  <data name="memory_utilization"><type name="uint32" package="package0"/><value>100</value></data>
+</event>

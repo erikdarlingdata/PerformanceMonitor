@@ -132,17 +132,18 @@ namespace PerformanceMonitor.Common
             if (ev == null)
                 return null;
 
+            var sqlCpu = ParseInt(DataValue(ev, "process_utilization"));
+            var idle = ParseInt(DataValue(ev, "system_idle"));
+
             return new SchedulerIssueRecord
             {
                 EventTime = ParseTimestamp(ev),
-                SchedulerId = ParseInt(DataValue(ev, "scheduler_id")),
-                CpuId = ParseInt(DataValue(ev, "cpu_id")),
-                Status = DataText(ev, "status"),
-                IsOnline = ParseBool(DataValue(ev, "is_online")),
-                IsRunnable = ParseBool(DataValue(ev, "is_runnable")),
-                IsRunning = ParseBool(DataValue(ev, "is_running")),
-                NonYieldingTimeMs = ParseLong(DataValue(ev, "non_yielding_time")),
-                ThreadQuantumMs = ParseLong(DataValue(ev, "thread_quantum")),
+                SqlCpuUtilization = sqlCpu,
+                OtherProcessCpu = sqlCpu is { } sc && idle is { } id ? 100 - sc - id : (int?)null,
+                SystemIdle = idle,
+                MemoryUtilization = ParseInt(DataValue(ev, "memory_utilization")),
+                PageFaults = ParseLong(DataValue(ev, "page_faults")),
+                WorkingSetDeltaMb = MbFromBytes(DataValue(ev, "working_set_delta")),
             };
         }
 
@@ -525,6 +526,9 @@ namespace PerformanceMonitor.Common
 
         /// <summary>KB -&gt; GB by integer division (÷1024²), matching sp_HealthParser's bigint arithmetic (truncating).</summary>
         private static long? GbFromKb(string? s) => ParseLong(s) is { } v ? v / 1024 / 1024 : (long?)null;
+
+        /// <summary>Bytes -&gt; MB (÷1,048,576) as decimal(19,2), matching sp_HealthParser's <c>CONVERT(decimal(19,2), bigint / 1048576.)</c> — real division, then rounded to 2 places (banker's rounding via decimal.Round, matching CONVERT's rounding behavior).</summary>
+        private static decimal? MbFromBytes(string? s) => ParseLong(s) is { } v ? Math.Round(v / 1048576m, 2, MidpointRounding.AwayFromZero) : (decimal?)null;
 
         /// <summary>
         /// Replaces control characters — except tab (9), line feed (10) and carriage return (13) — with '?',

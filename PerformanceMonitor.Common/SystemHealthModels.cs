@@ -28,38 +28,35 @@ namespace PerformanceMonitor.Common
      */
 
     /// <summary>
-    /// One scheduler-monitor warning row, shredded from a
+    /// One scheduler-monitor utilization sample, shredded from a
     /// <c>scheduler_monitor_system_health_ring_buffer_recorded</c> event. Mirrors sp_HealthParser's
-    /// <c>*_SchedulerIssues</c> table (non-yielding schedulers, deadlocked schedulers).
+    /// current "Parsing scheduler monitor data" section: this event is a periodic CPU/memory
+    /// utilization sample, not a per-scheduler status record — it carries no scheduler_id, status,
+    /// online/runnable/running flags, or non-yielding/thread-quantum timers (an earlier version of
+    /// this record read those fields, which this event has never carried; every row came back null).
     /// </summary>
     public sealed record SchedulerIssueRecord
     {
         /// <summary>Event <c>@timestamp</c>, parsed as UTC (sp_HealthParser converts to server-local at render; kept UTC here).</summary>
         public DateTime? EventTime { get; init; }
 
-        /// <summary>xpath <c>data[@name="scheduler_id"]/value</c>.</summary>
-        public int? SchedulerId { get; init; }
+        /// <summary>xpath <c>data[@name="process_utilization"]/value</c> — SQL Server's own CPU percent.</summary>
+        public int? SqlCpuUtilization { get; init; }
 
-        /// <summary>xpath <c>data[@name="cpu_id"]/value</c>.</summary>
-        public int? CpuId { get; init; }
+        /// <summary>Computed: <c>100 - SqlCpuUtilization - SystemIdle</c> — the CPU percent used by everything else on the box. Null if either input is null.</summary>
+        public int? OtherProcessCpu { get; init; }
 
-        /// <summary>xpath <c>data[@name="status"]/text</c> (the friendly enum text, e.g. WARNING).</summary>
-        public string? Status { get; init; }
+        /// <summary>xpath <c>data[@name="system_idle"]/value</c> — the box's idle CPU percent.</summary>
+        public int? SystemIdle { get; init; }
 
-        /// <summary>xpath <c>data[@name="is_online"]/value</c> (bit).</summary>
-        public bool? IsOnline { get; init; }
+        /// <summary>xpath <c>data[@name="memory_utilization"]/value</c> — percent of committed memory in the working set (100 is healthy; low means the working set was trimmed).</summary>
+        public int? MemoryUtilization { get; init; }
 
-        /// <summary>xpath <c>data[@name="is_runnable"]/value</c> (bit).</summary>
-        public bool? IsRunnable { get; init; }
+        /// <summary>xpath <c>data[@name="page_faults"]/value</c>.</summary>
+        public long? PageFaults { get; init; }
 
-        /// <summary>xpath <c>data[@name="is_running"]/value</c> (bit).</summary>
-        public bool? IsRunning { get; init; }
-
-        /// <summary>xpath <c>data[@name="non_yielding_time"]/value</c> (bigint; the table column is named *_ms).</summary>
-        public long? NonYieldingTimeMs { get; init; }
-
-        /// <summary>xpath <c>data[@name="thread_quantum"]/value</c> (bigint; the table column is named *_ms).</summary>
-        public long? ThreadQuantumMs { get; init; }
+        /// <summary>xpath <c>data[@name="working_set_delta"]/value</c>, bytes converted to MB (÷1,048,576), rounded to 2 decimal places.</summary>
+        public decimal? WorkingSetDeltaMb { get; init; }
     }
 
     /// <summary>

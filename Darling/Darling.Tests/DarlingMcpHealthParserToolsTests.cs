@@ -208,12 +208,12 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
     [Fact]
     public void Significance_SchedulerIssue_MatchesViewer()
     {
-        foreach (var status in new[] { "WARNING", "OK", "", null })
+        foreach (var (sqlCpu, other, mem) in new (int?, int?, int?)[] { (90, 0, 100), (89, 0, 100), (0, 50, 100), (0, 49, 100), (0, 0, 50), (0, 0, 51), (null, null, null) })
         {
-            var r = new SchedulerIssueRecord { Status = status };
+            var r = new SchedulerIssueRecord { SqlCpuUtilization = sqlCpu, OtherProcessCpu = other, MemoryUtilization = mem };
             Assert.Equal(SystemEventSignificance.IsSignificant(r), SystemHealthSignificance.IsSignificant(r));
         }
-        Assert.True(SystemHealthSignificance.IsSignificant(new SchedulerIssueRecord { Status = "WARNING" }));
+        Assert.True(SystemHealthSignificance.IsSignificant(new SchedulerIssueRecord { SqlCpuUtilization = 90 }));
     }
 
     [Fact]
@@ -311,7 +311,7 @@ public sealed class DarlingMcpHealthParserToolsSurfaceAndSqlTests
         // SystemHealthSignificance keeps the significant rows. Assert the same significant set the
         // viewer's System Events tab surfaces.
         Assert.True(SystemHealthSignificance.IsSignificant(
-            SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor.xml"))!));            // WARNING
+            SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor_high_sql_cpu.xml"))!));  // SQL CPU 94 >= 90
         Assert.True(SystemHealthSignificance.IsSignificant(
             SystemHealthParser.ParseSevereError(LoadFixture("error_reported.xml"))!));                  // severity 24
         Assert.True(SystemHealthSignificance.IsSignificant(
@@ -398,7 +398,7 @@ public sealed class DarlingMcpHealthParserToolsLivePostgresTests
 VALUES ($1,$2,$3,$4,$5,$6,$7)",
                     CollectionIdGenerator.Next(), t, ServerId, ServerName, t, eventType, LoadFixture(fixture));
 
-            await PlantEvent(SystemHealthParser.SchedulerMonitorEvent, "scheduler_monitor.xml");
+            await PlantEvent(SystemHealthParser.SchedulerMonitorEvent, "scheduler_monitor_high_sql_cpu.xml");
             await PlantEvent(SystemHealthParser.ErrorReportedEvent, "error_reported.xml");
             await PlantEvent(SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_system.xml");
             await PlantEvent(SystemHealthParser.SpServerDiagnosticsEvent, "sp_server_diagnostics_query_processing_warning.xml");

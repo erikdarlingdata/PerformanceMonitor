@@ -221,7 +221,7 @@ public sealed class DarlingMcpHealthParserTools
         catch (Exception ex) when (ex is not OperationCanceledException) { return McpHelpers.FormatError("get_health_parser_io_issues", ex); }
     }
 
-    [McpServerTool(Name = "get_health_parser_scheduler_issues"), Description("Gets scheduler issues from system_health (non-yielding schedulers, scheduler-monitor warnings) over an event_time window ending at as_of, newest first. Gated: WARNING-state results only. An empty answer with status empty is a real result: nothing in this window passed the gate, and events_in_window counts what was captured and filtered out. status unavailable with source_observed false is no evidence either way. <<GUIDE>> Gets scheduler issues from system_health: non-yielding schedulers and scheduler-monitor warnings, with the scheduler/cpu ids, online/runnable/running state, and non-yielding time. " + McpToolGuideTopics.SystemHealthEmptyWindows)]
+    [McpServerTool(Name = "get_health_parser_scheduler_issues"), Description("Gets scheduler-monitor utilization samples over an event_time window ending at as_of, newest first. Gated: only significant CPU/memory pressure. <<GUIDE>> Gets scheduler-monitor utilization samples from system_health: SQL Server CPU percent, other-process CPU percent, idle CPU percent, memory utilization percent, page faults, and working-set change in MB. Significant when SQL CPU is pinned (>= 90), other-process CPU is high (>= 50), or memory utilization is low (<= 50). " + McpToolGuideTopics.SystemHealthEmptyWindows)]
     public static async Task<string> GetSchedulerIssues(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -239,7 +239,7 @@ public sealed class DarlingMcpHealthParserTools
             if (c.EarlyReturn != null) return c.EarlyReturn;
             if (c.Rows.Count == 0)
                 return await EmptyAsync(postgres, c, hours_back, SystemHealthParser.SchedulerMonitorEvent,
-                    "none was a scheduler-monitor record in the WARNING state", cancellationToken);
+                    "none was a significant scheduler-monitor sample (SQL CPU, other-process CPU, or memory utilization outside the warning thresholds)", cancellationToken);
 
             return JsonSerializer.Serialize(new
             {
@@ -252,14 +252,12 @@ public sealed class DarlingMcpHealthParserTools
                 issues = c.Rows.Take(limit).Select(r => new
                 {
                     event_time = r.EventTime?.ToString("o"),
-                    scheduler_id = r.SchedulerId,
-                    cpu_id = r.CpuId,
-                    status = r.Status,
-                    is_online = r.IsOnline,
-                    is_runnable = r.IsRunnable,
-                    is_running = r.IsRunning,
-                    non_yielding_time_ms = r.NonYieldingTimeMs,
-                    thread_quantum_ms = r.ThreadQuantumMs
+                    sql_cpu_utilization = r.SqlCpuUtilization,
+                    other_process_cpu = r.OtherProcessCpu,
+                    system_idle = r.SystemIdle,
+                    memory_utilization = r.MemoryUtilization,
+                    page_faults = r.PageFaults,
+                    working_set_delta_mb = r.WorkingSetDeltaMb
                 })
             }, McpHelpers.JsonOptions);
         }

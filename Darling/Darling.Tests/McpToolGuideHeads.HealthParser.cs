@@ -42,7 +42,7 @@ public sealed class McpToolGuideHeadsHealthParserTests
         ("get_health_parser_memory_node_oom", "Ungated: every recorded OOM is returned."),
         ("get_health_parser_severe_errors", "Gated: severity 19 or higher only, benign connection-reset error numbers excluded"),
         ("get_health_parser_io_issues", "Gated: WARNING-state results only."),
-        ("get_health_parser_scheduler_issues", "Gated: WARNING-state results only."),
+        ("get_health_parser_scheduler_issues", "Gated: only significant CPU/memory pressure."),
         ("get_health_parser_memory_conditions", "Gated: only snapshots whose last notification is RESOURCE_MEMPHYSICAL_LOW."),
         ("get_health_parser_cpu_tasks", "Gated: WARNING-state results with at least 10 pending tasks only."),
         ("get_health_parser_memory_broker", "Gated: RESOURCE_MEMPHYSICAL_LOW notifications only."),

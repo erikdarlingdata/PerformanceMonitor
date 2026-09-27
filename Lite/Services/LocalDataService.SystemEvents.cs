@@ -47,20 +47,18 @@ internal static class SystemEventRowFormat
     public static string Local(DateTime? utc) => ServerTimeHelper.FormatServerTime(utc, "yyyy-MM-dd HH:mm:ss");
 }
 
-/// <summary>One scheduler-monitor WARNING row (Scheduler Issues sub-tab). Mirrors sp_HealthParser's <c>*_SchedulerIssues</c>.</summary>
+/// <summary>One scheduler-monitor utilization sample (Scheduler Issues sub-tab), flagged the way sp_HealthParser flags this section: SQL CPU pinned, other-process CPU high, or memory utilization low.</summary>
 public sealed class SchedulerIssueRow(SchedulerIssueRecord record)
 {
     public string EventTimeLocal => SystemEventRowFormat.Local(record.EventTime);
     /// <summary>Raw naive-UTC event time (the XE @timestamp) for the MCP layer's ISO output.</summary>
     public DateTime? EventTime => record.EventTime;
-    public int? SchedulerId => record.SchedulerId;
-    public int? CpuId => record.CpuId;
-    public string? Status => record.Status;
-    public bool? IsOnline => record.IsOnline;
-    public bool? IsRunnable => record.IsRunnable;
-    public bool? IsRunning => record.IsRunning;
-    public long? NonYieldingTimeMs => record.NonYieldingTimeMs;
-    public long? ThreadQuantumMs => record.ThreadQuantumMs;
+    public int? SqlCpuUtilization => record.SqlCpuUtilization;
+    public int? OtherProcessCpu => record.OtherProcessCpu;
+    public int? SystemIdle => record.SystemIdle;
+    public int? MemoryUtilization => record.MemoryUtilization;
+    public long? PageFaults => record.PageFaults;
+    public decimal? WorkingSetDeltaMb => record.WorkingSetDeltaMb;
 }
 
 /// <summary>
