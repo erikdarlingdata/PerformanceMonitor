@@ -334,7 +334,7 @@ public static class PgLogEntryAssembler
             if (!DateTime.TryParse(
                     _stamp,
                     CultureInfo.InvariantCulture,
-                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                    DateTimeStyles.AssumeUniversal,
                     out _occurredAtUtc))
             {
                 /* Unreachable through the pattern, which admits only digits in the stamp's shape; kept so a
