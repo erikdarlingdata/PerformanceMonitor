@@ -67,7 +67,18 @@ public sealed class JobHistoryCollector : CollectorDefinitionBase<JobHistoryColl
 
     /// <inheritdoc />
     public (long InstanceId, string JobId, int StepId, DateTime RunDateTime) GetNaturalKey(Row row) =>
-        (row.InstanceId, row.JobId, row.StepId, row.RunDateTime ?? DateTime.MinValue);
+        (row.InstanceId, row.JobId, row.StepId, ToMicroseconds(row.RunDateTime ?? DateTime.MinValue));
+
+    /// <summary>
+    /// Truncates a <see cref="DateTime"/> to whole microseconds (drops any sub-microsecond ticks), so the
+    /// in-memory natural-key comparison matches regardless of the source's tick precision: PostgreSQL's
+    /// <c>timestamp</c> and DuckDB's <c>TIMESTAMP</c> both store microsecond precision, but
+    /// <see cref="DateTime.UtcNow"/> carries 100 ns ticks on Windows (and whole microseconds on other
+    /// platforms), so an untruncated batch-side key never matched a stored key read back from either
+    /// store. The <see cref="DateTime.Kind"/> is preserved.
+    /// </summary>
+    internal static DateTime ToMicroseconds(DateTime t) =>
+        new DateTime(t.Ticks - (t.Ticks % 10), t.Kind);
 
     /// <summary>
     /// Pure filter (#4487): drops rows whose natural key the host says is already stored, in the same

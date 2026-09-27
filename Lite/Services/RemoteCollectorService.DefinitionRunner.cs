@@ -1076,7 +1076,7 @@ public partial class RemoteCollectorService
                     reader.GetInt64(0),
                     reader.GetString(1),
                     reader.GetInt32(2),
-                    reader.GetDateTime(3)));
+                    JobHistoryCollector.ToMicroseconds(reader.GetDateTime(3))));
             }
         }
 

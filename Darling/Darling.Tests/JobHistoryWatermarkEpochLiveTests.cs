@@ -433,8 +433,12 @@ public sealed class JobHistoryWatermarkEpochLiveTests
             var now = DateTime.UtcNow;
 
             /* A1: epoch A, instance_id 500..520 (21 rows), run_datetime spread D-3d .. D-1d, collected
-               3 days ago. */
-            var a1RunBase = now.AddDays(-3);
+               3 days ago. AddTicks(7) plants sub-microsecond ticks on purpose (#4496): Windows'
+               DateTime.UtcNow carries 100 ns ticks, but PostgreSQL's timestamp column truncates to
+               whole microseconds on write, so the re-delivered failback batch's in-memory RunDateTime
+               (still carrying the untruncated ticks) must be truncated the same way before the dedupe
+               compares it against the stored, already-truncated key — otherwise the two never match. */
+            var a1RunBase = now.AddDays(-3).AddTicks(7);
             var a1Rows = new List<JobHistoryCollector.Row>();
             long instanceId = 500;
             for (var d = 0; d <= 2; d++)
@@ -525,7 +529,10 @@ public sealed class JobHistoryWatermarkEpochLiveTests
         try
         {
             var now = DateTime.UtcNow;
-            var longRunningRow = MakeRow(900, "job-long", 0, now.AddDays(-5));
+            /* AddTicks(7) plants sub-microsecond ticks on purpose (#4496), same reason as the A→B→A
+               pin above: the replay batch's re-delivered RunDateTime must be truncated to whole
+               microseconds before it matches the stored, already-truncated key. */
+            var longRunningRow = MakeRow(900, "job-long", 0, now.AddDays(-5).AddTicks(7));
             var failbackBatch = new List<JobHistoryCollector.Row> { longRunningRow };
 
             var context1 = MakeContext(server, now);

@@ -58,6 +58,59 @@ public sealed class JobHistoryNaturalKeyDedupeTests
         Assert.Equal(runDateTime, key.RunDateTime);
     }
 
+    [Theory]
+    [InlineData(7, 0)]
+    [InlineData(10, 10)]
+    [InlineData(19, 10)]
+    [InlineData(0, 0)]
+    public void ToMicroseconds_TruncatesSubMicrosecondTicks_KeepingTheWholeMicrosecond(long extraTicks, long expectedExtraTicks)
+    {
+        var wholeMicrosecond = new DateTime(2026, 9, 20, 10, 0, 0, DateTimeKind.Utc);
+        var withSubMicrosecondTicks = wholeMicrosecond.AddTicks(extraTicks);
+
+        var truncated = JobHistoryCollector.ToMicroseconds(withSubMicrosecondTicks);
+
+        Assert.Equal(wholeMicrosecond.AddTicks(expectedExtraTicks), truncated);
+    }
+
+    [Fact]
+    public void ToMicroseconds_PreservesTheDateTimeKind()
+    {
+        var utc = new DateTime(2026, 9, 20, 10, 0, 0, DateTimeKind.Utc).AddTicks(7);
+        var unspecified = new DateTime(2026, 9, 20, 10, 0, 0, DateTimeKind.Unspecified).AddTicks(7);
+
+        Assert.Equal(DateTimeKind.Utc, JobHistoryCollector.ToMicroseconds(utc).Kind);
+        Assert.Equal(DateTimeKind.Unspecified, JobHistoryCollector.ToMicroseconds(unspecified).Kind);
+    }
+
+    [Fact]
+    public void GetNaturalKey_TruncatesSubMicrosecondTicks_SoABatchRowMatchesAWholeMicrosecondStoredKey()
+    {
+        var wholeMicrosecond = new DateTime(2026, 9, 20, 10, 0, 0, DateTimeKind.Unspecified);
+        var row = MakeRow(500, "job-a", 0, wholeMicrosecond.AddTicks(7));
+
+        var key = JobHistoryCollector.Instance.GetNaturalKey(row);
+
+        Assert.Equal(wholeMicrosecond, key.RunDateTime);
+    }
+
+    [Fact]
+    public void DropAlreadyStored_DropsARowWithSubMicrosecondTicks_AgainstAStoredKeyAtTheWholeMicrosecond()
+    {
+        var wholeMicrosecond = new DateTime(2026, 9, 20, 10, 0, 0, DateTimeKind.Unspecified);
+        var subMicrosecondRow = MakeRow(500, "job-a", 0, wholeMicrosecond.AddTicks(7));
+        var rows = new List<JobHistoryCollector.Row> { subMicrosecondRow };
+
+        var storedKeys = new HashSet<(long InstanceId, string JobId, int StepId, DateTime RunDateTime)>
+        {
+            (500, "job-a", 0, wholeMicrosecond),
+        };
+
+        var kept = JobHistoryCollector.Instance.DropAlreadyStored(rows, storedKeys);
+
+        Assert.Empty(kept);
+    }
+
     [Fact]
     public void DropAlreadyStored_WithAnEmptyStoredSet_ReturnsEveryRow()
     {
