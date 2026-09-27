@@ -3169,7 +3169,24 @@ public sealed class DarlingCollectorRunner
                    not a fan-out path) advance — see watermarkCacheEligible above. */
                 if (watermarkCacheEligible && rowsWritten > 0)
                 {
-                    AdvanceServerWatermark(server, definition, rows, watermarkFromUtcColumn);
+                    /* #4487: a batch that carries an identity regression (job_history's guarded filter
+                       collapsed to its bounded-window arm because the target's own MAX(instance_id) fell
+                       below the store's watermark — an identity reseed, an msdb restore, or a failover to a
+                       replica with a lower identity; the rows alone can't say which) must not be MAXed
+                       against the stale cached value the way an ordinary batch is: Advance keeps the
+                       GREATER of the two, which is still the OLD epoch's higher number, and every cycle
+                       after would keep taking the regressed arm even though the store itself has already
+                       self-healed. Invalidate instead, so the next run re-seeds from the store — which by
+                       then holds this run's new-epoch rows and returns the new, honest max. */
+                    var regressed = context.Measurements.Any(m => m.Label == JobHistoryCollector.IdentityRegressionsMeasurement && m.Value > 0);
+                    if (regressed)
+                    {
+                        _watermarkCache.Invalidate(server.ServerId, definition.Name);
+                    }
+                    else
+                    {
+                        AdvanceServerWatermark(server, definition, rows, watermarkFromUtcColumn);
+                    }
                 }
             }
         }
@@ -3863,8 +3880,10 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     internal static string BuildServerWatermarkInstanceIdSql(string tableName, string columnName, bool bounded) =>
         bounded
-            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
-            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2 "
+              + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1 AND collection_time > $2)"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
+              + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1)";
 
     /// <summary>
     /// True when this cycle will OVERWRITE the server-scoped watermark before any query is built, so

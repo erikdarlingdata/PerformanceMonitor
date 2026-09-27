@@ -217,11 +217,28 @@ AND   DATEADD
     /// the re-read anyway, and on Lite it keeps the run from re-inserting rows already aged into parquet
     /// that <c>v_job_history</c> would double-count.</para>
     ///
-    /// <para><b>Self-healing, no operator action.</b> The regressed run stores rows carrying the NEW
-    /// epoch's ids, so the host's <c>SELECT MAX(instance_id)</c> for this server is the new max on the very
-    /// next run and the watermark arm is honest again — one run of fallback per reseed, not a mode the
-    /// collector stays in. Pinned as two consecutive BuildQuery calls in
-    /// <c>JobHistoryIdentityEpochTests</c>.</para>
+    /// <para><b>Self-healing, no operator action — but only once the host's own watermark read is honest
+    /// too (#4487).</b> The regressed run stores rows carrying the NEW epoch's ids, so the very next run's
+    /// <c>SELECT MAX(instance_id)</c> is the new max PROVIDED the host reads it as the max of the server's
+    /// NEWEST collected batch, not an all-time max: an all-time max would still return the OLD epoch's
+    /// higher number (it never stops being the largest id ever stored) and this arm would take the bounded
+    /// window every cycle forever, not once. Darling's <c>GetLastCollectedInstanceIdAsync</c> and Lite's
+    /// equivalent read the newest batch's max for exactly this reason. Darling also caches this watermark
+    /// in memory between runs (<c>ServerWatermarkCache</c>); a regressed batch invalidates that cache
+    /// entry rather than merging it in, so the next run re-seeds from the store's now-honest value instead
+    /// of keeping the cache pinned at the pre-reseed number the ordinary "keep the greater" rule would
+    /// otherwise preserve indefinitely. Pinned as two consecutive BuildQuery calls in
+    /// <c>JobHistoryIdentityEpochTests</c>; the host-side watermark and cache behaviour is pinned where the
+    /// host lives.</para>
+    ///
+    /// <para><b>An epoch that returns (a failover and failback) is a KNOWN gap, not yet closed.</b> If the
+    /// identity later flips back to an epoch this server already stored rows under — a failover away and
+    /// back, or a restore reverted — the newest-batch watermark by itself is not enough: it sits at the
+    /// LOWER epoch's max after the away leg, and the following incremental read
+    /// (<c>instance_id &gt; @last_instance_id</c>, unbounded in time) re-collects every already-stored row
+    /// from the higher epoch that is still above that lower number, which can be far more than the
+    /// regressed arm's 24h window. See #4487 for the options considered (a natural-key dedupe on write, an
+    /// explicit per-epoch max, or bounding the post-flip read by <c>run_datetime</c>) and which one ships.</para>
     /// </summary>
     private static readonly string IdentityGuardedWatermarkFilter = string.Format(
         CultureInfo.InvariantCulture,
