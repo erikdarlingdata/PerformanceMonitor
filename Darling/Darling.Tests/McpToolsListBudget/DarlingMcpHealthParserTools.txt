@@ -29,7 +29,7 @@ param get_health_parser_memory_node_oom.hours_back 41
 param get_health_parser_memory_node_oom.limit 38
 param get_health_parser_memory_node_oom.server_name 28
 
-tool get_health_parser_scheduler_issues 446
+tool get_health_parser_scheduler_issues 536
 param get_health_parser_scheduler_issues.as_of 167
 param get_health_parser_scheduler_issues.hours_back 41
 param get_health_parser_scheduler_issues.limit 38

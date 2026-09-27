@@ -183,7 +183,7 @@ public sealed class McpToolsListBudgetTests
     /* #4214/#4282 (merge with #4279): re-measured on the tree combining both independent #4273-based branches -
        this PR's own get_store_host (+616) and dev's #4279 Lite-parity head change (+181). Constant set to the
        value McpToolsListBudgetTests itself measured on the merged tree, not the two deltas added by hand. */
-    private const int TotalCeilingBytes = 175_170;
+    private const int TotalCeilingBytes = 175_265;
 
 
 

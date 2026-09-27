@@ -353,7 +353,7 @@ public sealed class ViewerSystemEventsTests
     {
         var events = new (string?, string?)[]
         {
-            (SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor.xml")),
+            (SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor_high_sql_cpu.xml")),
             (SystemHealthParser.ErrorReportedEvent, LoadFixture("error_reported.xml")),
             (SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_system.xml")),
             (SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_resource.xml")),
