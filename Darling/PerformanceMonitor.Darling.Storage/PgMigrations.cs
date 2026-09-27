@@ -230,6 +230,7 @@ public static class PgMigrations
         new Migration(148, "read-latency", V148Sql),
         new Migration(149, "query-store-liveness-hot-touch", V149Sql),
         new Migration(150, "collection-log-watermark-and-job-history-indexes", V150Sql),
+        new Migration(151, "ag-group-id", V151Sql),
     };
 
     /// <summary>
@@ -2402,6 +2403,48 @@ CREATE INDEX IF NOT EXISTS idx_collection_log_watermark
     ON collect.collection_log (server_id, collector_name, collection_time DESC);
 CREATE INDEX IF NOT EXISTS idx_job_history_server_run
     ON collect.job_history (server_id, run_datetime DESC, instance_id DESC);";
+
+    /// <summary>
+    /// V151 — <c>sys.availability_groups.group_id</c> on both AG collector tables (#4475): the GUID the engine
+    /// stamps identically on every replica of one Availability Group, appended LAST as text (the collector
+    /// column vocabulary has no uuid type; <c>AgDatabaseReplicaStatesCollector</c>'s <c>last_hardened_lsn</c> /
+    /// <c>last_commit_lsn</c> already store a wide identifier the same way). <see cref="AgTopology.CountDistinctGroups"/>
+    /// uses it to close the one gap the name-plus-replica-overlap rule (#4475) could not: two monitored
+    /// SECONDARIES of one AG, with its primary unmonitored, share no replica name with each other (each reports
+    /// only itself under <c>sys.dm_hadr_availability_replica_states</c>'s local-only rule) and so counted as two
+    /// groups. The group_id is the same on both replicas' rows, so a member carrying one groups by it exactly;
+    /// a member from a row collected before this rung carries none and falls back to the pre-existing name +
+    /// overlap rule among the other id-less members; and a with-id member and a without-id member of the same
+    /// name whose replica sets overlap still join (the same AG, seen before and after the upgrade landed on that
+    /// reporter). Stated in <see cref="AgTopology.CountDistinctGroups"/>'s own doc, not restated as a second
+    /// source of truth here.
+    ///
+    /// <para><b>Nullable, no DEFAULT, no backfill</b>, the V127/V128/V132/V133/V150 shape for every column-adding
+    /// rung on a collector table: a row collected before this rung never asked the engine for its AG's
+    /// group_id, and NULL is the honest value — a reader treats it as "fall back to the pre-#4475 name + overlap
+    /// rule", exactly today's behavior. Both tables are compressed hypertables on the fleet; a nullable,
+    /// default-less <c>ADD COLUMN</c> is catalog-only in PostgreSQL and TimescaleDB accepts it on a compressed
+    /// hypertable with a compression policy attached, the shape V127/V128/V132/V133 used and verified live each
+    /// time. No view to refresh: the AG collector tables have been view-less since V34 (no <c>v_</c> passthrough
+    /// was ever created for either), so this rung is two ALTERs and nothing else.</para>
+    ///
+    /// <para>A fresh store gets the column from the generated CREATE TABLE
+    /// (<see cref="AgReplicaStatesCollector"/> / <see cref="AgDatabaseReplicaStatesCollector"/> carry it,
+    /// appended last in <c>PayloadColumns</c>) and the ALTER no-ops there — the V101 rule, pinned by
+    /// <c>PgSchemaGeneratorTests</c> reconstructing the current shape from V34/V36/V37/this rung and comparing it
+    /// to the generator's current output.</para>
+    ///
+    /// <para>Lite's DuckDB twin gets the same column the same way (schema version bump, additive <c>ALTER TABLE
+    /// ... ADD COLUMN IF NOT EXISTS</c>), and the shared <see cref="AgTopology.CountDistinctGroups"/> is what
+    /// both Lite's AG tab and Darling's Viewer/MCP/web reads call, so the fallback rule cannot drift apart
+    /// between stores.</para>
+    /// </summary>
+    private const string V151Sql = @"
+ALTER TABLE collect.ag_replica_states
+    ADD COLUMN IF NOT EXISTS group_id text;
+
+ALTER TABLE collect.ag_database_replica_states
+    ADD COLUMN IF NOT EXISTS group_id text;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
