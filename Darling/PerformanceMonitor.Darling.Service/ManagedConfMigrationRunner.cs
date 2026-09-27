@@ -297,6 +297,49 @@ internal static class ManagedConfMigrationRunner
     }
 
     /// <summary>
+    /// The <see cref="ManagedConfMigrationState.Kind.MigratedUnstamped"/> re-verification's own scan of a
+    /// fresh <c>pg_file_settings</c> snapshot: every error row whose <c>sourcefile</c> names
+    /// <see cref="ManagedConfFile.FileName"/>, by <see cref="Path.GetFileName(string)"/> (not a suffix
+    /// match — a stray <c>old-darling-managed.conf</c> in an include directory is a different file), EXCEPT
+    /// <see cref="DarlingStoreHostProfile.CommandLineOnlyKeys"/> (<c>port</c>, <c>listen_addresses</c>) — the
+    /// same skip <see cref="VerifyStepB"/> applies, and for the same reason: an exposed store's command line
+    /// always outranks the file for both keys, so PostgreSQL reports the rendered (always loopback-only) file
+    /// row with <c>error = 'setting could not be applied'</c> on every start, never a real mismatch. Returns
+    /// the matched keys (empty when clean, whether because nothing matched or every match was named for a
+    /// skipped key) so the caller can log and build the <c>Failed</c> outcome exactly as before this method
+    /// existed — this is a pure extraction, not a behavior change beyond the skip. <c>HasError</c> is true
+    /// whenever a genuine (non-skipped) error row was found, INCLUDING one with no <c>Name</c> — the
+    /// pre-extraction code failed on that row too, even though it never had a key to name.
+    /// </summary>
+    internal static (bool HasError, IReadOnlyList<string> MismatchedKeys) FindUnstampedManagedFileErrors(
+        IReadOnlyList<FileSettingRow> rows)
+    {
+        var hasError = false;
+        var mismatchedKeys = new List<string>();
+        foreach (var row in rows)
+        {
+            if (row.Error is null || row.SourceFile is null
+                || !string.Equals(Path.GetFileName(row.SourceFile), ManagedConfFile.FileName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (row.Name is not null && Array.IndexOf(DarlingStoreHostProfile.CommandLineOnlyKeys, row.Name) >= 0)
+            {
+                continue;
+            }
+
+            hasError = true;
+            if (row.Name is not null)
+            {
+                mismatchedKeys.Add(row.Name);
+            }
+        }
+
+        return (hasError, mismatchedKeys);
+    }
+
+    /// <summary>
     /// Step B: after a normal derivation has already rendered and written
     /// <c>darling-managed.conf</c>, checks that <paramref name="rows"/> (a fresh <c>pg_file_settings</c>
     /// snapshot) shows every key <paramref name="renderedText"/> declares with the rendered value and no

@@ -368,6 +368,20 @@ public sealed class ManagedConfFileTests
         Assert.Contains("checkpoint_timeout = '15min'", body, StringComparison.Ordinal);
     }
 
+    /// <summary>Pin: <see cref="ManagedConfFile.RenderBody"/> always renders <c>listen_addresses</c> as
+    /// exactly loopback (<c>DarlingManagedPostgres.BuildConfAppend</c>'s v1 line) — never the network
+    /// address an exposed store's command line adds. Every verification path that reads this rendered text
+    /// (<see cref="ManagedConfMigrationRunner.VerifyStepB"/>, <see cref="ManagedConfMigrationRunner.FindUnstampedManagedFileErrors"/>)
+    /// depends on that being true — it is the reason the command line always outranks this file for the key,
+    /// on every exposed store, every start.</summary>
+    [Fact]
+    public void RenderBody_ListenAddresses_IsAlwaysLoopbackOnly()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        Assert.Contains("listen_addresses = '127.0.0.1'", body, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// #4246 (claude-desktop's parity pin, 14:47Z): for EVERY marker in
     /// <see cref="DarlingManagedPostgres.AllManagedConfMarkers"/>, every key that marker's OWN legacy builder

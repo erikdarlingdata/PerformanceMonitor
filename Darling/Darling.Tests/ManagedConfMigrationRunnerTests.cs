@@ -503,6 +503,66 @@ public sealed class ManagedConfMigrationRunnerTests : IDisposable
         Assert.Contains("work_mem", outcome.MismatchedKeys);
     }
 
+    /// <summary>Pin: <see cref="ManagedConfMigrationRunner.FindUnstampedManagedFileErrors"/> is the
+    /// <c>MigratedUnstamped</c> re-verification's own scan (<c>DarlingManagedPostgres.MigrateManagedConfAsync</c>),
+    /// which must skip the same <see cref="DarlingStoreHostProfile.CommandLineOnlyKeys"/> as
+    /// <see cref="ManagedConfMigrationRunner.VerifyStepB"/> does, for the same reason: an exposed store's
+    /// <c>listen_addresses</c> is always overridden by the command line, so darling-managed.conf's rendered
+    /// (always loopback-only) line reports <c>error = "setting could not be applied"</c> on every start even
+    /// though nothing needs healing. <c>192.0.2.10</c> (RFC 5737) stands in for the store's own address.
+    /// </summary>
+    [Fact]
+    public void FindUnstampedManagedFileErrors_ListenAddressesOverriddenByCommandLine_IsNotAnError()
+    {
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            Applied("work_mem", "16MB", file: managedPath, line: 2),
+        };
+
+        var (hasError, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
+
+        Assert.False(hasError);
+        Assert.Empty(mismatchedKeys);
+    }
+
+    /// <summary>Pin: the same skip for <c>port</c> — also command-line-owned
+    /// (<see cref="DarlingStoreHostProfile.CommandLineOnlyKeys"/>).</summary>
+    [Fact]
+    public void FindUnstampedManagedFileErrors_PortOverriddenByCommandLine_IsNotAnError()
+    {
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "port", Setting: "5555", Applied: false, Error: "setting could not be applied"),
+        };
+
+        var (hasError, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
+
+        Assert.False(hasError);
+        Assert.Empty(mismatchedKeys);
+    }
+
+    /// <summary>Pin: a REAL error row on another key (not command-line-owned) still reports as an error,
+    /// with that key named — the skip is narrow, not a blanket "ignore darling-managed.conf errors".</summary>
+    [Fact]
+    public void FindUnstampedManagedFileErrors_RealErrorOnOtherKey_StillReportsError()
+    {
+        var managedPath = Path.Combine(_dataDir, ManagedConfFile.FileName);
+        var rows = new List<FileSettingRow>
+        {
+            new(SourceFile: managedPath, SourceLine: 1, Name: "listen_addresses", Setting: "127.0.0.1", Applied: false, Error: "setting could not be applied"),
+            new(SourceFile: managedPath, SourceLine: 2, Name: "work_mem", Setting: "16MB", Applied: false, Error: "invalid value"),
+        };
+
+        var (hasError, mismatchedKeys) = ManagedConfMigrationRunner.FindUnstampedManagedFileErrors(rows);
+
+        Assert.True(hasError);
+        Assert.DoesNotContain("listen_addresses", mismatchedKeys);
+        Assert.Contains("work_mem", mismatchedKeys);
+    }
+
     /// <summary>Pin (#4336): the exact change-log line for two changed keys.</summary>
     [Fact]
     public void FormatStepBChangeLog_TwoKeys_ExactLine()
