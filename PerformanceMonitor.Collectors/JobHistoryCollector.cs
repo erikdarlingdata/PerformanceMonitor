@@ -197,22 +197,42 @@ AND   DATEADD
     public const int FailbackLookbackDays = 7;
 
     /// <summary>
+    /// The failback bound's own cap (a review finding on #4487): a target whose clock was ever wrong can
+    /// have stored a FUTURE <c>run_datetime</c>, which would carry <c>@min_run_datetime</c> into the future
+    /// too and starve the steady arm of every real (present-day) row until that future date arrives — the
+    /// same silent-zero-rows shape #3885 already ended for the identity guard, now reachable through the
+    /// timestamp bound instead. Clamped in the collector's OWN SQL, on the TARGET's own local clock (like
+    /// <see cref="ArchivalEmptyFilter"/>'s GETDATE() already is — a host-supplied UTC cutoff would be
+    /// timezone-skewed the same way), so the last <see cref="FailbackLookbackDays"/> days are always
+    /// collected regardless of what the store believes it last saw. T-SQL has no LEAST before 2022, hence
+    /// the CASE. Built once from <see cref="FailbackLookbackDays"/>, never a second literal, so a change to
+    /// the constant cannot leave the cap and the lookback disagreeing.
+    /// </summary>
+    private static readonly string MinRunDateTimeCapExpression = string.Format(
+        CultureInfo.InvariantCulture,
+        "CASE WHEN @min_run_datetime > DATEADD(DAY, -{0}, GETDATE()) THEN DATEADD(DAY, -{0}, GETDATE()) ELSE @min_run_datetime END",
+        FailbackLookbackDays);
+
+    /// <summary>
     /// The failback bound as a bare boolean expression (#4487): true with no restriction when the host has
     /// no timestamp watermark yet (nothing stored means nothing to fail back FROM), otherwise the same
     /// sargable run_date pre-filter plus exact decoded-run_datetime bound <see cref="ArchivalEmptyFilter"/>
-    /// uses — anchored on the host-supplied <c>@min_run_datetime</c> parameter instead of <c>GETDATE()</c>.
+    /// uses — anchored on <see cref="MinRunDateTimeCapExpression"/> (the host-supplied <c>@min_run_datetime</c>
+    /// parameter, capped, per the guard above) instead of <c>GETDATE()</c> directly.
     /// <c>OPTION(RECOMPILE)</c> on the template lets the optimizer fold the <c>IS NULL</c> branch away once
     /// the literal parameter value is known, the same reason the guard's own target-max comparison can be a
     /// runtime scalar rather than a second round trip. <c>run_datetime</c> is the target's own local wall
     /// clock, and so is the stored <c>run_datetime</c> the host's watermark was read from, so the two
-    /// compare like with like.
+    /// compare like with like — the cap keeps that true even when the stored value cannot be trusted.
     /// </summary>
-    private static readonly string MinRunDateTimeBoundPredicate = @"
+    private static readonly string MinRunDateTimeBoundPredicate = string.Format(
+        CultureInfo.InvariantCulture,
+        @"
 (
     @min_run_datetime IS NULL
     OR
     (
-        jh.run_date >= CONVERT(integer, CONVERT(varchar(8), @min_run_datetime, 112))
+        jh.run_date >= CONVERT(integer, CONVERT(varchar(8), {0}, 112))
         AND   DATEADD
               (
                   SECOND,
@@ -220,9 +240,10 @@ AND   DATEADD
                   ((jh.run_time / 100) % 100) * 60 +
                   (jh.run_time % 100),
                   CONVERT(datetime, CONVERT(varchar(8), jh.run_date))
-              ) >= @min_run_datetime
+              ) >= {0}
     )
-)";
+)",
+        MinRunDateTimeCapExpression);
 
     /// <summary>
     /// The target's OWN current high-water mark, read on the same round trip as the rows (a scalar

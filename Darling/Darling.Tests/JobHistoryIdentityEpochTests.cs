@@ -123,13 +123,40 @@ public sealed class JobHistoryIdentityEpochTests
         Assert.Equal(storedNewestRunDateTime.AddDays(-7), bound.Value);
         Assert.Equal(CollectorParameterType.DateTime2, bound.Type);
 
-        /* The exact decoded-run_datetime shape, tied to @min_run_datetime rather than GETDATE() — the
-           same idiom ArchivalEmptyFilter uses, anchored differently. */
-        Assert.Contains("CONVERT(integer, CONVERT(varchar(8), @min_run_datetime, 112))", query.Text, StringComparison.Ordinal);
-        Assert.Contains(") >= @min_run_datetime", query.Text, StringComparison.Ordinal);
+        /* The exact decoded-run_datetime shape, tied to the CAPPED @min_run_datetime rather than a bare
+           parameter or GETDATE() — the same idiom ArchivalEmptyFilter uses, anchored differently. */
+        const string capExpression = "CASE WHEN @min_run_datetime > DATEADD(DAY, -7, GETDATE()) THEN DATEADD(DAY, -7, GETDATE()) ELSE @min_run_datetime END";
+        Assert.Contains($"CONVERT(integer, CONVERT(varchar(8), {capExpression}, 112))", query.Text, StringComparison.Ordinal);
+        Assert.Contains($") >= {capExpression}", query.Text, StringComparison.Ordinal);
         /* Only inside the HONEST arm (paired with the un-guarded instance_id predicate), not the
            regressed arm, which keeps its own independent 24h GETDATE() window untouched. */
         Assert.Contains(DevWatermarkPredicate + "\r\n              AND ", query.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4487 review finding: a future-dated stored run must not starve the steady arm. The cap forces
+    /// @min_run_datetime's EFFECT in the SQL down to FailbackLookbackDays before the TARGET's own clock
+    /// whenever the parameter value would otherwise be later than that — asserted here as the literal
+    /// CASE expression the collector emits, since the clamp runs on the target's server-side GETDATE(),
+    /// not on a value this test can observe from the parameter alone.
+    /// </summary>
+    [Fact]
+    public void SteadyStateFilter_CapsTheFailbackBound_AtTheTargetsOwnRecentPast()
+    {
+        var context = MakeContext(numericWatermark: 200L);
+        context.Watermark = new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+        var query = JobHistoryCollector.Instance.BuildQuery(context);
+
+        /* The parameter itself still carries the raw (uncapped) stored-watermark-minus-lookback value —
+           the SQL, not the parameter, is where the cap is applied, so a future-dated store never reaches
+           the target as a future bound. */
+        var bound = Assert.Single(query.Parameters, x => x.Name == "@min_run_datetime");
+        Assert.Equal(new DateTime(2098, 12, 25, 0, 0, 0, DateTimeKind.Unspecified), bound.Value);
+
+        Assert.Contains(
+            "CASE WHEN @min_run_datetime > DATEADD(DAY, -7, GETDATE()) THEN DATEADD(DAY, -7, GETDATE()) ELSE @min_run_datetime END",
+            query.Text, StringComparison.Ordinal);
     }
 
     /// <summary>
