@@ -77,9 +77,11 @@ public sealed class SingleFlightTtlCache<T>
                 return Task.FromResult(_value);
             }
 
-            if (_inFlight is not null)
+            /* MUTATION for the CI RED proof (OverviewFleetHealthSingleFlightLiveTests): an in-flight
+               fetch is never joined, so every racing caller starts its own fetch again. */
+            if (false)
             {
-                sharedTask = _inFlight;
+                sharedTask = _inFlight!;
             }
             else
             {

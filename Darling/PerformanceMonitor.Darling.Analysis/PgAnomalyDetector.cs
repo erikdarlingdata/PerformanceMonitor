@@ -675,7 +675,18 @@ ORDER BY ms_delta DESC LIMIT 1";
                 while (await rateReader.ReadAsync(context.CancellationToken))
                 {
                     tiles.Add(WindowTiles.ReadTile(rateReader, localHourOrdinal: 0, peakOrdinal: 1, meanOrdinal: 2, samplesOrdinal: 4, peakTimeOrdinal: -1));
-                    totalWaitMs += rateReader.IsDBNull(3) ? 0.0 : Convert.ToDouble(rateReader.GetValue(3));
+                }
+            }
+
+            /* MUTATION for the CI RED proof (WaitRateTileReadCountLiveTests): reintroduces the pre-fix
+               second round trip that re-ran the identical statement just to sum total_wait_ms. */
+            using (var totalCmd = new NpgsqlCommand(WaitRateTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
+            {
+                BindTiledWindow(totalCmd, context, map);
+                using var totalReader = await totalCmd.ExecuteReaderAsync(context.CancellationToken);
+                while (await totalReader.ReadAsync(context.CancellationToken))
+                {
+                    totalWaitMs += totalReader.IsDBNull(3) ? 0.0 : Convert.ToDouble(totalReader.GetValue(3));
                 }
             }
 

@@ -73,7 +73,8 @@ WHERE s.server_id <> 0";
     /// staleness <see cref="StoreSelfMetrics.LatestStoreSizeSql"/> already accepts for the service's own
     /// disk-pressure check (mean ~59 min between sweeps there). Five minutes keeps this field visibly fresher
     /// than that self-metrics row while cutting the read from every refresh tick to at most one per window.</summary>
-    public static readonly TimeSpan StoreSizeCacheLifetime = TimeSpan.FromMinutes(5);
+    /* MUTATION for the CI RED proof (StoreSizeCacheLiveTests): a zero lifetime means every call misses the cache. */
+    public static readonly TimeSpan StoreSizeCacheLifetime = TimeSpan.Zero;
 
     /// <summary>#4477: single-flighted and TTL-memoized the same way as
     /// <see cref="GetFleetCollectionHealthByServerAsync"/> — two refreshes racing a cold cache share ONE
