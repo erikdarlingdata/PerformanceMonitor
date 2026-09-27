@@ -4698,7 +4698,42 @@ public sealed class DarlingWorker : BackgroundService
     /// uniformly Kind=Utc. Failure-isolated: a store hiccup returns an EMPTY map so the caller seeds every
     /// collector as never-run (a prompt, jittered run) rather than aborting the connect — an observability read
     /// must never break the collection loop. Internal so a gated live test can seed a row and assert the read.
+    ///
+    /// <para><b>Bounded to <see cref="WatermarkFloorLookback"/>, not the unbounded MAX/GROUP BY this
+    /// replaces (#4469).</b> On a busy store the old statement walked every retained <c>collection_log</c>
+    /// chunk, compressed ones included, because the newest instant per collector is not known until the
+    /// whole table has been read: measured 4,775 ms and 21,483 buffers read on a 32-chunk hypertable (30
+    /// compressed), enough to clear the connect path's 10 s deadline and cancel repeatedly on the busiest
+    /// store. Adding a literal floor on <c>collection_time</c> lets TimescaleDB exclude every chunk older
+    /// than the floor outright: the same read, same server, same statement shape, measured 69 ms and 20,703
+    /// buffers with a 2-day floor.</para>
+    ///
+    /// <para><b>Why 2 days is a safe floor.</b> This read only seeds <see cref="ComputeSeededNextDue"/>,
+    /// which only cares whether a collector ran within its OWN interval of "now" — a collector whose true
+    /// last run falls outside the floor is, by definition, already overdue on every cadence this product
+    /// schedules (the longest recurring cadence in <c>CollectorScheduleDefaults</c> is 1440 minutes = 1 day,
+    /// shared by <c>index_object_stats</c>, <c>pg_column_stats</c>, <c>pg_extension_availability</c> and
+    /// <c>pg_index_usage_stats</c>). A floor of one day would already catch every such collector's true
+    /// last run; two days is a full day of margin so a floor-excluded row (last run 1–2 days back, still
+    /// technically inside interval + slop for a collector whose interval is close to a day) cannot be
+    /// mistaken for never-run. A collector whose last run predates the floor entirely is seeded as never-run
+    /// — the SAME fallback this read already used on a query failure — so it runs promptly under jitter
+    /// instead of waiting out a remaining interval it does not actually have left; that is strictly safer
+    /// than the alternative (treating it as still-current and never rescheduling it).</para>
     /// </summary>
+    internal static readonly TimeSpan WatermarkFloorLookback = TimeSpan.FromDays(2);
+
+    /// <summary>The bounded statement itself (#4469), pinned by name so a live/plan test can assert its
+    /// text and shape directly rather than re-deriving it from the call site. $1 server_id; $2 the floor
+    /// (<c>DateTime.UtcNow - WatermarkFloorLookback</c>, naive UTC).</summary>
+    internal const string ReadCollectorWatermarksSql = """
+        SELECT collector_name, MAX(collection_time)
+        FROM collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        GROUP BY collector_name
+        """;
+
     internal static async Task<Dictionary<string, DateTime>> ReadCollectorWatermarksAsync(
         NpgsqlDataSource postgres, int serverId, ILogger? logger, CancellationToken cancellationToken)
     {
@@ -4706,10 +4741,10 @@ public sealed class DarlingWorker : BackgroundService
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                "SELECT collector_name, MAX(collection_time) FROM collection_log WHERE server_id = $1 GROUP BY collector_name", connection);
+            using var command = new NpgsqlCommand(ReadCollectorWatermarksSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(DateTime.UtcNow - WatermarkFloorLookback);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
