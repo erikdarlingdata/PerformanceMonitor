@@ -920,6 +920,27 @@ jobs:
           [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $dest)
           if (-not (Test-Path "$dest\pgsql\bin\pg_ctl.exe")) { throw "pg-runtime missing pgsql\bin\pg_ctl.exe" }
 
+      # store-upgrade-gated (#4326): the same fixture nightly.yml builds, only when a changed path is in
+      # .github/darling-paths-filter.yml's store-upgrade filter, so a PR that cannot move the upgrade E2Es'
+      # answer does not pay for the ~680MB of pinned archives. The four classes that read the three env vars
+      # this fixture feeds hash into shards 1 and 2 by the class-name-hash rule above (none into shard 0), so
+      # shard 0 skips this and the two fixture steps below even when store-upgrade matches. Same cache key as
+      # nightly.yml, so a warm cache from either means no download here.
+      - name: Cache upgrade-fixture downloads (previous-major runtime)
+        if: steps.filter.outputs.darling == 'true' && steps.filter.outputs.store-upgrade == 'true' && matrix.shard != 0
+        uses: actions/cache@v6
+        with:
+          path: Darling/artifacts/upgrade-fixture/work/downloads
+          key: upgrade-fixture-${{ runner.os }}-${{ hashFiles('Darling/tools/new-upgraded-store-fixture.ps1') }}
+
+      # -SkipNew: the CURRENT runtime is already extracted above from pg-runtime.zip, which is what
+      # DARLING_TEST_PGRUNTIME_NEWZIP points at below. This step only needs the old sides: the previous
+      # major, and (#3906) the previous release on the current major.
+      - name: Build previous-major runtime for the upgrade fixture
+        if: steps.filter.outputs.darling == 'true' && steps.filter.outputs.store-upgrade == 'true' && matrix.shard != 0
+        shell: pwsh
+        run: ./Darling/tools/new-upgraded-store-fixture.ps1 -SkipNew
+
       - name: Restore Darling.Tests
         if: steps.filter.outputs.darling == 'true'
         run: dotnet restore Darling/Darling.Tests/Darling.Tests.csproj --locked-mode
@@ -1051,6 +1072,14 @@ jobs:
           DARLING_TEST_PG_CSVLOG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
           # csvlog-only from its first start, with log_timezone = 'UTC': PgLogTailStderrSiblingLiveTests' #4019 case.
           DARLING_TEST_PG_CSVLOG_ONLY: "Host=127.0.0.1;Port=5542;Username=darling;Database=darling"
+          # store-upgrade-gated, exactly as nightly.yml sets them (#1706, #3906); empty when the fixture
+          # above did not run, which the consuming tests treat as "not set" (Environment.GetEnvironmentVariable
+          # returns null for an empty value read this way, and every one of them guards with
+          # string.IsNullOrWhiteSpace before touching the path), so they SkipWhen on a shard or PR where the
+          # gate did not match rather than fail on a missing fixture.
+          DARLING_TEST_PGRUNTIME_OLD: ${{ (steps.filter.outputs.store-upgrade == 'true' && matrix.shard != 0) && format('{0}\Darling\artifacts\upgrade-fixture\old\pg-runtime', github.workspace) || '' }}
+          DARLING_TEST_PGRUNTIME_NEWZIP: ${{ (steps.filter.outputs.store-upgrade == 'true' && matrix.shard != 0) && format('{0}\Darling\artifacts\pg-runtime.zip', github.workspace) || '' }}
+          DARLING_TEST_PGRUNTIME_PREVIOUS: ${{ (steps.filter.outputs.store-upgrade == 'true' && matrix.shard != 0) && format('{0}\Darling\artifacts\upgrade-fixture\previous\pg-runtime', github.workspace) || '' }}
           DARLING_TEST_PG_JSONLOG: "Host=127.0.0.1;Port=5543;Username=darling;Database=darling"
           DARLING_TEST_PG_AUTOEXPLAIN: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
           DARLING_TEST_PG_CSVLOG_SIBLING: "Host=127.0.0.1;Port=5544;Username=darling;Database=darling"
