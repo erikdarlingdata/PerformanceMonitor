@@ -600,13 +600,22 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
         var headEnd = DarlingFleetReader.CeilingHour(windowStart);
         var raw = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthSql, windowStart, null, ct);
         var forced = await ReadRowsAsync(postgres, DarlingFleetReader.FleetCollectionHealthComposedSql, windowStart, headEnd, ct);
-        Assert.NotEqual(raw, forced); // the hole is real: served from buckets, the read is short
+        Assert.NotEqual(raw, forced); // the naive union (no hole hours) is short: the hole is real
 
-        Assert.False(await DarlingFleetReader.CollectionHealthRollupUsableAsync(postgres, headEnd, ct));
-        var banded = await ReadBandedAsync(postgres, now, ct);
+        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
+        Assert.True(plan.Usable); // #4477: a single repairable hole no longer sends the whole window to raw
+        Assert.Single(plan.HoleHours);
+
+        var repairedSql = CollectionHealthRollupSupport.ComposeFleetSql(DarlingFleetReader.FleetCollectionHealthSql, plan.HoleHours);
+        var repaired = await ReadRowsAsync(postgres, repairedSql, windowStart, headEnd, plan.HoleHours, ct);
+        AssertSameRows(raw, repaired);
+
+        /* The product's own call path (ReadFailingCollectorCountsAsync, reached through ReadBandedAsync) picks
+           the SAME repaired plan and must band identically to the pure raw scan. */
+        var bandedRepaired = await ReadBandedAsync(postgres, now, ct);
         await DropAggregateAsync(connection, ct);
         var bandedRaw = await ReadBandedAsync(postgres, now, ct);
-        Assert.Equal(bandedRaw.OrderBy(kv => kv.Key), banded.OrderBy(kv => kv.Key));
+        Assert.Equal(bandedRaw.OrderBy(kv => kv.Key), bandedRepaired.OrderBy(kv => kv.Key));
     }
 
     /// <summary>THE ABSENT GUARD. No aggregate (plain PostgreSQL, or not yet created): the probe says so, the

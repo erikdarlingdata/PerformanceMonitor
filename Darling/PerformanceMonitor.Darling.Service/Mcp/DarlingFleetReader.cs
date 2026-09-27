@@ -677,8 +677,8 @@ GROUP BY server_id, collector_name";
     /// <summary>See <see cref="CollectionHealthRollupSupport.WatermarkSql"/>.</summary>
     internal const string CollectionHealthWatermarkSql = CollectionHealthRollupSupport.WatermarkSql;
 
-    /// <summary>See <see cref="CollectionHealthRollupSupport.ContinuitySql"/>.</summary>
-    internal const string CollectionHealthContinuitySql = CollectionHealthRollupSupport.ContinuitySql;
+    /// <summary>See <see cref="CollectionHealthRollupSupport.MissingHoursSql"/>.</summary>
+    internal const string CollectionHealthMissingHoursSql = CollectionHealthRollupSupport.MissingHoursSql;
 
     /// <summary>The raw read restricted to the partial head hour [$1, $2): <see cref="FleetCollectionHealthSql"/>
     /// itself with one predicate inserted (<see cref="CollectionHealthRollupSupport.InsertHeadBound"/>), DERIVED
@@ -689,11 +689,15 @@ GROUP BY server_id, collector_name";
 
     /// <summary>
     /// <see cref="FleetCollectionHealthSql"/>'s result, served from <c>collect.collection_health_hourly</c>
-    /// (<see cref="CollectionHealthRollupSupport.ComposeFleetSql"/>): every WHOLE hour bucket from $2 (the first
-    /// hour boundary at or after the window start $1) UNION ALL the raw head slice [$1, $2), re-aggregated per
-    /// (server, collector). Same thirteen ordinals, same names, same types (the SUMs cast back to bigint), so
-    /// the reader below cannot tell which statement it ran. The aggregate is <c>materialized_only = false</c>:
-    /// buckets above its watermark are computed real-time from raw, so the result is current to the second.
+    /// (<see cref="CollectionHealthRollupSupport.ComposeFleetSql(string)"/>): every WHOLE hour bucket from $2
+    /// (the first hour boundary at or after the window start $1) UNION ALL the raw head slice [$1, $2),
+    /// re-aggregated per (server, collector). Same thirteen ordinals, same names, same types (the SUMs cast
+    /// back to bigint), so the reader below cannot tell which statement it ran. The aggregate is
+    /// <c>materialized_only = false</c>: buckets above its watermark are computed real-time from raw, so the
+    /// result is current to the second.
+    /// <para>No hole hours (#4477): callers that need those add a <c>$3</c> array parameter and compose
+    /// through <see cref="CollectionHealthRollupSupport.ComposeFleetSql(string, System.Collections.Generic.IReadOnlyList{DateTime})"/>
+    /// directly instead of this fixed constant.</para>
     /// </summary>
     internal static readonly string FleetCollectionHealthComposedSql =
         CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthSql);
@@ -703,13 +707,22 @@ GROUP BY server_id, collector_name";
     internal static DateTime CeilingHour(DateTime windowStart) => CollectionHealthRollupSupport.CeilingHour(windowStart);
 
     /// <summary>
-    /// Chooses the statement for the seven-day collection-health read: the composed one only when both guards
-    /// pass, else the exact raw scan. See <see cref="CollectionHealthRollupSupport.RollupUsableAsync"/> for (a)
-    /// the ABSENT guard and (b) the CONTINUITY guard.
+    /// Chooses the statement for the seven-day collection-health read: the composed one — with any hole hours
+    /// read raw alongside it (#4477) — unless the guard says unusable, in which case the exact raw scan. See
+    /// <see cref="CollectionHealthRollupSupport.RollupPlanAsync"/> for (a) the ABSENT guard and (b) the
+    /// CONTINUITY guard.
     /// </summary>
-    internal static Task<bool> CollectionHealthRollupUsableAsync(
+    internal static Task<CollectionHealthRollupSupport.RollupPlan> CollectionHealthRollupPlanAsync(
         NpgsqlDataSource postgres, DateTime headEnd, CancellationToken cancellationToken) =>
-        CollectionHealthRollupSupport.RollupUsableAsync(postgres, headEnd, cancellationToken);
+        CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, cancellationToken);
+
+    /// <summary>The usable/not verdict alone, for existing pins that predate #4477's hole-hours plan
+    /// (<see cref="CollectionHealthAggregateTests"/>, <see cref="FreshStoreWatermarkTests"/>): still true for
+    /// EVERY case those pins exercise, since none of them plant a repairable hole — they either have none, or
+    /// exceed the repair cap on the same runs that expect unusable.</summary>
+    internal static async Task<bool> CollectionHealthRollupUsableAsync(
+        NpgsqlDataSource postgres, DateTime headEnd, CancellationToken cancellationToken) =>
+        await CollectionHealthRollupPlanAsync(postgres, headEnd, cancellationToken);
 
     /// <summary>The default depth of the worst-first "Needs attention" ranking.</summary>
     public const int DefaultWorstCount = 5;
@@ -1599,17 +1612,23 @@ GROUP BY server_id, collector_name";
         NpgsqlDataSource postgres, DateTime now, CancellationToken cancellationToken)
     {
         var counts = new Dictionary<int, CollectorCounts>();
-        /* #3893 arm 2: the composed read (hourly aggregate + raw head slice) when both guards pass, else the
-           raw scan. Same thirteen ordinals either way, so everything below is shared. */
+        /* #3893 arm 2, #4477: the composed read (hourly aggregate + raw head slice + any hole hours read raw
+           alongside it) when the guard passes, else the raw scan. Same thirteen ordinals either way, so
+           everything below is shared. */
         var windowStart = DateTime.SpecifyKind(now.AddDays(-7), DateTimeKind.Unspecified);
         var headEnd = CeilingHour(windowStart);
-        var composed = await CollectionHealthRollupUsableAsync(postgres, headEnd, cancellationToken);
-        await using var command = postgres.CreateCommand(composed ? FleetCollectionHealthComposedSql : FleetCollectionHealthSql);
+        var plan = await CollectionHealthRollupPlanAsync(postgres, headEnd, cancellationToken);
+        var composedSql = plan.Usable ? CollectionHealthRollupSupport.ComposeFleetSql(FleetCollectionHealthSql, plan.HoleHours) : null;
+        await using var command = postgres.CreateCommand(composedSql ?? FleetCollectionHealthSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddTimestamp(command, windowStart);
-        if (composed)
+        if (plan.Usable)
         {
             AddTimestamp(command, headEnd);
+            if (plan.HoleHours.Count > 0)
+            {
+                command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = plan.HoleHours as DateTime[] ?? plan.HoleHours.ToArray() });
+            }
         }
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
