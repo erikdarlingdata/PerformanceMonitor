@@ -128,6 +128,25 @@ public sealed class DarlingManagedPostgres
     public const string McpApplicationName = "PerformanceMonitorDarling-Mcp";
 
     /// <summary>
+    /// The <c>ApplicationName</c> the SERVICE's own collection-loop store connection presents (#4479, the
+    /// rest of #4442's pattern): the worker's data source, set through
+    /// <see cref="Storage.DarlingStoreConnection.WithApplicationName"/> when the resolved connection string
+    /// does not already carry one. Distinguishes the collection loop's own backends from the web/MCP pools'
+    /// in the store's own <c>pg_stat_activity</c> — all four surfaces open store connections independently,
+    /// and only the role name told them apart before this.
+    /// </summary>
+    public const string ServiceApplicationName = "PerformanceMonitorDarling-Service";
+
+    /// <summary>The CLI verbs' store connections (#4479) — <c>darling.exe --add-server</c> and friends,
+    /// each a one-shot process distinct from the running service.</summary>
+    public const string CliApplicationName = "PerformanceMonitorDarling-Cli";
+
+    /// <summary>The managed-runtime bootstrap/upgrade's own store connections (#4479) — the migration
+    /// snapshot read, the TimescaleDB bridge/update, and the pg_upgrade identity read, all of which open a
+    /// connection before the collection loop's own data source exists.</summary>
+    public const string UpgradeApplicationName = "PerformanceMonitorDarling-Upgrade";
+
+    /// <summary>
     /// The search path (schemas in resolution order) the managed connection strings carry, so pooled
     /// connections resolve the bare table names to collect/config even if the database default was
     /// not (or could not be) set. Same schemas, same order as the SQL-side
