@@ -622,6 +622,23 @@ public partial class ServerTab : UserControl
             PerfmonChart.Plot.YLabel(DeltaSeriesShaping.YAxisLabel(plottedBases));
             SetChartYLimitsWithLegendPadding(PerfmonChart, 0, globalMax > 0 ? globalMax : 100);
             ShowChartLegend(PerfmonChart);
+
+            /* #4476: a chart-chrome title naming how many one-sample Wait Statistics spikes this window's
+               plotted counters set aside — null when none, so nothing is shown for the common case. Mirrors
+               the Darling viewer's ViewerServerTab.Perfmon.cs. */
+            var artifactsSetAside = selected
+                .Where(s => trendsByCounter.ContainsKey(s.DisplayName))
+                .SelectMany(s => trendsByCounter[s.DisplayName])
+                .Sum(t => t.ArtifactsSetAside);
+            var caption = WaitStatisticsArtifact.ChartCaption(artifactsSetAside);
+            if (caption != null)
+            {
+                PerfmonChart.Plot.Title(caption);
+                PerfmonChart.Plot.Axes.Title.Label.ForeColor = PerfmonChart.Plot.Axes.Bottom.TickLabelStyle.ForeColor;
+                PerfmonChart.Plot.Axes.Title.Label.FontSize = 11;
+                PerfmonChart.Plot.Axes.Title.Label.Bold = false;
+            }
+
             PerfmonChart.Refresh();
         }
         catch
