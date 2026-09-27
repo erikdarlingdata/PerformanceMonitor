@@ -381,7 +381,14 @@ public sealed class QsCaptureModeRouteKnobToastRungTests
         Assert.Equal(CollectorTargetEngine.SqlServer, QueryStoreHealthCollector.Instance.TargetEngine);
 
         var initializer = RepoFile.ReadRepoFile("Lite", "Database", "DuckDbInitializer.cs");
-        Assert.Contains("internal const int CurrentSchemaVersion = 64;", initializer, StringComparison.Ordinal);
+        /* Stays-true shape (#4475 raised CurrentSchemaVersion past 64, so a literal "= 64;" pin would
+           break on the next rung): the v64 block must still be present, and CurrentSchemaVersion must be
+           AT LEAST 64 — this fact is about Lite twinning ONLY the capture modes at v64, not about v64
+           being the ceiling. */
+        Assert.Contains("internal const int CurrentSchemaVersion = ", initializer, StringComparison.Ordinal);
+        var versionMatch = System.Text.RegularExpressions.Regex.Match(initializer, @"internal const int CurrentSchemaVersion = (\d+);");
+        Assert.True(versionMatch.Success, "DuckDbInitializer has no CurrentSchemaVersion literal");
+        Assert.True(int.Parse(versionMatch.Groups[1].Value) >= 64);
         var start = initializer.IndexOf("if (fromVersion < 64)", StringComparison.Ordinal);
         Assert.True(start >= 0, "DuckDbInitializer has no v64 block");
         var block = initializer[start..];

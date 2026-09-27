@@ -178,6 +178,13 @@ public sealed class AgGroupIdRungTests
         await InsertReplicaRowAsync(connection, ct, collectionId: 1, collectionTime: oldTime, groupIdColumn: false);
         await InsertDatabaseReplicaRowAsync(connection, ct, collectionId: 1, collectionTime: oldTime, groupIdColumn: false);
 
+        /* This test MUST run on CI (CI has TimescaleDB); the compressed-hypertable state is the whole
+           point. A fresh ScratchPostgres database does not inherit the extension, so enable it here on the
+           scratch connection before the create_hypertable calls below, the same way
+           DarlingWatermarkFloorScanBoundLiveTests / CaptureDownChunkOrderTests do. */
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
+        Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the compressed-hypertable round trip");
+
         /* Convert both tables to hypertables and compress their one chunk each, the product's own way —
            this is what "V150's ALTER succeeded on the compressed hypertable" actually needs to test
            against, rather than an ordinary heap table. */

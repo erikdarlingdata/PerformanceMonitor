@@ -162,7 +162,9 @@ public sealed class QsCaptureModeRungTests : IDisposable
         using (var conn = new DuckDBConnection($"Data Source={dbPath}"))
         {
             await conn.OpenAsync();
-            Assert.Equal(64L, Convert.ToInt64(await ScalarAsync(conn, "SELECT MAX(version) FROM schema_version")));
+            /* Stays-true shape (#4475 raised CurrentSchemaVersion past 64): the climb reaches AT LEAST v64,
+               and lands exactly on CurrentSchemaVersion, whatever that is today. */
+            Assert.True(DuckDbInitializer.CurrentSchemaVersion >= 64);
             Assert.Equal((long)DuckDbInitializer.CurrentSchemaVersion, Convert.ToInt64(await ScalarAsync(conn, "SELECT MAX(version) FROM schema_version")));
 
             Assert.Equal(1L, Convert.ToInt64(await ScalarAsync(conn, "SELECT COUNT(*) FROM duckdb_indexes() WHERE table_name = 'query_store_health'")));
