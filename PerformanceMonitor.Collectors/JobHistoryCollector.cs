@@ -182,6 +182,49 @@ AND   DATEADD
     private const string ArchivalEmptyFilterPrefix = "\r\nAND   ";
 
     /// <summary>
+    /// The failback (A→B→A) lookback horizon, in days (#4487). After a target flips back to an epoch it
+    /// already stored rows under, the honest arm's <c>instance_id &gt; @last_instance_id</c> alone would
+    /// re-collect every already-stored row from the returning (higher) epoch that still sits above the
+    /// lower watermark the away leg left behind — potentially the server's entire retained history.
+    /// Bounding by <c>run_datetime</c> caps that re-read to this many days, once per failback, the same
+    /// shape <see cref="ArchivalEmptyFallbackHours"/> already gives the reseed case. The trade this makes:
+    /// <c>sysjobhistory</c> stamps a row with its run's START time but writes the row only when the run
+    /// ENDS, so a job STEP that has been running longer than this many days when it finally completes is
+    /// silently missed by the bound. Days, not hours, because a failback can leave the target on the
+    /// returning epoch for a while before the host's next cycle observes it — unlike the reseed case, where
+    /// the very next cycle self-heals.
+    /// </summary>
+    public const int FailbackLookbackDays = 7;
+
+    /// <summary>
+    /// The failback bound as a bare boolean expression (#4487): true with no restriction when the host has
+    /// no timestamp watermark yet (nothing stored means nothing to fail back FROM), otherwise the same
+    /// sargable run_date pre-filter plus exact decoded-run_datetime bound <see cref="ArchivalEmptyFilter"/>
+    /// uses — anchored on the host-supplied <c>@min_run_datetime</c> parameter instead of <c>GETDATE()</c>.
+    /// <c>OPTION(RECOMPILE)</c> on the template lets the optimizer fold the <c>IS NULL</c> branch away once
+    /// the literal parameter value is known, the same reason the guard's own target-max comparison can be a
+    /// runtime scalar rather than a second round trip. <c>run_datetime</c> is the target's own local wall
+    /// clock, and so is the stored <c>run_datetime</c> the host's watermark was read from, so the two
+    /// compare like with like.
+    /// </summary>
+    private static readonly string MinRunDateTimeBoundPredicate = @"
+(
+    @min_run_datetime IS NULL
+    OR
+    (
+        jh.run_date >= CONVERT(integer, CONVERT(varchar(8), @min_run_datetime, 112))
+        AND   DATEADD
+              (
+                  SECOND,
+                  (jh.run_time / 10000) * 3600 +
+                  ((jh.run_time / 100) % 100) * 60 +
+                  (jh.run_time % 100),
+                  CONVERT(datetime, CONVERT(varchar(8), jh.run_date))
+              ) >= @min_run_datetime
+    )
+)";
+
+    /// <summary>
     /// The target's OWN current high-water mark, read on the same round trip as the rows (a scalar
     /// aggregate over <c>sysjobhistory</c>'s clustered <c>instance_id</c> key — a one-row backward top,
     /// not a scan). <c>ISNULL(..., -1)</c> because a freshly purged <c>sysjobhistory</c> with nothing
@@ -231,14 +274,24 @@ AND   DATEADD
     /// <c>JobHistoryIdentityEpochTests</c>; the host-side watermark and cache behaviour is pinned where the
     /// host lives.</para>
     ///
-    /// <para><b>An epoch that returns (a failover and failback) is a KNOWN gap, not yet closed.</b> If the
-    /// identity later flips back to an epoch this server already stored rows under — a failover away and
-    /// back, or a restore reverted — the newest-batch watermark by itself is not enough: it sits at the
-    /// LOWER epoch's max after the away leg, and the following incremental read
-    /// (<c>instance_id &gt; @last_instance_id</c>, unbounded in time) re-collects every already-stored row
-    /// from the higher epoch that is still above that lower number, which can be far more than the
-    /// regressed arm's 24h window. See #4487 for the options considered (a natural-key dedupe on write, an
-    /// explicit per-epoch max, or bounding the post-flip read by <c>run_datetime</c>) and which one ships.</para>
+    /// <para><b>An epoch that returns (a failover and failback) is now BOUNDED, not closed by dedup
+    /// (#4487).</b> If the identity later flips back to an epoch this server already stored rows under — a
+    /// failover away and back, or a restore reverted — the newest-batch watermark by itself is not enough:
+    /// it sits at the LOWER epoch's max after the away leg, and the following incremental read
+    /// (<c>instance_id &gt; @last_instance_id</c>, unbounded in time) would otherwise re-collect every
+    /// already-stored row from the higher epoch that is still above that lower number. The honest arm now
+    /// ALSO requires <c>run_datetime &gt;= @min_run_datetime</c> whenever the host supplies a watermark —
+    /// <see cref="MinRunDateTimeBoundPredicate"/>, composed the same sargable way as
+    /// <see cref="ArchivalEmptyWindowPredicate"/>, anchored on the host's own newest stored
+    /// <c>run_datetime</c> minus <see cref="FailbackLookbackDays"/> days instead of <c>GETDATE()</c>. That
+    /// bounds a post-failback re-read to at most <see cref="FailbackLookbackDays"/> days of the returning
+    /// epoch's rows, once per failback, the same shape the regressed arm already gives the reseed case. The
+    /// cost: a job STEP that runs longer than <see cref="FailbackLookbackDays"/> days is missed by this
+    /// bound — <c>sysjobhistory</c> stamps a step row with its START time and writes it only when the step
+    /// ENDS, so a step that has been running for more than the lookback window when it finally completes
+    /// falls outside <c>run_datetime &gt;= @min_run_datetime</c> and is silently dropped. No bound at all
+    /// applies when the host has no watermark yet (first run, or an archival-emptied Lite store) — nothing
+    /// stored means nothing to fail back FROM.</para>
     /// </summary>
     private static readonly string IdentityGuardedWatermarkFilter = string.Format(
         CultureInfo.InvariantCulture,
@@ -247,6 +300,7 @@ AND   (
           (
               {0} >= @last_instance_id
               AND jh.instance_id > @last_instance_id
+              AND {2}
           )
           OR
           (
@@ -255,7 +309,8 @@ AND   (
           )
       )",
         TargetMaxInstanceIdScalar,
-        ArchivalEmptyWindowPredicate);
+        ArchivalEmptyWindowPredicate,
+        MinRunDateTimeBoundPredicate);
 
     /// <summary>
     /// Count of job-history identity regressions this run observed (0 or 1) — the store-side marker for a
@@ -330,9 +385,18 @@ AND   (
         if (context.NumericWatermark.HasValue)
         {
             filter = IdentityGuardedWatermarkFilter;
+            /* #4487: the failback bound. context.Watermark is ALREADY the host's newest STORED run_datetime
+               for this server (job_history declares run_datetime as its WatermarkColumn precisely so a Lite
+               archival-emptied store can be told from a true first run — see the class remarks) — exactly
+               the anchor the honest arm's run_datetime bound needs, with no second host read. Null when
+               nothing has been stored yet, which MinRunDateTimeBoundPredicate treats as no restriction. */
+            var minRunDateTime = context.Watermark is { } newestStored
+                ? newestStored - TimeSpan.FromDays(FailbackLookbackDays)
+                : (DateTime?)null;
             parameters = new[]
             {
                 new CollectorParameter("@last_instance_id", context.NumericWatermark.Value, CollectorParameterType.BigInt),
+                new CollectorParameter("@min_run_datetime", minRunDateTime, CollectorParameterType.DateTime2),
             };
         }
         else if (context.HasCollectedBefore)
