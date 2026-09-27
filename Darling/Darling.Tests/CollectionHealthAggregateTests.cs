@@ -771,22 +771,28 @@ ORDER BY range_start", connection);
     }
 
     /// <summary>
-    /// THE SCAN-BOUND PROOF (#4477, pin b). One hole hour, three days back, below the watermark. The
-    /// PRODUCT's own call path (<see cref="ReadBandedAsync"/>, reaching
-    /// <c>DarlingFleetReader.ReadFailingCollectorCountsAsync</c>) must touch no <c>collect.collection_log</c>
-    /// chunk older than the head window except the one chunk the hole hour itself falls in — never the whole
-    /// eight-day history a pre-#4477 build would have scanned raw for this one missing hour.
+    /// THE SCAN-BOUND PROOF (#4477, pin b). One hole hour, three days back, below the watermark. Every chunk
+    /// entirely before the 7-day window is untouched on dev too (dev's raw arm is itself bounded to that
+    /// window, so that half of the claim is vacuous — it does not discriminate this fix from dev at all). What
+    /// this fix actually changes is INSIDE the window: a covered chunk — one entirely below the watermark and
+    /// not the hole hour's own chunk — is read ONLY from the rollup once this fix's per-hole raw slice replaces
+    /// dev's whole-window fallback. The PRODUCT's own call path (<see cref="ReadBandedAsync"/>, reaching
+    /// <c>DarlingFleetReader.ReadFailingCollectorCountsAsync</c>) must touch no such covered chunk. Scans stay
+    /// legitimate only on the head chunk(s) [window start, head end), the hole hour's own chunk, and anything
+    /// at or after the watermark (the real-time tail, since <c>materialized_only = false</c>).
     ///
-    /// <para><b>RED on dev.</b> <c>CollectionHealthRollupSupport.RollupPlanAsync</c> and its
-    /// <c>RollupPlan.HoleHours</c> member do not exist before #4477, so this test fails to build there — the
-    /// only shape a fix that adds a whole new return type can be RED against pre-fix code with. Even if the
-    /// plan assertions were stripped, dev's guard would still fail this test at RUNTIME: it has no
-    /// hole-hours concept, ANY missing hour makes the whole read unusable, the caller falls back to
-    /// <see cref="DarlingFleetReader.FleetCollectionHealthSql"/> for the WHOLE window, and every old chunk
-    /// this test asserts untouched would be scanned instead.</para>
+    /// <para><b>RED on dev, at RUNTIME</b> (recorded against a build of dev's tip with only this test file
+    /// swapped in, since dev already has <c>RollupUsableAsync</c>/<c>ContinuitySql</c> under the names this
+    /// test reads — no compile failure this time). Dev has no hole-hours concept: <c>ContinuitySql</c> counts
+    /// distinct buckets in [head end, watermark) and any gap short of the count fails the whole guard, so ONE
+    /// missing hour anywhere in an eight-day plant makes <c>RollupUsableAsync</c> return <c>false</c> and the
+    /// caller falls back to <see cref="DarlingFleetReader.FleetCollectionHealthSql"/> raw for the WHOLE
+    /// window — every covered chunk this test asserts untouched gets seq_scan'd instead. Read through plain
+    /// SQL (<see cref="DarlingFleetReader.CollectionHealthWatermarkSql"/>), not <c>RollupPlanAsync</c>, so this
+    /// file compiles unmodified against dev.</para>
     /// </summary>
     [Fact]
-    public async Task ProductPath_OneHoleHour_NeverScansAChunkOlderThanTheHeadOrTheHole_AgainstDevPostgres()
+    public async Task ProductPath_OneHoleHour_NeverScansACoveredChunkInsideTheWindow_AgainstDevPostgres()
     {
         var ct = TestContext.Current.CancellationToken;
         var store = await OpenStoreAsync(ct);
@@ -813,25 +819,36 @@ ORDER BY range_start", connection);
         var holeHour = new DateTime(now.Year, now.Month, now.Day, now.Hour, 0, 0, DateTimeKind.Unspecified).AddDays(-3);
         await DeleteOneBucketAsync(connection, holeHour, ct);
 
-        var plan = await CollectionHealthRollupSupport.RollupPlanAsync(postgres, headEnd, ct);
-        Assert.True(plan.Usable);
-        Assert.Single(plan.HoleHours);
+        /* Read through PLAIN SQL, the members dev already has under these names, so this file needs no
+           #4477-only member to build on dev's tip — only the ASSERTED BEHAVIOR differs. */
+        DateTime? watermark;
+        await using (var readWatermark = new NpgsqlCommand(DarlingFleetReader.CollectionHealthWatermarkSql, connection))
+        {
+            watermark = await readWatermark.ExecuteScalarAsync(ct) is DateTime w ? DateTime.SpecifyKind(w, DateTimeKind.Unspecified) : null;
+        }
+        Assert.True(watermark is { } mark && mark > headEnd, "expected a materialized watermark past the head end for a covered chunk to exist below it");
+        var watermarkUtc = DateTime.SpecifyKind(watermark!.Value, DateTimeKind.Utc);
 
         var chunks = await ListChunkRelationsAsync(connection, ct);
         Assert.True(chunks.Count >= 3, $"expected several daily chunks from eight days of history; got {chunks.Count}");
 
-        /* Everything at or after windowStart is legitimately in play: the head raw slice, the rollup's whole
-           buckets, the hole hour read raw, AND — above the aggregate's watermark — the cagg's own real-time
-           computation over the freshest raw chunk(s), since materialized_only = false. "Old" here means
-           strictly BEFORE the 7-day consumer window: the plant seeds 8 days of history precisely so at least
-           one chunk falls outside the window and must never be touched at all. */
+        /* A COVERED chunk: entirely below the watermark (so the aggregate, not raw, is authoritative for it),
+           at or after the 7-day window start (inside the consumer window this fix's slice logic actually
+           governs — the vacuous "before the window" half of the old pin proved nothing, since dev's own raw
+           arm never touches those chunks either), and NOT the hole hour's own chunk (that chunk is legitimately
+           read raw by both dev and this fix, so it proves nothing about the fix). */
         var windowStartUtc = DateTime.SpecifyKind(windowStart, DateTimeKind.Utc);
-        var oldChunks = chunks.Where(c => c.RangeEnd <= windowStartUtc).ToList();
-        Assert.True(oldChunks.Count >= 1, "expected at least one chunk entirely before the 7-day window to prove untouched");
+        var holeHourUtc = DateTime.SpecifyKind(holeHour, DateTimeKind.Utc);
+        var coveredChunks = chunks
+            .Where(c => c.RangeEnd <= watermarkUtc && c.RangeStart >= windowStartUtc)
+            .Where(c => !(holeHourUtc >= c.RangeStart && holeHourUtc < c.RangeEnd))
+            .ToList();
+        Assert.True(coveredChunks.Count >= 1,
+            "expected at least one whole chunk below the watermark, inside the window, and outside the hole's own chunk");
 
         await ForceStatsFlushAsync(postgres, connection, ct);
         var before = new Dictionary<(string, string), (long Seq, long Idx)>();
-        foreach (var chunk in oldChunks)
+        foreach (var chunk in coveredChunks)
         {
             before[(chunk.Schema, chunk.Name)] = await ScanCountersAsync(connection, chunk.Schema, chunk.Name, ct);
         }
@@ -840,7 +857,7 @@ ORDER BY range_start", connection);
         _ = await ReadBandedAsync(postgres, now, ct);
 
         await ForceStatsFlushAsync(postgres, connection, ct);
-        foreach (var chunk in oldChunks)
+        foreach (var chunk in coveredChunks)
         {
             var after = await ScanCountersAsync(connection, chunk.Schema, chunk.Name, ct);
             var beforeCounters = before[(chunk.Schema, chunk.Name)];
