@@ -270,21 +270,32 @@ WHERE ccs.before_compression_total_bytes IS NOT NULL", connection))
         Assert.Equal(1L, await ScalarLongAsync(connection,
             "SELECT COUNT(*) FROM collect.raw_chunk_interval_rung_history WHERE table_name = 'rated_test'", ct));
 
-        var summary = logger.Lines.FirstOrDefault(l => l.Contains("moved", StringComparison.Ordinal) && l.Contains("evaluated", StringComparison.Ordinal));
+        var summary = logger.Lines.FirstOrDefault(l =>
+            l.StartsWith("Information: raw chunk interval reconcile:", StringComparison.Ordinal)
+            && l.Contains("moved", StringComparison.Ordinal) && l.Contains("evaluated", StringComparison.Ordinal));
         Assert.NotNull(summary);
         Assert.Contains("1 moved", summary, StringComparison.Ordinal);
 
         /* ---- second arm: a huge budget, no table over its own forecast cap, so nothing moves and the
-           summary line still logs at Information with the ratio under 1 ---- */
+           summary line still logs at Information with the ratio under 1. The rated table itself is now held
+           for a different reason: it just moved (the call above), so MinimumDaysBetweenMoves holds it before
+           either pass runs — that held line is asserted at Information too, by exact prefix. ---- */
         var loggerNoChange = new CapturingTestLogger();
         var changedNoChange = await RawChunkIntervalReconciler.ReconcileAsync(
             connection, budgetBytes: openBytesAt24Hours * 1_000, DateTime.UtcNow, loggerNoChange, ct);
 
         Assert.Equal(0, changedNoChange);
-        var summaryNoChange = loggerNoChange.Lines.FirstOrDefault(l => l.Contains("evaluated", StringComparison.Ordinal));
+        var summaryNoChange = loggerNoChange.Lines.FirstOrDefault(l =>
+            l.StartsWith("Information: raw chunk interval reconcile:", StringComparison.Ordinal)
+            && l.Contains("evaluated", StringComparison.Ordinal));
         Assert.NotNull(summaryNoChange);
         Assert.Contains("0 moved", summaryNoChange, StringComparison.Ordinal);
         Assert.Contains("0.", summaryNoChange, StringComparison.Ordinal); /* ratio under 1, e.g. "0.00x budget" */
+
+        var heldLine = loggerNoChange.Lines.FirstOrDefault(l =>
+            l.StartsWith("Information: raw chunk interval: rated_test held at 12h", StringComparison.Ordinal));
+        Assert.NotNull(heldLine);
+        Assert.Contains("moved within the last", heldLine, StringComparison.Ordinal);
     }
 
     /// <summary>Plants one row a day before <paramref name="ts"/> for <c>collect.rated_test</c>, the same
