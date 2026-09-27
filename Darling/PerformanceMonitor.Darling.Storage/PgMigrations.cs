@@ -229,6 +229,7 @@ public static class PgMigrations
         new Migration(147, "compose-statement-timeout-sixty", V147Sql),
         new Migration(148, "read-latency", V148Sql),
         new Migration(149, "query-store-liveness-hot-touch", V149Sql),
+        new Migration(150, "collection-log-watermark-and-job-history-indexes", V150Sql),
     };
 
     /// <summary>
@@ -2357,6 +2358,50 @@ DROP INDEX IF EXISTS collect.idx_query_store_plan_map_last_seen;
 DROP INDEX IF EXISTS collect.idx_query_store_text_last_seen;
 ALTER TABLE collect.query_store_plan_map SET (fillfactor = 90);
 ALTER TABLE collect.query_store_text SET (fillfactor = 90);";
+
+    /// <summary>
+    /// V150 — two indexes, added additively for both #4469 and #4477:
+    /// <list type="bullet">
+    /// <item><c>idx_collection_log_watermark</c> on <c>collect.collection_log (server_id, collector_name,
+    /// collection_time DESC)</c> so <see cref="PerformanceMonitor.Darling.Service.DarlingWorker.ReadCollectorWatermarksSql"/>
+    /// can look up each collector's newest run with one index-only descent per collector instead of a
+    /// bitmap heap scan of the newest chunks. Measured on a rig shaped like the field (43 servers, ~40
+    /// collectors, 15M rows, 9 of 11 chunks compressed): the per-collector lookup runs ~0.65 ms against
+    /// the old statement's ~24 ms, cold and warm alike, because it turns the read from a scan of every
+    /// row in the newest chunks into one index-only descent per collector name. Costs: ~0.94 s to build
+    /// on 2.4M uncompressed rows (well inside <c>MigrationCommandTimeoutSeconds</c>), ~115 MB, and +38%
+    /// wall time on a 100,000-row bulk COPY into the newest chunk (0.353 s -&gt; 0.487 s median of 3) —
+    /// one more btree every future <c>collection_log</c> write maintains.</item>
+    /// <item><c>idx_job_history_server_run</c> on <c>collect.job_history (server_id, run_datetime DESC,
+    /// instance_id DESC)</c> for the Viewer's Job History tab
+    /// (<see cref="PerformanceMonitor.Darling.Viewer.ViewerDataService.BuildJobHistorySql"/>), matching that
+    /// read's own <c>ORDER BY run_datetime_utc DESC, instance_id DESC</c> tie-break so a per-server
+    /// top-N lookup needs no additional sort on the indexed columns. Measured on a rig shaped like the
+    /// field (43 servers, ~28,000 rows/server over 4 days, 3 of 5 chunks compressed): the base row
+    /// selection this index serves reads ~1,506 buffers cold against the unindexed scan's ~6,883 (about
+    /// 4.6x fewer), and the full Job History read (including the per-job stats aggregate this index does
+    /// not cover) runs ~721 ms cold against ~1,362 ms (about 1.9x) — the win is smaller than the
+    /// watermark index's because the read's other half, <c>job_stats</c>, still scans every matching row
+    /// in the window to compute an average/max per job and this index does not help that half.</item>
+    /// </list>
+    /// Both are plain <c>CREATE INDEX IF NOT EXISTS</c> (mirroring V149's shape): <c>MigrateAsync</c> wraps
+    /// every rung's whole SQL in one transaction, and <c>CREATE INDEX ... WITH
+    /// (timescaledb.transaction_per_chunk)</c> cannot run inside one — measured, it raises
+    /// <c>CREATE INDEX ... WITH (timescaledb.transaction_per_chunk) cannot run inside a transaction
+    /// block</c>. Each build takes a <c>ShareLock</c> for its duration (confirmed via <c>pg_locks</c>),
+    /// blocking concurrent inserts/updates/deletes to that table until the build finishes — acceptable at
+    /// the measured field-store extrapolation of well under 2 seconds each, but a store whose uncompressed
+    /// chunks have grown unusually large (a long compression-policy gap, or a raised
+    /// <c>CompressAfterDays</c>) would make this rung's lock window grow linearly with the uncompressed
+    /// row count. <c>IF NOT EXISTS</c> makes both idempotent on a FRESH store too: <c>PgSchemaGenerator</c>
+    /// does not build either index on a fresh install today, so this rung is the real create on both
+    /// paths, with no fresh-vs-upgraded shape divergence to special-case.
+    /// </summary>
+    private const string V150Sql = @"
+CREATE INDEX IF NOT EXISTS idx_collection_log_watermark
+    ON collect.collection_log (server_id, collector_name, collection_time DESC);
+CREATE INDEX IF NOT EXISTS idx_job_history_server_run
+    ON collect.job_history (server_id, run_datetime DESC, instance_id DESC);";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
