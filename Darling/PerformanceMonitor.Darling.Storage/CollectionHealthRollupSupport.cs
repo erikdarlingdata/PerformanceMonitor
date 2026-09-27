@@ -7,6 +7,8 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -52,13 +54,45 @@ FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_f
       WHERE user_view_schema = 'collect'
       AND   user_view_name = '" + TimescaleSupport.CollectionHealthHourlyView + @"') x";
 
-    /// <summary>THE CONTINUITY GUARD (#3893's watermark hole): how many distinct whole-hour buckets the
-    /// aggregate holds in [$1 head end, $2 watermark). Below the watermark only materialized buckets exist, so
-    /// a missing hour there is a HOLE — rows that exist in <c>collection_log</c> and that the aggregate will
-    /// never serve. Belt-and-braces for what the refresh policy's eight-day window cannot rule out: a refresh
-    /// interrupted part-way, a hand-run narrow refresh, an altered policy.</summary>
-    public const string ContinuitySql =
-        "SELECT count(DISTINCT bucket) FROM collect." + TimescaleSupport.CollectionHealthHourlyView + " WHERE bucket >= $1 AND bucket < $2";
+    /// <summary>THE CONTINUITY GUARD (#3893's watermark hole, #4477's fix): every whole-hour boundary in
+    /// [$1 head end, $2 watermark) that the aggregate has NO bucket for. Below the watermark only materialized
+    /// buckets exist, so a missing hour there is a HOLE — rows that exist in <c>collection_log</c> and that
+    /// the aggregate will never serve on its own. Returns the actual hour boundaries (not just a count, #4477)
+    /// so the composer can read exactly those hours raw instead of falling every caller back to a 7-day raw
+    /// scan for the whole window over one missing hour — the shape that sent the Viewer's fleet health read to
+    /// the raw arm 819 times in three days on a store measured at 6.6 s (raw) against 184 ms (composed).
+    /// Belt-and-braces for what the refresh policy's eight-day window cannot rule out: a refresh interrupted
+    /// part-way, a hand-run narrow refresh, an altered policy.</summary>
+    public const string MissingHoursSql = @"
+SELECT gs
+FROM generate_series($1::timestamp, $2::timestamp - INTERVAL '1 hour', INTERVAL '1 hour') AS gs
+WHERE NOT EXISTS (SELECT 1 FROM collect." + TimescaleSupport.CollectionHealthHourlyView + @" h WHERE h.bucket = gs)
+ORDER BY gs";
+
+    /// <summary>The most hole hours the composed read will still serve individually (#4477). Above this, the
+    /// per-hole raw slice this composer would add (two extra parameters and one extra UNION ALL branch per
+    /// hole) grows large enough that reading the whole window raw is simpler and no slower in the case that
+    /// matters — a fleet this broken is already answering from <c>collection_log</c>'s hot, uncompressed tail,
+    /// not the 7-day cold scan a single missing hour used to force. Named so the guard's own doc comment and
+    /// the tests that pin the too-many-holes fallback have one place to read it from.</summary>
+    public const int MaxRepairableHoleHours = 48;
+
+    /// <summary>The continuity guard's verdict: whether the composed read may be used at all, and — when it
+    /// may — exactly which whole hours below the watermark have no bucket and must be read raw alongside the
+    /// rollup instead of forcing the WHOLE window to raw (#4477). <see cref="Usable"/> converts implicitly to
+    /// <c>bool</c> so the existing <c>Assert.True</c>/<c>Assert.False</c> pins and <c>if (composed)</c> call
+    /// sites need no rewrite.</summary>
+    public readonly record struct RollupPlan(bool Usable, IReadOnlyList<DateTime> HoleHours)
+    {
+        public static implicit operator bool(RollupPlan plan) => plan.Usable;
+
+        /// <summary>The all-clear verdict every non-holed window reaches: usable, no holes to read raw.</summary>
+        public static readonly RollupPlan Clean = new(true, Array.Empty<DateTime>());
+
+        /// <summary>The verdict when the composed read must not be used at all — absent, too many holes, or a
+        /// failed/unconvertible guard read. The caller falls back to the exact raw scan of the whole window.</summary>
+        public static readonly RollupPlan Unusable = new(false, Array.Empty<DateTime>());
+    }
 
     /// <summary>The first hour boundary at or after <paramref name="windowStart"/> — where whole buckets begin.</summary>
     public static DateTime CeilingHour(DateTime windowStart)
@@ -104,9 +138,61 @@ FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_f
     /// <c>materialized_only = false</c>: buckets above its watermark are computed real-time from raw, so the
     /// result is current to the second.
     /// </summary>
-    public static string ComposeFleetSql(string rawSql)
+    public static string ComposeFleetSql(string rawSql) => ComposeFleetSql(rawSql, Array.Empty<DateTime>());
+
+    /// <summary><paramref name="rawSql"/> (a <c>collection_time &gt;= $1</c>-bounded statement) with the SAME
+    /// bound replaced with <c>holes.h</c> / <c>holes.h + INTERVAL '1 hour'</c> (#4477) — derived by
+    /// <c>Replace</c>, not restated, for the same reason <see cref="InsertHeadBound"/> is: a raw statement
+    /// reshaped without this composer noticing fails loudly instead of quietly reading the whole window.</summary>
+    public static string InsertHoleBound(string rawSql)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rawSql);
+
+        var holeSlice = rawSql.Replace(
+            "WHERE collection_time >= $1",
+            "WHERE collection_time >= holes.h\nAND   collection_time < holes.h + INTERVAL '1 hour'",
+            StringComparison.Ordinal);
+
+        if (string.Equals(holeSlice, rawSql, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                "CollectionHealthRollupSupport.InsertHoleBound found no 'WHERE collection_time >= $1' to bound — the raw SQL has drifted from the shape this composer requires (#4477).",
+                nameof(rawSql));
+        }
+
+        return holeSlice;
+    }
+
+    /// <summary>
+    /// Composes <paramref name="rawSql"/> with <c>collect.collection_health_hourly</c>: every WHOLE hour bucket
+    /// from $2 (the ceiling hour) UNION ALL the raw head slice [$1, $2) (<see cref="InsertHeadBound"/>) UNION
+    /// ALL, for every hour in <paramref name="holeHours"/> (#4477), the raw rows for that one hour
+    /// (<see cref="InsertHoleBound"/>, driven off a <c>$3</c> array parameter via <c>unnest</c> so the SQL text
+    /// stays the same shape whether there is one hole or <see cref="MaxRepairableHoleHours"/> of them) —
+    /// re-aggregated per (server, collector), same as every other part. A hole hour with no raw rows at all (a
+    /// real collection outage) contributes nothing from its branch, exactly what the raw arm would also have
+    /// returned for that hour. <paramref name="rawSql"/> must select exactly the thirteen columns described on
+    /// the overload above, in that order.
+    /// </summary>
+    public static string ComposeFleetSql(string rawSql, IReadOnlyList<DateTime> holeHours)
     {
         var headSlice = InsertHeadBound(rawSql);
+
+        var holesSql = string.Empty;
+        if (holeHours.Count > 0)
+        {
+            var holeSlice = InsertHoleBound(rawSql);
+            holesSql = @"
+    UNION ALL
+    SELECT server_id, collector_name, total_runs, success_count, error_count, last_success_time,
+           permission_denied_count, last_run_time, abandoned_count, extension_missing_count,
+           last_non_skip_time, last_productive_time, last_zero_row_streak_break_time
+    FROM unnest($3::timestamp[]) AS holes(h)
+    CROSS JOIN LATERAL
+    (
+" + holeSlice + @"
+    ) AS hole_rows";
+        }
 
         return @"
 WITH parts AS
@@ -117,7 +203,7 @@ WITH parts AS
     FROM collect." + TimescaleSupport.CollectionHealthHourlyView + @"
     WHERE bucket >= $2
     UNION ALL
-" + headSlice + @"
+" + headSlice + holesSql + @"
 )
 SELECT
     server_id,
@@ -140,12 +226,13 @@ GROUP BY server_id, collector_name";
     /// <summary>
     /// Chooses the statement for the seven-day collection-health read: the composed one only when both guards
     /// pass, else the exact raw scan. (a) ABSENT: no aggregate (plain PostgreSQL, or not yet created) → raw.
-    /// (b) CONTINUITY: any whole hour in [head end, watermark) missing as a bucket → raw
-    /// (<see cref="ContinuitySql"/> says why). A guard read that fails is treated as a failed guard,
+    /// (b) CONTINUITY: the missing hours below the watermark (#4477: read raw alongside the rollup instead of
+    /// forcing the WHOLE window to raw), unless there are more than <see cref="MaxRepairableHoleHours"/>, in
+    /// which case → raw, unchanged from before #4477. A guard read that fails is treated as a failed guard,
     /// availability-first: the raw scan is always exact, only slower. That includes a value the client cannot
     /// convert (#3973): a guard read that produced one used to fail the whole overview instead.
     /// </summary>
-    public static async Task<bool> RollupUsableAsync(
+    public static async Task<RollupPlan> RollupPlanAsync(
         NpgsqlDataSource postgres, DateTime headEnd, CancellationToken cancellationToken)
     {
         try
@@ -155,7 +242,7 @@ GROUP BY server_id, collector_name";
                 probe.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
                 if (await probe.ExecuteScalarAsync(cancellationToken) is not true)
                 {
-                    return false;
+                    return RollupPlan.Unusable;
                 }
             }
 
@@ -168,22 +255,41 @@ GROUP BY server_id, collector_name";
 
             if (watermark is not { } mark || mark <= headEnd)
             {
-                return true; // nothing whole below the watermark inside the window: all real-time, nothing to hole
+                return RollupPlan.Clean; // nothing whole below the watermark inside the window: all real-time, nothing to hole
             }
 
-            var expected = (long)Math.Floor((mark - headEnd).TotalHours);
-            await using var count = postgres.CreateCommand(ContinuitySql);
-            count.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
-            AddTimestamp(count, headEnd);
-            AddTimestamp(count, headEnd.AddHours(expected));
-            var present = Convert.ToInt64(await count.ExecuteScalarAsync(cancellationToken));
-            return present >= expected;
+            var holes = new List<DateTime>();
+            await using (var missing = postgres.CreateCommand(MissingHoursSql))
+            {
+                missing.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
+                AddTimestamp(missing, headEnd);
+                AddTimestamp(missing, mark);
+                await using var reader = await missing.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    holes.Add(DateTime.SpecifyKind(reader.GetDateTime(0), DateTimeKind.Unspecified));
+                }
+            }
+
+            return holes.Count switch
+            {
+                0 => RollupPlan.Clean,
+                > MaxRepairableHoleHours => RollupPlan.Unusable, // too many holes to patch cheaply: raw is simpler and no slower
+                _ => new RollupPlan(true, holes),
+            };
         }
         catch (Exception ex) when (ex is PostgresException or InvalidCastException)
         {
-            return false;
+            return RollupPlan.Unusable;
         }
     }
+
+    /// <summary>Back-compat shape for callers that only need the usable/not verdict, not the hole hours
+    /// (#4477's <see cref="RollupPlan"/> implicitly converts to <c>bool</c> too, but a caller that awaits this
+    /// directly needs an explicit <c>Task&lt;bool&gt;</c>).</summary>
+    public static async Task<bool> RollupUsableAsync(
+        NpgsqlDataSource postgres, DateTime headEnd, CancellationToken cancellationToken) =>
+        await RollupPlanAsync(postgres, headEnd, cancellationToken);
 
     private static void AddTimestamp(NpgsqlCommand command, DateTime value) =>
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(value, DateTimeKind.Unspecified) });
