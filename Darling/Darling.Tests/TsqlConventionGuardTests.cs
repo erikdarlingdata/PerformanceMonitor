@@ -1431,6 +1431,10 @@ public sealed class TsqlConventionGuardTests
         "PerformanceMonitor.Collectors/StallWaitProbe.cs FitsUnderBudget",
         "PerformanceMonitor.Common/SystemHealthParser.cs GbFromBytes",
         "PerformanceMonitor.Common/SystemHealthParser.cs GbFromKb",
+        /* #4452: the same expression-bodied one-liner shape as GbFromBytes/GbFromKb just above — it strands
+           only its own numeric literals (1048576, the rounding precision), not T-SQL or a tempdb label, so
+           no census reads a site of that kind here. */
+        "PerformanceMonitor.Common/SystemHealthParser.cs MbFromBytes",
         "PerformanceMonitor.Notifications/WebhookAlertService.cs DeriveResourceDatabase",
         "Darling/PerformanceMonitor.Darling.Analysis/PgBaselineProvider.cs IsCommandTimeout",
         /* #4276: the same expression-bodied classifier shape as IsCommandTimeout just above — it strands

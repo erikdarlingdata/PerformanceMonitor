@@ -1,0 +1,16 @@
+<!-- #4452: DERIVED from the real scheduler_monitor_normal.xml capture (same element shape;
+     only the process_utilization and system_idle <value> numbers were changed). No real captured
+     sample crossed the other-process-CPU threshold, so this fixture exercises that arm: sql_cpu=3,
+     system_idle=40 -> other-process CPU = 100-3-40=57, which is >= 50 and so significant on the
+     other-process arm alone (sql_cpu 3 < 90, memory_utilization 100 > 50). -->
+<event name="scheduler_monitor_system_health_ring_buffer_recorded" package="sqlos" timestamp="2026-09-26T23:59:53.232Z">
+  <data name="id"><type name="uint32" package="package0"/><value>0</value></data>
+  <data name="timestamp"><type name="uint64" package="package0"/><value>0</value></data>
+  <data name="process_utilization"><type name="uint32" package="package0"/><value>3</value></data>
+  <data name="system_idle"><type name="uint32" package="package0"/><value>40</value></data>
+  <data name="user_mode_time"><type name="uint64" package="package0"/><value>176250000</value></data>
+  <data name="kernel_mode_time"><type name="uint64" package="package0"/><value>7187500</value></data>
+  <data name="page_faults"><type name="uint32" package="package0"/><value>99</value></data>
+  <data name="working_set_delta"><type name="int64" package="package0"/><value>77824</value></data>
+  <data name="memory_utilization"><type name="uint32" package="package0"/><value>100</value></data>
+</event>

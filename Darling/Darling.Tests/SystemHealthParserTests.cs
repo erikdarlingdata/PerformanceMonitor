@@ -27,7 +27,7 @@ public class SystemHealthParserTests
     private static string LoadFixture(string name) =>
         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "SystemHealth", name));
 
-    private static readonly DateTime SchedulerTime = new(2026, 7, 5, 11, 58, 0, 123, DateTimeKind.Utc);
+    private static readonly DateTime SchedulerHighCpuTime = new(2026, 9, 26, 22, 8, 48, 939, DateTimeKind.Utc);
     private static readonly DateTime ErrorTime = new(2026, 7, 5, 12, 0, 5, 500, DateTimeKind.Utc);
     private static readonly DateTime ResourceTime = new(2026, 7, 5, 12, 1, 0, 0, DateTimeKind.Utc);
     private static readonly DateTime BrokerTime = new(2026, 7, 5, 12, 2, 10, 250, DateTimeKind.Utc);
@@ -41,20 +41,75 @@ public class SystemHealthParserTests
     // ── SchedulerIssues (scheduler_monitor_system_health_ring_buffer_recorded) ──
 
     [Fact]
-    public void SchedulerIssue_ShredsEveryColumn()
+    public void SchedulerIssue_ShredsEveryColumn_HighSqlCpu()
     {
-        var r = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor.xml"));
+        // Real field capture: process_utilization=94, system_idle=2 -> other = 100-94-2=4;
+        // working_set_delta 4096 bytes -> 4096/1048576 = 0.00390625 MB, rounded to 0.00.
+        var r = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor_high_sql_cpu.xml"));
 
         Assert.NotNull(r);
-        Assert.Equal(SchedulerTime, r!.EventTime);
-        Assert.Equal(10, r.SchedulerId);
-        Assert.Equal(3, r.CpuId);
-        Assert.Equal("WARNING", r.Status);          // data[@name="status"]/text, NOT the numeric value
-        Assert.True(r.IsOnline);
-        Assert.False(r.IsRunnable);
-        Assert.True(r.IsRunning);
-        Assert.Equal(4500L, r.NonYieldingTimeMs);    // data[@name="non_yielding_time"] (no _ms suffix in XML)
-        Assert.Equal(4L, r.ThreadQuantumMs);         // data[@name="thread_quantum"]
+        Assert.Equal(SchedulerHighCpuTime, r!.EventTime);
+        Assert.Equal(94, r.SqlCpuUtilization);
+        Assert.Equal(4, r.OtherProcessCpu);
+        Assert.Equal(2, r.SystemIdle);
+        Assert.Equal(100, r.MemoryUtilization);
+        Assert.Equal(505L, r.PageFaults);
+        Assert.Equal(0.00m, r.WorkingSetDeltaMb);
+        Assert.True(SystemHealthSignificance.IsSignificant(r));   // SQL CPU 94 >= 90
+    }
+
+    [Fact]
+    public void SchedulerIssue_ShredsEveryColumn_Normal()
+    {
+        // Real field capture: process_utilization=3, system_idle=95 -> other = 100-3-95=2;
+        // working_set_delta 77824 bytes -> 77824/1048576 = 0.074218... MB, rounded to 0.07.
+        var r = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor_normal.xml"));
+
+        Assert.NotNull(r);
+        Assert.Equal(3, r!.SqlCpuUtilization);
+        Assert.Equal(2, r.OtherProcessCpu);
+        Assert.Equal(95, r.SystemIdle);
+        Assert.Equal(100, r.MemoryUtilization);
+        Assert.Equal(99L, r.PageFaults);
+        Assert.Equal(0.07m, r.WorkingSetDeltaMb);
+        Assert.False(SystemHealthSignificance.IsSignificant(r));
+    }
+
+    [Fact]
+    public void SchedulerIssue_OtherProcessCpu_Significant()
+    {
+        // Derived from the real "normal" capture (system_idle changed 95 -> 40) to exercise the
+        // other-process-CPU arm: other = 100-3-40=57 >= 50.
+        var r = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor_other_process_cpu.xml"));
+        Assert.NotNull(r);
+        Assert.Equal(57, r!.OtherProcessCpu);
+        Assert.True(SystemHealthSignificance.IsSignificant(r));
+    }
+
+    [Fact]
+    public void SchedulerIssue_LowMemory_Significant()
+    {
+        // Derived from the real "normal" capture (memory_utilization changed 100 -> 50) to exercise
+        // the low-memory arm: 50 <= 50.
+        var r = SystemHealthParser.ParseSchedulerIssue(LoadFixture("scheduler_monitor_low_memory.xml"));
+        Assert.NotNull(r);
+        Assert.Equal(50, r!.MemoryUtilization);
+        Assert.True(SystemHealthSignificance.IsSignificant(r));
+    }
+
+    [Theory]
+    [InlineData(90, 0, 100, true)]        // sql cpu boundary: 90 is significant
+    [InlineData(89, 0, 100, false)]       // one under, not significant
+    [InlineData(0, 50, 100, true)]        // other-process boundary: 50 is significant (sql=0,idle=50->other=50)
+    [InlineData(0, 51, 100, false)]       // other-process 49, not significant (idle=51->other=49)
+    [InlineData(0, 100, 50, true)]        // memory boundary: 50 is significant
+    [InlineData(0, 100, 51, false)]       // memory 51, not significant
+    [InlineData(null, null, null, false)] // all null -> not significant (SQL null comparison is false)
+    public void SchedulerIssue_SignificanceBoundaries(int? sqlCpu, int? idle, int? mem, bool expected)
+    {
+        var other = sqlCpu is { } sc && idle is { } id ? 100 - sc - id : (int?)null;
+        var r = new SchedulerIssueRecord { SqlCpuUtilization = sqlCpu, OtherProcessCpu = other, SystemIdle = idle, MemoryUtilization = mem };
+        Assert.Equal(expected, SystemHealthSignificance.IsSignificant(r));
     }
 
     // ── SevereErrors (error_reported) ──
@@ -385,7 +440,7 @@ public class SystemHealthParserTests
     {
         var events = new (string?, string?)[]
         {
-            (SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor.xml")),
+            (SystemHealthParser.SchedulerMonitorEvent, LoadFixture("scheduler_monitor_high_sql_cpu.xml")),
             (SystemHealthParser.ErrorReportedEvent, LoadFixture("error_reported.xml")),
             (SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_system.xml")),
             (SystemHealthParser.SpServerDiagnosticsEvent, LoadFixture("sp_server_diagnostics_resource.xml")),
@@ -410,7 +465,7 @@ public class SystemHealthParserTests
         Assert.Single(result.MemoryConditions);
         Assert.Single(result.CpuTasks);
         Assert.Equal(2, result.IoIssues.Count);
-        Assert.Equal(10, result.SchedulerIssues[0].SchedulerId);
+        Assert.Equal(94, result.SchedulerIssues[0].SqlCpuUtilization);
         Assert.Equal(823, result.SevereErrors[0].ErrorNumber);
         Assert.Equal(6, result.SystemHealth[0].BadPagesDetected);
     }

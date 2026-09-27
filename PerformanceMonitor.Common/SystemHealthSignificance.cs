@@ -105,12 +105,16 @@ public static class SystemHealthSignificance
     };
 
     /// <summary>
-    /// A scheduler-monitor row is significant when its status is WARNING (a non-yielding or offline
-    /// scheduler), per sp_HealthParser.sql line 4540 under <c>@warnings_only = 1</c>. Routine heartbeat
-    /// rows (any other status) are dropped.
+    /// A scheduler-monitor sample is significant per sp_HealthParser's <c>@warnings_only</c> predicate for
+    /// this section: SQL Server's own CPU is pinned (&gt;= 90), other processes are using half the box or
+    /// more (&gt;= 50), or memory utilization has dropped to half or below (&lt;= 50, the classic external
+    /// memory-pressure signal). A null comparison is false, so a sample with everything null is not
+    /// significant.
     /// </summary>
     public static bool IsSignificant(SchedulerIssueRecord record) =>
-        string.Equals(record.Status, WarningStatus, StringComparison.Ordinal);
+        record.SqlCpuUtilization >= 90 ||
+        record.OtherProcessCpu >= 50 ||
+        record.MemoryUtilization <= 50;
 
     /// <summary>
     /// An error_reported row is significant when severity &gt;= 19 and the error number is not one of the
