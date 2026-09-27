@@ -3640,7 +3640,7 @@ internal sealed class DarlingStoreUpgrade
                 pgUpgrade,
                 BuildPgUpgradeArguments(
                     context.OldBinDirectory, context.NewBinDirectory, context.DataDirectory, newDataDirectory,
-                    context.UserName, mode, checkOnly: false, jobs, QuiesceTimescaleServerOptions),
+                    context.UserName, mode, checkOnly: false, jobs, serverOptions: null),
                 s_pgUpgradeTimeout,
                 cancellationToken,
                 environment,
