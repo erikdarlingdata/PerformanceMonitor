@@ -120,6 +120,12 @@ public sealed partial class ViewerDataService
     /// not move. A bucket whose every row was an artifact reads <c>cntr_value IS NULL</c> with a positive
     /// <c>artifacts_set_aside</c> — <see cref="GetPerfmonTrendsByCountersAsync"/> drops that point rather than
     /// turning it into a fabricated 0.</para>
+    /// <para>The raw-row layer is itself a <c>UNION ALL</c> (#4476 cost review): the lag/lead window opens only
+    /// on rows <see cref="WaitStatisticsArtifact.ObjectNameSuffixMatchSql"/> lets through, with the rest of the
+    /// selected counters carrying a plain <c>false AS is_artifact</c> and no window at all — windowing every
+    /// row measured 12 counters over 7 days at 2.3-2.4s against ~800ms unwindowed, because the sort touched
+    /// rows that could never be an artifact and pushed the planner off its index scan onto a parallel seq scan.
+    /// Same shape as the MCP twin's <c>PerfmonTrendSql</c>.</para>
     /// $1 server_id, $2/$3 window (naive UTC), $4.. counter names, last $ the bucket width in minutes.
     /// </summary>
     public static string PerfmonTrendsSql(int counterCount)
@@ -128,6 +134,7 @@ public sealed partial class ViewerDataService
         var widthParam = "$" + (counterCount + 4);
         var isArtifact = "COALESCE((" + WaitStatisticsArtifact.ArtifactPredicateSql(
             "cntr_type", "object_name", "prev_value", "cntr_value", "next_value") + "), false)";
+        var isWaitStatistics = WaitStatisticsArtifact.ObjectNameSuffixMatchSql("object_name");
         return $$"""
             SELECT
                 counter_name,
@@ -156,6 +163,23 @@ public sealed partial class ViewerDataService
                         delta_cntr_value,
                         sample_interval_seconds,
                         cntr_type,
+                        false AS is_artifact
+                    FROM v_perfmon_stats
+                    WHERE server_id = $1
+                    AND   collection_time >= $2
+                    AND   collection_time <= $3
+                    AND   counter_name IN ({{nameParams}})
+                    AND   NOT ({{isWaitStatistics}})
+
+                    UNION ALL
+
+                    SELECT
+                        counter_name,
+                        collection_time,
+                        cntr_value,
+                        delta_cntr_value,
+                        sample_interval_seconds,
+                        cntr_type,
                         {{isArtifact}} AS is_artifact
                     FROM (
                         SELECT
@@ -173,6 +197,7 @@ public sealed partial class ViewerDataService
                         AND   collection_time >= $2
                         AND   collection_time <= $3
                         AND   counter_name IN ({{nameParams}})
+                        AND   {{isWaitStatistics}}
                         WINDOW w AS (PARTITION BY object_name, counter_name, instance_name ORDER BY collection_time)
                     ) AS raw
                 ) AS flagged
