@@ -1052,6 +1052,77 @@ WHERE hypertable_name = 'wait_stats'
             + "the margin is deliberate");
     }
 
+    /* ---------------- #4250 item 3: the unordered row-capped prune for the liveness-touched tables ---------------- */
+
+    /// <summary>
+    /// The sibling builder's shape: row-capped like <see cref="DarlingRetention.RowCappedDeleteSql"/>, but
+    /// with NO <c>ORDER BY</c> — since V149 (#4250) dropped both tables' <c>last_seen</c> btree, an ORDER BY
+    /// would force a sort of every under-cutoff row before the LIMIT could apply, a second full pass over
+    /// data the seq scan already read. No <c>min()</c> subquery and no <c>INTERVAL</c> either: this is a
+    /// single bound against a FIXED cutoff, not a time slice.
+    /// </summary>
+    [Fact]
+    public void UnorderedRowCappedDelete_HasNoOrderByAndNoMinSubquery()
+    {
+        var sql = DarlingRetention.UnorderedRowCappedDeleteSql("collect.query_store_text", "last_seen", 300_000);
+
+        Assert.Equal(
+            "DELETE FROM collect.query_store_text WHERE ctid IN ("
+            + "SELECT ctid FROM collect.query_store_text WHERE last_seen < $1 "
+            + "LIMIT 300000)",
+            sql);
+
+        Assert.DoesNotContain("ORDER BY", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("min(", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("INTERVAL", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ctid IN", sql, StringComparison.Ordinal);
+        Assert.Contains("LIMIT 300000", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both liveness-touched tables' purge calls use the unordered builder, carry the shared cap as their
+    /// batch size (so the drain loop's "a full-cap batch means there may be more" contract applies), and
+    /// leave <c>adaptiveRowCapTimeColumn</c> unset — that parameter exists only for the plan dimension's
+    /// #4130 retry-at-half-cap behavior, which neither of these tables has been measured to need: both
+    /// clear their whole steady-state backlog in ONE batch at the sized cap (see
+    /// <see cref="DarlingRetention.LivenessTouchedTablePruneRowCap"/>'s remarks), so there is nothing here
+    /// for a shrinking retry to protect against.
+    /// </summary>
+    [Fact]
+    public void MapAndTextPurges_UseTheUnorderedCap_WithoutTheAdaptiveRetry()
+    {
+        var source = ReadRetentionSource();
+
+        var mapAt = source.IndexOf("var mapCutoff = ComputeMapCutoff(", StringComparison.Ordinal);
+        Assert.True(mapAt >= 0, "the map purge call moved");
+        var mapBody = source[mapAt..Math.Min(source.Length, mapAt + 500)];
+        Assert.Contains("UnorderedRowCappedDeleteSql(", mapBody, StringComparison.Ordinal);
+        Assert.Contains("LivenessTouchedTablePruneRowCap", mapBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("adaptiveRowCapTimeColumn", mapBody, StringComparison.Ordinal);
+
+        var textAt = source.IndexOf("var queryTextCutoff = utcNow.AddDays(", StringComparison.Ordinal);
+        Assert.True(textAt >= 0, "the query text purge call moved");
+        var textBody = source[textAt..Math.Min(source.Length, textAt + 500)];
+        Assert.Contains("UnorderedRowCappedDeleteSql(", textBody, StringComparison.Ordinal);
+        Assert.Contains("LivenessTouchedTablePruneRowCap", textBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("adaptiveRowCapTimeColumn", textBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The cap clears the busiest single day observed in the field's <c>last_seen</c> age histogram (map
+    /// 255k rows at its oldest surviving day, text 220k) in ONE batch — a steady-state run never issues a
+    /// second, empty-batch statement.
+    /// </summary>
+    [Fact]
+    public void LivenessTouchedTablePruneRowCap_ClearsTheBusiestObservedDayInOneBatch()
+    {
+        const int busiestMapDay = 255_000;
+        const int busiestTextDay = 220_000;
+
+        Assert.True(DarlingRetention.LivenessTouchedTablePruneRowCap > busiestMapDay);
+        Assert.True(DarlingRetention.LivenessTouchedTablePruneRowCap > busiestTextDay);
+    }
+
     /// <summary>
     /// Only the plan dimension is capped. <c>query_text_dim</c> is ~40 MB in total and drains in a single
     /// slice, and the fact tables need the compressed-chunk-safe shape that the <c>ctid</c> idiom cannot

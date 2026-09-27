@@ -214,6 +214,30 @@ public static class DarlingRetention
     /// </summary>
     internal const string TerminalCommandStatuses = "status IN ('succeeded', 'failed')";
 
+    /// <summary>
+    /// The row cap for <see cref="QueryStorePlanMap"/>'s and <see cref="QueryStoreTextStore"/>'s prune
+    /// (#4250 item 3), shared by both tables rather than sized per table, because both clear it in ONE
+    /// batch at every measured rate and a single named constant is easier to keep correct than two.
+    ///
+    /// <para><b>Sizing (read-only field histogram of <c>last_seen</c> age, <c>collect.query_store_plan_map</c>
+    /// / <c>collect.query_store_text</c>).</b> Map rows retire only up to age 14 days, at roughly 180k-255k
+    /// rows/day; text rows retire up to age 32 days, at roughly 150k-220k rows/day. The purge runs twice a
+    /// day (<see cref="CollectorScheduleDefaults"/>'s cadence), so a normal, on-schedule run's due backlog
+    /// is about half a day's worth — map ≈90k-130k, text ≈75k-110k — and even ONE missed run (the whole
+    /// day's retirement landing on the next one) is at most the single busiest day observed: map 255k, text
+    /// 220k. 300,000 clears every one of those in a single batch (no second, empty-batch statement), while
+    /// still bounding a real backlog — a 10-day gap drains in roughly 7-9 batches per table (10 days ×
+    /// ~200k ÷ 300k), each its own committed transaction, never one unbounded delete.</para>
+    ///
+    /// <para><b>Transaction size per batch, worst case (one missed run).</b> Map: 255,000 rows × ≈175 B/row
+    /// (709 MB / 4.04 M rows, field-measured) ≈ 45 MB. Text: 220,000 rows × ≈1.4 KB/row (4,992 MB main +
+    /// 4,355 MB TOAST / 6.86 M rows, field-measured, TOAST included) ≈ 300 MB. Both are single-slice-sized
+    /// or smaller against the old shape's own one-day slice, which already deleted comparable row counts
+    /// per statement — this is not a new order of magnitude of transaction size, only a cheaper way to find
+    /// the same rows.</para>
+    /// </summary>
+    internal const int LivenessTouchedTablePruneRowCap = 300_000;
+
     /* Each one-day slice is bounded work (see TimeSlicedDeleteSql); the generous 300s per-slice command
        timeout (well above Npgsql's 30s default) is belt-and-suspenders for a slow disk. Slicing is also what
        keeps a large first purge from ever hitting a timeout at all — a single unbounded DELETE could roll
@@ -577,8 +601,10 @@ public static class DarlingRetention
                 var mapCutoff = ComputeMapCutoff(utcNow, widestFactRetentionDays, planContentRetentionDays);
                 var mapDeleted = await PurgeOneAsync(
                     postgres, QueryStorePlanMap.TableName,
-                    QueryStorePlanMap.PruneSql(TimescaleSupport.ChunkIntervalDays),
-                    mapCutoff, logger, cancellationToken);
+                    UnorderedRowCappedDeleteSql(
+                        QueryStorePlanMap.TableName, QueryStorePlanMap.LastSeenColumn, LivenessTouchedTablePruneRowCap),
+                    mapCutoff, logger, cancellationToken,
+                    batchSize: LivenessTouchedTablePruneRowCap);
                 if (mapDeleted is not null)
                 {
                     tablesPurged++;
@@ -595,8 +621,10 @@ public static class DarlingRetention
                 var queryTextCutoff = utcNow.AddDays(-(widestFactRetentionDays + QueryStoreTextStore.PruneMarginDays));
                 var queryTextDeleted = await PurgeOneAsync(
                     postgres, QueryStoreTextStore.TableName,
-                    QueryStoreTextStore.PruneSql(TimescaleSupport.ChunkIntervalDays),
-                    queryTextCutoff, logger, cancellationToken);
+                    UnorderedRowCappedDeleteSql(
+                        QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, LivenessTouchedTablePruneRowCap),
+                    queryTextCutoff, logger, cancellationToken,
+                    batchSize: LivenessTouchedTablePruneRowCap);
                 if (queryTextDeleted is not null)
                 {
                     tablesPurged++;
@@ -1056,6 +1084,48 @@ public static class DarlingRetention
         $"DELETE FROM {table} WHERE ctid IN ("
       + $"SELECT ctid FROM {table} WHERE {timeColumn} < $1 "
       + $"ORDER BY {timeColumn} LIMIT {cap})";
+
+    /// <summary>
+    /// A row-capped purge with NO <c>ORDER BY</c> (#4250 item 3) — the sibling of
+    /// <see cref="RowCappedDeleteSql"/> for the two tables whose V149 migration dropped their
+    /// <c>last_seen</c> btree (<see cref="QueryStorePlanMap"/>, <see cref="QueryStoreTextStore"/>): with no
+    /// index, <c>ORDER BY {timeColumn}</c> forces a sort of every row under the cutoff before the
+    /// <c>LIMIT</c> can apply, which is a second full pass over exactly the rows the seq scan already read.
+    /// Dropping it removes that pass; the row cap and the drain contract are unchanged.
+    ///
+    /// <para><b>Why dropping the ordering is still correct here, unlike the case
+    /// <see cref="RowCappedDeleteSql"/>'s own doc warns against.</b> That doc's "an unordered cap would
+    /// nibble arbitrary rows and leave the floor where it was" describes a MOVING cutoff recomputed from
+    /// the table's own remaining minimum each call — nibbling from the middle there really can strand old
+    /// rows below a floor that never advances. This builder's cutoff is FIXED: it is the caller's own
+    /// <c>$1</c>, computed once from wall time before the drain starts (<see cref="ComputeMapCutoff"/> for
+    /// the map, the fact-horizon-plus-margin sum for text), not from what happened to survive the last
+    /// batch. Every row the predicate matches is expired by that same fixed cutoff regardless of which ones
+    /// a given batch happens to take, and each batch deletes rows the predicate matched, so the matching set
+    /// strictly shrinks every round. A drain that keeps taking rows from a strictly shrinking set reaches
+    /// empty in a bounded number of rounds — arbitrary selection changes WHICH rows go in which round, never
+    /// WHETHER the drain terminates or converges on the same fixed floor. "Leave the floor where it was" is
+    /// exactly what cannot happen: there is no floor to leave behind, only a set that only ever gets
+    /// smaller.</para>
+    ///
+    /// <para>The #2316 margin ordering (<see cref="ComputeMapCutoff"/>, the text-outlives-facts margin on
+    /// <see cref="QueryStoreTextStore.PruneMarginDays"/>) is about which CUTOFF each table's caller computes
+    /// relative to the others — map's cutoff stays strictly newer than the plan dim's, text's stays older
+    /// than the facts that reference it — never about the order rows are removed WITHIN one table's own
+    /// delete. Dropping the intra-table ordering touches none of that: the cutoffs the callers pass in are
+    /// unchanged, and every row this builder can touch in either table is already past its own table's
+    /// cutoff no matter which order the batch takes them in.</para>
+    ///
+    /// <para>The <c>ctid</c> idiom itself requires a plain table — reading <c>ctid</c> through
+    /// TimescaleDB's transparent decompression is unsupported (#1564) — and both
+    /// <see cref="QueryStorePlanMap.TableName"/> and <see cref="QueryStoreTextStore.TableName"/> are plain
+    /// tables, never hypertables (no <c>create_hypertable</c> call anywhere in their migrations), so that
+    /// constraint never applies to either.</para>
+    /// </summary>
+    internal static string UnorderedRowCappedDeleteSql(string table, string timeColumn, int cap) =>
+        $"DELETE FROM {table} WHERE ctid IN ("
+      + $"SELECT ctid FROM {table} WHERE {timeColumn} < $1 "
+      + $"LIMIT {cap})";
 
     /// <summary>
     /// The dimension GC's cutoff (#1795): the ASSUMED horizon (widest dim-feeding fact retention +

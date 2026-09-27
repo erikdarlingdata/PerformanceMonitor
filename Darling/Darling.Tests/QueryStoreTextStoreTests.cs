@@ -160,19 +160,9 @@ public sealed class QueryStoreTextStoreTests
         Assert.Contains("WHERE EXCLUDED.last_seen >= query_store_text.last_seen", QueryStoreTextStore.UpsertSql, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// The prune is bounded to roughly one chunk-width of the OLDEST rows per call, so a single sweep cannot
-    /// take an unbounded row lock — the same shape as the plan map's.
-    /// </summary>
-    [Fact]
-    public void ThePruneIsBoundedToOneChunkWidth()
-    {
-        var sql = QueryStoreTextStore.PruneSql(7);
-
-        Assert.StartsWith("DELETE FROM collect.query_store_text WHERE last_seen < $1", sql, StringComparison.Ordinal);
-        Assert.Contains("INTERVAL '7 days'", sql, StringComparison.Ordinal);
-        Assert.Contains("SELECT min(last_seen)", sql, StringComparison.Ordinal);
-    }
+    /* The prune's statement shape (row-capped, no ORDER BY, no min() subqueries) is pinned in
+       DarlingRetentionTests against DarlingRetention.UnorderedRowCappedDeleteSql, the shared builder
+       #4250 item 3 introduced for this table and query_store_plan_map. */
 
     /// <summary>
     /// The retention margin is ADDED to the fact horizon, never subtracted. Text has to OUTLIVE the rows
