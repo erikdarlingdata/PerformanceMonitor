@@ -173,12 +173,12 @@ public static class PgLogEntryAssembler
     /// cannot masquerade as the prefix's punctuation;</item>
     /// <item><paramref name="matchedLabel"/> and M2's label are DIFFERENT strings — same-severity pairs (a
     /// genuine <c>RAISE EXCEPTION 'ERROR:  x'</c> rendering <c>ERROR:  ERROR:  x</c>) read the same either
-    /// way, so nothing is lost by keeping them (#4501 ruling item 1).</item>
+    /// way, so nothing is lost by keeping them (#4501).</item>
     /// </list>
     ///
     /// <para><paramref name="applyCheck"/> false skips the whole rule (never refuses): the collected prefix
-    /// puts no client-controlled field after the pid, so there is no forgery surface to guard (#4501 ruling
-    /// item 2 — the RDS default <c>%t:%r:%u@%d:[%p]:</c> and a bare <c>%m [%p] </c> both land here).</para>
+    /// puts no client-controlled field after the pid, so there is no forgery surface to guard (#4501 —
+    /// the RDS default <c>%t:%r:%u@%d:[%p]:</c> and a bare <c>%m [%p] </c> both land here).</para>
     ///
     /// <para>A refused match is treated exactly as a line the prefix regex never matched at all: dropped,
     /// ending the open entry, never opening a new one.</para>
@@ -266,7 +266,7 @@ public static class PgLogEntryAssembler
     /// <c>log_line_prefix</c> in the statement that returned <paramref name="logBody"/> (#4501, plumbed the
     /// same way <paramref name="logTimezoneIsUtc"/> is): <paramref name="logLinePrefix"/> null means the
     /// setting was not collected — the forgery rule still runs, but with no separator check, per the #4501
-    /// ruling's fallback. See <see cref="IsForgedLabel"/> and <see cref="ForgeryCheckFor"/>.
+    /// fallback. See <see cref="IsForgedLabel"/> and <see cref="ForgeryCheckFor"/>.
     /// </summary>
     public static List<PgLogEntry> Assemble(
         string? logBody, bool logTimezoneIsUtc, string? logLinePrefix, out int foreignZoneLines)
@@ -276,7 +276,7 @@ public static class PgLogEntryAssembler
     }
 
     /// <summary>
-    /// Decides, from a collected <c>log_line_prefix</c> (#4501 ruling item 2), whether the forgery rule
+    /// Decides, from a collected <c>log_line_prefix</c> (#4501), whether the forgery rule
     /// applies at all and what separator it requires.
     ///
     /// <list type="bullet">
@@ -325,7 +325,7 @@ public static class PgLogEntryAssembler
         return (true, tail);
     }
 
-    /* %a, %u, %d: the three client-controlled fields (#4501 ruling item 2). */
+    /* %a, %u, %d: the three client-controlled fields (#4501). */
     private static readonly Regex s_clientFieldEscape = new("%[aud]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* Every log_line_prefix escape (%-something), used to find the LAST one so the separator is only the
