@@ -1637,7 +1637,16 @@ public sealed class DarlingStoreUpgradeTests
 
     private static async Task<string?> ScalarOnAsync(string connectionString, string sql, CancellationToken cancellationToken)
     {
-        await using var connection = new NpgsqlConnection(connectionString);
+        /* Pooling=false: several callers (the in-place upgrade test's post-bootstrap "SHOW work_mem" read
+           included) pass a connection string this same process used, pooled, against a server it has since
+           stopped and replaced — pg_upgrade's swap, or this test's own StopWithRuntimeAsync/StartWithRuntimeAsync.
+           A pooled Npgsql connection can hand back a physical socket opened against that earlier server's
+           lifetime; its first write then fails with "forcibly closed" even though the CURRENT server is up and
+           never restarted (the #4445 diagnostic's own finding). Every other read in this file that crosses a
+           stop/start already strips Pooling for the same reason (MeasureStoreAsync, ReadServerVersionAsync,
+           ReadPostmasterStartTimeAsync); this helper is the one that had not caught up. */
+        var builder = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false };
+        await using var connection = new NpgsqlConnection(builder.ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 600 };
         return await command.ExecuteScalarAsync(cancellationToken) as string;
@@ -2895,14 +2904,20 @@ public sealed class DarlingStoreUpgradeTests
                 Assert.True(Directory.Exists(
                     Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql")));
 
-                /* The managed conf blocks are on the NEW data directory: the upgrade wrote them before
-                   pg_upgrade (shared_preload_libraries has to be live for the extension to restore) and
-                   the normal heal path did not duplicate them. */
+                /* #4336's Step A migrates the new data directory's conf on this same first start: the v1-v15
+                   blocks it wrote before pg_upgrade (shared_preload_libraries has to be live for the extension
+                   to restore) move into darling-managed.conf, behind the include, leaving no v-marker in
+                   postgresql.conf at all. */
                 var conf = await File.ReadAllTextAsync(Path.Combine(dataDirectory, "postgresql.conf"), timeout.Token);
-                Assert.Contains("shared_preload_libraries = 'timescaledb'", conf, StringComparison.Ordinal);
-                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
-                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
-                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
+                Assert.True(ManagedConfFile.HasManagedInclude(conf),
+                    "expected postgresql.conf to carry the darling-managed.conf include after the upgrade's first start (#4336)");
+                Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
+                Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
+                Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
+
+                /* The preload line moved with them: it lives in darling-managed.conf, reached through the include,
+                   and keeps both libraries (the check the same-major swap test already makes). */
+                await ManagedPreloadAssert.FileLevel_HasOneManagedPreloadLine_WithBothLibraries(dataDirectory, timeout.Token);
             }
             catch (Exception ex)
             {
@@ -3114,10 +3129,15 @@ public sealed class DarlingStoreUpgradeTests
                     DarlingStoreUpgrade.ComputeFileHash(shippedZip),
                     File.ReadAllText(Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName)).Trim());
 
+                /* #4336's Step A migrates this data directory's conf on the same-major swap's own first
+                   start: the v1-v15 blocks EnsureConfAppended wrote on the previous release move into
+                   darling-managed.conf, behind the include, leaving no v-marker in postgresql.conf. */
                 var conf = await File.ReadAllTextAsync(Path.Combine(dataDirectory, "postgresql.conf"), timeout.Token);
-                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
-                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
-                Assert.Equal(1, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
+                Assert.True(ManagedConfFile.HasManagedInclude(conf),
+                    "expected postgresql.conf to carry the darling-managed.conf include after the same-major swap's first start (#4336)");
+                Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarker));
+                Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV6));
+                Assert.Equal(0, CountOccurrences(conf, DarlingManagedPostgres.ConfMarkerV7));
 
                 /* #4336's Step A moved shared_preload_libraries into darling-managed.conf, behind the include
                    this migrated host now carries; postgresql.conf no longer states it directly. */
