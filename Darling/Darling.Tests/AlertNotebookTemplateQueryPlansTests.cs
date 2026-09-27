@@ -60,7 +60,10 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Long-Running Query");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             "Long-Running Query", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
 
@@ -97,7 +100,10 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Long-Running Query");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             "Long-Running Query", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
 
@@ -114,10 +120,13 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Long-Running Query");
         Assert.NotNull(template);
 
-        var withIncident = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var withIncident = buildCells(
             "Long-Running Query", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
-        var withoutIncident = template.Value.BuildCells(
+        var withoutIncident = buildCells(
             "Long-Running Query", "SRV1", AsOf, WindowStart, WindowEnd,
             null, null, "Unknown");
 
@@ -132,7 +141,10 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Forced Plan Failing");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             "Forced Plan Failing", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
 
@@ -161,7 +173,10 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Forced Plan Failing");
         Assert.NotNull(template);
 
-        var cells = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var cells = buildCells(
             "Forced Plan Failing", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
 
@@ -180,10 +195,13 @@ public sealed class AlertNotebookTemplateQueryPlansTests
         var template = AlertNotebookEndpoint.AuthoredTemplate("Forced Plan Failing");
         Assert.NotNull(template);
 
-        var withIncident = template!.Value.BuildCells(
+        var buildCells = template!.Value.BuildCells;
+        Assert.NotNull(buildCells);
+
+        var withIncident = buildCells(
             "Forced Plan Failing", "SRV1", AsOf, WindowStart, WindowEnd,
             IncidentWithDatabase("SalesDb"), null, "Unknown");
-        var withoutIncident = template.Value.BuildCells(
+        var withoutIncident = buildCells(
             "Forced Plan Failing", "SRV1", AsOf, WindowStart, WindowEnd,
             null, null, "Unknown");
 

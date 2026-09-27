@@ -67,23 +67,23 @@ public sealed class ViewerFinOpsIntervalHonestLiveTests
             await PlantQueryAsync(connection, ct, at, sampleIntervalSeconds: 60, cpuUs: OrdinaryCpuUs, execCount: 10L);
 
             var resourceUsage = await viewer.GetDatabaseResourceUsageAsync(ServerId, hoursBack: 24, ct);
-            var row = Assert.Single(resourceUsage.Where(r => r.DatabaseName == DbName));
+            var row = Assert.Single(resourceUsage, r => r.DatabaseName == DbName);
             Assert.Equal(OrdinaryCpuUs / 1000L, row.CpuTimeMs);
 
             var (byTotal, byAvg) = await viewer.GetTopResourceConsumersAsync(ServerId, hoursBack: 24, topN: 10, ct);
-            var totalRow = Assert.Single(byTotal.Where(r => r.DatabaseName == DbName));
+            var totalRow = Assert.Single(byTotal, r => r.DatabaseName == DbName);
             Assert.Equal(OrdinaryCpuUs / 1000L, totalRow.CpuTimeMs);
-            var avgRow = Assert.Single(byAvg.Where(r => r.DatabaseName == DbName));
+            var avgRow = Assert.Single(byAvg, r => r.DatabaseName == DbName);
             Assert.Equal(OrdinaryCpuUs / 1000L, avgRow.TotalCpuTimeMs);
 
             var expensive = await viewer.GetExpensiveQueriesAsync(ServerId, hoursBack: 24, topN: 20, ct);
             Assert.DoesNotContain(expensive, q => q.TotalCpuMs >= ZeroIntervalCpuUs / 1000L);
-            var expensiveRow = Assert.Single(expensive.Where(q => q.DatabaseName == DbName));
+            var expensiveRow = Assert.Single(expensive, q => q.DatabaseName == DbName);
             Assert.Equal(OrdinaryCpuUs / 1000L, expensiveRow.TotalCpuMs);
 
             var highImpact = await viewer.GetHighImpactQueriesAsync(ServerId, hoursBack: 24, ct);
             Assert.DoesNotContain(highImpact, q => q.TotalCpuMs >= ZeroIntervalCpuUs / 1000.0m);
-            var highImpactRow = Assert.Single(highImpact.Where(q => q.DatabaseName == DbName));
+            var highImpactRow = Assert.Single(highImpact, q => q.DatabaseName == DbName);
             Assert.Equal(OrdinaryCpuUs / 1000.0m, highImpactRow.TotalCpuMs);
 
             succeeded = true;

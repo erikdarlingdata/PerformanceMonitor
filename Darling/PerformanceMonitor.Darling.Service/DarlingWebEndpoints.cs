@@ -1068,7 +1068,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
         var outcome = await RunComposedPanelCoreAsync(postgres, body, cancellationToken);
-        RecordComposeLatency(body, outcome, cancellationToken, stopwatch.ElapsedMilliseconds);
+        RecordComposeLatency(body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
 
@@ -1093,7 +1093,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
-    private static void RecordComposeLatency(JsonObject body, ComposeRunOutcome outcome, System.Threading.CancellationToken cancellationToken, long elapsedMs)
+    private static void RecordComposeLatency(JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken)
     {
         try
         {

@@ -3377,10 +3377,8 @@ internal sealed class DarlingStoreUpgrade
             foreach (var rawLine in candidateLines)
             {
                 var (_, name, _) = DarlingManagedPostgres.ParseConfText(rawLine).FirstOrDefault();
-                var isProbeableSetting = name is not null &&
-                    !s_confIncludeDirectiveNames.Contains(name, StringComparer.OrdinalIgnoreCase);
 
-                if (!isProbeableSetting)
+                if (name is null || s_confIncludeDirectiveNames.Contains(name, StringComparer.OrdinalIgnoreCase))
                 {
                     /* A comment, blank line, or an operator include directive — never probed, always carried
                        (see s_confIncludeDirectiveNames and the method summary above). */
