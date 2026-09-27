@@ -165,39 +165,17 @@ public sealed partial class ViewerDataService
     /// <c>job_history</c> row survives regardless of whether its server is still registered.
     /// </para>
     /// <para>
-    /// <b>top_by_server is a two-pass, key-then-row read, not a single full-row descent per server.</b> A
-    /// per-server LATERAL that selects every column and stops at <c>LIMIT {limitParam}</c> pulls up to
-    /// <c>limit</c> FULL rows from every server, even though most of those rows never survive <c>base</c>'s
-    /// fleet-wide re-sort-and-trim back down to <c>limit</c>. <c>candidate_keys</c> is pass 1: a per-server
-    /// LATERAL selecting ONLY <c>run_datetime, instance_id</c> — the two columns V150's
-    /// <c>idx_job_history_server_run</c> carries, so this pass can run as an Index Only Scan with no heap
-    /// visit — ordered and limited exactly like the old single-pass LATERAL. <c>cutoff</c> takes the n-th key
-    /// fleet-wide, by the SAME <c>(run_datetime_utc DESC, instance_id DESC)</c> order the outer read uses
-    /// (<c>OFFSET limit-1 LIMIT 1</c>); with fewer than <c>limit</c> candidates fleet-wide it is empty (no
-    /// cutoff — every candidate is kept). <c>top_by_server</c> is pass 2: the same per-server LATERAL as
-    /// before, but now additionally bounded to rows whose key is at or past the cutoff (a row comparison on
-    /// <c>(run_datetime_utc, instance_id)</c>, so ties break identically to the final ORDER BY), or unbounded
-    /// when no cutoff exists. <b>Correctness</b>: every row in the true fleet-wide top-<c>limit</c> has a key
-    /// ≥ the n-th key (that is what "n-th" means under this order), so pass 2's filter never excludes a row
-    /// the old text would have kept; pass 2 returns every row with key ≥ cutoff, which is at most <c>limit</c>
-    /// rows per server plus exact ties at the boundary (instance_id is unique per server, so a server can tie
-    /// the cutoff at most once); the outer <c>base</c>'s unchanged <c>ORDER BY … LIMIT {limitParam}</c> then
-    /// yields exactly the same top-<c>limit</c> set and order the old text produced, cutoff or no cutoff.
-    /// </para>
-    /// <para>
-    /// <b>job_stats is ONE scan restricted to base's own (server, job) pairs, not a per-server LATERAL.</b> The
-    /// average/max a row needs only ever depends on its OWN job's step_id-0 SUCCESS rows on its OWN server, and
-    /// <c>base</c> has already picked at most <c>limit</c> (server_id, job_id) pairs — a per-server LATERAL
-    /// scan (one full pass per server) does more work than the fleet already needs. <c>job_stats</c> instead
-    /// scans <c>job_history</c> ONCE, joined to <c>server_offsets</c> for each row's offset, filtered to
-    /// <c>step_id = 0 AND run_status = 1</c> and the SAME window predicate as before, and restricted with a
-    /// semi-join to exactly the (server_id, job_id) pairs <c>base</c> kept (<c>WHERE (jh.server_id, jh.job_id)
-    /// IN (SELECT DISTINCT server_id, job_id FROM base)</c>) — a pair never shown needs no average computed
-    /// for it. <c>GROUP BY jh.server_id, jh.job_id</c> matches the old text's grain exactly, so the AVG/MAX
-    /// values are identical; only the SET of rows scanned narrows to the pairs the read actually needs, and
-    /// the scan itself runs once for the whole fleet instead of once per server. <c>job_stats</c> LEFT JOINs
-    /// onto <c>base</c> so a job with no successful step-0 row in the window still surfaces its other rows
-    /// with a NULL avg/last-success, exactly as before.
+    /// <b>job_stats stays a bounded per-server window, not a second fleet-wide scan.</b> The average/max a row
+    /// needs only ever depends on its OWN job's step_id-0 SUCCESS rows on its OWN server, so <c>job_stats</c>
+    /// is a <c>CROSS JOIN LATERAL</c> per server actually present in <c>base</c> (not all registered servers —
+    /// a server with no rows in the final top-<c>limit</c> needs no stats at all), using the same index's
+    /// <c>server_id</c>/<c>run_datetime</c> range to bound the scan to that one server's window, filtered to
+    /// <c>step_id = 0 AND run_status = 1</c> and to just the job_ids <c>base</c> actually kept for that server
+    /// (a job never shown needs no average computed for it), <c>GROUP BY job_id</c>. Values are identical to
+    /// the old text's: same 24-hour-window predicate, same step_id/run_status filter, same GROUP BY grain —
+    /// only the scan is now bounded to one server's rows via the index instead of every server's success rows
+    /// combined. <c>job_stats</c> LEFT JOINs onto <c>base</c> so a job with no successful step-0 row in the
+    /// window still surfaces its other rows with a NULL avg/last-success, exactly as before.
     /// </para>
     /// </summary>
     internal static string BuildJobHistorySql(bool scopedToServer)
@@ -229,34 +207,6 @@ server_offsets AS (
     FROM active_servers AS a
     LEFT JOIN svr ON svr.server_id = a.server_id
     LEFT JOIN servers AS reg ON reg.server_id = a.server_id
-),
-candidate_keys AS (
-    SELECT
-        so.server_id,
-        cand.run_datetime,
-        cand.instance_id,
-        cand.run_datetime - make_interval(mins => so.offset_minutes) AS run_datetime_utc
-    FROM server_offsets AS so
-    CROSS JOIN LATERAL (
-        SELECT
-            jh.run_datetime,
-            jh.instance_id
-        FROM job_history AS jh
-        WHERE jh.server_id = so.server_id
-        AND   jh.collection_time >= {floorParam}
-        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
-        ORDER BY jh.run_datetime DESC, jh.instance_id DESC
-        LIMIT {limitParam}
-    ) AS cand
-),
-cutoff AS (
-    SELECT
-        run_datetime_utc AS cutoff_utc,
-        instance_id AS cutoff_instance_id
-    FROM candidate_keys
-    ORDER BY run_datetime_utc DESC, instance_id DESC
-    OFFSET {limitParam} - 1
-    LIMIT 1
 ),
 top_by_server AS (
     SELECT
@@ -296,9 +246,6 @@ top_by_server AS (
         WHERE jh.server_id = so.server_id
         AND   jh.collection_time >= {floorParam}
         AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
-        AND   (NOT EXISTS (SELECT 1 FROM cutoff)
-               OR (jh.run_datetime - make_interval(mins => so.offset_minutes), jh.instance_id)
-                  >= (SELECT cutoff_utc, cutoff_instance_id FROM cutoff))
         ORDER BY jh.run_datetime DESC, jh.instance_id DESC
         LIMIT {limitParam}
     ) AS top
@@ -311,18 +258,26 @@ base AS (
 ),
 job_stats AS (
     SELECT
-        jh.server_id,
-        jh.job_id,
-        AVG(jh.run_duration_seconds) AS avg_success_duration,
-        MAX(jh.run_datetime - make_interval(mins => so.offset_minutes)) AS last_success_run_utc
-    FROM job_history AS jh
-    JOIN server_offsets AS so ON so.server_id = jh.server_id
-    WHERE jh.step_id = 0
-    AND   jh.run_status = 1
-    AND   jh.collection_time >= {floorParam}
-    AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
-    AND   (jh.server_id, jh.job_id) IN (SELECT DISTINCT server_id, job_id FROM base)
-    GROUP BY jh.server_id, jh.job_id
+        so.server_id,
+        js.job_id,
+        js.avg_success_duration,
+        js.last_success_run_utc
+    FROM (SELECT DISTINCT server_id FROM base) AS b
+    JOIN server_offsets AS so ON so.server_id = b.server_id
+    CROSS JOIN LATERAL (
+        SELECT
+            jh.job_id,
+            AVG(jh.run_duration_seconds) AS avg_success_duration,
+            MAX(jh.run_datetime - make_interval(mins => so.offset_minutes)) AS last_success_run_utc
+        FROM job_history AS jh
+        WHERE jh.server_id = so.server_id
+        AND   jh.step_id = 0
+        AND   jh.run_status = 1
+        AND   jh.collection_time >= {floorParam}
+        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
+        AND   jh.job_id IN (SELECT job_id FROM base WHERE base.server_id = so.server_id)
+        GROUP BY jh.job_id
+    ) AS js
 )
 SELECT
     base.server_id,
