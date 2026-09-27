@@ -66,6 +66,10 @@ public partial class JobHistoryTab : UserControl
         await LoadJobsAsync();
     }
 
+    /// <summary>The read's row cap (#4478) — the 2,000 <see cref="LoadJobsAsync"/> passes to
+    /// <see cref="LocalDataService.GetJobHistoryAsync"/>.</summary>
+    private const int RowCap = 2000;
+
     private async System.Threading.Tasks.Task LoadJobsAsync()
     {
         if (_dataService == null) return;
@@ -74,12 +78,15 @@ public partial class JobHistoryTab : UserControl
            starting of two overlapping reads can land first. Same idiom as FinOpsTab's. */
         var gen = _loads.Claim(nameof(LoadJobsAsync));
 
+        NoJobsMessage.Visibility = Visibility.Collapsed;
+        LoadingMessage.Visibility = Visibility.Visible;
+
         try
         {
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
 
-            var all = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryAsync(hoursBack, 2000, serverId));
+            var all = await System.Threading.Tasks.Task.Run(() => _dataService.GetJobHistoryAsync(hoursBack, RowCap, serverId));
             if (_loads.Superseded(nameof(LoadJobsAsync), gen)) return;
 
             /* #2126: rows carry the raw collected server name; swap in the operator's alias where the
@@ -118,7 +125,14 @@ public partial class JobHistoryTab : UserControl
 
             var displayCount = JobHistoryDataGrid.ItemsSource is ICollection<JobHistoryRow> coll ? coll.Count : filtered.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            JobCountIndicator.Text = displayCount > 0 ? $"{displayCount} run(s)" : "";
+
+            /* The cap applies to the UNFILTERED read (all.Count), not the client-side-filtered display count:
+               a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
+               the underlying read still hit the cap. */
+            var capLabel = JobHistoryCap.Label(all.Count, RowCap);
+            JobCountIndicator.Text = displayCount == 0
+                ? ""
+                : capLabel.Length > 0 ? $"{displayCount} run(s) ({capLabel})" : $"{displayCount} run(s)";
             AppLogger.Debug("JobHistory", $"Loaded {displayCount} job run(s) (query returned {all.Count}, hoursBack={hoursBack}, serverId={serverId?.ToString() ?? "all"})");
 
             _lastRefreshed = DateTime.UtcNow;
@@ -129,6 +143,10 @@ public partial class JobHistoryTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Error("JobHistory", $"Failed to load job history: {ex.Message}");
+        }
+        finally
+        {
+            LoadingMessage.Visibility = Visibility.Collapsed;
         }
     }
 
