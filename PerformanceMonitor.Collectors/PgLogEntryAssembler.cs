@@ -141,26 +141,95 @@ public static class PgLogEntryAssembler
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// Whether the matched <c>text</c> itself OPENS with another exact two-space label (#4426 v17, closing the
-    /// known misparse the pipeline test named <c>ApplicationNameRenderingATwoSpacedLabel_IsAKnownMisparse</c>):
-    /// an <c>application_name</c> rendering <c>ERROR:  </c> under <c>%a</c> reads as a genuine <c>ERROR</c>
-    /// primary line, with the real line's own label and message becoming its "message" — <c>… ERROR:  LOG:
-    /// checkpoint starting: time</c> loses the checkpoint LOG and gains a manufactured ERROR nothing on the
-    /// server actually raised.
-    ///
-    /// <para>This reader also serves self-hosted targets, whose operators set their own <c>%a</c>: a forgery
-    /// case, not a formatting one, so the store's own rule for the same trade governs — a missed line is
-    /// accepted over a manufactured one. A match here is treated exactly as a line the prefix regex never
-    /// matched at all: dropped, ending the open entry, never opening a new one.</para>
-    ///
-    /// <para><b>Accepted trade:</b> a genuine line whose MESSAGE itself starts with a two-space label — a
-    /// <c>RAISE LOG 'ERROR:  x'</c> renders <c>LOG:  ERROR:  x</c> — is refused by this same check. Nothing in
-    /// stderr text tells a forged label from a genuine message that happens to start with one, so this reader
-    /// picks the missed line both times.</para>
+    /// The bounded, severity-disagreement forgery rule (#4501, replacing the plain "text opens with a label"
+    /// check #4426 v17 shipped first). Finds the NEXT known label anywhere in <c>text</c> — not only at its
+    /// start — so a forged label can hide behind extra <c>application_name</c> characters before the real one
+    /// (K2, K6). Used by <see cref="IsForgedLabel"/>.
     /// </summary>
-    private static readonly Regex s_textOpensWithALabel = new(
-        @"^(?:" + LabelAlternation + @"):  ",
+    private static readonly Regex s_nextLabel = new(
+        @"(?<![A-Z_])(?<label>" + LabelAlternation + @"):  ",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// Whether the matched label (<paramref name="matchedLabel"/>, the text already consumed as label plus
+    /// its trailing <c>":  "</c>) is a forgery planted in front of the line's REAL label, found by scanning
+    /// <paramref name="text"/> for the next known label (#4501, replacing #4426 v17's plain "text opens with a
+    /// label" check with the bounded, severity-disagreement rule the security review specified).
+    ///
+    /// <para><b>The window.</b> <c>window = matchedLabel + ":  " + text[..M2.Index)</c> — everything from the
+    /// forged label's own start up to (not including) the real label M2. That whole span sits inside
+    /// whatever client-controlled field rendered it (<c>application_name</c> under the default managed
+    /// prefix, or <c>%u</c>/<c>%d</c> under a prefix that puts a field after the pid), so it is bounded by
+    /// that field's own limit: PostgreSQL caps <c>application_name</c>, <c>%u</c> and <c>%d</c> at
+    /// NAMEDATALEN−1 = 63 bytes of printable ASCII 0x20–0x7E.</para>
+    ///
+    /// <para><b>Refuse the line iff ALL of:</b></para>
+    /// <list type="number">
+    /// <item>the window is at most 63 bytes plus <paramref name="separator"/>'s length (or, with no separator
+    /// check — <paramref name="separator"/> is null — at most 63 bytes with no allowance for one);</item>
+    /// <item>every character in the window is printable ASCII 0x20–0x7E;</item>
+    /// <item>(only when <paramref name="separator"/> is not null) the window ends with it — the literal text
+    /// the collected <c>log_line_prefix</c> renders right before the label, so a client field's own value
+    /// cannot masquerade as the prefix's punctuation;</item>
+    /// <item><paramref name="matchedLabel"/> and M2's label are DIFFERENT strings — same-severity pairs (a
+    /// genuine <c>RAISE EXCEPTION 'ERROR:  x'</c> rendering <c>ERROR:  ERROR:  x</c>) read the same either
+    /// way, so nothing is lost by keeping them (#4501 ruling item 1).</item>
+    /// </list>
+    ///
+    /// <para><paramref name="applyCheck"/> false skips the whole rule (never refuses): the collected prefix
+    /// puts no client-controlled field after the pid, so there is no forgery surface to guard (#4501 ruling
+    /// item 2 — the RDS default <c>%t:%r:%u@%d:[%p]:</c> and a bare <c>%m [%p] </c> both land here).</para>
+    ///
+    /// <para>A refused match is treated exactly as a line the prefix regex never matched at all: dropped,
+    /// ending the open entry, never opening a new one.</para>
+    /// </summary>
+    private static bool IsForgedLabel(string matchedLabel, string text, bool applyCheck, string? separator)
+    {
+        if (!applyCheck)
+        {
+            return false;
+        }
+
+        var m2 = s_nextLabel.Match(text);
+
+        if (!m2.Success)
+        {
+            return false;
+        }
+
+        var beforeLabel = matchedLabel.Length + 3 /* ":  " */ + m2.Index;
+        var sepLen = separator?.Length ?? 0;
+
+        if (beforeLabel > 63 + sepLen)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < m2.Index; i++)
+        {
+            if (text[i] < '\x20' || text[i] > '\x7E')
+            {
+                return false;
+            }
+        }
+
+        if (separator is not null)
+        {
+            var window = matchedLabel + ":  " + text[..m2.Index];
+
+            if (!window.EndsWith(separator, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return !string.Equals(matchedLabel, m2.Groups["label"].Value, StringComparison.Ordinal);
+    }
+
+    /// <summary>The default separator assumed by the overloads that take no <c>log_line_prefix</c>
+    /// (#4501): a single space, the trailing literal of the managed v17 marker's own
+    /// <c>'%m [%p] %a '</c>. Kept as the pre-#4501 pins' assumed shape.</summary>
+    private const string DefaultSeparator = " ";
 
     /* %u@%d anywhere in the prefix's non-pid text, before the pid or after it. Both halves required: a background
        process renders `@` alone under that prefix and means neither. */
@@ -193,6 +262,77 @@ public static class PgLogEntryAssembler
     public static List<PgLogEntry> Assemble(string? logBody) => Assemble(logBody, logTimezoneIsUtc: false, out _);
 
     /// <summary>
+    /// <see cref="Assemble(string?, bool, out int)"/> for a caller that also read the target's own
+    /// <c>log_line_prefix</c> in the statement that returned <paramref name="logBody"/> (#4501, plumbed the
+    /// same way <paramref name="logTimezoneIsUtc"/> is): <paramref name="logLinePrefix"/> null means the
+    /// setting was not collected — the forgery rule still runs, but with no separator check, per the #4501
+    /// ruling's fallback. See <see cref="IsForgedLabel"/> and <see cref="ForgeryCheckFor"/>.
+    /// </summary>
+    public static List<PgLogEntry> Assemble(
+        string? logBody, bool logTimezoneIsUtc, string? logLinePrefix, out int foreignZoneLines)
+    {
+        var (applyCheck, separator) = ForgeryCheckFor(logLinePrefix);
+        return Assemble(logBody, logTimezoneIsUtc, applyCheck, separator, out foreignZoneLines);
+    }
+
+    /// <summary>
+    /// Decides, from a collected <c>log_line_prefix</c> (#4501 ruling item 2), whether the forgery rule
+    /// applies at all and what separator it requires.
+    ///
+    /// <list type="bullet">
+    /// <item><paramref name="logLinePrefix"/> is null (not collected): apply the rule with NO separator
+    /// check — the fallback shrinks what it keeps rather than what it refuses, since an unknown prefix could
+    /// put anything before the label.</item>
+    /// <item>the prefix has no client-controlled field (<c>%a</c>, <c>%u</c> or <c>%d</c>) between <c>%p</c>
+    /// and the label: the rule does not apply at all (there is no forgery surface), matching how a bare
+    /// <c>%m [%p] </c> read before #4501.</item>
+    /// <item>otherwise: apply the rule, with the separator being the prefix's own literal text between that
+    /// field and where the label starts — the prefix's tail after its last escape (a space for
+    /// <c>'%m [%p] %a '</c>, empty for a field glued straight onto the label).</item>
+    /// </list>
+    /// </summary>
+    internal static (bool ApplyCheck, string? Separator) ForgeryCheckFor(string? logLinePrefix)
+    {
+        if (logLinePrefix is null)
+        {
+            return (true, null);
+        }
+
+        /* %p is required for this reader to have a pid to anchor on at all; a prefix with no %p is not one
+           this reader can reason about, so it is treated the same as "no client field after %p". */
+        var pidIndex = logLinePrefix.IndexOf("%p", StringComparison.Ordinal);
+
+        if (pidIndex < 0)
+        {
+            return (false, null);
+        }
+
+        var afterPid = logLinePrefix[(pidIndex + 2)..];
+        var fieldMatch = s_clientFieldEscape.Match(afterPid);
+
+        if (!fieldMatch.Success)
+        {
+            return (false, null);
+        }
+
+        /* The prefix's own literal text after the LAST escape of any kind, up to the prefix's end — that is
+           what actually renders right before the label on the wire. A prefix that glues the field straight
+           to the label (no trailing literal) yields an empty separator, which IsForgedLabel treats as "no
+           separator required", the correct reading: there is nothing there to check. */
+        var lastEscape = s_anyEscape.Matches(afterPid).Cast<Match>().LastOrDefault();
+        var tail = lastEscape is null ? afterPid : afterPid[(lastEscape.Index + lastEscape.Length)..];
+
+        return (true, tail);
+    }
+
+    /* %a, %u, %d: the three client-controlled fields (#4501 ruling item 2). */
+    private static readonly Regex s_clientFieldEscape = new("%[aud]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* Every log_line_prefix escape (%-something), used to find the LAST one so the separator is only the
+       prefix's own trailing literal, not a literal that sits between two escapes earlier in the string. */
+    private static readonly Regex s_anyEscape = new("%.", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
     /// Every complete entry in the slab, in log order, for a caller that read the target's own <c>log_timezone</c>
     /// in the statement that returned <paramref name="logBody"/> (#4046).
     ///
@@ -210,7 +350,14 @@ public static class PgLogEntryAssembler
     /// </summary>
     /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: see
     /// <see cref="Assemble(string?)"/>.</exception>
-    public static List<PgLogEntry> Assemble(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines)
+    public static List<PgLogEntry> Assemble(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines) =>
+        Assemble(logBody, logTimezoneIsUtc, applyForgeryCheck: true, separator: DefaultSeparator, out foreignZoneLines);
+
+    /// <summary>The walk itself, parameterised over the #4501 forgery rule (see <see cref="IsForgedLabel"/>)
+    /// so both the pre-#4501-shaped overloads (a bare check, the store's default separator) and the
+    /// prefix-aware overload above share one implementation.</summary>
+    private static List<PgLogEntry> Assemble(
+        string? logBody, bool logTimezoneIsUtc, bool applyForgeryCheck, string? separator, out int foreignZoneLines)
     {
         var entries = new List<PgLogEntry>();
         foreignZoneLines = 0;
@@ -249,12 +396,11 @@ public static class PgLogEntryAssembler
 
             var match = s_prefixLine.Match(line);
 
-            /* #4426 v17: the matched label is genuine only if the text after it does NOT itself open with
-               another exact two-space label. A forged one in application_name (%a) would otherwise read as
-               the line's real severity, with the real label and message becoming its "message" — see
-               s_textOpensWithALabel's doc for the accepted trade this refusal makes instead. Treated exactly
+            /* #4501: the matched label is genuine only if it is not a forgery in front of the line's real
+               label — see IsForgedLabel's doc for the bounded, severity-disagreement rule. Treated exactly
                as a line the prefix never matched: dropped, closing the open entry, opening none. */
-            if (!match.Success || s_textOpensWithALabel.IsMatch(match.Groups["text"].Value))
+            if (!match.Success
+                || IsForgedLabel(match.Groups["label"].Value, match.Groups["text"].Value, applyForgeryCheck, separator))
             {
                 /* Not a prefix line and not a continuation: the cut head, a line the server wrote to stderr
                    outside its own format (a loader's chatter, a crash dump), or a line whose label this reader
