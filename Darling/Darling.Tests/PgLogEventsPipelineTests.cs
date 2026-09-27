@@ -113,22 +113,44 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>
-    /// #4426 v17 (KNOWN LIMITATION, documented rather than fixed here — see the PR body): an
-    /// <c>application_name</c> containing the literal text <c>"LOG:"</c> is read as the line's real label by
-    /// <see cref="s_prefixLine"/>'s earliest-match rule, because <see cref="PgLogEntryAssembler"/> — unlike
-    /// <c>StoreLogClassifier.ContinuesAnUpperCaseToken</c> — has no check for a label-shaped token still
-    /// inside the prefix. The result is a MANUFACTURED entry: severity <c>LOG</c> instead of <c>ERROR</c>, and
-    /// a message that starts with the real severity's text. This pins the CURRENT (wrong) behavior so a fix
-    /// changes this assertion, not silently regresses it.
+    /// #4426 v17: an <c>application_name</c> containing the literal text <c>"LOG:"</c> with only ONE space
+    /// after the colon must not be read as the line's real label. PostgreSQL's own labels always end
+    /// <c>":  "</c> (colon, two spaces) — that is what <c>elog.c</c> writes and what
+    /// <see cref="PgLogEntryAssembler"/>'s label match now requires, so a single-spaced token still inside
+    /// the prefix cannot satisfy it and the lazy run keeps going to the line's REAL label
+    /// (<c>ERROR:  </c>, two spaces), the same fix <c>StoreLogClassifier.ContinuesAnUpperCaseToken</c>'s
+    /// doc already argues for the store's own reader.
     /// </summary>
     [Fact]
-    public void ApplicationNameContainingALogLabel_IsAKnownMisparse()
+    public void ApplicationNameContainingASingleSpacedLogLabel_DoesNotDistortTheEntry()
     {
         var line = P + "[4102] My App [x]: LOG: ERROR:  canceling statement due to user request\n";
 
         var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
-        Assert.Equal("LOG", entry.Severity);
-        Assert.StartsWith("ERROR:", entry.Message, StringComparison.Ordinal);
+        Assert.Equal("ERROR", entry.Severity);
+        Assert.Equal("canceling statement due to user request", entry.Message);
+    }
+
+    /// <summary>
+    /// #4426 v17 (KNOWN LIMITATION, pinned rather than fixed here — see the PR body): when
+    /// <c>application_name</c> itself renders a label followed by the EXACT two spaces PostgreSQL's own
+    /// labels use (<c>%a</c> = <c>"ERROR: "</c>, whose trailing space plus the prefix's own space before the
+    /// label gives <c>"ERROR:  "</c> on the wire), the line is genuinely ambiguous in stderr: nothing in it
+    /// distinguishes that token from a real <c>ERROR</c> primary line, so <see cref="PgLogEntryAssembler"/>
+    /// still reads it as the severity and the real <c>LOG:</c> line's text becomes the message. The single-
+    /// spaced case above is fixed; this exact-two-space case is not, because closing it needs the same
+    /// label-shaped-lookbehind check <c>StoreLogClassifier.ContinuesAnUpperCaseToken</c> uses, which is a
+    /// larger change to this class's shared prefix-run steps than this fix makes. Pinned so a future fix
+    /// changes this assertion, not silently regresses it.
+    /// </summary>
+    [Fact]
+    public void ApplicationNameRenderingATwoSpacedLabel_IsAKnownMisparse()
+    {
+        var line = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
+
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("ERROR", entry.Severity);
+        Assert.StartsWith("LOG:", entry.Message, StringComparison.Ordinal);
     }
 
     private static List<PgLogEvent> Classify(string text) => new PgLogEventClassifier(TestLogHashKeys.Fixed).Classify(text);
