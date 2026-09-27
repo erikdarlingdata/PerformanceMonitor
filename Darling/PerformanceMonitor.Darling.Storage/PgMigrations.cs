@@ -2462,22 +2462,36 @@ ALTER TABLE collect.ag_database_replica_states
     /// on the two hourly views only, where reads measurably use it) — the reader check this rung's PR body
     /// carries in full.
     ///
-    /// <para><b>Resolved by view name, not by hard-coded hypertable id (#4503).</b> A continuous aggregate's
-    /// materialization hypertable id is assigned at CREATE time and differs per store — the production catalog
-    /// this rung read from happened to number them 103/106/109/110/112/113, but a fresh or differently-ordered
-    /// store would not. The <c>DO</c> block below resolves each view's <c>materialization_hypertable_name</c>
-    /// from <c>timescaledb_information.continuous_aggregates</c> and drops indexes on THAT hypertable by
-    /// matching the group-index name shape (<c>&lt;column&gt;_bucket_idx</c>) against the KEPT set, so a store
-    /// missing one of the six CAGGs (a plain-PostgreSQL store, or one that never enabled a given rollup) skips it
-    /// rather than erroring, and re-running the block after the indexes are already gone is a no-op.</para>
+    /// <para><b>Resolved by view name and by the indexed COLUMN, never by a string-built index name
+    /// (#4503).</b> A continuous aggregate's materialization hypertable id is assigned at CREATE time and
+    /// differs per store — the production catalog this rung read from happened to number them
+    /// 103/106/109/110/112/113, but a fresh or differently-ordered store would not; that part was already
+    /// handled by resolving <c>materialization_hypertable_name</c> from
+    /// <c>timescaledb_information.continuous_aggregates</c>. What was NOT safe is building the auto-created
+    /// index's NAME as a string and passing it to <c>DROP INDEX IF EXISTS</c>: PostgreSQL truncates an
+    /// identifier at 63 bytes with no hash suffix, and
+    /// <c>_materialized_hypertable_112_runtime_stats_interval_id_bucket_idx</c> is 68 characters, so the name
+    /// actually on disk is the 63-byte truncation, not the string this rung would have built — the DROP
+    /// would have silently no-op'd against a name nothing wears, leaving the real index in place. The
+    /// <c>DO</c> block below never builds that name: for each view it resolves the materialization's OID,
+    /// then reads <c>pg_index</c>/<c>pg_attribute</c> directly for a two-key btree whose FIRST key column is
+    /// one of that view's drop-list columns and whose SECOND key column is <c>bucket</c> — the exact shape
+    /// <c>create_group_indexes</c>'s default builds — and drops whatever index actually carries that shape,
+    /// by its real (possibly-truncated) name via <c>::regclass</c>. A single-column index (the kept
+    /// <c>bucket_idx</c>) and a two-key index whose kept column ISN'T in the drop list both fail the match
+    /// and are never touched. A store missing one of the six CAGGs (a plain-PostgreSQL store, or one that
+    /// never enabled a given rollup) skips it rather than erroring, and re-running the block after the
+    /// indexes are already gone is a no-op — the catalog read finds nothing to drop.</para>
     /// </summary>
     private const string V152Sql = @"
 DO $$
 DECLARE
     v_view text;
     v_drop_cols text[];
+    v_mat_schema text;
     v_mat_table text;
-    v_col text;
+    v_mat_oid regclass;
+    r record;
 BEGIN
     FOR v_view, v_drop_cols IN VALUES
         ('query_store_stats_hourly',          ARRAY['database_name', 'module_name', 'query_hash']),
@@ -2487,8 +2501,8 @@ BEGIN
         ('query_store_stats_interval_daily',   ARRAY['database_name', 'execution_type_desc', 'first_execution_time', 'module_name', 'plan_id', 'query_hash', 'query_id', 'replica_role', 'runtime_stats_interval_id', 'server_name']),
         ('query_store_stats_daygrain_daily',   ARRAY['database_name', 'module_name', 'query_hash', 'server_name'])
     LOOP
-        SELECT materialization_hypertable_name
-        INTO v_mat_table
+        SELECT materialization_hypertable_schema, materialization_hypertable_name
+        INTO v_mat_schema, v_mat_table
         FROM timescaledb_information.continuous_aggregates
         WHERE view_schema = 'collect' AND view_name = v_view;
 
@@ -2496,9 +2510,19 @@ BEGIN
             CONTINUE;
         END IF;
 
-        FOREACH v_col IN ARRAY v_drop_cols
+        v_mat_oid := format('%I.%I', v_mat_schema, v_mat_table)::regclass;
+
+        FOR r IN
+            SELECT i.indexrelid::regclass AS idx
+            FROM pg_index i
+            JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+            JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+            WHERE i.indrelid = v_mat_oid
+            AND   i.indnatts = 2
+            AND   a1.attname = ANY (v_drop_cols)
+            AND   a2.attname = 'bucket'
         LOOP
-            EXECUTE format('DROP INDEX IF EXISTS _timescaledb_internal.%I', v_mat_table || '_' || v_col || '_bucket_idx');
+            EXECUTE format('DROP INDEX IF EXISTS %s', r.idx);
         END LOOP;
     END LOOP;
 END $$;";
