@@ -188,8 +188,9 @@ public sealed class PayloadDimensionLiveTests
                 Assert.True(reader.IsDBNull(1), "'none' mode must leave query_plan_gz NULL - that is the whole contract");
             }
 
-            /* A gzip-mode batch with the SAME plan (hours later, past the last_seen guard) must not
-               convert the row - the conflict arm only refreshes last_seen. */
+            /* A gzip-mode batch with the SAME plan (hours later) must not convert the row - the
+               conflict arm only refreshes last_seen, and this assertion holds regardless of the guard
+               window's width. */
             await WriteQueryStatsBatchAsync(
                 connection, serverId, serverName, DateTime.UtcNow.AddHours(2),
                 new[] { NewRow("0x2171B", queryText, planXml) }, ct, compressPlanContent: true);
@@ -648,7 +649,7 @@ public sealed class PayloadDimensionLiveTests
     // ── (e) the last_seen watermark and its churn guard ──
 
     [Fact]
-    public async Task LastSeen_RefreshesOnlyOncePerHour_SoAHotDimTakesOneUpdateNotOnePerCycle()
+    public async Task LastSeen_RefreshesOnlyOncePerGuardWindow_SoAHotDimTakesOneUpdateNotOnePerCycle()
     {
         var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(connectionString), SkipReason);
@@ -679,21 +680,22 @@ public sealed class PayloadDimensionLiveTests
             await FlushAtAsync(t0);
             Assert.Equal(t0, await LastSeenAsync());
 
-            /* Within the hour: NOT refreshed. Every referenced dim row would otherwise take an UPDATE every
-               collection cycle — a dead tuple per row per minute on a hot table — for a watermark whose
-               only consumer has a multi-day horizon. */
-            await FlushAtAsync(t0.AddMinutes(30));
+            /* Within the guard window (#4503: 6 hours, widened from 1): NOT refreshed. Every referenced
+               dim row would otherwise take an UPDATE every collection cycle — a dead tuple per row per
+               minute on a hot table — for a watermark whose only consumer has a multi-day horizon. */
+            await FlushAtAsync(t0.AddHours(3));
             Assert.Equal(t0, await LastSeenAsync());
 
-            /* Past the hour: refreshed. The guard caps the churn at 60x less, and stays correct as long as
-               the GC margin exceeds an hour (it is a full day). */
-            await FlushAtAsync(t0.AddHours(2));
-            Assert.Equal(t0.AddHours(2), await LastSeenAsync());
+            /* Past the guard window: refreshed. The guard caps the churn at 4x fewer updates a day than
+               the original 1-hour width, and stays correct as long as the GC margin exceeds the guard
+               width (it is a full day). */
+            await FlushAtAsync(t0.AddHours(7));
+            Assert.Equal(t0.AddHours(7), await LastSeenAsync());
 
             /* And a REPLAYED/backfilled batch cannot stamp content as fresher than it is: the watermark
                never moves backwards, because the guard's comparison is one-directional. */
             await FlushAtAsync(t0.AddMinutes(5));
-            Assert.Equal(t0.AddHours(2), await LastSeenAsync());
+            Assert.Equal(t0.AddHours(7), await LastSeenAsync());
 
             bodySucceeded = true;
         }
@@ -733,9 +735,9 @@ public sealed class PayloadDimensionLiveTests
     /// directly against the rows this test wrote, with no exposure to unrelated WAL traffic, so
     /// the WAL assertion was dropped as redundant and flaky (#4354).</para>
     ///
-    /// <para>(2) A row stamped two hours ago is still refreshed — the pre-filter's own staleness
-    /// read uses the same one-hour boundary the <c>ON CONFLICT ... WHERE</c> guard always used, so
-    /// a genuinely stale row still reaches the <c>UPDATE</c>.</para>
+    /// <para>(2) A row stamped past the guard window (#4503: 6 hours) is still refreshed — the
+    /// pre-filter's own staleness read uses the same boundary the <c>ON CONFLICT ... WHERE</c> guard
+    /// always used, so a genuinely stale row still reaches the <c>UPDATE</c>.</para>
     ///
     /// <para>(3) A digest with no existing row at all is still inserted — the pre-filter is an
     /// anti-join over existing rows, not a blanket skip of the statement.</para>
@@ -810,25 +812,25 @@ public sealed class PayloadDimensionLiveTests
             await FlushAsync(freshPairs.Append((staleDigest, stalePayload)), t0);
             Assert.Equal(0, await LockedRowCountAsync(freshDigests));
 
-            // (1) Same batch, same digests, 30 minutes later -- still inside the one-hour
-            // freshness window. The pre-filter excludes every one of them before the statement
+            // (1) Same batch, same digests, 3 hours later -- still inside the guard's freshness
+            // window (#4503: 6 hours). The pre-filter excludes every one of them before the statement
             // ever reaches INSERT/ON CONFLICT: no lock taken, no last_seen change.
-            await FlushAsync(freshPairs, t0.AddMinutes(30));
+            await FlushAsync(freshPairs, t0.AddHours(3));
 
             Assert.Equal(0, await LockedRowCountAsync(freshDigests));
             Assert.Equal(0, await ChangedLastSeenCountAsync(freshDigests, t0));
 
-            // (2) and (3): two hours after t0, the stale row is refreshed and a brand-new digest
-            // is inserted, in the same flush.
-            await FlushAsync([(staleDigest, stalePayload), (newDigest, newPayload)], t0.AddHours(2));
+            // (2) and (3): 7 hours after t0 (past the guard window), the stale row is refreshed and a
+            // brand-new digest is inserted, in the same flush.
+            await FlushAsync([(staleDigest, stalePayload), (newDigest, newPayload)], t0.AddHours(7));
 
             var refreshedStale = (DateTime)(await ScalarAsync(
                 connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, staleDigest))!;
-            Assert.Equal(t0.AddHours(2), refreshedStale);
+            Assert.Equal(t0.AddHours(7), refreshedStale);
 
             var insertedNew = (DateTime)(await ScalarAsync(
                 connection, "SELECT last_seen FROM query_plan_dim WHERE digest = $1", ct, newDigest))!;
-            Assert.Equal(t0.AddHours(2), insertedNew);
+            Assert.Equal(t0.AddHours(7), insertedNew);
 
             bodySucceeded = true;
         }

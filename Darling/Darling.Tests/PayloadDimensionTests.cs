@@ -432,10 +432,11 @@ public sealed class PayloadDimensionTests
            content writes no new row. */
         Assert.Contains("ON CONFLICT (digest) DO UPDATE", sql, StringComparison.Ordinal);
 
-        /* The churn guard. Without it, every referenced dim row takes an UPDATE every collection cycle —
+        /* The churn guard, now 6 hours (#4503, widened from 1 to cut non-HOT WAL on the indexed
+           last_seen column). Without it, every referenced dim row takes an UPDATE every collection cycle —
            a dead tuple per row per minute — to maintain a watermark whose only consumer (the GC) has a
            multi-day horizon. */
-        Assert.Contains("INTERVAL '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("INTERVAL '6 hours'", sql, StringComparison.Ordinal);
 
         /* ONE statement with array parameters: an Npgsql batch mixing multiple statements with positional
            parameters fails SILENTLY, and a 200-row batch would otherwise cost 200 round trips. */
@@ -448,10 +449,10 @@ public sealed class PayloadDimensionTests
             "WHERE NOT EXISTS (\n" +
             "    SELECT 1 FROM query_text_dim d\n" +
             "    WHERE d.digest = u.digest\n" +
-            "    AND   d.last_seen >= $3 - INTERVAL '1 hour')\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
+            "WHERE query_text_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
             sql);
 
         /* #4249: the pre-filter is a plain MVCC read (no lock) that keeps an already-fresh digest from
@@ -474,10 +475,10 @@ public sealed class PayloadDimensionTests
             "WHERE NOT EXISTS (\n" +
             "    SELECT 1 FROM query_plan_dim d\n" +
             "    WHERE d.digest = u.digest\n" +
-            "    AND   d.last_seen >= $3 - INTERVAL '1 hour')\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable));
 
         /* #2171: compressContent false routes the plan dim through the TEXT branch - query_plan_xml
@@ -490,10 +491,10 @@ public sealed class PayloadDimensionTests
             "WHERE NOT EXISTS (\n" +
             "    SELECT 1 FROM query_plan_dim d\n" +
             "    WHERE d.digest = u.digest\n" +
-            "    AND   d.last_seen >= $3 - INTERVAL '1 hour')\n" +
+            "    AND   d.last_seen >= $3 - INTERVAL '6 hours')\n" +
             "ORDER BY u.digest\n" +
             "ON CONFLICT (digest) DO UPDATE SET last_seen = EXCLUDED.last_seen\n" +
-            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '1 hour'",
+            "WHERE query_plan_dim.last_seen < EXCLUDED.last_seen - INTERVAL '6 hours'",
             PayloadDimensions.UpsertSql(PayloadDimensions.QueryPlanDimTable, compressContent: false));
 
         /* Explicit true is byte-identical to the default - the parameter cannot drift the gzip shape. */
