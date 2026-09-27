@@ -262,7 +262,7 @@ public sealed class DarlingAgStatesReaderLiveEqualityTests
                 Assert.Equal(2, removedCard.Databases.Count);
             }
 
-            var fleetHealth = await DarlingAgReader.GetAgHealthAsync(postgres, null, now, ct);
+            var fleetHealth = await DarlingAgReader.GetAgHealthAsync(postgres, null, now, cancellationToken: ct);
             var fleetGroups = fleetHealth.AvailabilityGroups.Where(g => sentinelIds.Contains(g.ServerId)).ToList();
             Assert.Equal(9, fleetGroups.Count);
             Assert.DoesNotContain(fleetGroups, g => g.ServerId == disabledId);
@@ -270,7 +270,7 @@ public sealed class DarlingAgStatesReaderLiveEqualityTests
             var fleetCount = await DarlingAgReader.GetAvailabilityGroupCountAsync(postgres, null, ct);
             Assert.Equal(fleetHealth.AvailabilityGroupCount, fleetCount);
 
-            var scopedHealth = await DarlingAgReader.GetAgHealthAsync(postgres, staleId, now, ct);
+            var scopedHealth = await DarlingAgReader.GetAgHealthAsync(postgres, staleId, now, cancellationToken: ct);
             Assert.Equal(StaleName, Assert.Single(scopedHealth.AvailabilityGroups).ServerName);
 
             var fleetJson = await DarlingMcpAgTools.GetAgHealth(postgres, null);
