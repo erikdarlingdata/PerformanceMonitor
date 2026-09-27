@@ -1457,6 +1457,121 @@ public class StoreLogClassifierTests
             perSlab.OrderBy(p => p.Key, StringComparer.Ordinal).ToArray());
     }
 
+    /// <summary>
+    /// #4501's bounded refusal rule: shapes it must KEEP (K1-K8). A second known label sitting ahead of the
+    /// real one is refused only when it is within 63 bytes plus the separator, made entirely of printable
+    /// ASCII, separated from it by a space, and names a DIFFERENT severity than the real one. Each K case
+    /// fails at least one of those four conditions, or (K7/K8) agrees in severity, so none is refused.
+    /// </summary>
+    [Fact]
+    public void KeptShapes_ForgedOrCoincidentalSecondLabelDoesNotRefuseTheLine()
+    {
+        /* K1: a quote, not a space, sits before the second label — condition (iii) fails. */
+        var k1 = StoreLogClassifier.Classify(
+            DefaultPrefix + "psql LOG:  statement: SELECT 'ERROR:  x'\n");
+        var k1Group = Assert.Single(k1.Groups);
+        Assert.Equal("LOG", k1Group.Severity);
+
+        /* K2: the second label sits more than 64 characters past the real one — condition (i) fails. */
+        var k2 = StoreLogClassifier.Classify(
+            DefaultPrefix + "psql LOG:  statement: SELECT '"
+            + new string('x', 70) + "' ERROR:  padded far past the window\n");
+        var k2Group = Assert.Single(k2.Groups);
+        Assert.Equal("LOG", k2Group.Severity);
+
+        /* K3: non-ASCII sits in the window — condition (ii) fails (a name cannot contain it). */
+        var k3 = StoreLogClassifier.Classify(
+            DefaultPrefix + "psql LOG:  statement: SELECT 'é' ERROR:  x\n");
+        var k3Group = Assert.Single(k3.Groups);
+        Assert.Equal("LOG", k3Group.Severity);
+
+        /* K4: an auto_explain LOG line whose ERROR: text is only in its tab-continuation lines, which are
+           never label-matched at all. */
+        var k4 = StoreLogClassifier.Classify(
+            DefaultPrefix + "LOG:  duration: 1.2 ms  plan:\n"
+            + "\tQuery Text: SELECT 1\n"
+            + "\tSeq Scan (ERROR:  not a real severity)\n");
+        var k4Group = Assert.Single(k4.Groups);
+        Assert.Equal("LOG", k4Group.Severity);
+        Assert.Equal(1, k4.EntriesRead);
+
+        /* K5: the %Q rendering glues the query id straight onto the severity with no separator, so the field
+           found is the real ERROR and there is no known label after it to refuse against. */
+        var k5 = StoreLogClassifier.Classify(
+            QueryIdPrefix + "ERROR:  canceling statement due to user request\n");
+        Assert.Equal("user_request_cancel", Assert.Single(k5.Groups).EventClass);
+
+        /* K6: a STATEMENT companion whose forged ERROR: sits more than 64 characters in — condition (i)
+           fails. */
+        var k6 = StoreLogClassifier.Classify(
+            DefaultPrefix + "ERROR:  canceling statement due to user request\n"
+            + DefaultPrefix + "STATEMENT:  SELECT '"
+            + new string('x', 70) + "' /* ERROR:  padded far past the window */\n");
+        Assert.Equal(1, k6.EntriesRead);
+        Assert.Equal("user_request_cancel", Assert.Single(k6.Groups).EventClass);
+
+        /* K7: the ruling's narrowing of the review's R5 - psql's RAISE EXCEPTION echo, same severity both
+           ways, so there is nothing to refuse. Kept as ERROR. */
+        var k7 = StoreLogClassifier.Classify(
+            DefaultPrefix + "psql ERROR:  ERROR:  x\n");
+        var k7Group = Assert.Single(k7.Groups);
+        Assert.Equal("ERROR", k7Group.Severity);
+        Assert.Equal(1, k7.EntriesRead);
+
+        /* K8: a forged label that happens to repeat the line's own real severity. Kept as LOG. */
+        var k8 = StoreLogClassifier.Classify(
+            DefaultPrefix + "x LOG:  LOG:  checkpoint starting: time\n");
+        var k8Group = Assert.Single(k8.Groups);
+        Assert.Equal("LOG", k8Group.Severity);
+        Assert.Equal(1, k8.EntriesRead);
+    }
+
+    /// <summary>
+    /// #4501's bounded refusal rule: shapes it must REFUSE (R1-R4). Each satisfies all four conditions and
+    /// disagrees in severity, so the line opens no field — the same as one this reader never matched.
+    /// </summary>
+    [Fact]
+    public void RefusedShapes_DifferentSeverityWithinTheWindowRefusesTheLine()
+    {
+        /* R1: the review's own misparse pin - read as ERROR before this fix, refused after it. RED at the
+           pre-fix commit (proven separately in a detached worktree). */
+        var r1 = StoreLogClassifier.Classify(
+            DefaultPrefix + "ERROR:  LOG:  checkpoint starting: time\n");
+        Assert.Empty(r1.Groups);
+        Assert.Equal(0, r1.EntriesRead);
+
+        /* R2: the same shape with an application_name ahead of the forged label. */
+        var r2 = StoreLogClassifier.Classify(
+            DefaultPrefix + "x ERROR:  LOG:  checkpoint starting: time\n");
+        Assert.Empty(r2.Groups);
+        Assert.Equal(0, r2.EntriesRead);
+
+        /* R3: the companion forge - a STATEMENT field whose forged ERROR: disagrees with it, right after a
+           real LOG entry. The STATEMENT line opens no field of its own; the LOG entry above it is unaffected
+           and stays the only one read. */
+        var r3 = StoreLogClassifier.Classify(
+            DefaultPrefix + "LOG:  some real message\n"
+            + DefaultPrefix + "STATEMENT:  ERROR:  fake severity\n");
+        Assert.Equal(1, r3.EntriesRead);
+        var r3Group = Assert.Single(r3.Groups);
+        Assert.Equal("LOG", r3Group.Severity);
+
+        /* R4: the forged label (found as L1) sits exactly 64 characters before the real one (M2) - the
+           window's own boundary, 63 bytes plus the separator - and is refused; one character further apart
+           puts M2 past the window and it is kept. */
+        var atBoundaryPadding = new string('x', 55);
+        var r4AtBoundary = StoreLogClassifier.Classify(
+            DefaultPrefix + "ERROR:  " + atBoundaryPadding + " LOG:  past the pid\n");
+        Assert.Empty(r4AtBoundary.Groups);
+        Assert.Equal(0, r4AtBoundary.EntriesRead);
+
+        var pastBoundaryPadding = new string('x', 56);
+        var r4PastBoundary = StoreLogClassifier.Classify(
+            DefaultPrefix + "ERROR:  " + pastBoundaryPadding + " LOG:  past the pid\n");
+        var r4PastGroup = Assert.Single(r4PastBoundary.Groups);
+        Assert.Equal("ERROR", r4PastGroup.Severity);
+    }
+
     /// <summary>Class + severity + occurrences, order-independent — a comparison that survives a change to
     /// the order groups happen to come back in, which is not part of any contract.</summary>
     private static SortedSet<string> Fingerprint(StoreLogClassifier.Census census)
