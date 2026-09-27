@@ -1,0 +1,6 @@
+# DarlingMcpReadLatencyTools: tools/list budget for #3898. Ceilings only go down; see McpToolsListBudgetTests. One block per tool, blank line between blocks.
+tool get_read_latency 518
+param get_read_latency.hours 60
+param get_read_latency.limit 45
+param get_read_latency.route 47
+param get_read_latency.surface 54
