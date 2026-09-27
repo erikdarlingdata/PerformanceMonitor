@@ -1637,7 +1637,16 @@ public sealed class DarlingStoreUpgradeTests
 
     private static async Task<string?> ScalarOnAsync(string connectionString, string sql, CancellationToken cancellationToken)
     {
-        await using var connection = new NpgsqlConnection(connectionString);
+        /* Pooling=false: several callers (the in-place upgrade test's post-bootstrap "SHOW work_mem" read
+           included) pass a connection string this same process used, pooled, against a server it has since
+           stopped and replaced — pg_upgrade's swap, or this test's own StopWithRuntimeAsync/StartWithRuntimeAsync.
+           A pooled Npgsql connection can hand back a physical socket opened against that earlier server's
+           lifetime; its first write then fails with "forcibly closed" even though the CURRENT server is up and
+           never restarted (the #4445 diagnostic's own finding). Every other read in this file that crosses a
+           stop/start already strips Pooling for the same reason (MeasureStoreAsync, ReadServerVersionAsync,
+           ReadPostmasterStartTimeAsync); this helper is the one that had not caught up. */
+        var builder = new NpgsqlConnectionStringBuilder(connectionString) { Pooling = false };
+        await using var connection = new NpgsqlConnection(builder.ConnectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 600 };
         return await command.ExecuteScalarAsync(cancellationToken) as string;
