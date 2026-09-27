@@ -76,20 +76,22 @@ public sealed class QueryStoreLivenessHotTouchLiveTests
         var arity = method.GetParameters().Length;
         Assert.Equal("hasHotLivenessTouch", method.GetParameters()[ProbeOrdinal].Name);
 
-        /* Every rung above this one (V150's hasCollectionLogWatermarkAndJobHistoryIndexes) must also be
-           false, or the map finds the newer arm first and this assertion is checking the wrong rung's
-           fallthrough. */
+        /* Every rung above this one (V150's hasCollectionLogWatermarkAndJobHistoryIndexes, V151's
+           hasAgGroupId) must also be false, or the map finds a newer arm first and this assertion is
+           checking the wrong rung's fallthrough. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
         var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
-        behind[arity - 1] = false;
+        for (var i = ProbeOrdinal; i < arity; i++)
+        {
+            behind[i] = false;
+        }
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
-        /* V150 (#4469, #4477) is now the top rung, so this arm no longer needs to be the LAST one — it only
-           has to sit below the current top's arm, which is what the ladder-dense invariant above already
+        /* V151 (#4475) is now the top rung, so this arm no longer needs to be the LAST one — it only has
+           to sit below the current top's arm, which is what the ladder-dense invariant above already
            guarantees is registered ahead of it. */
         var thisArm = viewer.IndexOf("if (hasHotLivenessTouch)", StringComparison.Ordinal);
-        var topArm = viewer.IndexOf("if (hasCollectionLogWatermarkAndJobHistoryIndexes)", StringComparison.Ordinal);
+        var topArm = viewer.IndexOf("if (hasAgGroupId)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V149 sentinel arm — a fully-migrated store would map one rung short");
         Assert.True(topArm >= 0 && topArm < thisArm, "the current top rung's arm must sit above the V149 arm");
         Assert.Contains(

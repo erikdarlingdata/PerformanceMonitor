@@ -24,8 +24,9 @@ namespace Darling.Tests;
 /// (ladder, viewer probe) and the schema-after-migrate proof: both indexes exist, plain
 /// <c>CREATE INDEX IF NOT EXISTS</c>, idempotent on rerun.
 ///
-/// <para>This file's "I am the top rung" claim takes over from <c>QueryStoreLivenessHotTouchLiveTests</c>
-/// (V149) now that V150 has landed.</para>
+/// <para>This file's "I am the top rung" claim moved to <c>AgGroupIdRungTests</c> (V151) now that V151
+/// has landed; this file's own rung/probe facts below keep asserting what stays true forever (present,
+/// in-order, gated behind the arm above it) rather than "is exactly the top".</para>
 /// </summary>
 /* #1776 own-store: each fact mints its own scratch database through ScratchPostgres and never touches the
    shared store's tables, so it cannot race the live collection and serializing it would be pure slowdown. */
@@ -34,34 +35,36 @@ public sealed class CollectionLogWatermarkAndJobHistoryIndexesRungTests
     private const int RungVersion = 150;
     private const int PreviousVersion = 149;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe — no longer the newest, since V151 landed
+    /// above it.</summary>
     private const int ProbeOrdinal = 125;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>
-    /// The rung is registered and is the new top of the ladder — the claim this class takes over from
-    /// <c>QueryStoreLivenessHotTouchLiveTests</c> (V149) now that V150 has landed.
+    /// The rung is registered, and the ladder stays dense above the historical gap — the claim this class
+    /// took over from <c>QueryStoreLivenessHotTouchLiveTests</c> (V149) moved on again to
+    /// <c>AgGroupIdRungTests</c> (V151) now that V151 has landed.
     /// </summary>
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegistered_AndTheLadderIsDenseAboveTheHistoricalGap()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("collection-log-watermark-and-job-history-indexes", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
+
+        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
+        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung, and the map treats it as the TOP arm: a missing top arm
-    /// maps a fully-migrated store one rung short, permanently, because
+    /// The viewer probe's sentinel carries this rung, and the map treats it as an arm gated below the
+    /// current top's arm — a missing arm maps a fully-migrated store one rung short, permanently, because
     /// <see cref="ViewerDataService.RequiredStoreSchemaVersion"/> is <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndTheArmSitsBelowTheCurrentTop()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("idx_collection_log_watermark", probe, StringComparison.Ordinal);
@@ -69,29 +72,31 @@ public sealed class CollectionLogWatermarkAndJobHistoryIndexesRungTests
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
         Assert.Equal("hasCollectionLogWatermarkAndJobHistoryIndexes", method.GetParameters()[ProbeOrdinal].Name);
 
+        /* Every rung above this one (V151's hasAgGroupId) must also be false, or the map finds the newer
+           arm first and this assertion is checking the wrong rung's fallthrough. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
         var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
+        for (var i = ProbeOrdinal; i < arity; i++)
+        {
+            behind[i] = false;
+        }
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
+        /* V151 (#4475) is now the top rung, so this arm no longer needs to be the LAST one — it only has to
+           sit below the current top's arm, which is what the ladder-dense invariant above already
+           guarantees is registered ahead of it. */
         var thisArm = viewer.IndexOf("if (hasCollectionLogWatermarkAndJobHistoryIndexes)", StringComparison.Ordinal);
-        var previousArm = viewer.IndexOf("if (hasHotLivenessTouch)", StringComparison.Ordinal);
+        var topArm = viewer.IndexOf("if (hasAgGroupId)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V150 sentinel arm — a fully-migrated store would map one rung short");
-        Assert.True(thisArm < previousArm, "the V150 arm sits below V149's, so a current store maps one rung short");
+        Assert.True(topArm >= 0 && topArm < thisArm, "the current top rung's arm must sit above the V150 arm");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) + ";",
-            viewer[thisArm..previousArm], StringComparison.Ordinal);
+            "return " + RungVersion.ToString(System.Globalization.CultureInfo.InvariantCulture) + ";",
+            viewer[thisArm..(viewer.IndexOf("if (hasHotLivenessTouch)", StringComparison.Ordinal))], StringComparison.Ordinal);
     }
 
     /// <summary>
