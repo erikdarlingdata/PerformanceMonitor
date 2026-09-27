@@ -137,7 +137,9 @@ public sealed class McpToolsListBudgetTests
        window-floor sentence (422 -> 351, banking 71 bytes); get_top_queries_by_cpu and get_top_procedures_by_cpu
        each gain that same sentence (474 -> 600 and 406 -> 532, +126 bytes apiece), making all three heads
        byte-identical to Darling's. Net +181, matching Darling's twin change exactly. */
-    private const int TotalCeilingBytes = 92_222;
+    // #4452: get_scheduler_issues' description grew to stay byte-identical with Darling's twin
+    // (+95). Constant set to the value McpToolsListBudgetTests itself measured on this tree.
+    private const int TotalCeilingBytes = 92_317;
 
     private const int ConvertedHeadCap = 1_000;
     private const int ConvertedParameterCap = 200;
