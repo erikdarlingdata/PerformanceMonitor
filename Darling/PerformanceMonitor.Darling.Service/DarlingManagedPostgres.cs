@@ -116,6 +116,18 @@ public sealed class DarlingManagedPostgres
     public const string McpRoleName = "mcp";
 
     /// <summary>
+    /// The <c>ApplicationName</c> the web dashboard's and MCP server's own STORE connections present
+    /// (#4442 scope 2) — <see cref="MonitoredServerConnection.RemediationApplicationName"/>'s pattern applied
+    /// to the two network surfaces' pools instead of a monitored-target connection. Visible in the store's
+    /// own <c>pg_stat_activity</c> at once, so "which surface opened this backend" is a column, not a guess
+    /// from the role name alone (a bring-your-own store's <c>viewer</c>/<c>mcp</c> role names are the
+    /// operator's own choice, not necessarily these). The service's own collection connections to a monitored
+    /// server are untouched — this only names the STORE side of the web and MCP pools.
+    /// </summary>
+    public const string WebApplicationName = "PerformanceMonitorDarling-Web";
+    public const string McpApplicationName = "PerformanceMonitorDarling-Mcp";
+
+    /// <summary>
     /// The search path (schemas in resolution order) the managed connection strings carry, so pooled
     /// connections resolve the bare table names to collect/config even if the database default was
     /// not (or could not be) set. Same schemas, same order as the SQL-side
@@ -2530,9 +2542,13 @@ public sealed class DarlingManagedPostgres
     /// Builds a managed loopback connection string for a specific login role — shared by
     /// <see cref="BuildConnectionString"/> (the owner) and
     /// <see cref="TryBuildMcpConnectionStringFromStoredCredential"/> (the <c>mcp</c> role). Same
-    /// <c>127.0.0.1</c> + port + <see cref="SearchPath"/> shape; only the username/password differ.
+    /// <c>127.0.0.1</c> + port + <see cref="SearchPath"/> shape; only the username/password and
+    /// <paramref name="applicationName"/> differ. <paramref name="applicationName"/> is null for the
+    /// owner (whose <c>ApplicationName</c> stays Npgsql's default) and set for the <c>viewer</c>/<c>mcp</c>
+    /// roles (#4442 scope 2) so the connection names itself in <c>pg_stat_activity</c> without a store-side
+    /// change.
     /// </summary>
-    private static string BuildRoleConnectionString(int port, string username, string password)
+    private static string BuildRoleConnectionString(int port, string username, string password, string? applicationName = null)
     {
         var builder = new NpgsqlConnectionStringBuilder
         {
@@ -2542,6 +2558,7 @@ public sealed class DarlingManagedPostgres
             Password = password,
             Database = DatabaseName,
             SearchPath = SearchPath,
+            ApplicationName = applicationName,
             /* #1559: bound the service's backend count. Every pooled Npgsql connection is a live
                postgres.exe PROCESS on Windows, and each spawn must re-reserve the shared memory
                region (the 487 surface) — a field box showed 43 backends during a 24-server sweep.
@@ -2605,7 +2622,7 @@ public sealed class DarlingManagedPostgres
             return null;
         }
 
-        return BuildRoleConnectionString(config.Port, McpRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()));
+        return BuildRoleConnectionString(config.Port, McpRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), McpApplicationName);
     }
 
     /// <summary>
@@ -2625,7 +2642,7 @@ public sealed class DarlingManagedPostgres
             return null;
         }
 
-        return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()));
+        return BuildRoleConnectionString(config.Port, ViewerRoleName, DarlingSecrets.Unprotect(File.ReadAllText(credentialPath).Trim()), WebApplicationName);
     }
 
     /// <summary>#4280: the real-start fallback runs only for a "trial-passed" carry, and never for a requested

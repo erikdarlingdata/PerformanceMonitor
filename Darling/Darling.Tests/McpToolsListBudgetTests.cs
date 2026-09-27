@@ -183,7 +183,11 @@ public sealed class McpToolsListBudgetTests
     /* #4214/#4282 (merge with #4279): re-measured on the tree combining both independent #4273-based branches -
        this PR's own get_store_host (+616) and dev's #4279 Lite-parity head change (+181). Constant set to the
        value McpToolsListBudgetTests itself measured on the merged tree, not the two deltas added by hand. */
-    private const int TotalCeilingBytes = 175_265;
+    // #4442: get_read_latency's served block.
+    // #4452 (merge): re-measured on the tree combining dev's #4442 get_read_latency addition with this
+    // branch's scheduler-issues tool description growth (+95). Constant set to the value
+    // McpToolsListBudgetTests itself measured on the merged tree, not the two deltas added by hand.
+    private const int TotalCeilingBytes = 176_277;
 
 
 
