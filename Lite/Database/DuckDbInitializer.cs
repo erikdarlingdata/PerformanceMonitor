@@ -349,7 +349,7 @@ public class DuckDbInitializer : IDisposable
     /// <summary>
     /// Current schema version. Increment this when schema changes require table rebuilds.
     /// </summary>
-    internal const int CurrentSchemaVersion = 64;
+    internal const int CurrentSchemaVersion = 65;
 
     private readonly string _archivePath;
 
@@ -2307,6 +2307,50 @@ public class DuckDbInitializer : IDisposable
                 catch (Exception ex)
                 {
                     _logger?.LogWarning("Migration to v64 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
+                }
+            }
+        }
+
+        if (fromVersion < 65)
+        {
+            /* v65 (#4475, twinning Darling's V151): ag_replica_states and ag_database_replica_states gain
+               group_id — the GUID sys.availability_groups.group_id the engine stamps identically on every
+               replica of one Availability Group, stored as text (the collector column vocabulary has no uuid
+               type; AgDatabaseReplicaStatesCollector's last_hardened_lsn/last_commit_lsn already store a wide
+               identifier the same way). AgTopology.CountDistinctGroups uses it to close the one gap the
+               name-plus-replica-overlap rule (#4475) could not: two monitored SECONDARIES of one AG, with its
+               primary unmonitored, share no replica name with each other and so counted as two groups. A row
+               carrying group_id groups by it exactly; a row from before this rung carries none and falls back
+               to the pre-#4475 name + overlap rule.
+
+               Appended at the end of each PayloadColumns list, so the positional appender and old parquet are
+               unaffected. Nothing to backfill and nothing that COULD be: a row collected before the upgrade
+               never asked the engine for its AG's group_id, and NULL is the honest value — a reader treats it
+               as "fall back to the pre-#4475 rule", exactly today's behavior.
+
+               REQUIRED on this side for the v60 reason: the appender writes one value per declared payload
+               column, so a database without the column fails EndRow() on the first AG-collector batch — the
+               whole batch, not the column. Fresh installs get both from DuckDbSchemaGenerator (the AG tables
+               are generated from the shared collector catalog, not hand-written here); these ALTERs are for
+               an existing database and are idempotent. Neither AG table has ever had a v_ passthrough view
+               (view-less since Darling's V34 twin), so this rung is two ALTERs and nothing else. Non-fatal
+               per statement, matching v59–v64. */
+            _logger?.LogInformation("Running migration to v65: ag_replica_states and ag_database_replica_states store each Availability Group's engine-assigned id, closing a replica-name-overlap gap in the distinct-group count");
+
+            foreach (var table in new[]
+            {
+                "ag_replica_states",
+                "ag_database_replica_states",
+            })
+            {
+                try
+                {
+                    await ExecuteNonQueryAsync(connection,
+                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS group_id VARCHAR");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Migration to v65 on {Table}.group_id encountered an error (non-fatal): {Error}", table, ex.Message);
                 }
             }
         }
