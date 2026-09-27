@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -74,8 +75,14 @@ WHERE s.server_id <> 0";
     /// than that self-metrics row while cutting the read from every refresh tick to at most one per window.</summary>
     public static readonly TimeSpan StoreSizeCacheLifetime = TimeSpan.FromMinutes(5);
 
-    private long? _cachedStoreSizeBytes;
-    private DateTime _cachedStoreSizeAtUtc;
+    /// <summary>#4477: single-flighted and TTL-memoized the same way as
+    /// <see cref="GetFleetCollectionHealthByServerAsync"/> — two refreshes racing a cold cache share ONE
+    /// <see cref="StoreSizeSql"/> round trip instead of each running its own. A null reading (a transient
+    /// read failure) is never cached, so the very next call retries rather than serving null for the rest
+    /// of the window — the same rule the previous single-caller cache followed.</summary>
+    private readonly SingleFlightTtlCache<long?> _storeSizeCache = new(StoreSizeCacheLifetime);
+
+
 
     /// <summary>
     /// Reads MAX(collection_time) for every server in a single query, keyed by server_id. A server with no
@@ -103,24 +110,17 @@ WHERE s.server_id <> 0";
     /// <see cref="StoreSizeCacheLifetime"/> (#4477): a call inside the window returns the cached reading with
     /// no store round trip at all, rather than re-running <see cref="StoreSizeSql"/>'s whole-file-directory
     /// walk on every status-bar refresh.</summary>
-    public async Task<long?> GetStoreSizeBytesAsync(CancellationToken cancellationToken = default)
-    {
-        if (_cachedStoreSizeBytes is not null && DateTime.UtcNow - _cachedStoreSizeAtUtc < StoreSizeCacheLifetime)
-        {
-            return _cachedStoreSizeBytes;
-        }
+    public Task<long?> GetStoreSizeBytesAsync(CancellationToken cancellationToken = default)
+        => _storeSizeCache.GetOrStartAsync(FetchStoreSizeBytesAsync, shouldCache: static bytes => bytes is not null, cancellationToken);
 
+    /// <summary>The actual read behind <see cref="GetStoreSizeBytesAsync"/>'s single-flight gate. Runs with
+    /// <see cref="CancellationToken.None"/> (via <see cref="SingleFlightTtlCache{T}"/>): shared work, not any
+    /// one caller's.</summary>
+    private async Task<long?> FetchStoreSizeBytesAsync()
+    {
         await using var command = _dataSource.CreateCommand(StoreSizeSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
-        var result = await command.ExecuteScalarAsync(cancellationToken);
-        var bytes = result is null || result == DBNull.Value ? (long?)null : Convert.ToInt64(result);
-
-        if (bytes is not null)
-        {
-            _cachedStoreSizeBytes = bytes;
-            _cachedStoreSizeAtUtc = DateTime.UtcNow;
-        }
-
-        return bytes;
+        var result = await command.ExecuteScalarAsync(CancellationToken.None);
+        return result is null || result == DBNull.Value ? (long?)null : Convert.ToInt64(result);
     }
 }

@@ -93,16 +93,19 @@ public sealed class OverviewFleetHealthSingleFlightLiveTests
         ViewerDataService? service = null;
         try
         {
-            service = new ViewerDataService(scratch.ConnectionString);
-
-            /* The equivalence half: one server's fleet-served row must match a direct raw scan of the same
-               server's rows exactly — the fleet-wide statement must not answer a different question than
-               the per-server one it replaces. */
-            var byServer = await service.GetFleetCollectionHealthByServerAsync(ct);
-            Assert.True(byServer.TryGetValue(ServerIdBase, out var fleetRows), "the fleet-wide read must carry the seeded server's rows.");
-            Assert.Single(fleetRows!);
-            Assert.Equal(1, fleetRows![0].TotalRuns);
-            Assert.Equal(1, fleetRows[0].SuccessCount);
+            /* The equivalence half runs on its OWN service instance and is disposed before the concurrency
+               pin starts: GetFleetCollectionHealthByServerAsync memoizes its result on the instance for
+               FleetHealthByServerMemoLifetime (20 s), and every concurrent racer below must hit a COLD
+               cache — a shared instance would have every racer served from that still-warm memo instead
+               of racing the single-flight gate, proving nothing about it. */
+            await using (var equivalenceService = new ViewerDataService(scratch.ConnectionString))
+            {
+                var byServer = await equivalenceService.GetFleetCollectionHealthByServerAsync(ct);
+                Assert.True(byServer.TryGetValue(ServerIdBase, out var fleetRows), "the fleet-wide read must carry the seeded server's rows.");
+                Assert.Single(fleetRows!);
+                Assert.Equal(1, fleetRows![0].TotalRuns);
+                Assert.Equal(1, fleetRows[0].SuccessCount);
+            }
 
             /* Reset again so the equivalence read above doesn't count toward the concurrency pin. */
             await using (var resetConn = new NpgsqlConnection(scratch.ConnectionString))
@@ -113,8 +116,9 @@ public sealed class OverviewFleetHealthSingleFlightLiveTests
                 await resetCmd.ExecuteNonQueryAsync(ct);
             }
 
-            /* THE PIN: N racing callers (the per-card lanes of one Overview refresh) through the product's
-               own call path, hitting a cold cache together. */
+            /* THE PIN: N racing callers (the per-card lanes of one Overview refresh), on a FRESH instance
+               so every one of them hits the cold cache together, through the product's own call path. */
+            service = new ViewerDataService(scratch.ConnectionString);
             var racers = Enumerable.Range(0, ServerCount)
                 .Select(_ => service.GetFleetCollectionHealthByServerAsync(ct))
                 .ToArray();
