@@ -140,23 +140,42 @@ public sealed partial class ViewerDataService
     /// de-skewed run time is always ≤ <c>collection_time</c> (store UTC at collection, and a job's history row
     /// is collected after the run it reports), so the floor cannot drop a qualifying row.
     /// <para>
-    /// <b>job_stats replaces a window function over every step row (#4229).</b> The pre-fix text ran
-    /// <c>AVG</c>/<c>MAX</c> <c>OVER (PARTITION BY server_id, job_id)</c> against every row the window CTE
-    /// produced — every step of every job run, not just the ~2,000 the tab shows — so Postgres had to sort
-    /// and aggregate the WHOLE windowed set (measured: 21.7M-row table, 980 MB, 0.9M window rows) before the
-    /// final <c>ORDER BY ... LIMIT</c> could trim it. The average/max a row needs only ever depends on its
-    /// job's step_id-0 SUCCESS rows, so <c>job_stats</c> computes that once per (server_id, job_id) with a
-    /// plain <c>GROUP BY</c> over just that (much smaller) subset, filtered by the SAME window/floor/server
-    /// predicates as <c>base</c>. <c>base</c> itself now carries none of the analytic columns, so its own
-    /// <c>ORDER BY run_datetime_utc DESC, instance_id DESC LIMIT</c> can run — and the planner can pick a
-    /// top-N heapsort for it — before any aggregation happens at all; the join to <c>job_stats</c> below
-    /// attaches the per-job figures to only the (at most <c>limit</c>) rows that survive. Row selection is
-    /// unchanged: the LIMIT/ORDER BY in the old text never depended on avg_success_duration or
-    /// last_success_run_utc, so trimming to the newest rows first and joining the aggregate in after picks
-    /// the identical rows, in the identical order, with identical values (same GROUP BY filter as the old
-    /// CASE-gated window frame) — <c>job_stats</c> LEFT JOINs so a job with no successful step-0 row in the
-    /// window still surfaces its other rows, with NULL avg/last-success exactly as the window function gave
-    /// it (AVG/MAX of an empty/all-NULL partition is also NULL).
+    /// <b>Per-server top-N over V150's index (#4477), replacing a fleet-wide scan.</b> The old text scanned
+    /// every <c>job_history</c> row in the two-day window across the whole fleet, sorted the lot by
+    /// <c>run_datetime_utc DESC, instance_id DESC</c>, and took the top <c>limit</c> — a full scan of every
+    /// server's history to find the newest rows, with no index able to serve <c>run_datetime_utc</c> because
+    /// it is computed (<c>run_datetime</c> minus a per-server offset), not a stored column. Each monitored
+    /// server's UTC offset is constant for the life of the read (one <c>server_properties</c> lookup), so
+    /// "newest <c>limit</c> rows fleet-wide by <c>run_datetime_utc DESC, instance_id DESC</c>" is exactly a
+    /// merge of each server's own newest <c>limit</c> rows by RAW <c>run_datetime DESC, instance_id DESC</c> —
+    /// an order <see cref="PgMigrations"/>' V150 index <c>idx_job_history_server_run (server_id, run_datetime
+    /// DESC, instance_id DESC)</c> serves directly, with no sort. <c>server_offsets</c> enumerates every
+    /// registered server (mirroring the old <c>reg</c> LEFT JOIN, but now the LATERAL's driving table) with
+    /// its offset (0 when none collected yet, exactly like the old COALESCE); <c>top_by_server</c> is one
+    /// <c>CROSS JOIN LATERAL</c> per server, each an index-only top-<c>limit</c> descent; <c>base</c> merges
+    /// those (at most <c>servers × limit</c>, never more) and re-applies the SAME final ORDER BY/LIMIT to pick
+    /// the fleet-wide top <c>limit</c> — identical rows, identical order, identical tie-break to the old text.
+    /// <c>active_servers</c> drives off <c>job_history</c> itself (<c>DISTINCT server_id</c> for rows with
+    /// <c>collection_time &gt;= {floorParam}</c>, the same superset floor the per-server LATERAL already
+    /// filters on) rather than the <c>servers</c> registry — an earlier draft drove off <c>servers</c>
+    /// directly, which would have silently dropped every row for a <c>server_id</c> the registry no longer
+    /// carries (a decommissioned server whose retained history the old <c>LEFT JOIN reg</c> still showed,
+    /// under the raw collected name). <c>server_offsets</c> LEFT JOINs <c>servers</c> onto that driving set for
+    /// the display-name fallback (NULL when unregistered, exactly like the old COALESCE), so a
+    /// <c>job_history</c> row survives regardless of whether its server is still registered.
+    /// </para>
+    /// <para>
+    /// <b>job_stats stays a bounded per-server window, not a second fleet-wide scan.</b> The average/max a row
+    /// needs only ever depends on its OWN job's step_id-0 SUCCESS rows on its OWN server, so <c>job_stats</c>
+    /// is a <c>CROSS JOIN LATERAL</c> per server actually present in <c>base</c> (not all registered servers —
+    /// a server with no rows in the final top-<c>limit</c> needs no stats at all), using the same index's
+    /// <c>server_id</c>/<c>run_datetime</c> range to bound the scan to that one server's window, filtered to
+    /// <c>step_id = 0 AND run_status = 1</c> and to just the job_ids <c>base</c> actually kept for that server
+    /// (a job never shown needs no average computed for it), <c>GROUP BY job_id</c>. Values are identical to
+    /// the old text's: same 24-hour-window predicate, same step_id/run_status filter, same GROUP BY grain —
+    /// only the scan is now bounded to one server's rows via the index instead of every server's success rows
+    /// combined. <c>job_stats</c> LEFT JOINs onto <c>base</c> so a job with no successful step-0 row in the
+    /// window still surfaces its other rows with a NULL avg/last-success, exactly as before.
     /// </para>
     /// </summary>
     internal static string BuildJobHistorySql(bool scopedToServer)
@@ -174,46 +193,91 @@ WITH svr AS (
     WHERE utc_offset_minutes IS NOT NULL
     ORDER BY server_id, collection_time DESC
 ),
-job_stats AS (
-    SELECT
-        jh.server_id,
-        jh.job_id,
-        AVG(jh.run_duration_seconds) AS avg_success_duration,
-        MAX(jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0))) AS last_success_run_utc
+active_servers AS (
+    SELECT DISTINCT jh.server_id
     FROM job_history AS jh
-    LEFT JOIN svr ON svr.server_id = jh.server_id
-    WHERE jh.step_id = 0
-    AND   jh.run_status = 1
-    AND   jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) >= $1
-    AND   jh.collection_time >= {floorParam}
+    WHERE jh.collection_time >= {floorParam}
     {serverFilter}
-    GROUP BY jh.server_id, jh.job_id
+),
+server_offsets AS (
+    SELECT
+        a.server_id,
+        reg.display_name,
+        COALESCE(svr.utc_offset_minutes, 0) AS offset_minutes
+    FROM active_servers AS a
+    LEFT JOIN svr ON svr.server_id = a.server_id
+    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
+),
+top_by_server AS (
+    SELECT
+        so.server_id,
+        COALESCE(so.display_name, top.server_name) AS server_name,
+        top.instance_id,
+        top.job_id,
+        top.job_name,
+        top.job_enabled,
+        top.category_name,
+        top.step_id,
+        top.step_name,
+        top.run_status,
+        top.run_status_desc,
+        top.run_datetime - make_interval(mins => so.offset_minutes) AS run_datetime_utc,
+        top.run_duration_seconds,
+        top.retries_attempted,
+        top.message
+    FROM server_offsets AS so
+    CROSS JOIN LATERAL (
+        SELECT
+            jh.server_name,
+            jh.instance_id,
+            jh.job_id,
+            jh.job_name,
+            jh.job_enabled,
+            jh.category_name,
+            jh.step_id,
+            jh.step_name,
+            jh.run_status,
+            jh.run_status_desc,
+            jh.run_datetime,
+            jh.run_duration_seconds,
+            jh.retries_attempted,
+            jh.message
+        FROM job_history AS jh
+        WHERE jh.server_id = so.server_id
+        AND   jh.collection_time >= {floorParam}
+        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
+        ORDER BY jh.run_datetime DESC, jh.instance_id DESC
+        LIMIT {limitParam}
+    ) AS top
 ),
 base AS (
-    SELECT
-        jh.server_id,
-        COALESCE(reg.display_name, jh.server_name) AS server_name,
-        jh.instance_id,
-        jh.job_id,
-        jh.job_name,
-        jh.job_enabled,
-        jh.category_name,
-        jh.step_id,
-        jh.step_name,
-        jh.run_status,
-        jh.run_status_desc,
-        jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) AS run_datetime_utc,
-        jh.run_duration_seconds,
-        jh.retries_attempted,
-        jh.message
-    FROM job_history AS jh
-    LEFT JOIN svr ON svr.server_id = jh.server_id
-    LEFT JOIN servers AS reg ON reg.server_id = jh.server_id
-    WHERE jh.run_datetime - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) >= $1
-    AND   jh.collection_time >= {floorParam}
-    {serverFilter}
+    SELECT *
+    FROM top_by_server
     ORDER BY run_datetime_utc DESC, instance_id DESC
     LIMIT {limitParam}
+),
+job_stats AS (
+    SELECT
+        so.server_id,
+        js.job_id,
+        js.avg_success_duration,
+        js.last_success_run_utc
+    FROM (SELECT DISTINCT server_id FROM base) AS b
+    JOIN server_offsets AS so ON so.server_id = b.server_id
+    CROSS JOIN LATERAL (
+        SELECT
+            jh.job_id,
+            AVG(jh.run_duration_seconds) AS avg_success_duration,
+            MAX(jh.run_datetime - make_interval(mins => so.offset_minutes)) AS last_success_run_utc
+        FROM job_history AS jh
+        WHERE jh.server_id = so.server_id
+        AND   jh.step_id = 0
+        AND   jh.run_status = 1
+        AND   jh.collection_time >= {floorParam}
+        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
+        AND   jh.job_id IN (SELECT job_id FROM base WHERE base.server_id = so.server_id)
+        GROUP BY jh.job_id
+    ) AS js
 )
 SELECT
     base.server_id,
