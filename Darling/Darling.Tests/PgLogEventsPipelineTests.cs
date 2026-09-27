@@ -1673,7 +1673,7 @@ public sealed class PgLogEventsPipelineTests
            there; this pin follows dev's text rather than restating the old one. #4058 item 3 then replaced the
            two bare casts with the ordered CASE guard, so a forged out-of-range number is nulled instead of
            failing the whole read; this pin carries that text too. */
-        const string plansBefore = tail + "\nSELECT\n    CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL\n         WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,\n    CASE WHEN m[2] !~ '^[0-9]{1,15}(\\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? [^ [\\n]+ [^[\\n]*\\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'gn') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off'\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'no_stderr_log_file'\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 2000";
+        const string plansBefore = tail + "\nSELECT\n    CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL\n         WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,\n    CASE WHEN m[2] !~ '^[0-9]{1,15}(\\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,\n    replace(m[3], chr(9), '')                        AS plan_json,\n    pg_catalog.current_setting('log_line_prefix', true)  AS line_prefix\nFROM tail,\n     regexp_matches(\n         tail.body,\n         '^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)? [^ [\\n]+ [^[\\n]*\\[\\d+\\] (-?\\d+) LOG:  duration: ([0-9.]+) ms  plan:\\s*\\n((?:\\t[^\\n]*\\n)+)',\n         'gn') AS m\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'logging_collector=off', NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT NULL::bigint, NULL::double precision, 'no_stderr_log_file', NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)\nLIMIT 2000";
 
         /* The deadlock sibling's own part changed on purpose in #4005, after the extraction: it returns each
            candidate report's text whole, the HINT line after the DETAIL included, for the shared log reader to
@@ -1694,10 +1694,11 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal(deadlocksBefore, Lf(PgDeadlocksCollector.Instance.BuildQuery(context).Text));
 
         /* And the third reader opens with the same tailer and returns the body whole, with the target's
-           log_timezone beside it since #4046 (NULL on the marker arms). */
+           log_timezone beside it since #4046, and the target's own log_line_prefix beside that since #4501
+           (NULL on the marker arms for both). */
         var events = Lf(PgLogEventsCollector.Instance.BuildQuery(context).Text);
         Assert.Equal(
-            tail + "\nSELECT tail.body AS log_body,\n       pg_catalog.current_setting('log_timezone') AS log_timezone\nFROM tail\nUNION ALL\nSELECT 'logging_collector=off', NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)",
+            tail + "\nSELECT tail.body AS log_body,\n       pg_catalog.current_setting('log_timezone') AS log_timezone,\n       pg_catalog.current_setting('log_line_prefix', true) AS log_line_prefix\nFROM tail\nUNION ALL\nSELECT 'logging_collector=off', NULL, NULL\nWHERE pg_catalog.current_setting('logging_collector') <> 'on'\nUNION ALL\nSELECT 'no_stderr_log_file', NULL, NULL\nWHERE pg_catalog.current_setting('logging_collector') = 'on' AND NOT EXISTS (SELECT 1 FROM newest)",
             events);
         Assert.Contains("'" + PgLoggingCollectorOffException.Marker + "'", events, StringComparison.Ordinal);
         Assert.Contains("'" + PgNoStderrLogFileException.Marker + "'", events, StringComparison.Ordinal);

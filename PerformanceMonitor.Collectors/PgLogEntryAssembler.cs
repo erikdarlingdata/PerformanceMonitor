@@ -127,7 +127,7 @@ public static class PgLogEntryAssembler
     private static readonly string s_prefixGapBeforePid = @"(?:" + s_prefixRunStep + @"[^\[\n])*?";
 
     /// <summary>Every label this reader knows, the severities and the companion fields alike, as the same
-    /// alternation <see cref="s_prefixLine"/>'s own label group uses. Shared with <see cref="s_textOpensWithALabel"/>
+    /// alternation <see cref="s_prefixLine"/>'s own label group uses. Shared with <see cref="IsForgedLabel"/>
     /// so the "is this a label" shape is written once.</summary>
     private const string LabelAlternation =
         "LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION";
