@@ -33,21 +33,43 @@ namespace Darling.Tests;
 /// is stopped." and the refusal, and is skipped entirely under <c>-SkipStopGuard</c> - and the UNCHANGED
 /// refusal text are pinned structurally, the same way <c>DarlingDeployRollbackRetentionTests</c> pins this
 /// script's other invariants it cannot compile. Whether the wait actually WAITS is not visible to any
-/// source-parsing assertion, so <c>Wait-DarlingInstallTreeClear</c> is extracted and run under
-/// <c>pwsh</c> against a real child process, the same idiom <c>DarlingInstallLocationTests</c> and
-/// <c>DarlingDeployRollbackRetentionTests</c> use to run this script's other extracted functions - except
-/// this script targets Windows PowerShell 5.1 for those, and this fix has nothing PowerShell-5.1-specific
-/// in it, so it runs under the <c>pwsh</c> installed on this Mac instead. It is skipped cleanly where
-/// <c>pwsh</c> is not on PATH.</para>
+/// source-parsing assertion, so <c>Wait-DarlingInstallTreeClear</c> is extracted and run against a real
+/// child process, the same idiom <c>DarlingInstallLocationTests</c> and <c>DarlingDeployRollbackRetentionTests</c>
+/// use to run this script's other extracted functions - under <c>pwsh</c> on macOS or Linux, and Windows
+/// PowerShell 5.1 on Windows, the same host those two use and the one this script actually ships on. The
+/// behavioral pin now runs on Windows CI rather than skipping there, because Windows is the platform the
+/// production script targets.</para>
 /// </summary>
 public sealed class DarlingUpgradeInstallTreeWaitTests
 {
     private static string DeployScript => ReadRepoFile(Path.Combine("Darling", "tools", "upgrade-darling.ps1"));
 
-    private static string? PwshPath =>
-        File.Exists("/opt/homebrew/bin/pwsh") ? "/opt/homebrew/bin/pwsh"
-        : File.Exists("/usr/local/bin/pwsh") ? "/usr/local/bin/pwsh"
-        : null;
+    /// <summary>The shell this pin runs the extracted function under: Windows PowerShell 5.1 - the
+    /// production host - on Windows, falling back to a PowerShell 7 <c>pwsh.exe</c> install if 5.1 is
+    /// somehow absent; and <c>pwsh</c> on macOS or Linux, where this script never runs but the fix has
+    /// nothing platform-specific in it.</summary>
+    private static string? PwshPath
+    {
+        get
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                var windowsPowerShell = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.System),
+                    "WindowsPowerShell", "v1.0", "powershell.exe");
+                if (File.Exists(windowsPowerShell)) { return windowsPowerShell; }
+
+                var pwsh7 = Path.Combine(
+                    Environment.GetEnvironmentVariable("ProgramFiles") ?? @"C:\Program Files",
+                    "PowerShell", "7", "pwsh.exe");
+                return File.Exists(pwsh7) ? pwsh7 : null;
+            }
+
+            return File.Exists("/opt/homebrew/bin/pwsh") ? "/opt/homebrew/bin/pwsh"
+                : File.Exists("/usr/local/bin/pwsh") ? "/usr/local/bin/pwsh"
+                : null;
+        }
+    }
 
     /// <summary>
     /// The wait sits AFTER "Service is stopped." and BEFORE phase two's refusal, and the refusal's own
@@ -98,7 +120,7 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
     public void WaitDarlingInstallTreeClear_ReturnsEmptyAfterTheProcessExits_ButReturnsItWhenTheBoundIsTooShort()
     {
         var pwsh = PwshPath;
-        Assert.SkipUnless(pwsh is not null, "pwsh is not installed on this machine.");
+        Assert.SkipUnless(pwsh is not null, "neither Windows PowerShell 5.1 nor pwsh is installed on this machine.");
 
         var root = Directory.CreateTempSubdirectory("darling-4466-wait-");
         /* On macOS /tmp is a symlink to /private/tmp: Get-DarlingProcessesUnderPath resolves ITS root with
@@ -110,16 +132,10 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
         var resolvedRoot = ResolveRealPath(root.FullName);
         try
         {
-            var sleeperSource = Path.Combine(root.FullName, "sleeper.c");
-            var sleeperExe = Path.Combine(root.FullName, "sleeper");
-            File.WriteAllText(sleeperSource,
-                "#include <stdlib.h>\n#include <unistd.h>\n" +
-                "int main(int argc, char **argv) { sleep(argc > 1 ? atoi(argv[1]) : 1); return 0; }\n");
-
-            Compile(sleeperSource, sleeperExe);
+            var sleeperExe = BuildSleeper(root.FullName);
 
             /* Bound (10s) generous next to the process's own lifetime (2s): it must wait, then clear. */
-            using (var proc = StartUnder(sleeperExe, "2"))
+            using (var proc = StartUnder(sleeperExe, SleepArguments(2)))
             {
                 var cleared = RunWait(pwsh!, resolvedRoot, waitSeconds: 10, pollSeconds: 1);
                 Assert.Empty(cleared);
@@ -132,10 +148,10 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
             Process? holder = null;
             try
             {
-                holder = StartUnder(sleeperExe, "30");
+                holder = StartUnder(sleeperExe, SleepArguments(30));
                 var stillHolding = RunWait(pwsh!, resolvedRoot, waitSeconds: 1, pollSeconds: 1);
                 Assert.NotEmpty(stillHolding);
-                Assert.Contains(stillHolding, name => name.Contains("sleeper", StringComparison.OrdinalIgnoreCase));
+                Assert.Contains(stillHolding, name => name.Contains(SleeperImageName, StringComparison.OrdinalIgnoreCase));
             }
             finally
             {
@@ -152,6 +168,41 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
             try { Directory.Delete(root.FullName, recursive: true); } catch { /* best-effort cleanup */ }
         }
     }
+
+    /// <summary>The name the process under test reports through <c>Get-Process</c> - the sleeper's file
+    /// name without its extension, whether that file is a compiled C program on macOS/Linux or a copy of
+    /// <c>PING.EXE</c> on Windows.</summary>
+    private const string SleeperImageName = "sleeper";
+
+    /// <summary>Builds (or copies) a child process under <paramref name="root"/> that this test can hold
+    /// open for a controlled duration: a tiny compiled <c>sleep()</c> wrapper on macOS/Linux (a copied,
+    /// unsigned binary would refuse to run there), and a copy of the stock <c>PING.EXE</c> console
+    /// executable on Windows - the same stand-in <c>DarlingStoreUpgradeRevertTests</c> uses for a fake
+    /// long-lived process, since Windows has nothing installed everywhere that just sleeps.</summary>
+    private static string BuildSleeper(string root)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var pingCopy = Path.Combine(root, SleeperImageName + ".exe");
+            File.Copy(Path.Combine(Environment.SystemDirectory, "PING.EXE"), pingCopy, overwrite: true);
+            return pingCopy;
+        }
+
+        var sleeperSource = Path.Combine(root, SleeperImageName + ".c");
+        var sleeperExe = Path.Combine(root, SleeperImageName);
+        File.WriteAllText(sleeperSource,
+            "#include <stdlib.h>\n#include <unistd.h>\n" +
+            "int main(int argc, char **argv) { sleep(argc > 1 ? atoi(argv[1]) : 1); return 0; }\n");
+        Compile(sleeperSource, sleeperExe);
+        return sleeperExe;
+    }
+
+    /// <summary>Arguments that make the process built by <see cref="BuildSleeper"/> run for roughly
+    /// <paramref name="seconds"/> before exiting on its own: the sleep count directly on macOS/Linux, and
+    /// on Windows a ping count one higher than the target - <c>ping</c> sends its first echo immediately
+    /// and then one per second, so <c>N</c> requests span <c>N-1</c> seconds.</summary>
+    private static string SleepArguments(int seconds) =>
+        OperatingSystem.IsWindows() ? $"-n {seconds + 1} 127.0.0.1" : seconds.ToString();
 
     /// <summary>Resolves every symlink in <paramref name="path"/>'s ancestry, so this test's temp root
     /// matches what a started process's own <c>.Path</c> reports on macOS - see the comment where this is
@@ -190,11 +241,12 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
         Assert.True(cc.ExitCode == 0, $"could not compile the test's sleeper helper: {stderr}");
     }
 
-    private static Process StartUnder(string exePath, string sleepSeconds)
+    private static Process StartUnder(string exePath, string arguments)
     {
-        var psi = new ProcessStartInfo(exePath, sleepSeconds)
+        var psi = new ProcessStartInfo(exePath, arguments)
         {
             UseShellExecute = false,
+            CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
@@ -244,12 +296,23 @@ public sealed class DarlingUpgradeInstallTreeWaitTests
         File.WriteAllText(path, script.ToString());
         try
         {
-            using var process = Process.Start(new ProcessStartInfo(pwsh, $"-NoProfile -File \"{path}\"")
+            var arguments = OperatingSystem.IsWindows()
+                ? $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{path}\""
+                : $"-NoProfile -File \"{path}\"";
+            var startInfo = new ProcessStartInfo(pwsh, arguments)
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
-            });
+                CreateNoWindow = true,
+            };
+            /* A test host started from PowerShell 7 (CI's step shell) hands down a PSModulePath that points
+               Windows PowerShell 5.1 at PowerShell 7's modules, and 5.1 then cannot autoload the ones it
+               ships - the same problem DarlingInstallLocationTests works around for its own extracted
+               functions. Without the variable, 5.1 builds its own default, as an operator's console does. */
+            if (OperatingSystem.IsWindows()) { startInfo.Environment.Remove("PSModulePath"); }
+
+            using var process = Process.Start(startInfo);
             Assert.NotNull(process);
 
             var stdoutTask = process!.StandardOutput.ReadToEndAsync();
