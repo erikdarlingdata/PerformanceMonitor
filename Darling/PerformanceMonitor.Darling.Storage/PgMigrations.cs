@@ -15,6 +15,8 @@ using Npgsql;
 
 namespace PerformanceMonitor.Darling.Storage;
 
+// CI proof: comment-only touch to this file, to prove the store-upgrade path filter matches Storage changes.
+
 /// <summary>
 /// Darling's versioned schema migrations — plain SQL scripts the service applies on startup
 /// (headless plan: no migration framework). Each script runs once, inside its own transaction,
