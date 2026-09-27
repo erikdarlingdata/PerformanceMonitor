@@ -48,7 +48,8 @@ SELECT
     availability_mode_desc = ar.availability_mode_desc,
     failover_mode_desc = ar.failover_mode_desc,
     endpoint_url = ar.endpoint_url,
-    is_local = ars.is_local
+    is_local = ars.is_local,
+    group_id = CONVERT(nvarchar(36), ag.group_id)
 FROM sys.availability_replicas AS ar
 JOIN sys.availability_groups AS ag
   ON ar.group_id = ag.group_id
@@ -84,7 +85,8 @@ SELECT
     last_redone_time = hdrs.last_redone_time,
     last_received_time = hdrs.last_received_time,
     est_redo_completion_time_min = CONVERT(float, (hdrs.redo_queue_size * 1.0 / NULLIF(hdrs.redo_rate, 0)) / 60.0),
-    est_send_drain_time_min = CONVERT(float, (hdrs.log_send_queue_size * 1.0 / NULLIF(hdrs.log_send_rate, 0)) / 60.0)
+    est_send_drain_time_min = CONVERT(float, (hdrs.log_send_queue_size * 1.0 / NULLIF(hdrs.log_send_rate, 0)) / 60.0),
+    group_id = CONVERT(nvarchar(36), ag.group_id)
 FROM sys.dm_hadr_database_replica_states AS hdrs
 JOIN sys.availability_replicas AS ar
   ON  hdrs.replica_id = ar.replica_id
@@ -186,6 +188,9 @@ OPTION(RECOMPILE);";
                 /* #1696: appended LAST, so an upgraded store's ALTER lands it in the same physical position
                    a fresh generated table puts it - which is what keeps the two provenances comparable. */
                 "is_local",
+                /* #4475: appended AFTER is_local, for the same reason - it lands in the same physical
+                   position a fresh generated table puts it. */
+                "group_id",
             },
             names);
 
@@ -227,8 +232,12 @@ OPTION(RECOMPILE);";
                 "last_received_time",
                 "est_redo_completion_time_min",
                 "est_send_drain_time_min",
+                /* #4475: appended LAST, same rationale as the replica table's group_id. */
+                "group_id",
             },
             columns.Select(c => c.Name).ToArray());
+
+        Assert.Equal(CollectorColumnType.Varchar, columns.Single(c => c.Name == "group_id").Type);
 
         /* The LSNs are numeric(25,0) in the DMV — far wider than BIGINT — so they are converted
            server-side and stored as text. Storing them numerically would silently overflow. */
@@ -276,8 +285,8 @@ OPTION(RECOMPILE);";
     public async Task ReplicaReadAsync_MapsColumns()
     {
         using var reader = new FakeCollectorDataReader(
-            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true },
-            new object[] { "AG1", "NODE2", "SECONDARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE2.corp:5022", false });
+            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true, "11111111-1111-1111-1111-111111111111" },
+            new object[] { "AG1", "NODE2", "SECONDARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE2.corp:5022", false, "11111111-1111-1111-1111-111111111111" });
 
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
@@ -285,7 +294,7 @@ OPTION(RECOMPILE);";
 
         Assert.Equal(2, rows.Count);
         Assert.Equal(
-            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true),
+            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true, "11111111-1111-1111-1111-111111111111"),
             rows[0]);
         Assert.Equal("NODE2", rows[1].ReplicaServerName);
         Assert.Equal("SECONDARY", rows[1].RoleDesc);
@@ -293,6 +302,8 @@ OPTION(RECOMPILE);";
            node's view of an AG that every node can see. */
         Assert.True(rows[0].IsLocal);
         Assert.False(rows[1].IsLocal);
+        /* #4475: group_id maps like any other trailing text column. */
+        Assert.Equal("11111111-1111-1111-1111-111111111111", rows[0].GroupId);
     }
 
     [Fact]
@@ -302,8 +313,8 @@ OPTION(RECOMPILE);";
            state sys.availability_replicas serves only locally cached metadata — so every column can be
            null. A quorum-loss read must produce a row, not an InvalidCastException. */
         using var reader = new FakeCollectorDataReader(
-            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", DBNull.Value, DBNull.Value },
-            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
+            new object[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", DBNull.Value, DBNull.Value, DBNull.Value },
+            new object[] { DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value });
 
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
 
@@ -317,6 +328,8 @@ OPTION(RECOMPILE);";
         Assert.Null(rows[1].IsLocal);
         Assert.Equal("AG1", rows[0].AgName);
         Assert.Equal(default(AgReplicaStatesCollector.Row), rows[1]);
+        /* #4475: group_id is nullable, and NULL here (a pre-v65 row would carry none). */
+        Assert.Null(rows[0].GroupId);
     }
 
     [Fact]
@@ -335,6 +348,8 @@ OPTION(RECOMPILE);";
                    they need not agree with the queue/rate columns above. Deliberately different values so a
                    swapped mapping between the two fails rather than passing on a coincidence. */
                 8.0d, 0.5d,
+                /* #4475: group_id, trailing. */
+                "22222222-2222-2222-2222-222222222222",
             });
 
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
@@ -364,6 +379,8 @@ OPTION(RECOMPILE);";
 
         Assert.Equal(8.0d, row.EstRedoCompletionTimeMin);
         Assert.Equal(0.5d, row.EstSendDrainTimeMin);
+        /* #4475: group_id maps like any other trailing text column. */
+        Assert.Equal("22222222-2222-2222-2222-222222222222", row.GroupId);
     }
 
     [Fact]
@@ -383,6 +400,8 @@ OPTION(RECOMPILE);";
                 DBNull.Value, DBNull.Value, "ASYNCHRONOUS_COMMIT", DBNull.Value,
                 DBNull.Value, DBNull.Value, DBNull.Value, DBNull.Value,
                 DBNull.Value, DBNull.Value,
+                /* #4475: group_id, trailing, nullable. */
+                DBNull.Value,
             });
 
         var context = CollectorTestContext.Make(new RecordingCollectorDeltaCalculator());
@@ -408,6 +427,8 @@ OPTION(RECOMPILE);";
         /* NULL, not 0 — an un-drainable queue must never read as "drains instantly". */
         Assert.Null(row.EstRedoCompletionTimeMin);
         Assert.Null(row.EstSendDrainTimeMin);
+        /* #4475: group_id is nullable, and NULL here (a pre-v65 row would carry none). */
+        Assert.Null(row.GroupId);
     }
 
     [Fact]
@@ -433,12 +454,12 @@ OPTION(RECOMPILE);";
 
         var replicaWriter = new RecordingCollectorRowWriter();
         AgReplicaStatesCollector.Instance.WritePayload(
-            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true),
+            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true, null),
             replicaWriter,
             context);
 
         Assert.Equal(
-            new object?[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true },
+            new object?[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true, null },
             replicaWriter.Values);
 
         /* Modeled on a real measured sample from the Docker AG fixture: a SUSPEND_FROM_USER replica 62 s
@@ -451,7 +472,7 @@ OPTION(RECOMPILE);";
                 "AG1", "Orders", "NODE2", false, "SYNCHRONIZING", "1", "2", 4096L, 2048L, 512L, 256L, true, "SUSPEND_FROM_USER", "SYNCHRONOUS_COMMIT", 62L,
                 new DateTime(2026, 7, 26, 12, 0, 0), new DateTime(2026, 7, 26, 12, 0, 1),
                 new DateTime(2026, 7, 26, 11, 59, 55), new DateTime(2026, 7, 26, 12, 0, 2),
-                8.0d, null),
+                8.0d, null, null),
             databaseWriter,
             context);
 
@@ -461,7 +482,7 @@ OPTION(RECOMPILE);";
                 "AG1", "Orders", "NODE2", false, "SYNCHRONIZING", "1", "2", 4096L, 2048L, 512L, 256L, true, "SUSPEND_FROM_USER", "SYNCHRONOUS_COMMIT", 62L,
                 new DateTime(2026, 7, 26, 12, 0, 0), new DateTime(2026, 7, 26, 12, 0, 1),
                 new DateTime(2026, 7, 26, 11, 59, 55), new DateTime(2026, 7, 26, 12, 0, 2),
-                8.0d, null,
+                8.0d, null, null,
             },
             databaseWriter.Values);
 

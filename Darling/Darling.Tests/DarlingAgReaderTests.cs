@@ -209,8 +209,9 @@ public sealed class DarlingAgReaderTests
         string? connected = "CONNECTED",
         string? operational = "ONLINE",
         string? recoveryHealth = "ONLINE",
-        bool? isLocal = null) =>
-        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022");
+        bool? isLocal = null,
+        string? groupId = null) =>
+        new(serverId, serverName, At(1), agName, replicaName, role, isLocal, operational, connected, recoveryHealth, syncHealth, "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://" + replicaName + ":5022", groupId);
 
     private static Reader.DatabaseRow Database(
         int serverId,
@@ -221,8 +222,9 @@ public sealed class DarlingAgReaderTests
         string state = "SYNCHRONIZED",
         bool isSuspended = false,
         long? lagSeconds = 0,
-        int minutesAgo = 1) =>
-        new(serverId, serverName, At(minutesAgo), agName, databaseName, replicaName, true, state, "0x00", "0x00", 0, 0, 1024, 1024, isSuspended, isSuspended ? "USER_ACTION" : null, "SYNCHRONOUS_COMMIT", lagSeconds);
+        int minutesAgo = 1,
+        string? groupId = null) =>
+        new(serverId, serverName, At(minutesAgo), agName, databaseName, replicaName, true, state, "0x00", "0x00", 0, 0, 1024, 1024, isSuspended, isSuspended ? "USER_ACTION" : null, "SYNCHRONOUS_COMMIT", lagSeconds, groupId);
 
     [Fact]
     public void Build_OneAgSeenFromTwoServers_StaysTwoGroupsEachNamingItsReporter()
@@ -455,6 +457,44 @@ public sealed class DarlingAgReaderTests
         var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
 
         Assert.Equal(1, result.DistinctAgCount);
+        Assert.Equal(2, result.AvailabilityGroupCount);
+    }
+
+    [Fact]
+    public void DistinctAgCount_TwoSecondariesOfOneAgSameGroupId_DisjointReplicaSets_IsOne()
+    {
+        /* (a), through this reader's own public entry point rather than calling AgTopology.CountDistinctGroups
+           directly: two monitored SECONDARIES of one real AG, its primary unmonitored, each reporting only
+           itself (so their replica sets are disjoint), carrying the SAME group_id. Without the id, the
+           name+overlap rule alone counts 2 (see DistinctAgCount_SameAgSeenFromItsPrimaryAndItsSecondary_IsOne's
+           companion below for the id-less shape) -- with it, they collapse to 1. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "SECONDARY", groupId: "GROUP-GUID-1"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY", groupId: "GROUP-GUID-1"),
+        };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(1, result.DistinctAgCount);
+        Assert.Equal(2, result.AvailabilityGroupCount);
+    }
+
+    [Fact]
+    public void DistinctAgCount_TwoSecondariesOfOneAg_NoGroupId_DisjointReplicaSets_IsTwo()
+    {
+        /* The id-LESS companion to the pin above, proving the RED this branch closes: the SAME two disjoint-
+           replica-set secondaries, with NO group_id on either row, count as 2 under the name+overlap rule
+           alone -- exactly the gap #4475's follow-up (V151) exists to close. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(2, result.DistinctAgCount);
         Assert.Equal(2, result.AvailabilityGroupCount);
     }
 }

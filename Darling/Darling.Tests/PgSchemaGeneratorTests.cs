@@ -479,11 +479,12 @@ public sealed class PgSchemaGeneratorTests
            upgraded store's physical shape differ from a fresh one. */
         var v34 = Lf(PgMigrations.Scripts.Single(m => m.Version == 34).Sql);
 
-        /* The REPLICA-grain table is now the same two-migration story as the database grain below: V34
-           created its first 10 payload columns and V37 (#1696) appended is_local, so an upgraded store's
-           shape is V34 + V37 and only their sum equals the generator's current output. */
+        /* The REPLICA-grain table is now a three-migration story: V34 created its first 10 payload
+           columns, V37 (#1696) appended is_local, and V151 (#4475) appended group_id — so an upgraded
+           store's shape is V34 + V37 + V151 and only their sum equals the generator's current output. */
         var replicaColumns = AgReplicaStatesCollector.Instance.PayloadColumns;
         const int V34ReplicaColumnCount = 10;
+        const int V37ReplicaColumnCount = 11;
 
         Assert.Contains(
             CollectQualified(new TruncatedSchema(AgReplicaStatesCollector.Instance, V34ReplicaColumnCount)),
@@ -493,7 +494,7 @@ public sealed class PgSchemaGeneratorTests
 
         var v37 = Lf(PgMigrations.Scripts.Single(m => m.Version == 37).Sql);
 
-        foreach (var column in replicaColumns.Skip(V34ReplicaColumnCount))
+        foreach (var column in replicaColumns.Skip(V34ReplicaColumnCount).Take(V37ReplicaColumnCount - V34ReplicaColumnCount))
         {
             var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgReplicaStatesCollector.Instance, replicaColumns.Count)))
                 .Split('\n')
@@ -504,6 +505,21 @@ public sealed class PgSchemaGeneratorTests
             Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v37, StringComparison.Ordinal);
         }
 
+        /* V151 (#4475) appends group_id, the last replica-grain column, as its own additive rung — same
+           contract as V37 above. */
+        var v151ReplicaAlter = Lf(PgMigrations.Scripts.Single(m => m.Version == 151).Sql);
+
+        foreach (var column in replicaColumns.Skip(V37ReplicaColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgReplicaStatesCollector.Instance, replicaColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v151ReplicaAlter, StringComparison.Ordinal);
+        }
+
         /* No "V34 was not widened in place" sweep for this grain, unlike the database one below: the
            TruncatedSchema assertion above already matches V34's ag_replica_states block EXACTLY, which is a
            strictly stronger statement than any name-absence check. A substring sweep would also be wrong
@@ -511,14 +527,16 @@ public sealed class PgSchemaGeneratorTests
            for it finds the other table's legitimate column and fails. */
         Assert.Contains("CREATE INDEX IF NOT EXISTS idx_ag_database_replica_states_time ON collect.ag_database_replica_states(server_id, collection_time);", v34, StringComparison.Ordinal);
 
-        /* The database-grain table is the one case where a single migration is NOT the whole story: V34
-           created its first 15 payload columns and V36 (#991 addendum) appended 6 more, so an upgraded
-           store's shape is V34 + V36 and only their SUM can equal the generator's current output.
+        /* The database-grain table is a three-migration story: V34 created its first 15 payload columns,
+           V36 (#991 addendum) appended 6 more, and V151 (#4475) appended group_id — so an upgraded store's
+           shape is V34 + V36 + V151 and only their SUM can equal the generator's current output.
            Reconstruct that here rather than weakening the pin to name-presence — generate the historical
-           15-column shape and assert V34 matches it exactly, then assert V36 appends the remaining columns
-           in order with the generator's own types. Together those two prove fresh == upgraded. */
+           15-column shape and assert V34 matches it exactly, then assert V36 and V151 each append their
+           own remaining columns in order with the generator's own types. Together those prove fresh ==
+           upgraded. */
         var currentColumns = AgDatabaseReplicaStatesCollector.Instance.PayloadColumns;
         const int V34ColumnCount = 15;
+        const int V36ColumnCount = 21;
 
         Assert.Contains(
             CollectQualified(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, V34ColumnCount)),
@@ -527,7 +545,7 @@ public sealed class PgSchemaGeneratorTests
 
         var v36 = Lf(PgMigrations.Scripts.Single(m => m.Version == 36).Sql);
 
-        foreach (var column in currentColumns.Skip(V34ColumnCount))
+        foreach (var column in currentColumns.Skip(V34ColumnCount).Take(V36ColumnCount - V34ColumnCount))
         {
             var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, currentColumns.Count)))
                 .Split('\n')
@@ -536,6 +554,21 @@ public sealed class PgSchemaGeneratorTests
                 .TrimEnd(',');
 
             Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v36, StringComparison.Ordinal);
+        }
+
+        /* V151 (#4475) appends group_id, the last database-grain column, as its own additive rung — same
+           contract as V36 above. */
+        var v151DatabaseAlter = Lf(PgMigrations.Scripts.Single(m => m.Version == 151).Sql);
+
+        foreach (var column in currentColumns.Skip(V36ColumnCount))
+        {
+            var generatedType = Lf(PgSchemaGenerator.CreateTable(new TruncatedSchema(AgDatabaseReplicaStatesCollector.Instance, currentColumns.Count)))
+                .Split('\n')
+                .Single(l => l.TrimStart().StartsWith(column.Name + " ", StringComparison.Ordinal))
+                .Trim()
+                .TrimEnd(',');
+
+            Assert.Contains($"ADD COLUMN IF NOT EXISTS {generatedType}", v151DatabaseAlter, StringComparison.Ordinal);
         }
 
         /* And V34 must NOT have been widened in place: its CREATE TABLE IF NOT EXISTS is a no-op on a store

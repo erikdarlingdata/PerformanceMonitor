@@ -211,6 +211,13 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
     /// DMV's type), nullable, trailing; NULL on every pre-v62 row is "type never recorded", which the readers
     /// classify by the #3702 name proxy as they did before the rung. <see cref="DuckDbInitializer"/>'s v62
     /// migration adds it to existing databases.</para>
+    ///
+    /// <para>#4475 / schema v65: <c>group_id</c> on <c>ag_replica_states</c> and
+    /// <c>ag_database_replica_states</c> — the Availability Group's engine-assigned GUID from
+    /// <c>sys.availability_groups.group_id</c>, the same value on every replica, so the distinct-group
+    /// count can tell same-named AGs apart. VARCHAR, nullable, trailing; NULL on every pre-v65 row, which
+    /// the readers fall back to the name-plus-replica-overlap heuristic for. <see cref="DuckDbInitializer"/>'s
+    /// v65 migration adds it to existing databases.</para>
     /// </summary>
     private static readonly HashSet<string> IntentionalAppendedColumns = new(StringComparer.Ordinal)
     {
@@ -227,6 +234,9 @@ public class DuckDbSchemaEquivalenceTests : IDisposable
         "query_stats.statement_end_offset",
         /* v62 (#3653 A7): the counter's DMV type, so gauges stop being differenced. Appended, nullable INTEGER. */
         "perfmon_stats.cntr_type",
+        /* v65 (#4475): the AG's group_id from sys.availability_groups, so same-named AGs can be told apart. Appended, nullable VARCHAR. */
+        "ag_replica_states.group_id",
+        "ag_database_replica_states.group_id",
     };
 
     [Fact]

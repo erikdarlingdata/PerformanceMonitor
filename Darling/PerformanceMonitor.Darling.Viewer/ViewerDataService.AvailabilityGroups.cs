@@ -72,6 +72,7 @@ public sealed partial class ViewerDataService
                 AvailabilityModeDesc = row.AvailabilityModeDesc,
                 FailoverModeDesc = row.FailoverModeDesc,
                 EndpointUrl = row.EndpointUrl,
+                GroupId = row.GroupId,
             });
         }
 
@@ -105,6 +106,7 @@ public sealed partial class ViewerDataService
                 SuspendReasonDesc = row.SuspendReasonDesc,
                 AvailabilityModeDesc = row.AvailabilityModeDesc,
                 SecondaryLagSeconds = row.SecondaryLagSeconds,
+                GroupId = row.GroupId,
             });
         }
 

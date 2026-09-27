@@ -143,7 +143,8 @@ public static class DarlingAgStatesReader
             r.synchronization_health_desc,
             r.availability_mode_desc,
             r.failover_mode_desc,
-            r.endpoint_url
+            r.endpoint_url,
+            r.group_id
         FROM ag_replica_states AS r
         JOIN
         (
@@ -186,7 +187,8 @@ public static class DarlingAgStatesReader
             d.is_suspended,
             d.suspend_reason_desc,
             d.availability_mode_desc,
-            d.secondary_lag_seconds
+            d.secondary_lag_seconds,
+            d.group_id
         FROM ag_database_replica_states AS d
         JOIN
         (
@@ -247,7 +249,8 @@ public static class DarlingAgStatesReader
         string? SynchronizationHealthDesc,
         string? AvailabilityModeDesc,
         string? FailoverModeDesc,
-        string? EndpointUrl);
+        string? EndpointUrl,
+        string? GroupId);
 
     /// <summary>One database-grain row, exactly as <c>ag_database_replica_states</c> stores it. Queue sizes
     /// are KB and rates KB/s (the DMV's units), both instantaneous gauges rather than counters.</summary>
@@ -269,7 +272,8 @@ public static class DarlingAgStatesReader
         bool? IsSuspended,
         string? SuspendReasonDesc,
         string? AvailabilityModeDesc,
-        long? SecondaryLagSeconds);
+        long? SecondaryLagSeconds,
+        string? GroupId);
 
     /* ─────────────────────────── reads ─────────────────────────── */
 
@@ -415,7 +419,8 @@ public static class DarlingAgStatesReader
                 Text(reader, 10),
                 Text(reader, 11),
                 Text(reader, 12),
-                Text(reader, 13)));
+                Text(reader, 13),
+                Text(reader, 14)));
         }
 
         return rows;
@@ -450,7 +455,8 @@ public static class DarlingAgStatesReader
                 Flag(reader, 14),
                 Text(reader, 15),
                 Text(reader, 16),
-                Count(reader, 17)));
+                Count(reader, 17),
+                Text(reader, 18)));
         }
 
         return rows;
