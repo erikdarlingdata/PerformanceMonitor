@@ -1348,7 +1348,7 @@ public sealed class DarlingManagedPostgresTests
                PostgreSQL 18 and then reverted to 17 -- not an operator hand edit, which would only ever reach
                the last-good fallback in EnsureManagedConfReadyAsync, never the re-render this fact pins). */
             var managedTextBefore = await File.ReadAllTextAsync(managedConfPath, timeout.Token);
-            Assert.Equal(1, CountOccurrences(managedTextBefore, "maintenance_work_mem = "));
+            Assert.Single(ActiveValues(managedTextBefore, "maintenance_work_mem"));
             var parsedBefore = ManagedConfFile.ParseExisting(managedTextBefore);
             Assert.True(parsedBefore.IsWellFormed);
             var bodyWithOldValue = System.Text.RegularExpressions.Regex.Replace(
@@ -1362,6 +1362,7 @@ public sealed class DarlingManagedPostgresTests
             var headerBeforeHashLine = managedTextBefore[..managedTextBefore.IndexOf(ManagedConfFile.BodyHashPrefix, StringComparison.Ordinal)];
             var managedTextWithOldValue = headerBeforeHashLine + ManagedConfFile.BodyHashPrefix + ManagedConfFile.ComputeBodyHash(bodyWithOldValue) + "\n" + bodyWithOldValue;
             Assert.False(ManagedConfFile.IsHandEdited(managedTextWithOldValue));
+            Assert.Equal("2048MB", Assert.Single(ActiveValues(managedTextWithOldValue, "maintenance_work_mem")));
             await File.WriteAllTextAsync(managedConfPath, managedTextWithOldValue, timeout.Token);
 
             second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
@@ -1378,11 +1379,8 @@ public sealed class DarlingManagedPostgresTests
                the cap: the server must run on exactly the rendered value, and that value must be one
                PostgreSQL 17 accepts. */
             var managedTextAfter = await File.ReadAllTextAsync(managedConfPath, timeout.Token);
-            Assert.Equal(1, CountOccurrences(managedTextAfter, "maintenance_work_mem = "));
-            Assert.DoesNotContain("maintenance_work_mem = '2048MB'", managedTextAfter, StringComparison.Ordinal);
-            var renderedValue = System.Text.RegularExpressions.Regex.Match(
-                managedTextAfter, "maintenance_work_mem = '([^']*)'").Groups[1].Value;
-            Assert.False(string.IsNullOrEmpty(renderedValue), "expected the re-rendered darling-managed.conf to carry a maintenance_work_mem value");
+            var renderedValue = Assert.Single(ActiveValues(managedTextAfter, "maintenance_work_mem"));
+            Assert.NotEqual("2048MB", renderedValue);
 
             var (live, expected) = await ReadSettingAndLiteralBytesAsync(
                 connectionString, "maintenance_work_mem", renderedValue, timeout.Token);
@@ -1390,9 +1388,11 @@ public sealed class DarlingManagedPostgresTests
             Assert.True(live <= DarlingManagedPostgres.MaintenanceWorkMemCapMb * 1024L * 1024L,
                 $"expected the rendered maintenance_work_mem ({renderedValue}) to be at or under the {DarlingManagedPostgres.MaintenanceWorkMemCapMb} MB cap on PostgreSQL 17");
 
+            /* initdb's postgresql.conf carries a commented sample line (#maintenance_work_mem = 64MB), so these
+               read ACTIVE assignments the way PostgreSQL does, never a raw substring. */
             var postgresqlConfText = await File.ReadAllTextAsync(confPath, timeout.Token);
-            Assert.Contains(ManagedConfFile.IncludeLine, postgresqlConfText, StringComparison.Ordinal);
-            Assert.DoesNotContain("maintenance_work_mem", postgresqlConfText, StringComparison.Ordinal);
+            Assert.True(ManagedConfFile.HasManagedInclude(postgresqlConfText));
+            Assert.Empty(ActiveValues(postgresqlConfText, "maintenance_work_mem"));
         }
         finally
         {
@@ -1470,7 +1470,7 @@ public sealed class DarlingManagedPostgresTests
             await first.EnsureRunningAsync(timeout.Token);
             await first.StopIfStartedByThisProcessAsync();
             Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
-            Assert.Contains(ManagedConfFile.IncludeLine, await File.ReadAllTextAsync(confPath, timeout.Token), StringComparison.Ordinal);
+            Assert.True(ManagedConfFile.HasManagedInclude(await File.ReadAllTextAsync(confPath, timeout.Token)));
 
             /* The first start above succeeded, so it saved a last-good managed-conf copy (design step 2
                -- see the summary above): this data directory does have one to fall back to. */
@@ -1480,6 +1480,7 @@ public sealed class DarlingManagedPostgresTests
             /* An operator's own line below the include -- never something this product wrote (see the
                summary above). PostgreSQL 17 rejects it outright. */
             await File.AppendAllTextAsync(confPath, "\n# an operator's own line\nmaintenance_work_mem = 2048MB\n", timeout.Token);
+            Assert.Equal("2048MB", Assert.Single(ActiveValues(await File.ReadAllTextAsync(confPath, timeout.Token), "maintenance_work_mem")));
 
             second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
             var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
@@ -3665,6 +3666,48 @@ public sealed class DarlingManagedPostgresTests
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         Assert.True(await reader.ReadAsync(cancellationToken));
         return (reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    /// <summary>
+    /// The values of every ACTIVE assignment of <paramref name="setting"/> in postgresql.conf-format text, read
+    /// with the product's own parser (<see cref="DarlingManagedPostgres.ParseConfText"/>), so a commented line
+    /// such as initdb's <c>#maintenance_work_mem = 64MB</c> sample never counts.
+    /// </summary>
+    private static List<string> ActiveValues(string confText, string setting)
+    {
+        var values = new List<string>();
+        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(confText))
+        {
+            if (name.Equals(setting, StringComparison.OrdinalIgnoreCase))
+            {
+                values.Add(value);
+            }
+        }
+
+        return values;
+    }
+
+    /// <summary>
+    /// <see cref="ActiveValues"/> skips initdb's commented sample lines. The lines below are copied from
+    /// PostgreSQL 17's own <c>postgresql.conf.sample</c>, which is what initdb writes, and a raw substring check
+    /// on the key name matches them (the failure the gated cap facts above hit on a real PostgreSQL 17 conf).
+    /// </summary>
+    [Fact]
+    public void ActiveValues_SkipsInitdbsCommentedSampleLines_AndCountsAnOperatorLine()
+    {
+        const string initdbSample =
+            "#work_mem = 4MB\t\t\t\t# min 64kB\n" +
+            "#hash_mem_multiplier = 2.0\t\t# 1-1000.0 multiplier on hash table work_mem\n" +
+            "#maintenance_work_mem = 64MB\t\t# min 64kB\n" +
+            "#autovacuum_work_mem = -1\t\t# min 64kB, or -1 to use maintenance_work_mem\n" +
+            "include 'darling-managed.conf'\n";
+
+        Assert.Contains("maintenance_work_mem", initdbSample, StringComparison.Ordinal);
+        Assert.Empty(ActiveValues(initdbSample, "maintenance_work_mem"));
+        Assert.True(ManagedConfFile.HasManagedInclude(initdbSample));
+
+        var withOperatorLine = initdbSample + "\n# an operator's own line\nmaintenance_work_mem = 2048MB\n";
+        Assert.Equal("2048MB", Assert.Single(ActiveValues(withOperatorLine, "maintenance_work_mem")));
     }
 
     private static int CountOccurrences(string text, string value)
