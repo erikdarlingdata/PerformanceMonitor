@@ -79,12 +79,36 @@ public static class ShowPlanParser
 
         if (localName == "StmtCond")
         {
-            // IF/ELSE blocks — recurse into Condition, Then, Else
+            // IF/ELSE blocks — recurse into Condition, Then, Else.
+            // XSD (StmtCondType/Condition): Condition holds the condition's OWN QueryPlan
+            // (0 or 1) plus optional UDF sub-plans — never a nested Stmt* element. That
+            // QueryPlan's statement-level facts (StatementType "COND WITH QUERY", QueryHash,
+            // QueryPlanHash, missing indexes, the root operator) live on the StmtCond element
+            // itself, so they have to be read from stmtEl, not from the QueryPlan element.
             var condEl = stmtEl.Element(Ns + "Condition");
             if (condEl != null)
             {
-                foreach (var child in condEl.Elements())
-                    results.AddRange(ParseStatementAndChildren(child));
+                var condQueryPlanEl = condEl.Element(Ns + "QueryPlan");
+                if (condQueryPlanEl != null)
+                {
+                    var condRelOpEl = condQueryPlanEl.Element(Ns + "RelOp");
+                    var condStmt = condRelOpEl != null
+                        ? ParseQueryPlanAsStatement(stmtEl, condQueryPlanEl, condRelOpEl)
+                        : ParseStatement(stmtEl);
+                    if (condStmt != null)
+                        results.Add(condStmt);
+                }
+
+                // XSD gap: UDF sub-plans on Condition (StmtCondType/Condition/UDF)
+                foreach (var udfEl in condEl.Elements(Ns + "UDF"))
+                {
+                    var udfStmts = udfEl.Element(Ns + "Statements");
+                    if (udfStmts != null)
+                    {
+                        foreach (var child in udfStmts.Elements())
+                            results.AddRange(ParseStatementAndChildren(child));
+                    }
+                }
             }
 
             var thenStmts = stmtEl.Element(Ns + "Then")?.Element(Ns + "Statements");
@@ -206,8 +230,13 @@ public static class ShowPlanParser
 
         if (queryPlanEl == null)
         {
-            // Statements with no QueryPlan (e.g., DECLARE/ASSIGN) still get a synthetic
-            // root node so they appear in the statement tab list.
+            // Statements with no QueryPlan (e.g., DECLARE/ASSIGN, or a MULTIPLE PLAN statement
+            // whose plan was never captured) still get a synthetic root node so they appear in
+            // the statement tab list. ParseStmtAttributes reads only stmtEl attributes (QueryHash,
+            // QueryPlanHash, StatementId, etc.) — none of them depend on a QueryPlan child — so it
+            // runs here too, otherwise a plan-less statement loses hashes it actually carries.
+            ParseStmtAttributes(stmt, stmtEl);
+
             var stmtType = stmt.StatementType.Length > 0
                 ? stmt.StatementType.ToUpperInvariant()
                 : "STATEMENT";
