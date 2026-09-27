@@ -247,9 +247,11 @@ public sealed class AgTopologyCardsTests
     public void Summary_DistinguishesDistinctGroupsFromViews()
     {
         /* A reader seeing the same AG name on two cards needs the difference stated, not inferred. */
+        /* the primary's view lists every replica; a secondary's lists only itself (#4475) */
         var replicas = new[]
         {
             Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY"),
             Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
         };
 
