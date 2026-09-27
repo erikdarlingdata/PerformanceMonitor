@@ -285,9 +285,17 @@ public static class DarlingRetention
     /// before the GC may take it, independent of the fact-coupled horizon. 0 (the default here, for
     /// callers and tests that predate the knob) disables it — the fact-coupled horizon stands alone.
     /// </param>
+    /// <param name="livenessTouchedTablePruneRowCap">
+    /// TEST SEAM ONLY (#4250 item 3's live loop test): the row cap the map/text prune uses in place of
+    /// <see cref="LivenessTouchedTablePruneRowCap"/>. Every real caller (<see cref="DarlingWorker"/>'s daily
+    /// sweep and its on-demand <c>purge_now</c> command) omits this, so production always runs the shipped
+    /// 300,000 constant; a live test can pass a small cap (e.g. 1,000) to exercise a multi-batch drain
+    /// without seeding hundreds of thousands of rows.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
-        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0)
+        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap)
     {
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -602,9 +610,9 @@ public static class DarlingRetention
                 var mapDeleted = await PurgeOneAsync(
                     postgres, QueryStorePlanMap.TableName,
                     UnorderedRowCappedDeleteSql(
-                        QueryStorePlanMap.TableName, QueryStorePlanMap.LastSeenColumn, LivenessTouchedTablePruneRowCap),
+                        QueryStorePlanMap.TableName, QueryStorePlanMap.LastSeenColumn, livenessTouchedTablePruneRowCap),
                     mapCutoff, logger, cancellationToken,
-                    batchSize: LivenessTouchedTablePruneRowCap);
+                    batchSize: livenessTouchedTablePruneRowCap);
                 if (mapDeleted is not null)
                 {
                     tablesPurged++;
@@ -622,9 +630,9 @@ public static class DarlingRetention
                 var queryTextDeleted = await PurgeOneAsync(
                     postgres, QueryStoreTextStore.TableName,
                     UnorderedRowCappedDeleteSql(
-                        QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, LivenessTouchedTablePruneRowCap),
+                        QueryStoreTextStore.TableName, QueryStoreTextStore.LastSeenColumn, livenessTouchedTablePruneRowCap),
                     queryTextCutoff, logger, cancellationToken,
-                    batchSize: LivenessTouchedTablePruneRowCap);
+                    batchSize: livenessTouchedTablePruneRowCap);
                 if (queryTextDeleted is not null)
                 {
                     tablesPurged++;

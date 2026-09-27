@@ -1086,7 +1086,10 @@ WHERE hypertable_name = 'wait_stats'
     /// #4130 retry-at-half-cap behavior, which neither of these tables has been measured to need: both
     /// clear their whole steady-state backlog in ONE batch at the sized cap (see
     /// <see cref="DarlingRetention.LivenessTouchedTablePruneRowCap"/>'s remarks), so there is nothing here
-    /// for a shrinking retry to protect against.
+    /// for a shrinking retry to protect against. Both call sites read the cap from the LOCAL parameter
+    /// <c>livenessTouchedTablePruneRowCap</c> rather than the constant directly, since #4250 item 3's live
+    /// loop test needs a seam to run the same call sites at a small cap; the parameter itself defaults to
+    /// the constant (pinned separately, below), so production is unchanged.
     /// </summary>
     [Fact]
     public void MapAndTextPurges_UseTheUnorderedCap_WithoutTheAdaptiveRetry()
@@ -1097,15 +1100,30 @@ WHERE hypertable_name = 'wait_stats'
         Assert.True(mapAt >= 0, "the map purge call moved");
         var mapBody = source[mapAt..Math.Min(source.Length, mapAt + 500)];
         Assert.Contains("UnorderedRowCappedDeleteSql(", mapBody, StringComparison.Ordinal);
-        Assert.Contains("LivenessTouchedTablePruneRowCap", mapBody, StringComparison.Ordinal);
+        Assert.Contains("livenessTouchedTablePruneRowCap", mapBody, StringComparison.Ordinal);
         Assert.DoesNotContain("adaptiveRowCapTimeColumn", mapBody, StringComparison.Ordinal);
 
         var textAt = source.IndexOf("var queryTextCutoff = utcNow.AddDays(", StringComparison.Ordinal);
         Assert.True(textAt >= 0, "the query text purge call moved");
         var textBody = source[textAt..Math.Min(source.Length, textAt + 500)];
         Assert.Contains("UnorderedRowCappedDeleteSql(", textBody, StringComparison.Ordinal);
-        Assert.Contains("LivenessTouchedTablePruneRowCap", textBody, StringComparison.Ordinal);
+        Assert.Contains("livenessTouchedTablePruneRowCap", textBody, StringComparison.Ordinal);
         Assert.DoesNotContain("adaptiveRowCapTimeColumn", textBody, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The #4250 item 3 test seam's default: every real caller (the daily sweep, the on-demand
+    /// <c>purge_now</c> command) omits <c>livenessTouchedTablePruneRowCap</c>, so production must always
+    /// run the shipped 300,000-row constant, never a silently different value.
+    /// </summary>
+    [Fact]
+    public void LivenessTouchedTablePruneRowCapSeam_DefaultsToTheShippedConstant()
+    {
+        var method = typeof(DarlingRetention).GetMethod(
+            nameof(DarlingRetention.PurgeAsync), System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+        var parameter = Array.Find(method.GetParameters(), p => p.Name == "livenessTouchedTablePruneRowCap")!;
+        Assert.NotNull(parameter);
+        Assert.Equal(DarlingRetention.LivenessTouchedTablePruneRowCap, (int)parameter.DefaultValue!);
     }
 
     /// <summary>
