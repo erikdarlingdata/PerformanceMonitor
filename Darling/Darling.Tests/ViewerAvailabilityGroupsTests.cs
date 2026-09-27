@@ -473,4 +473,96 @@ public sealed class AgTopologyCardsTests
         Assert.Equal(42, servers);
         Assert.Equal(42, views);
     }
+
+    /* ────────────────── V151/#4475: the group_id overload's count rule ────────────────── */
+
+    [Fact]
+    public void CountDistinctGroups_TwoSecondariesOfOneAgSameGroupId_DisjointReplicaSets_IsOne()
+    {
+        /* The exact case a group_id closes: two monitored SECONDARIES of one real AG, its primary unmonitored.
+           Each reports only itself (sys.dm_hadr_availability_replica_states' local-only rule), so their replica
+           sets are DISJOINT and the name+overlap rule alone would count 2. Carrying the same group_id on both
+           unions them into 1. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>, string?)[]
+        {
+            ("RDSAG0", new string?[] { "S1" }, "GROUP-GUID-1"),
+            ("RDSAG0", new string?[] { "S2" }, "GROUP-GUID-1"),
+        });
+
+        Assert.Equal(1, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_FortyTwoDistinctGroupIds_AreFortyTwoGroups()
+    {
+        /* 42 members, same AG name (RDSAG0), each carrying its OWN distinct group_id -- id-based union never
+           collapses them, same as the pre-existing disjoint-replica-set case, now proven on the id path too. */
+        var members = new List<(string?, IEnumerable<string?>, string?)>();
+        for (var i = 1; i <= 42; i++)
+        {
+            members.Add(("RDSAG0", new string?[] { $"NODE{i}A", $"NODE{i}B" }, $"GROUP-GUID-{i}"));
+        }
+
+        var groups = AgTopology.CountDistinctGroups(members);
+
+        Assert.Equal(42, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_ExistingIdLessPins_AreUnchanged()
+    {
+        /* (c): the pre-existing id-less 2-tuple overload still behaves exactly as before -- calling it directly
+           (as every pre-V151 caller does) with no group_id anywhere reproduces the pre-existing #4475 41/42
+           result unchanged. */
+        var members = new List<(string?, IEnumerable<string?>)>();
+        for (var i = 1; i <= 42; i++)
+        {
+            members.Add(("RDSAG0", new string?[] { $"NODE{i}A", $"NODE{i}B" }));
+        }
+
+        Assert.Equal(42, AgTopology.CountDistinctGroups(members));
+    }
+
+    [Fact]
+    public void CountDistinctGroups_MixedWithIdAndIdLess_SameNameOverlappingReplicas_IsOne()
+    {
+        /* (d): a with-id member and an id-less member of the SAME name whose replicas overlap still union -- the
+           same AG, seen once before the V151 upgrade landed on that reporter (no group_id yet) and once after
+           (group_id now populated). */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>, string?)[]
+        {
+            ("RDSAG0", new string?[] { "P", "S1" }, "GROUP-GUID-1"),
+            ("RDSAG0", new string?[] { "S1" }, null),
+        });
+
+        Assert.Equal(1, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_TwoWithIdDifferentIds_SameNameOverlappingReplicas_IsTwo()
+    {
+        /* (e): two with-id members, DIFFERENT ids, same name, OVERLAPPING replicas -- a group_id is definitive,
+           so the name+overlap match that would otherwise union them is overridden. Never 1. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>, string?)[]
+        {
+            ("RDSAG0", new string?[] { "P", "S1" }, "GROUP-GUID-1"),
+            ("RDSAG0", new string?[] { "S1" }, "GROUP-GUID-2"),
+        });
+
+        Assert.Equal(2, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_WithIdAndIdLess_SameNameDisjointReplicas_IsTwo()
+    {
+        /* (f): a with-id member and an id-less member share a name but their replicas are DISJOINT -- with no id
+           on one side to union on, and no replica overlap either, they stay 2 separate groups. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>, string?)[]
+        {
+            ("RDSAG0", new string?[] { "P", "S1" }, "GROUP-GUID-1"),
+            ("RDSAG0", new string?[] { "S2" }, null),
+        });
+
+        Assert.Equal(2, groups);
+    }
 }
