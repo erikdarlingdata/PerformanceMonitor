@@ -7,8 +7,8 @@
  */
 
 using System;
-using System.IO;
 using Xunit;
+using static Darling.Tests.RepoFile;
 
 namespace Darling.Tests;
 
@@ -25,7 +25,7 @@ public sealed class LitePerfmonWaitStatisticsArtifactSourceTests
     [Fact]
     public void PerfmonTrendsSql_SourceEmbedsTheArtifactPredicateAndTheSuffixMatch()
     {
-        var text = ReadRepoFile("Lite/Services/LocalDataService.Perfmon.cs");
+        var text = ReadRepoFile("Lite", "Services", "LocalDataService.Perfmon.cs");
 
         Assert.Contains("WaitStatisticsArtifact.ArtifactPredicateSql(", text, StringComparison.Ordinal);
         Assert.Contains("lag(cntr_value) OVER w AS prev_value", text, StringComparison.Ordinal);
@@ -37,38 +37,12 @@ public sealed class LitePerfmonWaitStatisticsArtifactSourceTests
     [Fact]
     public void PerfmonBucketsSql_SourceEmbedsTheArtifactPredicateAndTheSuffixMatch()
     {
-        var text = ReadRepoFile("Lite/Services/LocalDataService.TrendBuckets.cs");
+        var text = ReadRepoFile("Lite", "Services", "LocalDataService.TrendBuckets.cs");
 
         Assert.Contains("WaitStatisticsArtifact.ArtifactPredicateSql(", text, StringComparison.Ordinal);
         Assert.Contains("WaitStatisticsArtifact.ObjectNameSuffixMatchSql(", text, StringComparison.Ordinal);
         Assert.Contains("artifacts_set_aside", text, StringComparison.Ordinal);
         Assert.Contains("PerfmonBucketsResult", text, StringComparison.Ordinal);
         Assert.Contains("FILTER (WHERE NOT is_artifact)", text, StringComparison.Ordinal);
-    }
-
-    /// <summary>Walks up from this test assembly's build output to the repo root (marked by <c>.git</c>) and
-    /// resolves <paramref name="relativePath"/> from there — no ProjectReference to Lite needed for a pure
-    /// text scan.</summary>
-    private static string ReadRepoFile(string relativePath)
-    {
-        var probe = Path.GetDirectoryName(typeof(LitePerfmonWaitStatisticsArtifactSourceTests).Assembly.Location);
-        while (probe is not null)
-        {
-            var gitMarker = Path.Combine(probe, ".git");
-            if (Directory.Exists(gitMarker) || File.Exists(gitMarker))
-            {
-                var candidate = Path.Combine(probe, relativePath);
-                if (!File.Exists(candidate))
-                {
-                    throw new FileNotFoundException($"Found repo root at {probe} but not {relativePath}", candidate);
-                }
-
-                return File.ReadAllText(candidate);
-            }
-
-            probe = Path.GetDirectoryName(probe);
-        }
-
-        throw new DirectoryNotFoundException("Could not locate repo root (.git) above the test assembly.");
     }
 }
