@@ -1295,11 +1295,13 @@ public sealed class DarlingManagedPostgresTests
     /// #3909 through the product's own bootstrap, after #4336 moved the settings into one included file. A
     /// store on PostgreSQL 17 whose <c>darling-managed.conf</c> still carries the old, uncapped 2048 MB value
     /// (the shape a store upgraded to #4336 without a fresh render since, or a reverted upgrade, could leave
-    /// on a 40 GB+ host) comes back up through <see cref="DarlingManagedPostgres.EnsureRunningAsync"/> with
-    /// the value capped, because every start re-renders <c>darling-managed.conf</c>
-    /// (<see cref="DarlingManagedPostgres.WriteManagedConfFile"/>) and its v14 block
-    /// (<see cref="DarlingManagedPostgres.NeedsLegacyMaintenanceWorkMemCap"/>) caps any value over PostgreSQL
-    /// 17's limit on every major at or below 17 — not only the value the render's own formula would derive.
+    /// on a 40 GB+ host) comes back up through <see cref="DarlingManagedPostgres.EnsureRunningAsync"/> on a
+    /// value PostgreSQL 17 accepts, because every start re-renders <c>darling-managed.conf</c>
+    /// (<see cref="DarlingManagedPostgres.WriteManagedConfFile"/>) from this host's own sizing, which on a
+    /// major at or below 17 never exceeds <see cref="DarlingManagedPostgres.MaintenanceWorkMemCapMb"/>. The
+    /// value is host-dependent (a small host renders less than the cap), so the fact reads the render's own
+    /// line back and asserts the server runs on exactly that value, and that it is at or under the cap; the
+    /// cap arithmetic itself is pinned without a server by <c>ManagedConfFileTests</c>.
     /// The 17 runtime is the runtime here, with no package beside it, so nothing is upgraded: this is the
     /// store that stays on 17. Gated on DARLING_TEST_PGRUNTIME_OLD.
     /// </summary>
@@ -1338,8 +1340,8 @@ public sealed class DarlingManagedPostgresTests
             Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
 
             /* The shape a store carrying the old, pre-cap value could still have in its managed file: replace
-               the ONE maintenance_work_mem assignment the first start's own render just wrote (WriteManagedConfFile
-               caps on <=17, so it is already at the capped value here) with the old, uncapped 2048MB, keeping
+               the ONE maintenance_work_mem assignment the first start's own render just wrote (this host's own value,
+               at or under the cap on <=17) with the old, uncapped 2048MB, keeping
                exactly one assignment. Then recompute the header's body hash over the edited body, the same way
                WriteManagedConfFile itself would, so the file still reads as the product's own render (this is
                simulating a store that carried this value in a file THE PRODUCT rendered -- e.g. rendered on
@@ -1371,14 +1373,22 @@ public sealed class DarlingManagedPostgresTests
             Assert.True(second.LastManagedConfWriteResult is { Written: true, HandEdited: false });
             Assert.False(second.LastStartUsedLastGoodManagedConf);
 
-            var (live, expected) = await ReadSettingAndLiteralBytesAsync(
-                connectionString, "maintenance_work_mem", $"{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB", timeout.Token);
-            Assert.Equal(expected, live);
-
+            /* The re-render replaced the old line with this host's own value. That value depends on the host's
+               RAM (a CI runner renders less than the cap), so read it back from the file rather than assume
+               the cap: the server must run on exactly the rendered value, and that value must be one
+               PostgreSQL 17 accepts. */
             var managedTextAfter = await File.ReadAllTextAsync(managedConfPath, timeout.Token);
             Assert.Equal(1, CountOccurrences(managedTextAfter, "maintenance_work_mem = "));
-            Assert.Contains(
-                $"maintenance_work_mem = '{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB'", managedTextAfter, StringComparison.Ordinal);
+            Assert.DoesNotContain("maintenance_work_mem = '2048MB'", managedTextAfter, StringComparison.Ordinal);
+            var renderedValue = System.Text.RegularExpressions.Regex.Match(
+                managedTextAfter, "maintenance_work_mem = '([^']*)'").Groups[1].Value;
+            Assert.False(string.IsNullOrEmpty(renderedValue), "expected the re-rendered darling-managed.conf to carry a maintenance_work_mem value");
+
+            var (live, expected) = await ReadSettingAndLiteralBytesAsync(
+                connectionString, "maintenance_work_mem", renderedValue, timeout.Token);
+            Assert.Equal(expected, live);
+            Assert.True(live <= DarlingManagedPostgres.MaintenanceWorkMemCapMb * 1024L * 1024L,
+                $"expected the rendered maintenance_work_mem ({renderedValue}) to be at or under the {DarlingManagedPostgres.MaintenanceWorkMemCapMb} MB cap on PostgreSQL 17");
 
             var postgresqlConfText = await File.ReadAllTextAsync(confPath, timeout.Token);
             Assert.Contains(ManagedConfFile.IncludeLine, postgresqlConfText, StringComparison.Ordinal);
