@@ -1292,14 +1292,21 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
-    /// #3909 through the product's own bootstrap. A store on PostgreSQL 17 whose conf ends with the old 2048 MB
-    /// value (the shape a reverted upgrade left on a 40 GB+ host) comes back up through
-    /// <see cref="DarlingManagedPostgres.EnsureRunningAsync"/> with the capped value in force. The 17 runtime is
-    /// the runtime here, with no package beside it, so nothing is upgraded: this is the store that stays on 17.
-    /// Gated on DARLING_TEST_PGRUNTIME_OLD.
+    /// #3909 through the product's own bootstrap, after #4336 moved the settings into one included file. A
+    /// store on PostgreSQL 17 whose <c>darling-managed.conf</c> still carries the old, uncapped 2048 MB value
+    /// (the shape a store upgraded to #4336 without a fresh render since, or a reverted upgrade, could leave
+    /// on a 40 GB+ host) comes back up through <see cref="DarlingManagedPostgres.EnsureRunningAsync"/> on a
+    /// value PostgreSQL 17 accepts, because every start re-renders <c>darling-managed.conf</c>
+    /// (<see cref="DarlingManagedPostgres.WriteManagedConfFile"/>) from this host's own sizing, which on a
+    /// major at or below 17 never exceeds <see cref="DarlingManagedPostgres.MaintenanceWorkMemCapMb"/>. The
+    /// value is host-dependent (a small host renders less than the cap), so the fact reads the render's own
+    /// line back and asserts the server runs on exactly that value, and that it is at or under the cap; the
+    /// cap arithmetic itself is pinned without a server by <c>ManagedConfFileTests</c>.
+    /// The 17 runtime is the runtime here, with no package beside it, so nothing is upgraded: this is the
+    /// store that stays on 17. Gated on DARLING_TEST_PGRUNTIME_OLD.
     /// </summary>
     [Fact]
-    public async Task Postgres17Store_WithTheOldCapInItsConf_StartsThroughTheBootstrap_Gated()
+    public async Task Postgres17Store_WithTheOldValueInItsManagedConf_StartsWithTheCap_Gated()
     {
         var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_OLD");
         Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime),
@@ -1309,6 +1316,139 @@ public sealed class DarlingManagedPostgresTests
             $"DARLING_TEST_PGRUNTIME_OLD={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
 
         var root = Directory.CreateTempSubdirectory("darling-pg17boot-");
+        var runtimeRoot = Path.Combine(root.FullName, "deploy", "pg-runtime");
+        var source = Path.Combine(oldRuntime!, "pgsql");
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var target = Path.Combine(runtimeRoot, "pgsql", Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
+        }
+
+        var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+        var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+        var managedConfPath = Path.Combine(dataDirectory, ManagedConfFile.FileName);
+        var config = new PostgresConfig { Managed = true, Port = FindFreeTcpPort(), DataDirectory = dataDirectory };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+        DarlingManagedPostgres? first = null;
+        DarlingManagedPostgres? second = null;
+        try
+        {
+            first = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await first.EnsureRunningAsync(timeout.Token);
+            await first.StopIfStartedByThisProcessAsync();
+            Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
+
+            /* The shape a store carrying the old, pre-cap value could still have in its managed file: replace
+               the ONE maintenance_work_mem assignment the first start's own render just wrote (this host's own value,
+               at or under the cap on <=17) with the old, uncapped 2048MB, keeping
+               exactly one assignment. Then recompute the header's body hash over the edited body, the same way
+               WriteManagedConfFile itself would, so the file still reads as the product's own render (this is
+               simulating a store that carried this value in a file THE PRODUCT rendered -- e.g. rendered on
+               PostgreSQL 18 and then reverted to 17 -- not an operator hand edit, which would only ever reach
+               the last-good fallback in EnsureManagedConfReadyAsync, never the re-render this fact pins). */
+            var managedTextBefore = await File.ReadAllTextAsync(managedConfPath, timeout.Token);
+            Assert.Single(ActiveValues(managedTextBefore, "maintenance_work_mem"));
+            var parsedBefore = ManagedConfFile.ParseExisting(managedTextBefore);
+            Assert.True(parsedBefore.IsWellFormed);
+            var bodyWithOldValue = System.Text.RegularExpressions.Regex.Replace(
+                parsedBefore.Body,
+                @"maintenance_work_mem = '[^']*'",
+                "maintenance_work_mem = '2048MB'");
+            /* Rewrite only the header's body-sha256 line to match the edited body -- the rest of the header
+               (formula version, RAM, CPUs, ...) stays exactly what the first start's own render wrote. This is
+               what makes the edited file read as the product's own render rather than a hand edit: see the
+               remarks above. */
+            var headerBeforeHashLine = managedTextBefore[..managedTextBefore.IndexOf(ManagedConfFile.BodyHashPrefix, StringComparison.Ordinal)];
+            var managedTextWithOldValue = headerBeforeHashLine + ManagedConfFile.BodyHashPrefix + ManagedConfFile.ComputeBodyHash(bodyWithOldValue) + "\n" + bodyWithOldValue;
+            Assert.False(ManagedConfFile.IsHandEdited(managedTextWithOldValue));
+            Assert.Equal("2048MB", Assert.Single(ActiveValues(managedTextWithOldValue, "maintenance_work_mem")));
+            await File.WriteAllTextAsync(managedConfPath, managedTextWithOldValue, timeout.Token);
+
+            second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            var connectionString = await second.EnsureRunningAsync(timeout.Token);
+
+            /* The second start re-rendered the file rather than falling back to a last-good copy: this is what
+               distinguishes this fact from an operator hand edit (the sibling fact below), which the last-good
+               fallback path would have to handle instead. */
+            Assert.True(second.LastManagedConfWriteResult is { Written: true, HandEdited: false });
+            Assert.False(second.LastStartUsedLastGoodManagedConf);
+
+            /* The re-render replaced the old line with this host's own value. That value depends on the host's
+               RAM (a CI runner renders less than the cap), so read it back from the file rather than assume
+               the cap: the server must run on exactly the rendered value, and that value must be one
+               PostgreSQL 17 accepts. */
+            var managedTextAfter = await File.ReadAllTextAsync(managedConfPath, timeout.Token);
+            var renderedValue = Assert.Single(ActiveValues(managedTextAfter, "maintenance_work_mem"));
+            Assert.NotEqual("2048MB", renderedValue);
+
+            var (live, expected) = await ReadSettingAndLiteralBytesAsync(
+                connectionString, "maintenance_work_mem", renderedValue, timeout.Token);
+            Assert.Equal(expected, live);
+            Assert.True(live <= DarlingManagedPostgres.MaintenanceWorkMemCapMb * 1024L * 1024L,
+                $"expected the rendered maintenance_work_mem ({renderedValue}) to be at or under the {DarlingManagedPostgres.MaintenanceWorkMemCapMb} MB cap on PostgreSQL 17");
+
+            /* initdb's postgresql.conf carries a commented sample line (#maintenance_work_mem = 64MB), so these
+               read ACTIVE assignments the way PostgreSQL does, never a raw substring. */
+            var postgresqlConfText = await File.ReadAllTextAsync(confPath, timeout.Token);
+            Assert.True(ManagedConfFile.HasManagedInclude(postgresqlConfText));
+            Assert.Empty(ActiveValues(postgresqlConfText, "maintenance_work_mem"));
+        }
+        finally
+        {
+            if (first is not null)
+            {
+                await first.StopIfStartedByThisProcessAsync();
+            }
+
+            if (second is not null)
+            {
+                await second.StopIfStartedByThisProcessAsync();
+            }
+
+            try
+            {
+                root.Delete(recursive: true);
+            }
+            catch (IOException)
+            {
+                /* A temp directory the OS still holds is not this test's failure. */
+            }
+        }
+    }
+
+    /// <summary>
+    /// #4405: an operator's own line below the managed include, out of PostgreSQL 17's range, is the
+    /// operator's line to fix — the store must refuse to start rather than silently absorb it, and its
+    /// refusal must name the fix. Unlike a value inside <c>darling-managed.conf</c> (the sibling fact above),
+    /// this line is NEVER something the product wrote: every start re-renders <c>darling-managed.conf</c>
+    /// itself (<see cref="DarlingManagedPostgres.WriteManagedConfFile"/>), and no code path in this service
+    /// ever appends a bare <c>maintenance_work_mem</c> line to <c>postgresql.conf</c> below the include — the
+    /// only appends that ever wrote it (v3, v7, v8, v14) always carry their own marker, and #4336 confined all
+    /// of them to a <c>Legacy</c> (pre-migration) conf. So a bare, unmarked line after the include is an
+    /// operator edit, and <see cref="DarlingManagedPostgres.EnsureManagedConfReadyAsync"/> validates the whole
+    /// merged conf with <c>postgres -C</c> before ever starting the server: PostgreSQL rejects the value.
+    /// The first start above already succeeded, so <see cref="DarlingManagedPostgres.SaveLastGoodManagedConf"/>
+    /// saved a last-good copy of <c>darling-managed.conf</c> after it — this data directory does have one, and
+    /// <see cref="DarlingManagedPostgres.EnsureManagedConfReadyAsync"/> restores and re-validates it. That still
+    /// fails, because the rejected line lives in <c>postgresql.conf</c> below the include, not in
+    /// <c>darling-managed.conf</c>: restoring the last-good managed file leaves the operator's own line in
+    /// place untouched. So the fallback is tried and still refused, and the start throws
+    /// <see cref="InvalidOperationException"/> naming the fix
+    /// (<see cref="DarlingManagedPostgres.BuildManagedConfValidationFailureMessage"/>) instead of starting on
+    /// a value the render never sanctioned. Gated on DARLING_TEST_PGRUNTIME_OLD.
+    /// </summary>
+    [Fact]
+    public async Task Postgres17Store_OperatorLineBelowIncludeOutOfRange_RefusesToStartNamingTheFix_Gated()
+    {
+        var oldRuntime = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME_OLD");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(oldRuntime),
+            "Set DARLING_TEST_PGRUNTIME_OLD to an assembled PostgreSQL 17 pg-runtime (new-upgraded-store-fixture.ps1 builds one).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(oldRuntime!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME_OLD={oldRuntime} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-pg17op-");
         var runtimeRoot = Path.Combine(root.FullName, "deploy", "pg-runtime");
         var source = Path.Combine(oldRuntime!, "pgsql");
         foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
@@ -1330,16 +1470,36 @@ public sealed class DarlingManagedPostgresTests
             await first.EnsureRunningAsync(timeout.Token);
             await first.StopIfStartedByThisProcessAsync();
             Assert.Equal(17, DarlingStoreUpgrade.TryReadDataDirectoryMajor(dataDirectory));
+            Assert.True(ManagedConfFile.HasManagedInclude(await File.ReadAllTextAsync(confPath, timeout.Token)));
 
-            await File.AppendAllTextAsync(confPath, "\n# written by a build before #3909\nmaintenance_work_mem = 2048MB\n", timeout.Token);
+            /* The first start above succeeded, so it saved a last-good managed-conf copy (design step 2
+               -- see the summary above): this data directory does have one to fall back to. */
+            var lastGoodPath = Path.Combine(dataDirectory, ManagedConfFile.LastGoodFileName);
+            Assert.True(File.Exists(lastGoodPath), $"Expected the first start to have saved {lastGoodPath}.");
+
+            /* An operator's own line below the include -- never something this product wrote (see the
+               summary above). PostgreSQL 17 rejects it outright. */
+            await File.AppendAllTextAsync(confPath, "\n# an operator's own line\nmaintenance_work_mem = 2048MB\n", timeout.Token);
+            Assert.Equal("2048MB", Assert.Single(ActiveValues(await File.ReadAllTextAsync(confPath, timeout.Token), "maintenance_work_mem")));
 
             second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
-            var connectionString = await second.EnsureRunningAsync(timeout.Token);
+            var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await second.EnsureRunningAsync(timeout.Token));
 
-            var (live, expected) = await ReadSettingAndLiteralBytesAsync(
-                connectionString, "maintenance_work_mem", $"{DarlingManagedPostgres.MaintenanceWorkMemCapMb}MB", timeout.Token);
-            Assert.Equal(expected, live);
-            Assert.Equal(1, CountOccurrences(await File.ReadAllTextAsync(confPath, timeout.Token), DarlingManagedPostgres.ConfMarkerV14));
+            Assert.Contains("maintenance_work_mem", thrown.Message, StringComparison.Ordinal);
+            Assert.Contains(
+                "Fix the rejected setting with a line after 'include ''darling-managed.conf'''",
+                thrown.Message, StringComparison.Ordinal);
+
+            /* Not left running on the rejected conf: stopping is safe (there is nothing to stop), and a
+               connection to the configured port fails. */
+            await second.StopIfStartedByThisProcessAsync();
+            await Assert.ThrowsAnyAsync<Exception>(async () =>
+            {
+                await using var connection = new NpgsqlConnection(
+                    $"Host=127.0.0.1;Port={config.Port};Username=darling;Database=postgres;Pooling=false;Timeout=5");
+                await connection.OpenAsync(timeout.Token);
+            });
         }
         finally
         {
@@ -3506,6 +3666,48 @@ public sealed class DarlingManagedPostgresTests
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         Assert.True(await reader.ReadAsync(cancellationToken));
         return (reader.GetInt64(0), reader.GetInt64(1));
+    }
+
+    /// <summary>
+    /// The values of every ACTIVE assignment of <paramref name="setting"/> in postgresql.conf-format text, read
+    /// with the product's own parser (<see cref="DarlingManagedPostgres.ParseConfText"/>), so a commented line
+    /// such as initdb's <c>#maintenance_work_mem = 64MB</c> sample never counts.
+    /// </summary>
+    private static List<string> ActiveValues(string confText, string setting)
+    {
+        var values = new List<string>();
+        foreach (var (_, name, value) in DarlingManagedPostgres.ParseConfText(confText))
+        {
+            if (name.Equals(setting, StringComparison.OrdinalIgnoreCase))
+            {
+                values.Add(value);
+            }
+        }
+
+        return values;
+    }
+
+    /// <summary>
+    /// <see cref="ActiveValues"/> skips initdb's commented sample lines. The lines below are copied from
+    /// PostgreSQL 17's own <c>postgresql.conf.sample</c>, which is what initdb writes, and a raw substring check
+    /// on the key name matches them (the failure the gated cap facts above hit on a real PostgreSQL 17 conf).
+    /// </summary>
+    [Fact]
+    public void ActiveValues_SkipsInitdbsCommentedSampleLines_AndCountsAnOperatorLine()
+    {
+        const string initdbSample =
+            "#work_mem = 4MB\t\t\t\t# min 64kB\n" +
+            "#hash_mem_multiplier = 2.0\t\t# 1-1000.0 multiplier on hash table work_mem\n" +
+            "#maintenance_work_mem = 64MB\t\t# min 64kB\n" +
+            "#autovacuum_work_mem = -1\t\t# min 64kB, or -1 to use maintenance_work_mem\n" +
+            "include 'darling-managed.conf'\n";
+
+        Assert.Contains("maintenance_work_mem", initdbSample, StringComparison.Ordinal);
+        Assert.Empty(ActiveValues(initdbSample, "maintenance_work_mem"));
+        Assert.True(ManagedConfFile.HasManagedInclude(initdbSample));
+
+        var withOperatorLine = initdbSample + "\n# an operator's own line\nmaintenance_work_mem = 2048MB\n";
+        Assert.Equal("2048MB", Assert.Single(ActiveValues(withOperatorLine, "maintenance_work_mem")));
     }
 
     private static int CountOccurrences(string text, string value)
