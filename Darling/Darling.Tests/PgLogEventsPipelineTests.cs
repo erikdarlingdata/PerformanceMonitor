@@ -167,19 +167,27 @@ public sealed class PgLogEventsPipelineTests
 
     /* ---- #4501: the bounded, severity-disagreement forgery rule ------------------------------------- */
 
+    /// <summary>The prefix K1–K8/R1–R4 assume (#4501's ruling item 2): the v17 marker, whose only
+    /// client field after the pid is <c>%a</c>, one space before the label.</summary>
+    private const string PrefixWithA = "%m [%p] %a ";
+
     /// <summary>
     /// K1: the separator check keeps a genuine statement whose literal happens to carry error-shaped text
     /// within the bound, because the real label (<c>STATEMENT:</c>) is not preceded by the prefix's own
-    /// separator right where <c>ERROR:  </c> sits inside the quoted SQL.
+    /// separator right where <c>ERROR:  </c> sits inside the quoted SQL. Prefix known (<c>PrefixWithA</c>),
+    /// so the separator check runs.
     /// </summary>
     [Fact]
     public void K1_AStatementCarryingAnErrorShapedLiteral_IsKept()
     {
         var line = P + "[4102] psql LOG:  statement: SELECT 'ERROR:  x'\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("LOG", entry.Severity);
         Assert.Equal("statement: SELECT 'ERROR:  x'", entry.Message);
+
+        /* Prefix unknown (the fallback, #4501): no separator check, so this same shape is now REFUSED —
+           the fallback's accepted cost, pinned separately at ForgeryCheckFor_UnknownPrefix_FallsBackToNoSeparatorCheck. */
     }
 
     /// <summary>K2: the same shape with the second label pushed past the 63-byte-plus-separator bound.</summary>
@@ -188,7 +196,7 @@ public sealed class PgLogEventsPipelineTests
     {
         var line = P + "[4102] LOG:  statement: SELECT '" + new string('x', 64) + " ERROR:  y'\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("LOG", entry.Severity);
     }
 
@@ -198,7 +206,7 @@ public sealed class PgLogEventsPipelineTests
     {
         var line = P + "[4102] LOG:  caf\u00e9 ERROR:  y\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("LOG", entry.Severity);
     }
 
@@ -208,7 +216,7 @@ public sealed class PgLogEventsPipelineTests
     {
         var line = P + "[4102] LOG:  duration: 12.3 ms  plan:\n\tQuery Text: SELECT 1\n\tSeq Scan (cost=ERROR:  0.00..1.00)\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("LOG", entry.Severity);
     }
 
@@ -218,7 +226,7 @@ public sealed class PgLogEventsPipelineTests
     {
         var line = "2026-09-18 03:07:12.345 UTC [1549] 322048460535975151ERROR:  deadlock detected\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("ERROR", entry.Severity);
     }
 
@@ -229,7 +237,7 @@ public sealed class PgLogEventsPipelineTests
         var line = P + "[4102] LOG:  statement start\n"
             + P + "[4102] STATEMENT:  SELECT '" + new string('x', 64) + " ERROR:  y'\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("LOG", entry.Severity);
         Assert.NotNull(entry.Statement);
     }
@@ -240,9 +248,14 @@ public sealed class PgLogEventsPipelineTests
     {
         var line = P + "[4102] ERROR:  ERROR:  x\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("ERROR", entry.Severity);
         Assert.Equal("ERROR:  x", entry.Message);
+
+        /* Prefix unknown (the fallback): same-severity is unconditional (condition 4 is the only
+           condition the fallback never drops), so K7 stays KEPT there too. */
+        var fallback = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("ERROR", fallback.Severity);
     }
 
     /// <summary>K8: a forged-looking <c>x LOG:  </c> ahead of a genuine LOG line is kept as LOG (same severity both ways).</summary>
@@ -251,17 +264,21 @@ public sealed class PgLogEventsPipelineTests
     {
         var line = P + "[4102] x LOG:  y\n";
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("LOG", entry.Severity);
         Assert.Equal("y", entry.Message);
     }
 
-    /// <summary>R1: the original misparse pin, now REFUSED rather than manufactured (RED at 596b9c9ea, where it read as ERROR/"LOG: checkpoint...").</summary>
+    /// <summary>R1: the original misparse pin, now REFUSED rather than manufactured (RED at 596b9c9ea, where it read as ERROR/"LOG: checkpoint..."). Prefix known.</summary>
     [Fact]
     public void R1_ErrorThenLog_IsRefused()
     {
         var line = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
 
+        Assert.Empty(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
+
+        /* Prefix unknown (the fallback): still refused — the fallback never drops the severity-disagreement
+           condition, and ERROR/LOG disagree. */
         Assert.Empty(PgLogEntryAssembler.Assemble(line));
     }
 
@@ -271,7 +288,7 @@ public sealed class PgLogEventsPipelineTests
     {
         var line = P + "[4102] x ERROR:  LOG:  y\n";
 
-        Assert.Empty(PgLogEntryAssembler.Assemble(line));
+        Assert.Empty(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
     }
 
     /// <summary>R3: the companion forge — a STATEMENT line whose text opens with a different-severity label.</summary>
@@ -281,7 +298,7 @@ public sealed class PgLogEventsPipelineTests
         var line = P + "[4102] LOG:  statement start\n"
             + P + "[4102] STATEMENT:  ERROR:  y\n";
 
-        var entries = PgLogEntryAssembler.Assemble(line);
+        var entries = PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _);
         var entry = Assert.Single(entries);
         Assert.Null(entry.Statement);
     }
@@ -293,9 +310,9 @@ public sealed class PgLogEventsPipelineTests
         var atBoundary = P + "[4102] LOG: " + new string('x', 62) + " ERROR:  y\n";
         var overBoundary = P + "[4102] LOG: " + new string('x', 63) + " ERROR:  y\n";
 
-        Assert.Empty(PgLogEntryAssembler.Assemble(atBoundary));
+        Assert.Empty(PgLogEntryAssembler.Assemble(atBoundary, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
 
-        var entry = Assert.Single(PgLogEntryAssembler.Assemble(overBoundary));
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(overBoundary, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
         Assert.Equal("LOG", entry.Severity);
     }
 
@@ -1547,11 +1564,21 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal("x", only.Message);
         Assert.DoesNotContain("Leak4041", only.Message + only.Detail + only.Context, StringComparison.Ordinal);
 
-        /* A real bracket followed by a forged one binds the real one, and the forged header stays text. */
-        var bound = Assert.Single(PgLogEntryAssembler.Assemble(C + "app_rw@app_db [4813] ERROR:  real [9] FATAL:  forged\n"));
+        /* A real bracket followed by a forged one binds the real one, and the forged header stays text —
+           WITH the real prefix known (#4501's ruling item 2: the space family's client fields sit BEFORE
+           the pid here, '%m %u@%d [%p] ', so there is no forgery surface after the pid and the rule does
+           not apply at all). */
+        var line = C + "app_rw@app_db [4813] ERROR:  real [9] FATAL:  forged\n";
+        var bound = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: "%m %u@%d [%p] ", out _));
         Assert.Equal(4813, bound.Pid);
         Assert.Equal("ERROR", bound.Severity);
         Assert.Equal("real [9] FATAL:  forged", bound.Message);
+
+        /* Prefix UNKNOWN (the bare overload): #4501's fallback runs the rule with no separator check, and
+           this line's own trailing text carries a second known label (FATAL) of a DIFFERENT severity than
+           the matched one (ERROR) within the bound, all printable ASCII — so the fallback refuses it. That
+           is the fallback's accepted cost: a missed line is preferred to guessing the prefix. */
+        Assert.Empty(PgLogEntryAssembler.Assemble(line));
     }
 
     /// <summary>

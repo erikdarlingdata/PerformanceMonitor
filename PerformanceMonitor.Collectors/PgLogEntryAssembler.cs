@@ -226,10 +226,6 @@ public static class PgLogEntryAssembler
         return !string.Equals(matchedLabel, m2.Groups["label"].Value, StringComparison.Ordinal);
     }
 
-    /// <summary>The default separator assumed by the overloads that take no <c>log_line_prefix</c>
-    /// (#4501): a single space, the trailing literal of the managed v17 marker's own
-    /// <c>'%m [%p] %a '</c>. Kept as the pre-#4501 pins' assumed shape.</summary>
-    private const string DefaultSeparator = " ";
 
     /* %u@%d anywhere in the prefix's non-pid text, before the pid or after it. Both halves required: a background
        process renders `@` alone under that prefix and means neither. */
@@ -256,6 +252,14 @@ public static class PgLogEntryAssembler
 
     /// <summary>
     /// Every complete entry in the slab, in log order.
+    ///
+    /// <para><b>Prefix unknown (#4501).</b> This overload takes no <c>log_line_prefix</c>, so the bounded
+    /// forgery rule (<see cref="IsForgedLabel"/>) runs with NO separator check — the fallback the ruling
+    /// on #4501 calls for when a caller cannot state the prefix: it shrinks what the rule KEEPS rather than
+    /// what it refuses, since an unknown prefix could put anything before the label. A caller that has read
+    /// the target's own <c>log_line_prefix</c> should prefer <see cref="Assemble(string?, bool, string?, out int)"/>
+    /// instead, which applies the rule only when a client field sits between the pid and the label, using the
+    /// prefix's own separator.</para>
     /// </summary>
     /// <exception cref="PgLogTimezoneUnsupportedException">A primary line's prefix zone is not a zero-offset
     /// one. Thrown from inside the walk, abandoning every entry assembled so far (#2993).</exception>
@@ -347,11 +351,17 @@ public static class PgLogEntryAssembler
     /// <see cref="Assemble(string?)"/>, refusal included. That refusal is for a target whose log really is local
     /// time, where a per-line skip would store a partial history nothing marks as partial (see the type
     /// header).</para>
+    ///
+    /// <para><b>No <c>log_line_prefix</c> parameter here either (#4501).</b> A caller on this overload has not
+    /// read the target's prefix, so this is the same fallback <see cref="Assemble(string?)"/> takes: the
+    /// bounded forgery rule runs with NO separator check (<see cref="IsForgedLabel"/>'s condition 3), keeping
+    /// only its severity-disagreement condition (4). See <see cref="ForgeryCheckFor"/> for the prefix-aware
+    /// overload a caller that has read the prefix should prefer instead.</para>
     /// </summary>
     /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is false: see
     /// <see cref="Assemble(string?)"/>.</exception>
     public static List<PgLogEntry> Assemble(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines) =>
-        Assemble(logBody, logTimezoneIsUtc, applyForgeryCheck: true, separator: DefaultSeparator, out foreignZoneLines);
+        Assemble(logBody, logTimezoneIsUtc, applyForgeryCheck: true, separator: null, out foreignZoneLines);
 
     /// <summary>The walk itself, parameterised over the #4501 forgery rule (see <see cref="IsForgedLabel"/>)
     /// so both the pre-#4501-shaped overloads (a bare check, the store's default separator) and the
