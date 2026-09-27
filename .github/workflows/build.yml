@@ -1108,6 +1108,8 @@ jobs:
           # Targets a deliberately nonexistent database.
           & "$bin\psql.exe" "-h" "127.0.0.1" "-p" "5545" "-U" "darling" "-d" "does_not_exist_5545" -c "SELECT 1" 2>$null
           if ($LASTEXITCODE -eq 0) { throw "5545 failed-login workload: connecting to a nonexistent database unexpectedly succeeded" }
+          # the failed login is expected; don't let its exit code end the step
+          $global:LASTEXITCODE = 0
 
       # DARLING_TEST_PG lights up the [Collection("live-postgres")] classes; DARLING_TEST_PGRUNTIME
       # lights up the managed-bootstrap E2E. DARLING_TEST_SQL is intentionally unset — the one
