@@ -484,4 +484,75 @@ VALUES ($1,$2,$3,$4,$5,$6)", CollectionIdGenerator.Next(), t, ServerId, ServerNa
         using var cleanup = new NpgsqlCommand(sql, connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
+
+    // ── the base filter, through the product's own read path (get_health_parser_severe_errors) ──
+
+    private static string ErrorReportedXml(int severity, int errorNumber) =>
+        $"<event name=\"error_reported\" package=\"sqlserver\" timestamp=\"2026-09-01T00:00:00.000Z\">" +
+        $"<data name=\"error_number\"><value>{errorNumber}</value></data>" +
+        $"<data name=\"severity\"><value>{severity}</value></data>" +
+        $"<data name=\"state\"><value>1</value></data>" +
+        $"<data name=\"message\"><value>base-filter probe</value></data>" +
+        $"<action name=\"database_id\"><value>1</value></action>" +
+        $"</event>";
+
+    [Fact]
+    public async Task GetSevereErrors_BaseFilter_DropsBelow16AndIgnoredNumbers_KeepsOnly19PlusSignificant()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live health-parser-tools test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+            var t = DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow).AddMinutes(-5);
+
+            async Task PlantErrorAsync(int severity, int errorNumber) =>
+                await DarlingMcpTestData.ExecAsync(connection, ct,
+                    @"INSERT INTO system_health_events (system_health_event_id, collection_time, server_id, server_name, event_time, event_type, event_xml)
+VALUES ($1,$2,$3,$4,$5,$6,$7)",
+                    CollectionIdGenerator.Next(), t, ServerId, ServerName, t, SystemHealthParser.ErrorReportedEvent, ErrorReportedXml(severity, errorNumber));
+
+            // sp_HealthParser's own base filter (@warnings_only = 0): severity < 16 is dropped always;
+            // 18056/17830 are dropped always, whatever the severity. 16 and 20 both survive the base
+            // filter (unfiltered), but only 20 clears the significant (warnings_only) floor of 19.
+            await PlantErrorAsync(15, 50001);   // below the base floor -> dropped entirely
+            await PlantErrorAsync(16, 50002);   // at the base floor -> kept, not significant
+            await PlantErrorAsync(20, 50003);   // above significant floor -> kept and significant
+            await PlantErrorAsync(20, 18056);   // severe but on the always-ignored list -> dropped entirely
+
+            var json = await DarlingMcpHealthParserTools.GetSevereErrors(postgres, ServerName);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            // GetSevereErrors gates on SystemHealthSignificance.IsSignificant, so only the severity-20/50003
+            // row (>= 19, not ignored) is in the tool's own significant-only surface.
+            Assert.Equal(1, root.GetProperty("error_count").GetInt32());
+            var errors = root.GetProperty("errors");
+            Assert.Equal(50003, errors[0].GetProperty("error_number").GetInt32());
+
+            // The base-filter population itself (what ParseSevereError alone lets through, before
+            // significance) is exactly the 16 and the 20 -- never the 15 or the 18056 -- proving the fix
+            // through the parser directly, on the SAME planted rows the tool above just read.
+            var xmls = await DarlingSystemHealthReader.ReadEventXmlAsync(
+                postgres, ServerId, t.AddMinutes(-1), t.AddMinutes(1), SystemHealthParser.ErrorReportedEvent, ct);
+            var baseFiltered = xmls.Select(SystemHealthParser.ParseSevereError).Where(r => r != null).Select(r => r!.ErrorNumber).OrderBy(n => n).ToArray();
+            Assert.Equal(new int?[] { 50002, 50003 }, baseFiltered);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
 }

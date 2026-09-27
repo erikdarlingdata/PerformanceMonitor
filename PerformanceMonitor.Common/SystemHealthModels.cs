@@ -61,9 +61,12 @@ namespace PerformanceMonitor.Common
 
     /// <summary>
     /// One severe-error row, shredded from an <c>error_reported</c> event. Mirrors sp_HealthParser's
-    /// <c>*_SevereErrors</c> table. sp_HealthParser surfaces only severity &gt;= 16 (ignoring 17830/18056);
-    /// that filtering is NOT applied here (it is a Stage 2b concern), so <see cref="Severity"/> is preserved
-    /// for the consumer to re-apply.
+    /// <c>*_SevereErrors</c> table. sp_HealthParser's own base population always drops severity &lt; 16 and
+    /// the two benign connection-reset numbers (17830/18056) — <c>SystemHealthParser.ParseSevereError</c>
+    /// applies that same always-on floor before a record is ever created, so a <see cref="SevereErrorRecord"/>
+    /// never carries a row the proc's unfiltered mode would drop. The warnings_only-specific raise to severity
+    /// &gt;= 19 is still a Stage 2b (<see cref="Severity"/>-based) concern, applied by
+    /// <c>SystemHealthSignificance.IsSignificant</c>.
     /// </summary>
     public sealed record SevereErrorRecord
     {

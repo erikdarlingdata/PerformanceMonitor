@@ -120,7 +120,10 @@ public static class SystemHealthSignificance
     /// An error_reported row is significant when severity &gt;= 19 and the error number is not one of the
     /// benign connection-reset numbers, per sp_HealthParser.sql lines 4759-4767 under
     /// <c>@warnings_only = 1</c>. A missing severity drops the row (sp requires the severity node);
-    /// a missing error number keeps it (it can't match the ignore list).
+    /// a missing error number keeps it (it can't match the ignore list). The always-on base floor
+    /// (severity &gt;= 16, and the same ignore list) is applied once, upstream, by
+    /// <see cref="SystemHealthParser.ParseSevereError"/> itself — this predicate only adds the
+    /// warnings_only-specific raise from 16 to 19 on top of rows the parser already let through.
     /// </summary>
     public static bool IsSignificant(SevereErrorRecord record) =>
         record.Severity >= SevereErrorMinSeverity &&
