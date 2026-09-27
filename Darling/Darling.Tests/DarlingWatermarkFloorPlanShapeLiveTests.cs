@@ -57,6 +57,15 @@ public sealed class DarlingWatermarkFloorPlanShapeLiveTests
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
+
+        /* #1922: probe on its own connection. The service's own runtime conversion for collection_log, which
+           sits outside the collector catalog and so outside ConvertToHypertablesAsync. */
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(connectionString!, ct);
+        if (timescaleEnabled)
+        {
+            Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+        }
+
         await DeleteLiveRowsAsync(connection, ct);
 
         var bodySucceeded = false;
