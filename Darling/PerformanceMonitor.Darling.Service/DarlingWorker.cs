@@ -1839,7 +1839,9 @@ public sealed class DarlingWorker : BackgroundService
            pin on the Create line itself — no reassignment in between for a future edit to slip
            an unpinned read behind. */
         await using var postgres = NpgsqlDataSource.Create(
-            DarlingStoreConnection.PinSessionTimeZoneUtc(EnsureStoreSearchPath(storeConnectionString)));
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(
+                    EnsureStoreSearchPath(storeConnectionString), DarlingManagedPostgres.ServiceApplicationName)));
         _postgres = postgres;
         /* #2936: a failure here is triaged rather than uniformly terminal. A store that is unreachable for
            a moment — restarting, failing over, still coming up alongside this service — and a sibling

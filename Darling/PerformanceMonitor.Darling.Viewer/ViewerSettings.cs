@@ -139,6 +139,17 @@ public sealed class ViewerSettings
     private const string ManagedSearchPath = "collect,config,public";
 
     /// <summary>
+    /// The viewer's own store connection's <c>ApplicationName</c> (#4479) — the twin, under the same
+    /// sliver rule as the role/credential constants above, of the service's
+    /// <c>DarlingManagedPostgres.WebApplicationName</c>. NOT the same string: the web dashboard host's
+    /// STORE pool (which the service opens on its own, unattended, as part of the running service) and
+    /// this desktop app opening its own connection from the operator's machine are different backends in
+    /// <c>pg_stat_activity</c>, and #4442 only named the former. Pinned equal to the service's constant
+    /// only where the two are meant to agree — nowhere yet, since this is the viewer's own surface.
+    /// </summary>
+    public const string ApplicationName = "PerformanceMonitorDarling-Viewer";
+
+    /// <summary>
     /// The viewer seat's connection-pool ceiling (#1566), named rather than left a literal in the
     /// builder below because it is not only a resource bound: it is the DIVISOR in the interactive read
     /// deadline (<see cref="ViewerCommandDeadlines.FanOutReadSeconds"/>, #3004). A read issued as one of
@@ -357,6 +368,7 @@ public sealed class ViewerSettings
             Password = password,
             Database = "darling",
             SearchPath = ManagedSearchPath,
+            ApplicationName = ApplicationName,
             /* #1566: bound the viewer seat's backend count (the service's pools were capped at 24 in
                #1559, but this string was built independently and rode Npgsql's default of 100). Every
                pooled connection is a live postgres.exe on Windows; a read-only UI seat polling on 30/60s
