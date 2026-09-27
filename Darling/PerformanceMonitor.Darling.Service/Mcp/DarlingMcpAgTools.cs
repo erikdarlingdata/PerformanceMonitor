@@ -76,9 +76,12 @@ public sealed class DarlingMcpAgTools
     public static async Task<string> GetAgHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name to limit the topology to one monitored server's view. Optional — omit for the whole fleet.")] string? server_name = null,
-        [Description("Maximum groups to return, most severe first, then by the largest lag/queue depth in the group. Default 11. groups_truncated flags a cut here.")] int limit = DefaultGroupLimit,
+        [Description("Maximum groups to return, most severe first, then by the largest lag/queue depth in the group. Default 11, range 1-1000. groups_truncated flags a cut here.")] int limit = DefaultGroupLimit,
         CancellationToken cancellationToken = default)
     {
+        var limitError = McpHelpers.ValidateTop(limit);
+        if (limitError != null) return limitError;
+
         /* Fleet-wide by default: only resolve when a name was actually supplied. The shared resolver auto-selects
            a sole registered server for an omitted name, which is right for a per-server tool and wrong here — it
            would silently narrow the fleet view on a one-server store. */

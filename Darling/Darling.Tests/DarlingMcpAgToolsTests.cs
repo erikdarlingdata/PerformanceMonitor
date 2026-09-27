@@ -548,7 +548,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
 
             const int TotalGroupCount = HealthyGroupCount + 1;
 
-            /* No limit argument — the default (40) must cap the response. */
+            /* No limit argument — the default (DarlingMcpAgTools.DefaultGroupLimit) must cap the response. */
             var json = await DarlingMcpAgTools.GetAgHealth(postgres, ServerName);
             Assert.False(McpHelpers.IsErrorEnvelope(json), $"tool returned an error: {json}");
 
@@ -580,6 +580,37 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
         {
             await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    /// <summary>
+    /// #4471: an out-of-range <c>limit</c> is REFUSED through the shared <see cref="McpHelpers.ValidateTop"/>,
+    /// never clamped or ignored, the same rule <c>get_alert_history</c> and <c>get_blocking_snapshots</c> apply
+    /// to their own <c>limit</c>. No topology needs to be planted: the refusal happens before any read.
+    /// </summary>
+    [Fact]
+    public async Task AgHealth_RefusesOutOfRangeLimit_AgainstDevPostgres()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live AG-health test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        foreach (var badLimit in new[] { 0, -1, 1001 })
+        {
+            var refused = await DarlingMcpAgTools.GetAgHealth(postgres, limit: badLimit);
+            Assert.True(McpHelpers.IsRefusalEnvelope(refused), $"limit {badLimit} must be refused: {refused}");
+            Assert.Equal("limit", JsonDocument.Parse(refused).RootElement.GetProperty("hints").GetProperty("parameter").GetString());
+        }
+
+        foreach (var okLimit in new[] { 1, 1000 })
+        {
+            var accepted = await DarlingMcpAgTools.GetAgHealth(postgres, limit: okLimit);
+            Assert.False(McpHelpers.IsErrorEnvelope(accepted), $"limit {okLimit} must be accepted: {accepted}");
         }
     }
 
