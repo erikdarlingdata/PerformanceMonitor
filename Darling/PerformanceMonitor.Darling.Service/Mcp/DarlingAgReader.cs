@@ -185,14 +185,12 @@ internal static class DarlingAgReader
             GeneratedAt = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified),
             AvailabilityGroupCount = groups.Count,
             ReportingServerCount = groups.Select(g => g.ServerId).Distinct().Count(),
-            /* #4475: identity is the AG name PLUS its replica set, not the name alone — every Amazon RDS for
-               SQL Server Multi-AZ instance's internal AG is named RDSAG0, so counting by name alone collapses
-               a whole fleet of them into "1". Shares AgTopology's group-identity key so the viewer and this
-               read cannot drift back apart. */
-            DistinctAgCount = groups
-                .Select(g => AgTopology.GroupIdentityKey(g.AgName, g.Replicas.Select(r => r.ReplicaServerName)))
-                .Distinct(StringComparer.Ordinal)
-                .Count(),
+            /* #4475: identity is the AG name plus a CONNECTED COMPONENT over replica-name sets, not the exact
+               set — a real AG monitored from its secondary reports only that secondary's own name (the DMV
+               returns local information only off the primary), so exact-set identity would double-count it.
+               Shares AgTopology's counting helper so the viewer and this read cannot drift back apart. */
+            DistinctAgCount = AgTopology.CountDistinctGroups(
+                groups.Select(g => (g.AgName, (IEnumerable<string?>)g.Replicas.Select(r => r.ReplicaServerName)))),
             WorstSeverity = groups.Count == 0 ? HealthSeverity.Unknown : groups.Max(g => g.Severity),
             AvailabilityGroups = groups,
         };

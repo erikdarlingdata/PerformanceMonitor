@@ -437,4 +437,24 @@ public sealed class DarlingAgReaderTests
         Assert.Equal(1, result.DistinctAgCount);
         Assert.Equal(2, result.AvailabilityGroupCount);
     }
+
+    [Fact]
+    public void DistinctAgCount_SameAgSeenFromItsPrimaryAndItsSecondary_IsOne()
+    {
+        /* The blocking #4475 follow-up case, proved through this reader's own public entry point: a monitored
+           SECONDARY's replica-states view returns only its own local information, so its card carries only
+           {S} while the primary's carries {P,S}. Exact-set identity counted this as 2, which this pin proves
+           wrong. */
+        var replicas = new[]
+        {
+            Replica(1, "NODE1", "AG1", "NODE1", "PRIMARY"),
+            Replica(1, "NODE1", "AG1", "NODE2", "SECONDARY"),
+            Replica(2, "NODE2", "AG1", "NODE2", "SECONDARY"),
+        };
+
+        var result = Reader.Build(replicas, Array.Empty<Reader.DatabaseRow>(), At(0));
+
+        Assert.Equal(1, result.DistinctAgCount);
+        Assert.Equal(2, result.AvailabilityGroupCount);
+    }
 }

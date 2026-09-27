@@ -249,36 +249,122 @@ public static class AgTopology
     /// <summary>The header counts. Groups and views differ exactly when an AG has more than one monitored
     /// reporter, and that difference is what a reader seeing one AG name twice needs said out loud.
     ///
-    /// <para><b>#4475:</b> a group's identity is the AG NAME plus the SET of replica server names its cards
-    /// carry, not the name alone. Every Amazon RDS for SQL Server Multi-AZ instance carries its own internal AG
-    /// named <c>RDSAG0</c>, so a fleet of them would otherwise collapse into "1 group" by name. Two monitored
-    /// replicas of the SAME real AG report the SAME replica set, so they still count once — which is exactly the
-    /// case the Views count exists to distinguish from Groups.</para></summary>
+    /// <para><b>#4475:</b> a group's identity is the AG NAME plus a CONNECTED COMPONENT over its cards'
+    /// replica-name sets, not the exact set. Per Microsoft's docs, <c>sys.dm_hadr_availability_replica_states</c>
+    /// on a server hosting a SECONDARY replica returns only LOCAL information — so a real AG monitored from its
+    /// secondary reports a card carrying only that secondary's own name, while the SAME AG monitored from its
+    /// primary reports the full replica set. Exact-set identity would then count that one AG as two groups,
+    /// which is a regression from the name-only count this Views split exists to improve on (#4238). Two cards
+    /// are the same group when they share a name (case-insensitive) AND their replica-name sets overlap; that
+    /// makes {P,S1,S2} + {S1} + {S2} one group by transitivity even though no two sets are equal.
+    ///
+    /// <para><b>Known limit:</b> two monitored SECONDARIES of one AG, with its primary unmonitored, share no
+    /// replica name with each other (each reports only itself) and so count as two groups. Nothing in the
+    /// collected rows links them — that would need the AG's <c>group_id</c>, which the replica-states DMV does
+    /// not expose to a non-primary reporter.</para>
+    ///
+    /// <para>Every Amazon RDS for SQL Server Multi-AZ instance carries its own internal AG named
+    /// <c>RDSAG0</c>, so a fleet of them would otherwise collapse into "1 group" by name alone — the case this
+    /// split exists to fix, still held by disjoint replica sets never unioning across different instances.</para>
+    /// </summary>
     public static (int DistinctGroups, int ReportingServers, int Views) Counts(IReadOnlyList<AgTopologyCard> cards)
     {
         ArgumentNullException.ThrowIfNull(cards);
 
         return (
-            cards.Select(c => GroupIdentityKey(c.AgName, c.Replicas.Select(r => r.ReplicaServerName))).Distinct(StringComparer.Ordinal).Count(),
+            CountDistinctGroups(cards.Select(c => (c.AgName, (IEnumerable<string?>)c.Replicas.Select(r => r.ReplicaServerName)))),
             cards.Select(c => c.ServerId).Distinct().Count(),
             cards.Count);
     }
 
-    /// <summary>A group's identity for counting purposes (#4475): the AG name plus its replica set, compared
-    /// case-insensitively and order-independently. Shared by <see cref="Counts"/> and the MCP/web AG reader's
-    /// equivalent distinct-AG count (<c>DarlingAgReader.Build</c>), so the two surfaces cannot drift back apart.
-    /// No store read: both callers already carry the replica names on the rows they group.</summary>
-    public static string GroupIdentityKey(string? agName, IEnumerable<string?> replicaServerNames)
+    /// <summary>
+    /// Counts distinct AG groups by connected components (#4475): two members with the same name
+    /// (case-insensitive) union into one group when their replica-name sets overlap (share at least one name,
+    /// case-insensitive); a member with an EMPTY replica set unions with every other same-named member instead
+    /// (falls back to name-only matching, since an empty set can never overlap anything). Members with
+    /// different names never union, regardless of their replica sets. Shared by <see cref="Counts"/> and the
+    /// MCP/web AG reader's equivalent distinct-AG count (<c>DarlingAgReader.Build</c>), so the two surfaces
+    /// cannot drift back apart. No store read: both callers already carry the replica names on the rows they
+    /// group.
+    /// </summary>
+    public static int CountDistinctGroups(IEnumerable<(string? AgName, IEnumerable<string?> ReplicaServerNames)> members)
     {
-        ArgumentNullException.ThrowIfNull(replicaServerNames);
+        ArgumentNullException.ThrowIfNull(members);
 
-        var sortedReplicas = replicaServerNames
-            .Select(name => (name ?? "").ToUpperInvariant())
-            .Where(name => name.Length > 0)
-            .Distinct(StringComparer.Ordinal)
-            .OrderBy(name => name, StringComparer.Ordinal);
+        var items = members
+            .Select(m => (Name: Key(m.AgName), Replicas: new HashSet<string>(
+                m.ReplicaServerNames.Select(n => (n ?? "").ToUpperInvariant()).Where(n => n.Length > 0),
+                StringComparer.Ordinal)))
+            .ToList();
 
-        return Key(agName) + "|" + string.Join(",", sortedReplicas);
+        var parent = new int[items.Count];
+        for (var i = 0; i < parent.Length; i++)
+        {
+            parent[i] = i;
+        }
+
+        int Find(int i)
+        {
+            while (parent[i] != i)
+            {
+                i = parent[i];
+            }
+
+            return i;
+        }
+
+        void Union(int a, int b)
+        {
+            var ra = Find(a);
+            var rb = Find(b);
+            if (ra != rb)
+            {
+                parent[ra] = rb;
+            }
+        }
+
+        /* Only same-named members can ever union, so grouping by name first keeps the pairwise comparison
+           quadratic within one AG name's cards rather than across the whole fleet. */
+        var byName = new Dictionary<string, List<int>>(StringComparer.Ordinal);
+        for (var i = 0; i < items.Count; i++)
+        {
+            if (!byName.TryGetValue(items[i].Name, out var indices))
+            {
+                indices = new List<int>();
+                byName[items[i].Name] = indices;
+            }
+
+            indices.Add(i);
+        }
+
+        foreach (var indices in byName.Values)
+        {
+            for (var a = 0; a < indices.Count; a++)
+            {
+                for (var b = a + 1; b < indices.Count; b++)
+                {
+                    var (ia, ib) = (indices[a], indices[b]);
+                    var setA = items[ia].Replicas;
+                    var setB = items[ib].Replicas;
+
+                    /* An empty set can never overlap anything, so it falls back to matching by name alone
+                       rather than being stranded as its own permanent singleton. */
+                    var matches = setA.Count == 0 || setB.Count == 0 || setA.Overlaps(setB);
+                    if (matches)
+                    {
+                        Union(ia, ib);
+                    }
+                }
+            }
+        }
+
+        var roots = new HashSet<int>();
+        for (var i = 0; i < items.Count; i++)
+        {
+            roots.Add(Find(i));
+        }
+
+        return roots.Count;
     }
 
     /// <summary>The identity a card keeps across refreshes (#4238): the (reporting server, AG) pair BuildCards

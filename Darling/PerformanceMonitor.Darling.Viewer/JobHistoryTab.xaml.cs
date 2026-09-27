@@ -61,12 +61,6 @@ public partial class JobHistoryTab : UserControl
     /// <see cref="ViewerDataService.GetJobHistoryAsync"/>.</summary>
     private const int RowCap = 2000;
 
-    /// <summary>The cap label's text (#4478): stated ONLY when the cap was reached, so a reader who sees fewer
-    /// rows than the cap never wonders whether more were silently dropped, and a reader who sees exactly the
-    /// cap knows there could be more outside the window.</summary>
-    internal static string CapLabel(int rowCount, int cap) =>
-        rowCount >= cap ? $"showing the newest {cap:N0}" : "";
-
     private async Task LoadJobsAsync()
     {
         if (_dataService == null)
@@ -115,7 +109,7 @@ public partial class JobHistoryTab : UserControl
             /* The cap applies to the UNFILTERED read (all.Count), not the client-side-filtered display count:
                a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
                the underlying read still hit the cap. */
-            var capLabel = CapLabel(all.Count, RowCap);
+            var capLabel = JobHistoryCap.Label(all.Count, RowCap);
             JobCountIndicator.Text = displayCount == 0
                 ? ""
                 : capLabel.Length > 0 ? $"{displayCount} run(s) ({capLabel})" : $"{displayCount} run(s)";
