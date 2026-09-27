@@ -74,11 +74,12 @@ public sealed class StoreApplicationNamePinTests
     }
 
     /// <summary>
-    /// The RUNTIME pin (#4479): opens the service's own store data source through
-    /// <see cref="DarlingStoreConnection.WithApplicationName"/> exactly as
-    /// <c>DarlingWorker.RunCollectionLoopAsync</c> does, and reads the surface's name back from
-    /// <c>pg_stat_activity</c> — a live probe, not a string assertion, so a wiring regression that left the
-    /// helper called but its result discarded would still show up here.
+    /// Pins the HELPER and the SHAPE the worker's own site wires (<see cref="DarlingStoreConnection.WithApplicationName"/>
+    /// wrapped in <see cref="DarlingStoreConnection.PinSessionTimeZoneUtc"/> straight into
+    /// <c>NpgsqlDataSource.Create</c>), read back live from <c>pg_stat_activity</c> — not a product call
+    /// site: <see cref="StoreApplicationNameCensusTests"/> covers every real STORE site (including this
+    /// one, by name, in its roster), and <c>ViewerApplicationNameLiveTests</c> is the pin that goes through
+    /// a real product constructor for the Viewer's own site.
     /// </summary>
     [Fact]
     public async Task ServiceApplicationName_ThroughTheHelper_NamesTheBackendInPgStatActivity()
@@ -115,9 +116,11 @@ public sealed class StoreApplicationNamePinTests
         }
     }
 
-    /// <summary>The Viewer's twin (#4479): the same live read through <see cref="ViewerSettings.ApplicationName"/>
-    /// and the helper's set-if-absent contract, since the Viewer cannot reference the Service project's constant
-    /// directly.</summary>
+    /// <summary>
+    /// Pins the HELPER and the SHAPE for the Viewer's constant, the same way the sibling test above pins
+    /// the worker's — not a product call site: <c>ViewerApplicationNameLiveTests</c> is the pin that
+    /// constructs the real <c>ViewerDataService</c> and reads the same fact through its own constructor.
+    /// </summary>
     [Fact]
     public async Task ViewerApplicationName_ThroughTheHelper_NamesTheBackendInPgStatActivity()
     {

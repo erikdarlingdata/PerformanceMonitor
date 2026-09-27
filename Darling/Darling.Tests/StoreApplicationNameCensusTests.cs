@@ -42,56 +42,76 @@ public sealed class StoreApplicationNameCensusTests
 
     /// <summary>
     /// Sites this scan finds but does not require to carry a DIRECT <c>WithApplicationName(</c> call, keyed
-    /// <c>file:line</c> — by LINE, not by enclosing member the way
-    /// <see cref="StoreSessionTimeZonePinCensusTests.MonitoredTargetSites"/> keys its own roster: two of this
-    /// census's sites share an enclosing member with a DIRECTLY-pinned sibling (both
-    /// <c>DarlingWorker.RunCollectionLoopAsync</c>'s own store connection and its unrelated custom-alert
-    /// viewer source live in that one method), and a member-only key waived BOTH the moment either dropped
-    /// its pin — the mutation this test's own review caught, below. Each entry carries a one-line reason.
+    /// <c>file:member</c> — or <c>file:member:disambiguator</c> when a member holds several call sites,
+    /// the disambiguator being the assigned variable's name at that site. A LINE key breaks the moment an
+    /// unrelated edit adds or removes a line above the waived site anywhere in the file (#4480 added ~38
+    /// lines above one of these before this fix landed); a member key survives that, and still keeps the
+    /// one-waiver-covers-one-site property
+    /// <see cref="StoreSessionTimeZonePinCensusTests.MonitoredTargetSites"/> keys by, because
+    /// <c>DarlingWorker.RunCollectionLoopAsync</c> — the one member here with two call sites — needs its
+    /// own site told apart from its waived sibling's: the mutation below removes the pin from the
+    /// member's OTHER (directly-pinned) site and expects that alone to red, which a member-only key without
+    /// a disambiguator cannot do. Each entry carries a one-line reason.
     /// </summary>
     private static readonly HashSet<string> Waived = new(StringComparer.Ordinal)
     {
         /* MONITORED-target sites (the TZ census's own MonitoredTargetSites, reused): these connect to a
            server this service WATCHES, never to the store, so naming them in the store's own convention
            makes no sense — a monitored target's own pg_stat_activity is the target's business. */
-        "DarlingServerConnector.cs:449",   // ConnectPostgresAsync
-        "PostgresTargetProvider.cs:31",    // CreateConnection
-        "DarlingWorker.cs:4194",           // ReadPgStatementTextAsync
-        "DarlingWorker.cs:9663",           // RunTestHypotheticalIndexAsync
+        "DarlingServerConnector.cs:ConnectPostgresAsync",
+        "PostgresTargetProvider.cs:CreateConnection",
+        "DarlingWorker.cs:ReadPgStatementTextAsync",
+        "DarlingWorker.cs:RunTestHypotheticalIndexAsync",
 
         /* DarlingWorker's custom-alert viewer source (#4479): its connection string comes from either
            DarlingManagedPostgres.TryBuildViewerConnectionStringFromStoredCredential (BuildRoleConnectionString,
            WebApplicationName) or DarlingStoreLogins.ResolveComposeCustomAlertViewerAsync (which returns
            ConnectionStringFor(Surface.Web), built by BuildComposeStoreRoleConnectionString) — both name the
-           connection through a builder, not through a WithApplicationName call visible on this line. */
-        "DarlingWorker.cs:2354",           // customAlertViewerSource, inside RunCollectionLoopAsync
+           connection through a builder, not through a WithApplicationName call visible on this line.
+           Disambiguated from the method's OTHER call site (the service's own store connection, directly
+           pinned, not waived) by the assigned variable's name. */
+        "DarlingWorker.cs:RunCollectionLoopAsync:customAlertViewerSource",
 
         /* The viewer's own diagnostic self-test (#1954/#1966): a short-lived, unpooled probe connection the
            Viewer opens on demand from its "Run self-test" button, never part of the pooled read path
            pg_stat_activity's ApplicationName column exists to distinguish. Both layers open and close inside
            one call; there is nothing here for a store operator's convention to distinguish from another
            surface's pooled backend. */
-        "StoreConnectionSelfTest.cs:206",  // RunAsync
-        "StoreConnectionSelfTest.cs:306",  // ProbeStoreShapeAsync
+        "StoreConnectionSelfTest.cs:RunAsync",
+        "StoreConnectionSelfTest.cs:ProbeStoreShapeAsync",
 
         /* Store-role provisioning and bootstrap probes: short-lived, unpooled, ADMINISTRATIVE connections that
            exist only around a single start's role/database setup, never the long-lived surfaces the naming
            convention exists to tell apart in a live pg_stat_activity. */
-        "DarlingManagedPostgres.cs:2988",  // MigrateManagedConfAsync's snapshot connection
-        "DarlingManagedPostgres.cs:4603",  // OpenProbedMaintenanceConnectionAsync
-        "DarlingManagedPostgres.cs:5300",  // VerifyPgHbaAsync
-        "DarlingManagedPostgres.cs:5392",  // GuardAdoptedListenAsync
-        "DarlingStoreLogins.cs:470",       // AcceptsLoginAsync
+        "DarlingManagedPostgres.cs:MigrateManagedConfAsync",       // snapshot connection
+        "DarlingManagedPostgres.cs:OpenProbedMaintenanceConnectionAsync",
+        "DarlingManagedPostgres.cs:VerifyPgHbaAsync",
+        "DarlingManagedPostgres.cs:GuardAdoptedListenAsync",
+        "DarlingStoreLogins.cs:AcceptsLoginAsync",
 
         /* The major-version upgrade's own internal probes (#3908/#1706): short-lived connections against the
            OLD or NEW cluster during the upgrade window itself, before/after the owner connection string
            (already named via DarlingStoreConnection.WithApplicationName at its own call sites) is the one the
            running service uses. */
-        "DarlingStoreUpgrade.cs:1577",     // OpenWithTransportRetryAsync
-        "DarlingStoreUpgrade.cs:4151",     // ReadClusterIdentityAsync
-        "DarlingStoreUpgrade.cs:4206",     // BridgeTimescaleAsync's database-listing connection
-        "DarlingStoreUpgrade.cs:4402",     // CompleteAfterStartAsync
+        "DarlingStoreUpgrade.cs:OpenWithTransportRetryAsync",
+        "DarlingStoreUpgrade.cs:ReadClusterIdentityAsync",
+        "DarlingStoreUpgrade.cs:BridgeTimescaleAsync",              // database-listing connection
+        "DarlingStoreUpgrade.cs:CompleteAfterStartAsync",
     };
+
+    /// <summary>No entry in <see cref="Waived"/> keys by line — a line number breaks the moment an
+    /// unrelated edit shifts anything above it in the same file (#4480's own ~38 lines is the case that
+    /// found this). Every key is <c>file:member</c> or <c>file:member:disambiguator</c>.</summary>
+    [Fact]
+    public void NoWaiverKeyIsLineNumbered()
+    {
+        var lineKeyed = Waived.Where(key => Regex.IsMatch(key, @":\d+$")).ToList();
+
+        Assert.True(
+            lineKeyed.Count == 0,
+            "a Waived key still ends in a line-number suffix, which breaks the moment an unrelated edit "
+            + "adds or removes a line above it: " + string.Join(", ", lineKeyed));
+    }
 
     [Fact]
     public void EveryStoreConnectionStringSourceNamesItsApplicationName()
@@ -122,7 +142,8 @@ public sealed class StoreApplicationNameCensusTests
 
     private static bool IsWaived(CallSite site) => Waived.Contains(site.Key);
 
-    /* ---------------- scan (identical shape to StoreSessionTimeZonePinCensusTests.Scan) ---------------- */
+    /* ---------------- scan (same four-pattern shape as StoreSessionTimeZonePinCensusTests.Scan, plus a
+       disambiguator for the one member here that holds more than one call site) ---------------- */
 
     private readonly record struct CallSite(string Key, string File, int Line, string Argument, bool Pinned);
 
@@ -132,16 +153,32 @@ public sealed class StoreApplicationNameCensusTests
         @"NpgsqlDataSource\.Create\(|new\s+NpgsqlDataSourceBuilder\(|new\s+NpgsqlConnection\(|new\s+Npgsql\.NpgsqlConnection\(",
         RegexOptions.Compiled);
 
+    /// <summary>The assigned variable's name, or the first identifier inside the construction call, read
+    /// backward from the call site to the nearest statement boundary (<c>;</c> or <c>{</c>) — the same span
+    /// the roster's disambiguated keys are written against. Null when the call is not a simple
+    /// assignment (nothing to disambiguate with, and none of this scan's multi-site members need one).</summary>
+    private static string? Disambiguator(string text, int matchIndex)
+    {
+        var windowStart = Math.Max(0, matchIndex - 400);
+        var window = text[windowStart..matchIndex];
+        var boundary = Math.Max(window.LastIndexOf(';'), window.LastIndexOf('{'));
+        var statement = boundary >= 0 ? window[(boundary + 1)..] : window;
+        var assignment = Regex.Match(statement, @"\bvar\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=");
+
+        return assignment.Success ? assignment.Groups["name"].Value : null;
+    }
+
     private static CensusScan Scan([CallerFilePath] string thisFile = "")
     {
         var files = 0;
-        var sites = new List<CallSite>();
+        var raw = new List<(string File, string Member, string? Disambiguator, int Line, string Argument, bool Pinned)>();
 
         foreach (var path in StoreSourceFiles(thisFile))
         {
             files++;
             var text = File.ReadAllText(path);
             var name = Path.GetFileName(path);
+            CSharpMemberMap.MemberMap? members = null;
 
             foreach (Match match in CallSiteRegex.Matches(text))
             {
@@ -149,16 +186,29 @@ public sealed class StoreApplicationNameCensusTests
                 var argument = ArgumentSpan(text, openParen)
                     ?? throw new InvalidOperationException($"{name}: unterminated call at offset {match.Index}");
 
+                members ??= CSharpMemberMap.Of(text);
+                var member = CSharpMemberMap.EnclosingMember(members, match.Index);
                 var line = CSharpMemberMap.LineOf(text, match.Index);
+                var disambiguator = Disambiguator(text, match.Index);
 
-                sites.Add(new CallSite(
-                    name + ":" + line,
-                    name,
-                    line,
-                    Collapse(argument),
-                    ArgumentIsNamed(argument)));
+                raw.Add((name, member, disambiguator, line, Collapse(argument), ArgumentIsNamed(argument)));
             }
         }
+
+        /* file:member alone is the key UNLESS that member holds more than one call site, in which case the
+           disambiguator (the assigned variable's name) joins the key — the shape that keeps one waiver
+           covering exactly one site when a member has several. */
+        var perMember = raw.GroupBy(r => (r.File, r.Member)).ToDictionary(g => g.Key, g => g.Count());
+
+        var sites = raw
+            .Select(r =>
+            {
+                var multi = perMember[(r.File, r.Member)] > 1;
+                var key = multi ? $"{r.File}:{r.Member}:{r.Disambiguator}" : $"{r.File}:{r.Member}";
+
+                return new CallSite(key, r.File, r.Line, r.Argument, r.Pinned);
+            })
+            .ToList();
 
         return new CensusScan(files, sites);
     }
