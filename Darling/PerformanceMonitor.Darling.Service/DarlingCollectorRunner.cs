@@ -20,6 +20,7 @@ using System.Threading.Tasks;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Service.Targets;
 using PerformanceMonitor.Common;
@@ -1560,6 +1561,37 @@ public sealed class DarlingCollectorRunner
         }
 
         return (watermark, watermarkFromUtcColumn, numericWatermark, serverWatermarkMs, watermarkCacheEligible, serverWatermarkDiscarded);
+    }
+
+    /// <summary>
+    /// #4487: the post-write regressed-vs-honest branch, extracted out of the plain (non-fan-out) write
+    /// path in <see cref="RunCoreAsync"/> for the same live-test reason as <see cref="ResolveServerWatermarkAsync"/>
+    /// and <see cref="AdvanceServerWatermark"/> above. Pure move: a batch that carries an identity
+    /// regression (job_history's guarded filter collapsed to its bounded-window arm because the target's
+    /// own MAX(instance_id) fell below the store's watermark — an identity reseed, an msdb restore, or a
+    /// failover to a replica with a lower identity; the rows alone can't say which) must not be MAXed
+    /// against the stale cached value the way an ordinary batch is: Advance keeps the GREATER of the two,
+    /// which is still the OLD epoch's higher number, and every cycle after would keep taking the regressed
+    /// arm even though the store itself has already self-healed. Invalidate instead, so the next run
+    /// re-seeds from the store — which by then holds this run's new-epoch rows and returns the new,
+    /// honest max.
+    /// </summary>
+    internal void CommitServerWatermark<TRow>(
+        ServerRuntime server,
+        ICollectorDefinition<TRow> definition,
+        List<TRow> rows,
+        bool watermarkFromUtcColumn,
+        IReadOnlyList<CollectorMeasurement> measurements)
+    {
+        var regressed = measurements.Any(m => m.Label == JobHistoryCollector.IdentityRegressionsMeasurement && m.Value > 0);
+        if (regressed)
+        {
+            _watermarkCache.Invalidate(server.ServerId, definition.Name);
+        }
+        else
+        {
+            AdvanceServerWatermark(server, definition, rows, watermarkFromUtcColumn);
+        }
     }
 
     /// <summary>
@@ -3169,7 +3201,7 @@ public sealed class DarlingCollectorRunner
                    not a fan-out path) advance — see watermarkCacheEligible above. */
                 if (watermarkCacheEligible && rowsWritten > 0)
                 {
-                    AdvanceServerWatermark(server, definition, rows, watermarkFromUtcColumn);
+                    CommitServerWatermark(server, definition, rows, watermarkFromUtcColumn, context.Measurements);
                 }
             }
         }
@@ -3339,6 +3371,24 @@ public sealed class DarlingCollectorRunner
             return 0;
         }
 
+        /* #4487: job_history's failback lookback can honestly re-read up to FailbackLookbackDays of an
+           epoch this server already stored — the numeric watermark alone cannot see that, because it
+           re-reads a HIGHER epoch's own rows, not the current low epoch's. Read the batch's own natural
+           keys back from the store ONCE, here, before the #3099 retry loop below, and filter `rows` once:
+           a start-phase re-attempt below reuses this already-filtered list rather than re-reading, which
+           is what keeps this read outside #3099's retry semantics entirely. Every other collector's
+           definition does not implement the contract, so this is a null check and nothing else for them. */
+        if (definition is INaturalKeyDedupedCollector<TRow> dedupe)
+        {
+            rows = await DropAlreadyStoredJobHistoryRowsAsync(
+                pgConnection, definition, dedupe, rows, server, cancellationToken);
+
+            if (rows.Count == 0)
+            {
+                return 0;
+            }
+        }
+
         /* #3099: ONE re-attempt, gated on the COPY's START phase, and lossless because `rows` is still
            the parameter this method was handed. The gate is what makes it lossless rather than merely
            cheap: a start-phase fault sent no row, so a COPY ... FROM STDIN cannot have committed and the
@@ -3400,6 +3450,103 @@ public sealed class DarlingCollectorRunner
         await RecordOversizedPlanSightingsAsync(definition, rows, server, collectionTime, cancellationToken);
 
         return outcome.RowsWritten;
+    }
+
+    /// <summary>
+    /// The keyed pre-insert dedupe (#4487): reads the batch's own natural keys back from
+    /// <c>collect.job_history</c> (the only table this runs against — <c>definition.TargetTable</c> is
+    /// job_history's, since only <see cref="JobHistoryCollector"/> implements
+    /// <see cref="INaturalKeyDedupedCollector{TRow}"/>) and drops any row this server already stored under
+    /// either the current epoch or a returning one, before the COPY.
+    ///
+    /// <para><b>The read.</b> A keyed join against store rung V150's
+    /// <c>idx_job_history_server_run (server_id, run_datetime DESC, instance_id DESC)</c> — confirmed with
+    /// EXPLAIN in the PR's cost check — bounded on <c>collection_time &gt;= batch's MIN(run_datetime) - 1
+    /// day</c> for chunk exclusion. That bound is on <c>collection_time</c> (the hypertable's partitioning
+    /// column, UTC) using <c>run_datetime</c> (the TARGET's own local wall clock) as its anchor: the two
+    /// clocks are within ±14h of each other (the widest real UTC offset), and a row cannot be collected
+    /// before the run it describes started, so one full day of slack on top of that is safe margin in
+    /// either direction without needing to reason about the exact offset.</para>
+    ///
+    /// <para><b>Once per batch, not once per retry.</b> Called from <see cref="WriteBatchAsync{TRow}"/>
+    /// BEFORE the #3099 retry loop begins, so a start-phase re-attempt reuses the already-filtered list —
+    /// re-reading on retry would be wasted work at best, and at worst could re-admit a row a slower first
+    /// attempt had already committed between the two reads.</para>
+    /// </summary>
+    private async Task<List<TRow>> DropAlreadyStoredJobHistoryRowsAsync<TRow>(
+        NpgsqlConnection pgConnection,
+        ICollectorDefinition<TRow> definition,
+        INaturalKeyDedupedCollector<TRow> dedupe,
+        List<TRow> rows,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        var runDateTimes = new DateTime[rows.Count];
+        var instanceIds = new long[rows.Count];
+        var jobIds = new string[rows.Count];
+        var stepIds = new int[rows.Count];
+        var minRunDateTime = DateTime.MaxValue;
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            var key = dedupe.GetNaturalKey(rows[i]);
+            instanceIds[i] = key.InstanceId;
+            jobIds[i] = key.JobId;
+            stepIds[i] = key.StepId;
+            runDateTimes[i] = DateTime.SpecifyKind(key.RunDateTime, DateTimeKind.Unspecified);
+
+            if (key.RunDateTime < minRunDateTime)
+            {
+                minRunDateTime = key.RunDateTime;
+            }
+        }
+
+        var collectionTimeFloor = DateTime.SpecifyKind(minRunDateTime.AddDays(-1), DateTimeKind.Unspecified);
+
+        var storedKeys = new HashSet<(long InstanceId, string JobId, int StepId, DateTime RunDateTime)>();
+
+        try
+        {
+            await using var command = new NpgsqlCommand(
+                $"SELECT jh.instance_id, jh.job_id, jh.step_id, jh.run_datetime " +
+                $"FROM {definition.TargetTable} AS jh " +
+                "JOIN unnest($2::timestamp[], $3::bigint[], $4::text[], $5::integer[]) " +
+                "AS k(run_datetime, instance_id, job_id, step_id) " +
+                "ON jh.run_datetime = k.run_datetime AND jh.instance_id = k.instance_id " +
+                "AND jh.job_id = k.job_id AND jh.step_id = k.step_id " +
+                "WHERE jh.server_id = $1 AND jh.collection_time >= $6",
+                pgConnection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(server.ServerId);
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp, Value = runDateTimes });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint, Value = instanceIds });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = jobIds });
+            command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = stepIds });
+            command.Parameters.AddWithValue(collectionTimeFloor);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                storedKeys.Add((
+                    reader.GetInt64(0),
+                    reader.GetString(1),
+                    reader.GetInt32(2),
+                    JobHistoryCollector.ToMicroseconds(reader.GetDateTime(3))));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* A failed dedupe read must never turn into a silent duplicate write: fail the batch rather
+               than store rows this server might already hold. The #3099 retry above still applies to
+               whatever failure the store write itself produces; this read is not part of that retry. */
+            _logger?.LogWarning(
+                "job_history pre-insert dedupe read failed for server {ServerId} — failing this batch " +
+                "rather than risk storing duplicate rows: {Message}",
+                server.ServerId, ex.Message);
+            throw;
+        }
+
+        return dedupe.DropAlreadyStored(rows, storedKeys);
     }
 
     /// <summary>
@@ -3863,8 +4010,10 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     internal static string BuildServerWatermarkInstanceIdSql(string tableName, string columnName, bool bounded) =>
         bounded
-            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2"
-            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+            ? $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND collection_time > $2 "
+              + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1 AND collection_time > $2)"
+            : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
+              + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1)";
 
     /// <summary>
     /// True when this cycle will OVERWRITE the server-scoped watermark before any query is built, so

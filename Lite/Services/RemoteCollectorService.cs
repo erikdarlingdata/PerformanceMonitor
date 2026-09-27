@@ -1545,6 +1545,15 @@ WHERE server_id = $3";
     /// collection — the numeric twin of <see cref="GetLastCollectedTimeAsync"/> (job_history dedups on
     /// <c>instance_id</c>, sysjobhistory's IDENTITY bigint). Returns null on first run or if the query
     /// fails (caller uses its documented first-run/fallback path).
+    ///
+    /// <para><b>#4487: the newest BATCH's max, not the all-time max.</b> An all-time <c>MAX(instance_id)</c>
+    /// survives an identity reseed (or an msdb restore, or a failover to a replica whose msdb carries a
+    /// lower identity — the cause is not distinguishable from the rows alone) at whatever value the OLD
+    /// epoch left behind, which sits above every id the new epoch will ever produce. The target's own max
+    /// then never matches <c>jh.instance_id &gt; @last_instance_id</c> again, and the collector's bounded
+    /// 24h regressed-arm re-read runs every cycle instead of the one time its own doc comment promises.
+    /// Scoping the max to the newest <c>collection_time</c> for this server fixes that: the run right after
+    /// a reseed stores the new epoch's ids, so the very next run's newest batch is that epoch's own max.</para>
     /// </summary>
     protected async Task<long?> GetLastCollectedInstanceIdAsync(
         int serverId, string tableName, string columnName, CancellationToken cancellationToken)
@@ -1556,7 +1565,8 @@ WHERE server_id = $3";
             using var conn = _duckDb.CreateConnection();
             await conn.OpenAsync(cancellationToken);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1";
+            cmd.CommandText = $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 "
+                + $"AND collection_time = (SELECT MAX(collection_time) FROM {tableName} WHERE server_id = $1)";
             cmd.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = serverId });
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             if (result is not null && result != DBNull.Value)

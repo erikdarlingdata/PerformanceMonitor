@@ -88,11 +88,93 @@ public sealed class JobHistoryIdentityEpochTests
         /* The honest-identity arm is still the pre-#3885 predicate, character for character. */
         Assert.Contains(DevWatermarkPredicate, query.Text, StringComparison.Ordinal);
 
-        /* One parameter, still BigInt: instance_id is a bigint IDENTITY and the millions are real. */
-        var p = Assert.Single(query.Parameters);
-        Assert.Equal("@last_instance_id", p.Name);
+        /* Two parameters: instance_id is still a bigint IDENTITY and the millions are real; #4487 adds
+           the failback bound alongside it (null here — this context sets no timestamp Watermark). */
+        Assert.Equal(2, query.Parameters.Count);
+        var p = Assert.Single(query.Parameters, x => x.Name == "@last_instance_id");
         Assert.Equal(11_500_000L, p.Value);
         Assert.Equal(CollectorParameterType.BigInt, p.Type);
+        var bound = Assert.Single(query.Parameters, x => x.Name == "@min_run_datetime");
+        Assert.Null(bound.Value);
+        Assert.Equal(CollectorParameterType.DateTime2, bound.Type);
+        Assert.Contains("@min_run_datetime IS NULL", query.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4487: the failback (A→B→A) bound. A store holding an older, higher-id epoch (A) and a newer,
+    /// lower-id epoch (B) supplies BOTH watermarks in the same round trip the honest arm already had —
+    /// context.Watermark is job_history's own timestamp watermark, read for the archival-emptied distinction,
+    /// and repurposed here as the failback anchor with no second host read. BuildQuery must derive
+    /// @min_run_datetime as that stored maximum minus FailbackLookbackDays, and the honest arm's text must
+    /// carry the run_date/run_datetime bound tied to that parameter, not a copy that could drift from
+    /// ArchivalEmptyWindowPredicate's own decode.
+    /// </summary>
+    [Fact]
+    public void SteadyStateFilter_BindsTheFailbackBound_WhenTheHostSuppliesAStoredWatermark()
+    {
+        var storedNewestRunDateTime = new DateTime(2026, 9, 27, 3, 0, 0, DateTimeKind.Unspecified);
+        var context = MakeContext(numericWatermark: 200L);
+        context.Watermark = storedNewestRunDateTime;
+
+        var query = JobHistoryCollector.Instance.BuildQuery(context);
+
+        Assert.Equal(7, JobHistoryCollector.FailbackLookbackDays);
+        var bound = Assert.Single(query.Parameters, x => x.Name == "@min_run_datetime");
+        Assert.Equal(storedNewestRunDateTime.AddDays(-7), bound.Value);
+        Assert.Equal(CollectorParameterType.DateTime2, bound.Type);
+
+        /* The exact decoded-run_datetime shape, tied to the CAPPED @min_run_datetime rather than a bare
+           parameter or GETDATE() — the same idiom ArchivalEmptyFilter uses, anchored differently. */
+        const string capExpression = "CASE WHEN @min_run_datetime > DATEADD(DAY, -7, GETDATE()) THEN DATEADD(DAY, -7, GETDATE()) ELSE @min_run_datetime END";
+        Assert.Contains($"CONVERT(integer, CONVERT(varchar(8), {capExpression}, 112))", query.Text, StringComparison.Ordinal);
+        Assert.Contains($") >= {capExpression}", query.Text, StringComparison.Ordinal);
+        /* Only inside the HONEST arm (paired with the un-guarded instance_id predicate), not the
+           regressed arm, which keeps its own independent 24h GETDATE() window untouched. */
+        Assert.Contains(DevWatermarkPredicate + "\r\n              AND ", query.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4487 review finding: a future-dated stored run must not starve the steady arm. The cap forces
+    /// @min_run_datetime's EFFECT in the SQL down to FailbackLookbackDays before the TARGET's own clock
+    /// whenever the parameter value would otherwise be later than that — asserted here as the literal
+    /// CASE expression the collector emits, since the clamp runs on the target's server-side GETDATE(),
+    /// not on a value this test can observe from the parameter alone.
+    /// </summary>
+    [Fact]
+    public void SteadyStateFilter_CapsTheFailbackBound_AtTheTargetsOwnRecentPast()
+    {
+        var context = MakeContext(numericWatermark: 200L);
+        context.Watermark = new DateTime(2099, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+        var query = JobHistoryCollector.Instance.BuildQuery(context);
+
+        /* The parameter itself still carries the raw (uncapped) stored-watermark-minus-lookback value —
+           the SQL, not the parameter, is where the cap is applied, so a future-dated store never reaches
+           the target as a future bound. */
+        var bound = Assert.Single(query.Parameters, x => x.Name == "@min_run_datetime");
+        Assert.Equal(new DateTime(2098, 12, 25, 0, 0, 0, DateTimeKind.Unspecified), bound.Value);
+
+        Assert.Contains(
+            "CASE WHEN @min_run_datetime > DATEADD(DAY, -7, GETDATE()) THEN DATEADD(DAY, -7, GETDATE()) ELSE @min_run_datetime END",
+            query.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4487: no stored timestamp watermark (a true first run, or a Lite store emptied by archival) means
+    /// nothing to fail back FROM, so the bound must impose no restriction — @min_run_datetime is null and
+    /// the predicate's IS NULL branch is what the guard relies on for it, pinned here at the parameter
+    /// level so the SQL-shape pin above and this null-input case cannot silently diverge.
+    /// </summary>
+    [Fact]
+    public void SteadyStateFilter_MinRunDateTimeIsNull_WhenTheHostHasNoStoredWatermarkYet()
+    {
+        var context = MakeContext(numericWatermark: 200L);
+        Assert.Null(context.Watermark);
+
+        var query = JobHistoryCollector.Instance.BuildQuery(context);
+
+        var bound = Assert.Single(query.Parameters, x => x.Name == "@min_run_datetime");
+        Assert.Null(bound.Value);
     }
 
     [Fact]
@@ -194,13 +276,13 @@ public sealed class JobHistoryIdentityEpochTests
         /* Run one: the store's watermark is the pre-reseed maximum, so the guarded statement's regressed
            arm takes the bounded window and stores rows carrying the NEW epoch's ids. */
         var regressed = JobHistoryCollector.Instance.BuildQuery(MakeContext(numericWatermark: 11_500_000L));
-        Assert.Equal(11_500_000L, Assert.Single(regressed.Parameters).Value);
+        Assert.Equal(11_500_000L, Assert.Single(regressed.Parameters, x => x.Name == "@last_instance_id").Value);
 
         /* Run two: the host re-reads SELECT MAX(instance_id) and now gets the new epoch's maximum, so the
            same statement's honest arm applies - one run of fallback per reseed, not a mode it stays in.
            The text is identical between the runs; only the bound parameter moved. */
         var healed = JobHistoryCollector.Instance.BuildQuery(MakeContext(numericWatermark: 4_000L));
-        Assert.Equal(4_000L, Assert.Single(healed.Parameters).Value);
+        Assert.Equal(4_000L, Assert.Single(healed.Parameters, x => x.Name == "@last_instance_id").Value);
         Assert.Equal(regressed.Text, healed.Text);
         Assert.Contains(DevWatermarkPredicate, healed.Text, StringComparison.Ordinal);
     }

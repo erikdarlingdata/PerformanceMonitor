@@ -99,6 +99,9 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
     private static readonly MethodInfo AdvanceMethod = typeof(DarlingCollectorRunner)
         .GetMethod("AdvanceServerWatermark", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)!;
 
+    private static readonly MethodInfo CommitMethod = typeof(DarlingCollectorRunner)
+        .GetMethod("CommitServerWatermark", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)!;
+
     private static readonly MethodInfo WriteBatchMethod = typeof(DarlingCollectorRunner)
         .GetMethod("WriteBatchAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
@@ -127,6 +130,13 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
         DarlingCollectorRunner runner, ServerRuntime server, ICollectorDefinition<TRow> definition, List<TRow> rows, bool fromUtc)
     {
         AdvanceMethod.MakeGenericMethod(typeof(TRow)).Invoke(runner, new object?[] { server, definition, rows, fromUtc });
+    }
+
+    private static void CommitServerWatermark<TRow>(
+        DarlingCollectorRunner runner, ServerRuntime server, ICollectorDefinition<TRow> definition, List<TRow> rows,
+        bool fromUtc, IReadOnlyList<CollectorMeasurement> measurements)
+    {
+        CommitMethod.MakeGenericMethod(typeof(TRow)).Invoke(runner, new object?[] { server, definition, rows, fromUtc, measurements });
     }
 
     private static async Task<int> WriteBatchAsync<TRow>(
@@ -168,9 +178,24 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
     /// #4197's headline correctness pin: after real writes through the product's own
     /// <c>WriteBatchAsync</c>, the cache's advanced watermark equals what a fresh
     /// <c>GetLastCollectedTimeAsync</c>/<c>GetLastCollectedInstanceIdAsync</c> read of the store returns.
-    /// Includes an out-of-order batch and a replay (a batch OLDER than the cache) to prove the value never
-    /// moves backwards, and sub-microsecond-tick / mixed DateTimeKind values so any conversion on the way
-    /// into the store would show up as a mismatch here.
+    /// Includes an out-of-order batch (newest row not last in the list) and sub-microsecond-tick / mixed
+    /// DateTimeKind values so any conversion on the way into the store would show up as a mismatch here.
+    ///
+    /// <para><b>Why the third batch's <c>instance_id</c> only goes UP, never down (#4487).</b> job_history's
+    /// numeric watermark is read as the max of the NEWEST collected batch
+    /// (<see cref="DarlingCollectorRunner.GetLastCollectedInstanceIdAsync"/>'s collection_time-scoped query),
+    /// not an all-time max — see that method's own remarks for why. Every REAL collector arm hands this batch
+    /// query the target's own current max as its floor (the steady arm's <c>instance_id &gt; @last_instance_id</c>;
+    /// the regressed and archival-emptied arms re-read a bounded window whose max is the target's own current
+    /// max; the first run reads everything), so a genuinely later batch's max can never be LOWER than an
+    /// earlier one's — the only way that happens is an identity reset, which the #4487 guard now detects and
+    /// invalidates the cache for instead of merging it in — see
+    /// <c>ServerWatermarkCacheTests</c>' own coverage of a regressed batch's invalidate-not-advance rule.
+    /// A batch that violated this (an ordinary batch with a lower newest id than the one before it) is not a
+    /// shape the product can produce, so this test does not plant one; the REPLAY batch here is older only
+    /// in <c>run_datetime</c> (job_history's timestamp watermark, read by a PLAIN unscoped MAX — see
+    /// <see cref="DarlingCollectorRunner.GetLastCollectedTimeAsync"/> — which a replay can legitimately
+    /// undercut without regressing the identity at all), never in <c>instance_id</c>.</para>
     ///
     /// <para>RED on dev: <c>ResolveServerWatermarkAsync</c>/<c>AdvanceServerWatermark</c> do not exist there
     /// (this branch's own extraction), so this fails to compile against dev.</para>
@@ -216,12 +241,15 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
             Assert.True(written2 > 0);
             Advance(runner, server, definition, batch2, fromUtc: false);
 
-            /* Batch 3: a REPLAY — every value OLDER than what is already cached. The cache must not move
-               backwards; DateTimeKind.Utc here, to prove a frame difference alone does not fool the max. */
+            /* Batch 3: a REPLAY in TIME only — an older run_datetime (DateTimeKind.Utc, to prove a frame
+               difference alone does not fool the max) than what is already cached, but a HIGHER instance_id
+               than batch 2's, exactly as every real collector arm produces it (see the class remarks above
+               for why a lower-id newest batch cannot happen here). Proves the timestamp watermark does not
+               move backwards even while the numeric one legitimately advances on the very same batch. */
             var replayTime = DateTime.SpecifyKind(t1.AddMinutes(-30), DateTimeKind.Utc);
             var batch3 = new List<JobHistoryCollector.Row>
             {
-                new() { InstanceId = 50, JobId = Guid.NewGuid().ToString(), JobName = "j1", RunDateTime = replayTime, RunStatus = 1 },
+                new() { InstanceId = 103, JobId = Guid.NewGuid().ToString(), JobName = "j1", RunDateTime = replayTime, RunStatus = 1 },
             };
             var context3 = MakeContext(server, DateTime.UtcNow);
             var written3 = await WriteBatchAsync(runner, connection, definition, batch3, server, context3.CollectionTime, context3, ct);
@@ -236,9 +264,12 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
 
             Assert.Equal(freshValue, cachedValue);
             Assert.Equal(freshNumeric, cachedNumeric);
-            /* The replay must not have moved anything backwards: the max is still t2b / 102. */
+            /* The run_datetime replay must not have moved the TIMESTAMP watermark backwards: it is still
+               t2b, the max over ALL batches (a plain unscoped MAX — see GetLastCollectedTimeAsync). The
+               NUMERIC watermark legitimately advances to 103 — the newest batch's own max — on this same
+               batch, because instance_id only ever goes up on a real collector arm. */
             Assert.Equal(DateTime.SpecifyKind(t2b, DateTimeKind.Unspecified), cachedValue!.Value, TimeSpan.FromSeconds(1));
-            Assert.Equal(102L, cachedNumeric);
+            Assert.Equal(103L, cachedNumeric);
 
             bodySucceeded = true;
         }
@@ -457,6 +488,190 @@ public sealed class ServerWatermarkCacheRunnerLiveTests
                MAX statements against job_history, not one; every call after is a hit and reads neither. */
             var calls = CallsForTable(loggerFactory.Provider, "job_history");
             Assert.Equal(2, calls);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var delete = new NpgsqlCommand("DELETE FROM job_history WHERE server_id = @id", cleanup);
+                delete.Parameters.AddWithValue("id", server.ServerId);
+                await delete.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4487: a regressed batch (one whose measurements carry <see cref="JobHistoryCollector.IdentityRegressionsMeasurement"/>
+    /// &gt; 0) invalidates the cache through the runner's own post-write seam
+    /// (<see cref="DarlingCollectorRunner.CommitServerWatermark{TRow}"/>) instead of merging its lower
+    /// new-epoch max into the old-epoch cached value, so the NEXT resolve re-seeds from the store and
+    /// returns the new, honest max — and reads the store exactly once to get it.
+    ///
+    /// <para>RED on dev: <c>CommitServerWatermark</c> does not exist there (this branch's own extraction),
+    /// so this fails to compile against dev.</para>
+    /// </summary>
+    [Fact]
+    public async Task RegressedBatch_InvalidatesTheCache_SoTheNextResolveReadsTheNewEpochFromTheStore()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to run the #4487 regressed-batch pin.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+
+        var loggerFactory = new CommandCountingLoggerFactory();
+        await using var postgres = new NpgsqlDataSourceBuilder(scratch.ConnectionString)
+            .UseLoggerFactory(loggerFactory)
+            .Build();
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var server = MakeServer(-419705, "wm-regressed");
+        var definition = JobHistoryCollector.Instance;
+
+        var bodySucceeded = false;
+        try
+        {
+            /* Plant and Advance an OLD-epoch batch — instance_id 10,200,001..10,200,040 — the same move
+               RunCoreAsync makes after an honest batch commits. Resolve confirms the cache seeded to the
+               batch's own max, 10,200,040. */
+            var oldEpochTime = DateTime.UtcNow.AddHours(-2);
+            var oldEpochBatch = new List<JobHistoryCollector.Row>();
+            for (var id = 10_200_001L; id <= 10_200_040L; id++)
+            {
+                oldEpochBatch.Add(new JobHistoryCollector.Row
+                {
+                    InstanceId = id,
+                    JobId = Guid.NewGuid().ToString(),
+                    JobName = "old-epoch",
+                    RunDateTime = oldEpochTime,
+                    RunStatus = 1,
+                });
+            }
+            var oldEpochContext = MakeContext(server, oldEpochTime);
+            await WriteBatchAsync(runner, connection, definition, oldEpochBatch, server, oldEpochContext.CollectionTime, oldEpochContext, ct);
+            Advance(runner, server, definition, oldEpochBatch, fromUtc: false);
+
+            var (seededValue, _, seededNumeric, _, _, _) = await ResolveAsync(runner, server, definition, ct);
+            Assert.Equal(10_200_040L, seededNumeric);
+
+            /* Plant a NEW-epoch batch — a lower instance_id range, 9,545,001..9,545,030 — standing in for
+               the target's own identity having reset below the store's watermark. Commit it with a
+               measurement list carrying IdentityRegressionsMeasurement = 1, exactly what RunCoreAsync
+               reads off context.Measurements after JobHistoryCollector detects the regression. */
+            var newEpochTime = DateTime.UtcNow.AddMinutes(-1);
+            var newEpochBatch = new List<JobHistoryCollector.Row>();
+            for (var id = 9_545_001L; id <= 9_545_030L; id++)
+            {
+                newEpochBatch.Add(new JobHistoryCollector.Row
+                {
+                    InstanceId = id,
+                    JobId = Guid.NewGuid().ToString(),
+                    JobName = "new-epoch",
+                    RunDateTime = newEpochTime,
+                    RunStatus = 1,
+                });
+            }
+            var newEpochContext = MakeContext(server, newEpochTime);
+            await WriteBatchAsync(runner, connection, definition, newEpochBatch, server, newEpochContext.CollectionTime, newEpochContext, ct);
+
+            var regressedMeasurements = new List<CollectorMeasurement>
+            {
+                new(JobHistoryCollector.IdentityRegressionsMeasurement, 1),
+            };
+            CommitServerWatermark(runner, server, definition, newEpochBatch, fromUtc: false, regressedMeasurements);
+
+            /* The next resolve must re-seed from the store — which now holds the new-epoch rows — and
+               return their max, 9,545,030, NOT the old-epoch cached value (which Advance's own "keep the
+               greater" rule would have kept had this gone through Advance instead of Invalidate). That
+               re-seed reads the store exactly once: job_history declares both a timestamp AND a numeric
+               watermark, so a reseed issues TWO MAX statements, same as every other cold-cache seed for
+               this collector (see the restart/fault pins' own remark) — but only ONE resolve call, i.e.
+               exactly once through the cache's own seed path, not once per call. */
+            loggerFactory.Provider.Reset();
+            var (resolvedValue, _, resolvedNumeric, _, _, _) = await ResolveAsync(runner, server, definition, ct);
+            Assert.Equal(9_545_030L, resolvedNumeric);
+            Assert.Equal(2, CallsForTable(loggerFactory.Provider, "job_history"));
+
+            /* And the call after THAT is a hit again — the reseed is a one-time cost. */
+            loggerFactory.Provider.Reset();
+            await ResolveAsync(runner, server, definition, ct);
+            Assert.Equal(0, CallsForTable(loggerFactory.Provider, "job_history"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var delete = new NpgsqlCommand("DELETE FROM job_history WHERE server_id = @id", cleanup);
+                delete.Parameters.AddWithValue("id", server.ServerId);
+                await delete.ExecuteNonQueryAsync(cleanupCt);
+            });
+        }
+    }
+
+    /// <summary>
+    /// #4487's companion to the regressed-batch pin above: an HONEST batch (measurements carrying
+    /// IdentityRegressionsMeasurement = 0, or no such measurement at all) through the SAME
+    /// <see cref="DarlingCollectorRunner.CommitServerWatermark{TRow}"/> seam Advances the cache exactly as
+    /// it always has — today's rule for an honest batch, unchanged by the #4487 extraction — so the
+    /// resolve right after still returns the OLD cached value merged with the new batch's max, with ZERO
+    /// store reads (the cache never invalidated, so it never needed to re-seed).
+    ///
+    /// <para>RED on dev: <c>CommitServerWatermark</c> does not exist there (this branch's own extraction),
+    /// so this fails to compile against dev.</para>
+    /// </summary>
+    [Fact]
+    public async Task HonestBatch_AdvancesTheCache_WithZeroStoreReads()
+    {
+        var baseCs = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseCs), "Set DARLING_TEST_PG to run the #4487 honest-batch pin.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseCs!, ct);
+        await using var connection = await OpenMigratedAsync(scratch, ct);
+
+        var loggerFactory = new CommandCountingLoggerFactory();
+        await using var postgres = new NpgsqlDataSourceBuilder(scratch.ConnectionString)
+            .UseLoggerFactory(loggerFactory)
+            .Build();
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var server = MakeServer(-419706, "wm-honest");
+        var definition = JobHistoryCollector.Instance;
+
+        var bodySucceeded = false;
+        try
+        {
+            var seedTime = DateTime.UtcNow.AddHours(-2);
+            var seedBatch = new List<JobHistoryCollector.Row>
+            {
+                new() { InstanceId = 10_200_040, JobId = Guid.NewGuid().ToString(), JobName = "seed", RunDateTime = seedTime, RunStatus = 1 },
+            };
+            var seedContext = MakeContext(server, seedTime);
+            await WriteBatchAsync(runner, connection, definition, seedBatch, server, seedContext.CollectionTime, seedContext, ct);
+            Advance(runner, server, definition, seedBatch, fromUtc: false);
+
+            var (seededValue, _, seededNumeric, _, _, _) = await ResolveAsync(runner, server, definition, ct);
+            Assert.Equal(10_200_040L, seededNumeric);
+
+            loggerFactory.Provider.Reset();
+
+            /* An honest batch — no identity regression at all, matching an ordinary steady-state cycle —
+               committed through the SAME seam, with an EMPTY measurement list (JobHistoryCollector emits
+               the regression measurement only when it fires; a normal cycle emits none at all). */
+            var honestBatch = new List<JobHistoryCollector.Row>
+            {
+                new() { InstanceId = 10_200_041, JobId = Guid.NewGuid().ToString(), JobName = "honest", RunDateTime = DateTime.UtcNow, RunStatus = 1 },
+            };
+            CommitServerWatermark(runner, server, definition, honestBatch, fromUtc: false, Array.Empty<CollectorMeasurement>());
+
+            /* CommitServerWatermark touched only the cache field in memory — no store write, no store read —
+               so the resolve right after must be a pure cache hit. */
+            var (resolvedValue, _, resolvedNumeric, _, _, _) = await ResolveAsync(runner, server, definition, ct);
+            Assert.Equal(10_200_041L, resolvedNumeric);
+            Assert.Equal(0, CallsForTable(loggerFactory.Provider, "job_history"));
 
             bodySucceeded = true;
         }

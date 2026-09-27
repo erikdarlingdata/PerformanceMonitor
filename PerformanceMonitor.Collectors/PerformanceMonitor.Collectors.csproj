@@ -19,5 +19,9 @@
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />
     <!-- #4058 r3: PgLogEntryProvenanceTests exercises RaisedByPlpgsql/ReportedByOther directly. -->
     <InternalsVisibleTo Include="Darling.Tests" />
+    <!-- #4496: Lite's RemoteCollectorService.DefinitionRunner calls JobHistoryCollector.ToMicroseconds
+         to normalise the stored-side natural key the same way Darling does. -->
+    <InternalsVisibleTo Include="PerformanceMonitorLite" />
+    <InternalsVisibleTo Include="Lite.Tests" />
   </ItemGroup>
 </Project>
