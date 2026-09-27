@@ -77,4 +77,44 @@ public static class WaitStatisticsArtifact
         var neighborMax = Math.Max(prev, next);
         return value > NeighborRatio * neighborMax;
     }
+
+    /// <summary>
+    /// The SQL twin of <see cref="IsIsolatedSingleSampleArtifact"/> (#4476), for the raw INSTANCE rows a trend
+    /// read sums per collection BEFORE the artifact can be told apart from a real value — both perfmon trend
+    /// reads (the Viewer's <c>PerfmonTrendsSql</c> and the MCP's <c>PerfmonTrendBucketedSql</c>) SUM every
+    /// instance of a counter name into one point in SQL, so a C#-side check on the summed <c>PerfmonTrendPoint</c>
+    /// never sees the one spiking instance. The expression is built from THIS type's own constants — never a
+    /// second literal 1,000,000 or 1,000 typed into a SQL string — so the SQL and C# rules cannot drift apart;
+    /// the two gauge type ids come from <see cref="PerfmonCounterTypes.GaugeTypes"/>, the same set
+    /// <see cref="PerfmonCounterKind.Gauge"/> classifies.
+    /// <para>Every parameter is a bare column or window-function reference the caller supplies as text (never a
+    /// user value), because a lag/lead window differs by partition between the two callers (the MCP single-counter
+    /// read partitions by <c>object_name, instance_name</c> alone since <c>counter_name</c> is already a query
+    /// parameter; a caller reading several counters at once must add <c>counter_name</c> to the partition too).
+    /// The <see cref="ObjectNameSuffix"/> match is an exact suffix (Postgres <c>right(...) = '...'</c>), the same
+    /// tolerance for a named-instance prefix the C# side's <c>EndsWith</c> gives.</para>
+    /// </summary>
+    public static string ArtifactPredicateSql(string cntrTypeColumn, string objectNameColumn, string previousValueColumn, string valueColumn, string nextValueColumn) =>
+        $"""
+        {cntrTypeColumn} IN ({PerfmonCounterTypes.PerfCounterLargeRawCount}, {PerfmonCounterTypes.PerfCounterRawCount})
+        AND {objectNameColumn} IS NOT NULL
+        AND right({objectNameColumn}, {ObjectNameSuffix.Length}) = '{ObjectNameSuffix}'
+        AND {previousValueColumn} IS NOT NULL
+        AND {nextValueColumn} IS NOT NULL
+        AND {valueColumn} >= {MinValue}
+        AND {valueColumn} > {NeighborRatio} * GREATEST({previousValueColumn}, {nextValueColumn})
+        """;
+
+    /// <summary>
+    /// The Viewer chart title / <c>get_perfmon_trend</c> notes-line sentence for a nonzero set-aside count
+    /// (#4476) — null when nothing was set aside, so a caller never appends an empty clause. Singular/plural
+    /// spelled out rather than left to a format string, matching the rest of the chart's caption idiom
+    /// (<c>ShowTrendCoverageTitle</c>).
+    /// </summary>
+    public static string? ChartCaption(long artifactsSetAside) => artifactsSetAside switch
+    {
+        <= 0 => null,
+        1 => "1 one-sample Wait Statistics spike set aside",
+        _ => $"{artifactsSetAside} one-sample Wait Statistics spikes set aside",
+    };
 }
