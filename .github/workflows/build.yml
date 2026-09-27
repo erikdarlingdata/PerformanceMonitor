@@ -1072,30 +1072,32 @@ jobs:
           # connection, lock_wait — written by the server itself before the tests read the log. Bounded and
           # loud: every step has its own timeout, and a missing precondition throws rather than leaving the
           # log quiet and the later test assertion to fail with no explanation of why.
-          $logTargetConn = "Host=127.0.0.1;Port=5545;Username=darling;Database=darling"
+          # psql takes libpq flags, not an Npgsql-style connection string (the tests' own env vars below
+          # stay in Npgsql form; they're read by Npgsql, not psql).
+          $logTargetArgs = @("-h", "127.0.0.1", "-p", "5545", "-U", "darling", "-d", "darling")
 
           # Connection + disconnection: an ordinary short-lived connection, which with log_connections/
           # log_disconnections on writes both a "connection received"/"connection authorized" pair and a
           # "disconnection" line.
-          & "$bin\psql.exe" $logTargetConn -c "SELECT 1"
+          & "$bin\psql.exe" @logTargetArgs -c "SELECT 1"
           if ($LASTEXITCODE -ne 0) { throw "5545 connection-event workload failed ($LASTEXITCODE)" }
 
           # Error: a division by zero the server itself reports at ERROR.
-          & "$bin\psql.exe" $logTargetConn -c "SELECT 1/0"
+          & "$bin\psql.exe" @logTargetArgs -c "SELECT 1/0"
           if ($LASTEXITCODE -eq 0) { throw "5545 error-event workload: SELECT 1/0 unexpectedly succeeded" }
 
           # Lock wait: one background session holds LOCK TABLE inside a transaction and sleeps past
           # deadlock_timeout (100ms on this cluster, see Start-LogFormatCluster) while a second session
           # requests the same table and blocks, so log_lock_waits fires a "still waiting for"/"acquired" pair.
           # Both are bounded jobs so a stuck lock can never hang the workflow.
-          & "$bin\psql.exe" $logTargetConn -c "CREATE TABLE IF NOT EXISTS lock_target_5545 (id int)"
+          & "$bin\psql.exe" @logTargetArgs -c "CREATE TABLE IF NOT EXISTS lock_target_5545 (id int)"
           if ($LASTEXITCODE -ne 0) { throw "5545 lock-wait workload: table setup failed ($LASTEXITCODE)" }
           $holder = Start-Job -ScriptBlock {
-            param($bin, $conn)
-            & "$bin\psql.exe" $conn -c "BEGIN; LOCK TABLE lock_target_5545; SELECT pg_sleep(3); COMMIT;"
-          } -ArgumentList $bin, $logTargetConn
+            param($bin, $connArgs)
+            & "$bin\psql.exe" @connArgs -c "BEGIN; LOCK TABLE lock_target_5545; SELECT pg_sleep(3); COMMIT;"
+          } -ArgumentList $bin, $logTargetArgs
           Start-Sleep -Milliseconds 500
-          & "$bin\psql.exe" $logTargetConn -c "LOCK TABLE lock_target_5545"
+          & "$bin\psql.exe" @logTargetArgs -c "LOCK TABLE lock_target_5545"
           if ($LASTEXITCODE -ne 0) { throw "5545 lock-wait workload: waiter session failed ($LASTEXITCODE)" }
           Wait-Job $holder -Timeout 15 | Out-Null
           if ($holder.State -ne 'Completed') { throw "5545 lock-wait workload: holder job did not complete ($($holder.State))" }
@@ -1103,7 +1105,8 @@ jobs:
           Remove-Job $holder
 
           # Failed login: a FATAL the target's own authentication path writes, distinct from the ERROR above.
-          & "$bin\psql.exe" "Host=127.0.0.1;Port=5545;Username=darling;Database=does_not_exist_5545" -c "SELECT 1" 2>$null
+          # Targets a deliberately nonexistent database.
+          & "$bin\psql.exe" "-h" "127.0.0.1" "-p" "5545" "-U" "darling" "-d" "does_not_exist_5545" -c "SELECT 1" 2>$null
           if ($LASTEXITCODE -eq 0) { throw "5545 failed-login workload: connecting to a nonexistent database unexpectedly succeeded" }
 
       # DARLING_TEST_PG lights up the [Collection("live-postgres")] classes; DARLING_TEST_PGRUNTIME
