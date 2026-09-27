@@ -453,14 +453,22 @@ VALUES ({idBase}, 1, 'srv-1', 'collector_1', (now() AT TIME ZONE 'UTC') - INTERV
 
     /// <summary>One statement's result, keyed (server, collector), every one of the thirteen ordinals rendered
     /// invariantly (timestamps to the tick, so a MAX that loses a microsecond cannot compare equal).</summary>
+    private static Task<SortedDictionary<string, string>> ReadRowsAsync(
+        NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, CancellationToken ct) =>
+        ReadRowsAsync(postgres, sql, windowStart, headEnd, null, ct);
+
     private static async Task<SortedDictionary<string, string>> ReadRowsAsync(
-        NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, CancellationToken ct)
+        NpgsqlDataSource postgres, string sql, DateTime windowStart, DateTime? headEnd, IReadOnlyList<DateTime>? holeHours, CancellationToken ct)
     {
         await using var command = postgres.CreateCommand(sql);
         command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = windowStart });
         if (headEnd is { } h)
         {
             command.Parameters.Add(new NpgsqlParameter<DateTime> { TypedValue = h });
+        }
+        if (holeHours is { Count: > 0 } holes)
+        {
+            command.Parameters.Add(new NpgsqlParameter<DateTime[]> { TypedValue = holes.ToArray() });
         }
         var rows = new SortedDictionary<string, string>(StringComparer.Ordinal);
         await using var reader = await command.ExecuteReaderAsync(ct);
