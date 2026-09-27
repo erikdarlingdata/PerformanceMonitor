@@ -57,6 +57,10 @@ public partial class JobHistoryTab : UserControl
     /// <summary>Reloads the job history (the shell calls this when the tab becomes visible / on the timer).</summary>
     public Task RefreshJobsAsync() => LoadJobsAsync();
 
+    /// <summary>The read's row cap (#4478) — the 2,000 <see cref="LoadJobsAsync"/> passes to
+    /// <see cref="ViewerDataService.GetJobHistoryAsync"/>.</summary>
+    private const int RowCap = 2000;
+
     private async Task LoadJobsAsync()
     {
         if (_dataService == null)
@@ -64,13 +68,16 @@ public partial class JobHistoryTab : UserControl
             return;
         }
 
+        NoJobsMessage.Visibility = Visibility.Collapsed;
+        LoadingMessage.Visibility = Visibility.Visible;
+
         try
         {
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
             var sinceUtc = DateTime.UtcNow.AddHours(-hoursBack);
 
-            var all = await _dataService.GetJobHistoryAsync(sinceUtc, serverId, 2000);
+            var all = await _dataService.GetJobHistoryAsync(sinceUtc, serverId, RowCap);
 
             /* Populate the Server / Category combos from the full (pre status/category) result, then apply
                Status + Category client-side — those must NOT go into the reader's window (they'd skew the
@@ -98,7 +105,14 @@ public partial class JobHistoryTab : UserControl
 
             var displayCount = JobHistoryDataGrid.Items.Count;
             NoJobsMessage.Visibility = displayCount == 0 ? Visibility.Visible : Visibility.Collapsed;
-            JobCountIndicator.Text = displayCount > 0 ? $"{displayCount} run(s)" : "";
+
+            /* The cap applies to the UNFILTERED read (all.Count), not the client-side-filtered display count:
+               a Status/Category filter narrowing the grid must not make the "newest 2,000" label disappear when
+               the underlying read still hit the cap. */
+            var capLabel = JobHistoryCap.Label(all.Count, RowCap);
+            JobCountIndicator.Text = displayCount == 0
+                ? ""
+                : capLabel.Length > 0 ? $"{displayCount} run(s) ({capLabel})" : $"{displayCount} run(s)";
 
             _lastRefreshed = DateTime.UtcNow;
             UpdateStaleDataIndicator();
@@ -108,6 +122,10 @@ public partial class JobHistoryTab : UserControl
         catch (Exception ex)
         {
             StatusChanged?.Invoke($"failed to load job history: {ex.Message}");
+        }
+        finally
+        {
+            LoadingMessage.Visibility = Visibility.Collapsed;
         }
     }
 

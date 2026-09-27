@@ -1442,12 +1442,20 @@ public sealed class ViewerCommandTimeoutTests
         var publish = code.IndexOf("ViewerStorePool.Publish(effectiveConnectionString)", System.StringComparison.Ordinal);
 
         /* #4277 wraps the argument in DarlingStoreConnection.PinSessionTimeZoneUtc(...) so every STORE data
-           source pins its session timezone to UTC; Publish still runs on the pre-pin string above (the pin
-           only touches the Timezone keyword, never MaxPoolSize, so ViewerStorePool.MaxPoolSizeOf reads the
-           same value either way). */
+           source pins its session timezone to UTC; #4479 adds a WithApplicationName(...) wrap inside that for
+           the BYO connection string's Application Name (set-if-absent). Publish still runs on the pre-wrap
+           string above (neither wrap touches MaxPoolSize, so ViewerStorePool.MaxPoolSizeOf reads the same
+           value either way). */
         var create = code.IndexOf(
-            "NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(effectiveConnectionString))",
+            "NpgsqlDataSource.Create(\r\n            DarlingStoreConnection.PinSessionTimeZoneUtc(\r\n                DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)))",
             System.StringComparison.Ordinal);
+
+        if (create < 0)
+        {
+            create = code.IndexOf(
+                "NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)))",
+                System.StringComparison.Ordinal);
+        }
 
         Assert.True(
             create >= 0,

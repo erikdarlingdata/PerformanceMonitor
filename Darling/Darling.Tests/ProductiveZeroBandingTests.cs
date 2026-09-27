@@ -380,4 +380,87 @@ public sealed class ProductiveZeroBandingTests
         Assert.Contains("TrailingZeroRowSuccessRuns = reader.IsDBNull(29)", lite, StringComparison.Ordinal);
         Assert.Contains("AnyRegression);", lite, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// #4473's shape: <c>query_store</c> runs every five minutes but its source (Query Store's runtime-
+    /// stats view) only gains a new row once per interval, so eleven zero-row cycles followed by one
+    /// productive cycle is its ORDINARY hourly cadence, not a stopped source. Called through the EXISTING
+    /// three-argument overload — the one that shipped before this issue — which is what makes this a real
+    /// RED against the pre-fix code: on dev, the streak alone flags this row.
+    /// </summary>
+    [Fact]
+    public void QueryStore_ElevenZeroRunsAfterAnHourlyInterval_IsNotRegressed()
+    {
+        Assert.False(
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 11, Now.AddMinutes(-55)));
+    }
+
+    /// <summary>
+    /// #3885's own measured shape, now on an interval-sourced collector: 1,900 zero-row runs and a
+    /// productive instant a fortnight back is well past a day of nothing new, however wide the interval,
+    /// and still flags.
+    /// </summary>
+    [Fact]
+    public void QueryStore_ProductiveAFortnightAgo_IsRegressed()
+    {
+        Assert.True(
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 1_900, Now.AddDays(-14)));
+    }
+
+    /// <summary>
+    /// The widest legal Query Store interval (1440 minutes = one day): 23 hours since the last productive
+    /// run is still inside one interval's worth of normal silence, but 25 hours is past it — the streak
+    /// alone cannot tell these apart, so the clock arm is the only thing that can.
+    /// </summary>
+    [Fact]
+    public void QueryStore_AtA1440MinuteInterval_TellsA23HourGapFromA25HourGap()
+    {
+        Assert.False(
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 5, Now.AddHours(-23)));
+        Assert.True(
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 5, Now.AddHours(-25)));
+    }
+
+    /// <summary>
+    /// The slack boundary itself, exactly on <see cref="CollectorHealthClassifier.QueryStoreLongestIntervalSlack"/>:
+    /// NOT regressed, because the comparison is strictly greater than the slack, not greater-or-equal. One
+    /// tick past it flips to regressed — the pin that keeps the direction from silently inverting.
+    /// </summary>
+    [Fact]
+    public void QueryStore_AtTheSlackBoundary_IsNotRegressed_OneTickPast_Is()
+    {
+        var nowUtc = new DateTime(2026, 9, 27, 12, 0, 0, DateTimeKind.Utc);
+        var lastProductive = nowUtc - CollectorHealthClassifier.QueryStoreLongestIntervalSlack;
+
+        Assert.False(
+            CollectorHealthClassifier.ProducedThenStopped("query_store", 100, lastProductive, nowUtc));
+        Assert.True(
+            CollectorHealthClassifier.ProducedThenStopped(
+                "query_store", 100, lastProductive.AddTicks(-1), nowUtc));
+    }
+
+    /// <summary>
+    /// A non-interval-sourced collector with a short streak still flags immediately — the clock arm is
+    /// additive only for the named interval-sourced set, and every other collector's existing rule is
+    /// untouched.
+    /// </summary>
+    [Fact]
+    public void ANonIntervalSourcedCollector_StillFlagsOnTheStreakAlone()
+    {
+        Assert.True(
+            CollectorHealthClassifier.ProducedThenStopped("wait_stats", 3, Now.AddMinutes(-10)));
+    }
+
+    /// <summary>
+    /// The set itself: <c>query_store</c> is interval-sourced, and an ordinary collector is not. Pinned by
+    /// name so a rename or a typo in the set fails loud rather than silently widening the exemption.
+    /// </summary>
+    [Fact]
+    public void TheIntervalSourcedSet_NamesQueryStore_AndNoOtherCollector()
+    {
+        Assert.True(CollectorHealthClassifier.IsIntervalSourcedCollector("query_store"));
+        Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector("wait_stats"));
+        Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector("job_history"));
+        Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector(null));
+    }
 }

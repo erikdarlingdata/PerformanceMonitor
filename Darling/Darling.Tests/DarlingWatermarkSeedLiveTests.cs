@@ -51,11 +51,17 @@ public sealed class DarlingWatermarkSeedLiveTests
         try
         {
             /* Whole-second naive-UTC times (the storage form of the collection_time `timestamp` column) so the
-               Postgres-microsecond / .NET-tick round-trip is exact and can't flake on precision. */
-            var baseTime = new DateTime(2026, 07, 18, 9, 0, 0, DateTimeKind.Unspecified);
+               Postgres-microsecond / .NET-tick round-trip is exact and can't flake on precision. Anchored to
+               "now", not a fixed calendar date (#4469): the read is bounded to
+               DarlingWorker.WatermarkFloorLookback (2 days) behind now, so every seeded row here stays
+               inside that floor — indexRun (25h back) is a daily collector's real last run, still inside the
+               2-day floor even though it is already overdue on its own 24h cadence. */
+            var baseTime = DateTime.SpecifyKind(
+                new DateTime(DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond * TimeSpan.TicksPerSecond, DateTimeKind.Utc),
+                DateTimeKind.Unspecified);
             var waitOld = baseTime.AddMinutes(-10);
             var waitNew = baseTime;                    /* newest wait_stats row → the per-collector MAX */
-            var indexRun = baseTime.AddHours(-25);     /* a daily collector, deliberately stale */
+            var indexRun = baseTime.AddHours(-25);     /* a daily collector, deliberately stale but inside the floor */
 
             long logId = 8_500_000;
             await InsertLogAsync(connection, ct, logId++, "wait_stats", waitOld, "SUCCESS");

@@ -701,8 +701,14 @@ public sealed class DarlingWebHostService : BackgroundService
                 }
             }
 
-            /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. */
-            var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString));
+            /* Lifetime tied to the running app: disposed by StopServerAsync, not this method's scope. #4479:
+               the viewer-role connection string built by DarlingManagedPostgres already carries
+               WebApplicationName, but a CONFIGURED (postgres.webConnectionString) or owner-fallback login
+               never runs through that builder — set-if-absent here so every path this string can take still
+               names the surface. */
+            var postgres = NpgsqlDataSource.Create(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.WebApplicationName)));
             _appDataSource = postgres;
 
             /* FOOTGUN (load-bearing): pin BOTH the content root AND the web root to the binary's directory. A
