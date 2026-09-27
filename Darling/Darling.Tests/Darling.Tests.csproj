@@ -50,6 +50,8 @@
   <ItemGroup>
     <!-- system_health event samples for SystemHealthParser (one per feeder event; shapes per sp_HealthParser xpath). -->
     <None Include="Fixtures\SystemHealth\*.xml" CopyToOutputDirectory="PreserveNewest" />
+    <!-- real, scrubbed system_health event captures for SystemHealthParserRealEventTests -->
+    <None Include="Fixtures\SystemHealth\real\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- Deadlock graph parser/layout golden samples (real sql2025 captures + synthetic edge cases). -->
     <None Include="Fixtures\Deadlocks\*.xml" CopyToOutputDirectory="PreserveNewest" />
     <!-- #2538: a REAL auto_explain block, captured from a PostgreSQL container with auto_explain

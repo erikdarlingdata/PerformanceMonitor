@@ -6,6 +6,6 @@
   <data name="category"><type name="error_reported_category" package="sqlserver" /><value>2</value><text>SERVER</text></data>
   <data name="destination"><value>0x00000002</value><text>ERRORLOG</text></data>
   <data name="is_intercepted"><value>false</value></data>
-  <data name="database_id"><value>6</value></data>
   <data name="message"><value>The operating system returned error 21 to SQL Server during a read at offset 0x00000c60000 in file 'D:\data\prod.mdf'.</value></data>
+  <action name="database_id" package="sqlserver"><type name="uint16" package="package0"/><value>6</value></action>
 </event>
