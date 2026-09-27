@@ -1079,7 +1079,7 @@ jobs:
           # Connection + disconnection: an ordinary short-lived connection, which with log_connections/
           # log_disconnections on writes both a "connection received"/"connection authorized" pair and a
           # "disconnection" line.
-          & "$bin\psql.exe" @logTargetArgs -c "SELECT 1"
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "SELECT 1"
           if ($LASTEXITCODE -ne 0) { throw "5545 connection-event workload failed ($LASTEXITCODE)" }
 
           # Error: a division by zero the server itself reports at ERROR.
@@ -1090,14 +1090,14 @@ jobs:
           # deadlock_timeout (100ms on this cluster, see Start-LogFormatCluster) while a second session
           # requests the same table and blocks, so log_lock_waits fires a "still waiting for"/"acquired" pair.
           # Both are bounded jobs so a stuck lock can never hang the workflow.
-          & "$bin\psql.exe" @logTargetArgs -c "CREATE TABLE IF NOT EXISTS lock_target_5545 (id int)"
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "CREATE TABLE IF NOT EXISTS lock_target_5545 (id int)"
           if ($LASTEXITCODE -ne 0) { throw "5545 lock-wait workload: table setup failed ($LASTEXITCODE)" }
           $holder = Start-Job -ScriptBlock {
             param($bin, $connArgs)
-            & "$bin\psql.exe" @connArgs -c "BEGIN; LOCK TABLE lock_target_5545; SELECT pg_sleep(3); COMMIT;"
+            & "$bin\psql.exe" @connArgs -v ON_ERROR_STOP=1 -c "BEGIN; LOCK TABLE lock_target_5545; SELECT pg_sleep(3); COMMIT;"
           } -ArgumentList $bin, $logTargetArgs
           Start-Sleep -Milliseconds 500
-          & "$bin\psql.exe" @logTargetArgs -c "LOCK TABLE lock_target_5545"
+          & "$bin\psql.exe" @logTargetArgs -v ON_ERROR_STOP=1 -c "BEGIN; LOCK TABLE lock_target_5545; COMMIT;"
           if ($LASTEXITCODE -ne 0) { throw "5545 lock-wait workload: waiter session failed ($LASTEXITCODE)" }
           Wait-Job $holder -Timeout 15 | Out-Null
           if ($holder.State -ne 'Completed') { throw "5545 lock-wait workload: holder job did not complete ($($holder.State))" }
