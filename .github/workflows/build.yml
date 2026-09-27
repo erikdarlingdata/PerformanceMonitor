@@ -514,9 +514,15 @@ jobs:
           name: Darling-unsigned
           path: publish/Darling-signing/
 
+      # v3 of this action talks to SignPath's Pipeline Connector, which needs the SignPath
+      # GitHub App installed on this repository (v2's connector did not). Without it every
+      # attempt fails with "Failed to retrieve GitHub App token" (erikdarlingdata/PerformanceStudio#569,
+      # which hit this on that repo's first v3 release run). The app has been installed here
+      # since 2026-09-24. SignPath signs only a run's first 3 attempts: if signing keeps
+      # failing, fix the cause and start a fresh release run instead of re-running this one.
       - name: Sign Lite
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -529,7 +535,7 @@ jobs:
 
       - name: Sign Darling
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -588,7 +594,7 @@ jobs:
 
       - name: Sign Lite (Velopack)
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -606,7 +612,7 @@ jobs:
       # exist fails the release — the standing #1340 SignPath prerequisite.
       - name: Sign Darling Viewer (Velopack)
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
@@ -683,7 +689,7 @@ jobs:
       # collect mode asserts a non-empty staging set for exactly that reason.
       - name: Sign the executables Velopack generates
         if: github.event_name == 'release'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '7969f8b6-d946-4a74-9bac-a55856d8b8e0'
