@@ -231,6 +231,7 @@ public static class PgMigrations
         new Migration(149, "query-store-liveness-hot-touch", V149Sql),
         new Migration(150, "collection-log-watermark-and-job-history-indexes", V150Sql),
         new Migration(151, "ag-group-id", V151Sql),
+        new Migration(152, "drop-unread-cagg-group-indexes", V152Sql),
     };
 
     /// <summary>
@@ -2445,6 +2446,62 @@ ALTER TABLE collect.ag_replica_states
 
 ALTER TABLE collect.ag_database_replica_states
     ADD COLUMN IF NOT EXISTS group_id text;";
+
+    /// <summary>
+    /// V152 (#4503) — drops the auto-created per-column GROUP BY index TimescaleDB builds on six Query Store
+    /// rollups' materialization hypertables, on every store that upgrades through this rung, the same way
+    /// #3597 did for <see cref="TimescaleSupport.QueryStoreStatsIntervalHourlyView"/>'s materialization at
+    /// CREATE time. A production catalog read found the same shape repeated on
+    /// <see cref="TimescaleSupport.QueryStoreStatsHourlyView"/>, <see cref="TimescaleSupport.QueryStoreStatsCorrectedHourlyView"/>,
+    /// <see cref="TimescaleSupport.QueryStoreStatsDailyView"/>, <see cref="TimescaleSupport.QueryStoreStatsCorrectedDailyView"/>,
+    /// <see cref="TimescaleSupport.QueryStoreStatsIntervalDailyView"/> and
+    /// <see cref="TimescaleSupport.QueryStoreStatsDayGrainDailyView"/>: five group indexes apiece
+    /// (<c>database_name</c>, <c>module_name</c>, <c>query_hash</c>, <c>server_id</c>, <c>server_name</c>, each
+    /// paired with <c>bucket DESC</c>) on the first five, eleven on the interval-daily view, and lifetime
+    /// <c>idx_scan</c> of ZERO on every one of them except <c>server_id</c> (kept) and <c>server_name</c> (kept
+    /// on the two hourly views only, where reads measurably use it) — the reader check this rung's PR body
+    /// carries in full.
+    ///
+    /// <para><b>Resolved by view name, not by hard-coded hypertable id (#4503).</b> A continuous aggregate's
+    /// materialization hypertable id is assigned at CREATE time and differs per store — the production catalog
+    /// this rung read from happened to number them 103/106/109/110/112/113, but a fresh or differently-ordered
+    /// store would not. The <c>DO</c> block below resolves each view's <c>materialization_hypertable_name</c>
+    /// from <c>timescaledb_information.continuous_aggregates</c> and drops indexes on THAT hypertable by
+    /// matching the group-index name shape (<c>&lt;column&gt;_bucket_idx</c>) against the KEPT set, so a store
+    /// missing one of the six CAGGs (a plain-PostgreSQL store, or one that never enabled a given rollup) skips it
+    /// rather than erroring, and re-running the block after the indexes are already gone is a no-op.</para>
+    /// </summary>
+    private const string V152Sql = @"
+DO $$
+DECLARE
+    v_view text;
+    v_drop_cols text[];
+    v_mat_table text;
+    v_col text;
+BEGIN
+    FOR v_view, v_drop_cols IN VALUES
+        ('query_store_stats_hourly',          ARRAY['database_name', 'module_name', 'query_hash']),
+        ('query_store_stats_corrected_hourly', ARRAY['database_name', 'module_name', 'query_hash']),
+        ('query_store_stats_daily',           ARRAY['database_name', 'module_name', 'query_hash', 'server_name']),
+        ('query_store_stats_corrected_daily',  ARRAY['database_name', 'module_name', 'query_hash', 'server_name']),
+        ('query_store_stats_interval_daily',   ARRAY['database_name', 'execution_type_desc', 'first_execution_time', 'module_name', 'plan_id', 'query_hash', 'query_id', 'replica_role', 'runtime_stats_interval_id', 'server_name']),
+        ('query_store_stats_daygrain_daily',   ARRAY['database_name', 'module_name', 'query_hash', 'server_name'])
+    LOOP
+        SELECT materialization_hypertable_name
+        INTO v_mat_table
+        FROM timescaledb_information.continuous_aggregates
+        WHERE view_schema = 'collect' AND view_name = v_view;
+
+        IF v_mat_table IS NULL THEN
+            CONTINUE;
+        END IF;
+
+        FOREACH v_col IN ARRAY v_drop_cols
+        LOOP
+            EXECUTE format('DROP INDEX IF EXISTS _timescaledb_internal.%I', v_mat_table || '_' || v_col || '_bucket_idx');
+        END LOOP;
+    END LOOP;
+END $$;";
 
     /// <summary>
     /// V2 — the service's observability store: the servers registry (upserted on every
