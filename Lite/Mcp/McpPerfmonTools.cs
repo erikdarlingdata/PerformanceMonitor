@@ -86,7 +86,8 @@ public sealed class McpPerfmonTools
             var bucketError = TrendBuckets.Resolve(hours_back, bucket_minutes, 1, budget, out var bucketMinutes);
             if (bucketError != null) return bucketError;
 
-            var points = await dataService.GetPerfmonBucketsAsync(resolved.ServerId, counter_name, hours_back, windowEnd, bucketMinutes);
+            var bucketsResult = await dataService.GetPerfmonBucketsAsync(resolved.ServerId, counter_name, hours_back, windowEnd, bucketMinutes);
+            var points = bucketsResult.Points;
             if (points.Count == 0)
             {
                 /* The engine question comes BEFORE the distinct-counter probe, not after it. Both are on
@@ -140,7 +141,7 @@ public sealed class McpPerfmonTools
 
             return TrendPayloads.PerfmonTrend(
                 resolved.ServerName, counter_name, hours_back, points, bucketMinutes, bucket_minutes is not null,
-                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities));
+                budget.AutoPoints, BaselineDiscontinuities.ToPayload(discontinuities), bucketsResult.ArtifactsSetAside);
         }
         catch (Exception ex)
         {
