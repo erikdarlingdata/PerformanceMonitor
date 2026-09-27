@@ -4688,6 +4688,26 @@ public sealed class DarlingWorker : BackgroundService
         return nowUtc + jitter;
     }
 
+    /// <summary>The floor applied to the watermark read below (#4469): how far back
+    /// <see cref="ReadCollectorWatermarksAsync"/> is willing to look for a collector's last run. Two days,
+    /// not one, so a floor-excluded row (a true last run 1–2 days back) can't be mistaken for never-run —
+    /// see the method's own doc comment for why this is safe.</summary>
+    internal static readonly TimeSpan WatermarkFloorLookback = TimeSpan.FromDays(2);
+
+    /// <summary>The bounded statement itself (#4469), pinned by name so a live/plan test can assert its
+    /// text and shape directly rather than re-deriving it from the call site. $1 server_id; $2 the floor
+    /// (<c>DateTime.UtcNow - WatermarkFloorLookback</c>, bound naive-UTC (Unspecified) to match the naive
+    /// <c>timestamp</c> column, so Npgsql sends <c>timestamp</c> and TimescaleDB excludes the old chunks
+    /// with no cast on <c>collection_time</c> — the same product-wide contract as
+    /// <see cref="BindActualPlanResolveParameters"/>).</summary>
+    internal const string ReadCollectorWatermarksSql = """
+        SELECT collector_name, MAX(collection_time)
+        FROM collection_log
+        WHERE server_id = $1
+        AND   collection_time >= $2
+        GROUP BY collector_name
+        """;
+
     /// <summary>
     /// One batched round-trip (#1575): the newest <c>collection_time</c> per collector for a server, keyed by
     /// collector_name — the persisted last-run watermark <see cref="ComputeSeededNextDue"/> seeds the schedule
@@ -4700,6 +4720,32 @@ public sealed class DarlingWorker : BackgroundService
     /// uniformly Kind=Utc. Failure-isolated: a store hiccup returns an EMPTY map so the caller seeds every
     /// collector as never-run (a prompt, jittered run) rather than aborting the connect — an observability read
     /// must never break the collection loop. Internal so a gated live test can seed a row and assert the read.
+    ///
+    /// <para><b>Bounded to <see cref="WatermarkFloorLookback"/>, not the unbounded MAX/GROUP BY this
+    /// replaces (#4469).</b> On a busy store the old statement walked every retained <c>collection_log</c>
+    /// chunk, compressed ones included, because the newest instant per collector is not known until the
+    /// whole table has been read. Back-to-back field EXPLAINs on the busiest measured store: the unbounded
+    /// statement, cold, took 4,775 ms (3,166 hit + 21,483 read buffers, 13,957 ms of parallel-worker I/O read
+    /// time); adding a literal 2-day floor removed the 30 older compressed chunks from that scan, which had
+    /// accounted for only about 11% of the cold I/O (~1,540 ms) — the other 89% (~12,417 ms) was spent in a
+    /// Bitmap Heap Scan over the two newest, uncompressed chunks, and the floor keeps those chunks, so that
+    /// cost is unchanged. (The bounded run's own 69 ms/20,703-buffers-all-hit number came from running warm,
+    /// right after the unbounded run had already pulled the same pages into cache, so it is not a clean
+    /// before/after and is not cited as the floor's effect.) The floor still matters: the excluded 11% grows
+    /// with retention and chunk count, and a follow-up addresses the dominant newest-chunk cost.</para>
+    ///
+    /// <para><b>Why 2 days is a safe floor.</b> This read only seeds <see cref="ComputeSeededNextDue"/>,
+    /// which only cares whether a collector ran within its OWN interval of "now" — a collector whose true
+    /// last run falls outside the floor is, by definition, already overdue on every cadence this product
+    /// schedules (the longest recurring cadence in <c>CollectorScheduleDefaults</c> is 1440 minutes = 1 day,
+    /// shared by <c>index_object_stats</c>, <c>pg_column_stats</c>, <c>pg_extension_availability</c> and
+    /// <c>pg_index_usage_stats</c>). A floor of one day would already catch every such collector's true
+    /// last run; two days is a full day of margin so a floor-excluded row (last run 1–2 days back, still
+    /// technically inside interval + slop for a collector whose interval is close to a day) cannot be
+    /// mistaken for never-run. A collector whose last run predates the floor entirely is seeded as never-run
+    /// — the SAME fallback this read already used on a query failure — so it runs promptly under jitter
+    /// instead of waiting out a remaining interval it does not actually have left; that is strictly safer
+    /// than the alternative (treating it as still-current and never rescheduling it).</para>
     /// </summary>
     internal static async Task<Dictionary<string, DateTime>> ReadCollectorWatermarksAsync(
         NpgsqlDataSource postgres, int serverId, ILogger? logger, CancellationToken cancellationToken)
@@ -4708,10 +4754,13 @@ public sealed class DarlingWorker : BackgroundService
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(
-                "SELECT collector_name, MAX(collection_time) FROM collection_log WHERE server_id = $1 GROUP BY collector_name", connection);
+            using var command = new NpgsqlCommand(ReadCollectorWatermarksSql, connection);
             command.CommandTimeout = ServiceCommandDeadlines.CollectionSweepSeconds;
             command.Parameters.AddWithValue(serverId);
+            command.Parameters.Add(new NpgsqlParameter<DateTime>
+            {
+                TypedValue = DateTime.SpecifyKind(DateTime.UtcNow - WatermarkFloorLookback, DateTimeKind.Unspecified),
+            });
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))

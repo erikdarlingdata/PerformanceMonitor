@@ -87,7 +87,8 @@ internal static class DarlingAgReader
         NpgsqlDataSource postgres,
         int? serverIdFilter = null,
         DateTime? nowUtc = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int? limit = null)
     {
         var effectiveNow = nowUtc ?? DateTime.UtcNow;
         var replicas = await ReadReplicasAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);
@@ -99,7 +100,7 @@ internal static class DarlingAgReader
             ? new List<DatabaseRow>()
             : await ReadDatabasesAsync(postgres, serverIdFilter, effectiveNow, cancellationToken);
 
-        return Build(replicas, databases, effectiveNow);
+        return Build(replicas, databases, effectiveNow, limit);
     }
 
     /// <summary>
@@ -127,7 +128,8 @@ internal static class DarlingAgReader
     internal static AgHealthResult Build(
         IReadOnlyList<ReplicaRow> replicas,
         IReadOnlyList<DatabaseRow> databases,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        int? limit = null)
     {
         /* Group key is (server_id, ag_name) — one card per reporting server's view of an AG. A NULL ag_name is
            possible under quorum loss (the catalog views fall back to cached metadata); it groups under an empty
@@ -160,6 +162,18 @@ internal static class DarlingAgReader
                 worst = Worse(worst, database.SynchronizationStateSeverity);
             }
 
+            /* The tie-break magnitude for #4471's cap: the worst (largest) queue-drain signal anywhere in the
+               group — secondary lag if any database reports it, else the bigger of the two queue depths. Used
+               only to order groups that TIE on severity (severity is not banded on lag/queue by design, see the
+               class doc's "What the badge deliberately does NOT band" paragraph), so a page cut by limit drops
+               the least-lagging tied groups first rather than an arbitrary alphabetical tail. */
+            long worstMagnitude = 0;
+            foreach (var database in databaseViews)
+            {
+                worstMagnitude = Math.Max(worstMagnitude, database.SecondaryLagSeconds ?? 0);
+                worstMagnitude = Math.Max(worstMagnitude, Math.Max(database.LogSendQueueKb ?? 0, database.RedoQueueKb ?? 0));
+            }
+
             groups.Add(new AvailabilityGroupView
             {
                 ServerId = first.ServerId,
@@ -172,33 +186,62 @@ internal static class DarlingAgReader
                 SeverityLabel = SeverityLabel(worst),
                 Replicas = replicaViews,
                 Databases = databaseViews,
+                WorstMagnitude = worstMagnitude,
             });
         }
 
-        /* Worst-first, then by name — the same "problems surface without scrolling" ordering the fleet roll-up
-           uses, and DESC by severity matches the house grid default. */
+        /* Worst-first, then by the largest lag/queue magnitude, then by name — the same "problems surface without
+           scrolling" ordering the fleet roll-up uses (DESC by severity matches the house grid default), with the
+           magnitude tie-break (#4471) so a page a limit cuts drops the LEAST-lagging tied groups, never the most
+           severe. */
         groups.Sort(CompareGroups);
+
+        var totalGroupCount = groups.Count;
+        var pagedGroups = groups;
+        var groupsTruncated = false;
+        if (limit is int effectiveLimit && totalGroupCount > effectiveLimit)
+        {
+            pagedGroups = groups.Take(Math.Max(0, effectiveLimit)).ToList();
+            groupsTruncated = true;
+        }
 
         return new AgHealthResult
         {
             /* Naive UTC, like every other instant the API emits — the browser appends the zone itself (R5). */
             GeneratedAt = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified),
-            AvailabilityGroupCount = groups.Count,
+            /* #4471: these three roll-up counts (and WorstSeverity below) describe the WHOLE scope, not just the
+               returned page — the same reason findings_truncated's total_finding_count in get_analysis_findings
+               is measured before that tool's own limit cuts. A caller reading distinct_ag_count off a truncated
+               page must still get the fleet's real distinct-AG count, not the page's. */
+            AvailabilityGroupCount = totalGroupCount,
             ReportingServerCount = groups.Select(g => g.ServerId).Distinct().Count(),
             DistinctAgCount = groups.Select(g => Key(g.AgName)).Distinct(StringComparer.Ordinal).Count(),
             WorstSeverity = groups.Count == 0 ? HealthSeverity.Unknown : groups.Max(g => g.Severity),
-            AvailabilityGroups = groups,
+            AvailabilityGroups = pagedGroups,
+            GroupsReturned = pagedGroups.Count,
+            GroupsTotal = totalGroupCount,
+            GroupsTruncated = groupsTruncated,
+            GroupsTruncatedNote = groupsTruncated
+                ? $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {pagedGroups.Count} (most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
+                : null,
         };
     }
 
-    /// <summary>Worst severity first, then AG name, then reporting server — so the several perspectives on one AG
-    /// stay adjacent once severity ties.</summary>
+    /// <summary>Worst severity first, then the largest lag/queue magnitude (#4471's cap tie-break — see the
+    /// group-building loop above), then AG name, then reporting server — so the several perspectives on one AG
+    /// stay adjacent once every other key ties.</summary>
     private static int CompareGroups(AvailabilityGroupView a, AvailabilityGroupView b)
     {
         var bySeverity = b.Severity.CompareTo(a.Severity);
         if (bySeverity != 0)
         {
             return bySeverity;
+        }
+
+        var byMagnitude = b.WorstMagnitude.CompareTo(a.WorstMagnitude);
+        if (byMagnitude != 0)
+        {
+            return byMagnitude;
         }
 
         var byName = string.Compare(a.AgName ?? "", b.AgName ?? "", StringComparison.OrdinalIgnoreCase);
@@ -586,6 +629,12 @@ public sealed class AvailabilityGroupView
     [JsonPropertyName("severity_label")] public string SeverityLabel { get; init; } = "";
     [JsonPropertyName("replicas")] public IReadOnlyList<AgReplicaView> Replicas { get; init; } = Array.Empty<AgReplicaView>();
     [JsonPropertyName("databases")] public IReadOnlyList<AgDatabaseView> Databases { get; init; } = Array.Empty<AgDatabaseView>();
+
+    /// <summary>#4471's severity-tie tie-break ONLY — the largest secondary_lag_seconds or queue-depth (KB)
+    /// anywhere in the group, never serialized. Lag and queue depth are deliberately NOT banded into severity
+    /// (see the class doc), so this exists purely to order same-severity groups by that raw magnitude before a
+    /// <c>limit</c> cut, rather than let it fall to an arbitrary name sort.</summary>
+    [JsonIgnore] internal long WorstMagnitude { get; init; }
 }
 
 /// <summary>The full AG topology payload — the <c>/api/ag</c> body and the <c>get_ag_health</c> MCP tool's
@@ -607,6 +656,26 @@ public sealed class AgHealthResult
 
     [JsonPropertyName("worst_severity")] public HealthSeverity WorstSeverity { get; init; }
     [JsonPropertyName("availability_groups")] public IReadOnlyList<AvailabilityGroupView> AvailabilityGroups { get; init; } = Array.Empty<AvailabilityGroupView>();
+
+    /// <summary>#4471: how many groups this response actually carries in <see cref="AvailabilityGroups"/> —
+    /// <see cref="GroupsTotal"/> when nothing was cut, or the caller's <c>limit</c> otherwise.</summary>
+    [JsonPropertyName("groups_returned")] public int GroupsReturned { get; init; }
+
+    /// <summary>#4471: how many (reporting server, AG) groups the scope held BEFORE the <c>limit</c> cut —
+    /// identical to <see cref="AvailabilityGroupCount"/>, carried under its own name so a caller reading this
+    /// tool's truncation trio (<see cref="GroupsReturned"/>/<see cref="GroupsTotal"/>/<see cref="GroupsTruncated"/>)
+    /// never has to cross-reference a differently-named field for the same number.</summary>
+    [JsonPropertyName("groups_total")] public int GroupsTotal { get; init; }
+
+    /// <summary>#4471: true when <see cref="GroupsTotal"/> exceeded the caller's <c>limit</c> and the tail — the
+    /// least severe, then least-lagging — was cut. Scope by <c>server_name</c> or raise <c>limit</c> to see the
+    /// rest; the most severe groups are always the ones kept.</summary>
+    [JsonPropertyName("groups_truncated")] public bool GroupsTruncated { get; init; }
+
+    /// <summary>Null unless <see cref="GroupsTruncated"/> — the same shape as <c>get_analysis_findings</c>'
+    /// <c>findings_truncated_note</c>, spelling out the cut and the fix instead of leaving a caller to infer one
+    /// from the bare flag.</summary>
+    [JsonPropertyName("groups_truncated_note")] public string? GroupsTruncatedNote { get; init; }
 }
 
 /// <summary>The <c>/api/ag/count</c> body (#4189) — the one field <see cref="AgHealthResult.AvailabilityGroupCount"/>
