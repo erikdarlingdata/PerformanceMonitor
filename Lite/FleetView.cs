@@ -13,6 +13,8 @@ using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite;
 
+// CI proof: comment-only touch to this file (not in the store-upgrade filter).
+
 /// <summary>
 /// Owns the fleet projection: the projected rows the sidebar renders (<see cref="Visible"/>) — a mix of
 /// group headers and servers, not a flat server list. Ported from the Darling viewer's <c>FleetView</c>.
