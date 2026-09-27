@@ -280,8 +280,9 @@ public static class AgTopology
     /// <summary>
     /// Counts distinct AG groups by connected components (#4475): two members with the same name
     /// (case-insensitive) union into one group when their replica-name sets overlap (share at least one name,
-    /// case-insensitive); a member with an EMPTY replica set unions with every other same-named member instead
-    /// (falls back to name-only matching, since an empty set can never overlap anything). Members with
+    /// case-insensitive); a member with an EMPTY replica set unions ONLY with other same-named EMPTY members
+    /// (name-only matching among themselves), never with a same-named member that has replicas, since nothing
+    /// on an empty row ties it to one specific AG over another. Members with
     /// different names never union, regardless of their replica sets. Shared by <see cref="Counts"/> and the
     /// MCP/web AG reader's equivalent distinct-AG count (<c>DarlingAgReader.Build</c>), so the two surfaces
     /// cannot drift back apart. No store read: both callers already carry the replica names on the rows they
@@ -347,9 +348,11 @@ public static class AgTopology
                     var setA = items[ia].Replicas;
                     var setB = items[ib].Replicas;
 
-                    /* An empty set can never overlap anything, so it falls back to matching by name alone
-                       rather than being stranded as its own permanent singleton. */
-                    var matches = setA.Count == 0 || setB.Count == 0 || setA.Overlaps(setB);
+                    /* An empty set can never overlap anything. Two empty same-named members still union by
+                       name alone (there is nothing else to key them on), but an empty member never unions with
+                       a same-named member that DOES have replicas: that would bridge unrelated groups on the
+                       strength of one row with no data, which is the bug this method exists to avoid. */
+                    var matches = (setA.Count == 0 && setB.Count == 0) || setA.Overlaps(setB);
                     if (matches)
                     {
                         Union(ia, ib);

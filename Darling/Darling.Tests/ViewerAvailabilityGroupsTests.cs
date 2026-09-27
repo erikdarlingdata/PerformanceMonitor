@@ -406,6 +406,53 @@ public sealed class AgTopologyCardsTests
     }
 
     [Fact]
+    public void CountDistinctGroups_EmptyReplicaSetCardAmongDisjointSameNameCards_DoesNotBridgeThem()
+    {
+        /* #4475/#4478 regression: one card whose replica names are all null (an empty set) must never union
+           with a same-named card that DOES have replicas -- that bridges components with nothing in common.
+           Two disjoint {P1,S1}/{P2,S2} cards plus one empty RDSAG0 card must stay 3 groups, not collapse to 1
+           (which is what happens against 0a3738bae, the pre-fix head). */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>)[]
+        {
+            ("RDSAG0", new string?[] { "P1", "S1" }),
+            ("RDSAG0", new string?[] { "P2", "S2" }),
+            ("RDSAG0", Array.Empty<string?>()),
+        });
+
+        Assert.Equal(3, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_TwoEmptyReplicaSetCards_StillMatchEachOtherByNameOnly()
+    {
+        /* Two empty-set same-named cards still union by name alone -- nothing else distinguishes them, so this
+           keeps the pre-existing #4475 empty-set pin's behavior for the all-empty case. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>)[]
+        {
+            ("RDSAG0", Array.Empty<string?>()),
+            ("RDSAG0", Array.Empty<string?>()),
+        });
+
+        Assert.Equal(1, groups);
+    }
+
+    [Fact]
+    public void CountDistinctGroups_OneReplicaOverlapsSharedNodePlusOneEmptyCard_AreTwoGroups()
+    {
+        /* {P,S} and {S} overlap on S and union into one group; the empty card unions with neither (it shares no
+           replica with either, and it is not itself empty-paired with a same-named empty card), so the total
+           is 2, not 1. */
+        var groups = AgTopology.CountDistinctGroups(new (string?, IEnumerable<string?>)[]
+        {
+            ("RDSAG0", new string?[] { "P", "S" }),
+            ("RDSAG0", new string?[] { "S" }),
+            ("RDSAG0", Array.Empty<string?>()),
+        });
+
+        Assert.Equal(2, groups);
+    }
+
+    [Fact]
     public void Counts_FortyTwoDistinctRdsAg0Instances_AreFortyTwoGroups()
     {
         /* Re-proves the pre-existing #4475 case still holds under overlap identity: 42 disjoint replica sets
