@@ -285,7 +285,7 @@ OPTION(RECOMPILE);";
 
         Assert.Equal(2, rows.Count);
         Assert.Equal(
-            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true),
+            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", "TCP://NODE1.corp:5022", true, null),
             rows[0]);
         Assert.Equal("NODE2", rows[1].ReplicaServerName);
         Assert.Equal("SECONDARY", rows[1].RoleDesc);
@@ -433,12 +433,12 @@ OPTION(RECOMPILE);";
 
         var replicaWriter = new RecordingCollectorRowWriter();
         AgReplicaStatesCollector.Instance.WritePayload(
-            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true),
+            new AgReplicaStatesCollector.Row("AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true, null),
             replicaWriter,
             context);
 
         Assert.Equal(
-            new object?[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true },
+            new object?[] { "AG1", "NODE1", "PRIMARY", "ONLINE", "CONNECTED", "ONLINE", "HEALTHY", "SYNCHRONOUS_COMMIT", "AUTOMATIC", null, true, null },
             replicaWriter.Values);
 
         /* Modeled on a real measured sample from the Docker AG fixture: a SUSPEND_FROM_USER replica 62 s
@@ -451,7 +451,7 @@ OPTION(RECOMPILE);";
                 "AG1", "Orders", "NODE2", false, "SYNCHRONIZING", "1", "2", 4096L, 2048L, 512L, 256L, true, "SUSPEND_FROM_USER", "SYNCHRONOUS_COMMIT", 62L,
                 new DateTime(2026, 7, 26, 12, 0, 0), new DateTime(2026, 7, 26, 12, 0, 1),
                 new DateTime(2026, 7, 26, 11, 59, 55), new DateTime(2026, 7, 26, 12, 0, 2),
-                8.0d, null),
+                8.0d, null, null),
             databaseWriter,
             context);
 
@@ -461,7 +461,7 @@ OPTION(RECOMPILE);";
                 "AG1", "Orders", "NODE2", false, "SYNCHRONIZING", "1", "2", 4096L, 2048L, 512L, 256L, true, "SUSPEND_FROM_USER", "SYNCHRONOUS_COMMIT", 62L,
                 new DateTime(2026, 7, 26, 12, 0, 0), new DateTime(2026, 7, 26, 12, 0, 1),
                 new DateTime(2026, 7, 26, 11, 59, 55), new DateTime(2026, 7, 26, 12, 0, 2),
-                8.0d, null,
+                8.0d, null, null,
             },
             databaseWriter.Values);
 

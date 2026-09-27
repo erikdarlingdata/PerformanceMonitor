@@ -63,13 +63,13 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
             }
 
             var unfilteredCount = await DarlingAgReader.GetAvailabilityGroupCountAsync(postgres, null, ct);
-            var unfilteredTopology = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, ct);
+            var unfilteredTopology = await DarlingAgReader.GetAgHealthAsync(postgres, null, DateTime.UtcNow, cancellationToken: ct);
             Assert.Equal(2, unfilteredCount);
             Assert.Equal(unfilteredTopology.AvailabilityGroupCount, unfilteredCount);
 
             // $1 binds the same way on both reads (the server-filtered path /api/read/get_ag_health takes).
             var filteredCount = await DarlingAgReader.GetAvailabilityGroupCountAsync(postgres, ServerId, ct);
-            var filteredTopology = await DarlingAgReader.GetAgHealthAsync(postgres, ServerId, DateTime.UtcNow, ct);
+            var filteredTopology = await DarlingAgReader.GetAgHealthAsync(postgres, ServerId, DateTime.UtcNow, cancellationToken: ct);
             Assert.Equal(2, filteredCount);
             Assert.Equal(filteredTopology.AvailabilityGroupCount, filteredCount);
 

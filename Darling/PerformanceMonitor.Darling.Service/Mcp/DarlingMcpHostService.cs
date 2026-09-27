@@ -410,8 +410,13 @@ public sealed class DarlingMcpHostService : BackgroundService
             }
 
             /* Lifetime tied to the running app (#1560): disposed by StopServerAsync, not this method's
-               scope — the supervisor may keep the app running across many poll ticks. */
-            var postgres = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString));
+               scope — the supervisor may keep the app running across many poll ticks. #4479: the mcp-role
+               connection string built by DarlingManagedPostgres already carries McpApplicationName, but a
+               CONFIGURED (postgres.mcpConnectionString) or owner-fallback login never runs through that
+               builder — set-if-absent here so every path this string can take still names the surface. */
+            var postgres = NpgsqlDataSource.Create(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.McpApplicationName)));
             _appDataSource = postgres;
 
             /* serverId → connection string, keyed by the STORE's identity (review catch on #2218).

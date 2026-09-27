@@ -841,10 +841,10 @@ public sealed class DarlingStoreLoginsTests
     /// green. Containment, not order — the resolver call has to be INSIDE the else of the managed branch.
     /// </summary>
     [Theory]
-    [InlineData("DarlingWebHostService.cs", "Web", "TryBuildViewerConnectionStringFromStoredCredential")]
-    [InlineData("DarlingMcpHostService.cs", "Mcp", "TryBuildMcpConnectionStringFromStoredCredential")]
+    [InlineData("DarlingWebHostService.cs", "Web", "TryBuildViewerConnectionStringFromStoredCredential", "WebApplicationName")]
+    [InlineData("DarlingMcpHostService.cs", "Mcp", "TryBuildMcpConnectionStringFromStoredCredential", "McpApplicationName")]
     public void EachHost_BuildsItsUnmanagedPoolFromTheResolver_AndItsManagedPoolAsBefore(
-        string file, string surface, string managedBuilder)
+        string file, string surface, string managedBuilder, string applicationNameConstant)
     {
         var code = CSharpSourceWalker.StripCommentsAndStrings(
             RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", file));
@@ -853,9 +853,11 @@ public sealed class DarlingStoreLoginsTests
         Assert.DoesNotContain("config.Postgres.ConnectionString", start, StringComparison.Ordinal);
 
         /* #4277: every STORE data source pins its session timezone to UTC, so the resolved
-           storeConnectionString is wrapped before it reaches Create rather than passed bare. */
+           storeConnectionString is wrapped before it reaches Create rather than passed bare. #4479 adds a
+           WithApplicationName(...) wrap inside that, naming the surface — set-if-absent, so a configured or
+           owner-fallback login that never ran through DarlingManagedPostgres still gets a name. */
         Assert.Contains(
-            "NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(storeConnectionString))",
+            $"NpgsqlDataSource.Create(\r\n                DarlingStoreConnection.PinSessionTimeZoneUtc(\r\n                    DarlingStoreConnection.WithApplicationName(storeConnectionString, DarlingManagedPostgres.{applicationNameConstant})));",
             start,
             StringComparison.Ordinal);
 

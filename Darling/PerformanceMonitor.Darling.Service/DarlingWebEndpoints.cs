@@ -328,7 +328,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         app.MapGet("/api/ag", async (HttpContext context) =>
         {
             var result = await DarlingAgReader.GetAgHealthAsync(
-                postgres, null, DateTime.UtcNow, context.RequestAborted);
+                postgres, null, DateTime.UtcNow, cancellationToken: context.RequestAborted);
             return Results.Json(result, DarlingAgReader.JsonOptions);
         });
 

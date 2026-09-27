@@ -212,9 +212,11 @@ public sealed class DarlingMcpTrendToolsSurfaceAndSqlTests
         var sql = DarlingTrendReader.PerfmonTrendSql;
         Assert.Contains("FROM v_perfmon_stats", sql, StringComparison.Ordinal);
         Assert.Contains("counter_name = $2", sql, StringComparison.Ordinal);
-        Assert.Contains("CAST(SUM(cntr_value) AS bigint)", sql, StringComparison.Ordinal);       /* PG SUM(bigint) is numeric */
-        Assert.Contains("CAST(SUM(delta_cntr_value) AS bigint)", sql, StringComparison.Ordinal);
+        /* #4476: the SUMs exclude an isolated single-sample Wait Statistics artifact row before casting. */
+        Assert.Contains("CAST(SUM(cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);       /* PG SUM(bigint) is numeric */
+        Assert.Contains("CAST(SUM(delta_cntr_value) FILTER (WHERE NOT is_artifact) AS bigint)", sql, StringComparison.Ordinal);
         Assert.Contains("GROUP BY collection_time", sql, StringComparison.Ordinal);
+        Assert.Contains("SUM(artifacts) AS artifacts_set_aside", DarlingTrendReader.PerfmonTrendBucketedSql, StringComparison.Ordinal);
 
         var distinct = DarlingTrendReader.DistinctPerfmonCountersSql;
         Assert.Contains("SELECT DISTINCT counter_name", distinct, StringComparison.Ordinal);

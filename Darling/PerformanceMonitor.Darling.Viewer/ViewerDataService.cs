@@ -466,7 +466,12 @@ public sealed partial class ViewerDataService : IAsyncDisposable
            from disagreeing. */
         ViewerStorePool.Publish(effectiveConnectionString);
 
-        _dataSource = NpgsqlDataSource.Create(DarlingStoreConnection.PinSessionTimeZoneUtc(effectiveConnectionString));
+        /* #4479: the managed derivation already carries ApplicationName (ViewerSettings.ApplicationName,
+           set on the builder there); this is the BYO connection string's turn — set-if-absent, so an
+           operator's own ApplicationName on a bring-your-own store wins. */
+        _dataSource = NpgsqlDataSource.Create(
+            DarlingStoreConnection.PinSessionTimeZoneUtc(
+                DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
     }
 
