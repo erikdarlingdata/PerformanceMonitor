@@ -178,8 +178,8 @@ public sealed class ViewerFleetTimerGuardTests
     /// how <c>RefreshServerStatusAsync</c> came to issue two freshness read-pairs per Overview cycle, on the
     /// one tab that ships selected.
     ///
-    /// <para>Compared against the UNCONDITIONAL region of the refresh tick — everything above its first
-    /// <c>return</c> — because that is the part no tab selection can skip. <c>RefreshVisibleAsync</c> lives
+    /// <para>Compared against the UNCONDITIONAL region of the refresh tick — everything above its tab
+    /// early-return (past the leading store-unavailable guard) — because that is the part no tab selection can skip. <c>RefreshVisibleAsync</c> lives
     /// below that return and is therefore mutually exclusive with the Overview tick by construction, which
     /// is exactly the distinction the "never double-refresh the same grid" comment was making and the
     /// reason it was true of the grid while being false of these reads.</para>
@@ -192,11 +192,14 @@ public sealed class ViewerFleetTimerGuardTests
         var refreshTick = Body(methods, "OnRefreshTimerTick");
         var overviewTick = Body(methods, "OnOverviewTimerTick");
 
-        /* Everything above the first return is what every tick runs regardless of the visible tab. */
-        var firstReturn = Regex.Match(refreshTick, @"\breturn\s*;");
-        Assert.True(firstReturn.Success, "OnRefreshTimerTick no longer has a tab early-return — this pin's split is stale");
+        /* Everything above the tab early-return is what every tick runs regardless of the visible tab. The
+           leading store-unavailable guard's own return is skipped (#4648), the same way
+           ViewerFleetTimerFanOutPositionTests skips it: otherwise this region is just the guard, empty,
+           and the intersection below is vacuously green. */
+        var tabReturn = ViewerFleetTimerFanOutPositionTests.TabEarlyReturnIndex(refreshTick);
+        Assert.True(tabReturn >= 0, "OnRefreshTimerTick no longer has a tab early-return — this pin's split is stale");
 
-        var unconditional = refreshTick[..firstReturn.Index];
+        var unconditional = refreshTick[..tabReturn];
 
         var both = FiredNames(unconditional).Intersect(FiredNames(overviewTick), StringComparer.Ordinal)
             .OrderBy(n => n, StringComparer.Ordinal)
