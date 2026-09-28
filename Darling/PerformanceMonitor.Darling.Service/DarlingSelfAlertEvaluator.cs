@@ -19,6 +19,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Notifications;
@@ -1853,7 +1854,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
         await RecordDocumentDeliveredAsync(
             _lastCostDigest, CollectorCostDigestKey, PgSelfAlertDeliveryStampStore.CostDigestStateKey,
-            delivery, now, "collector-cost digest", cancellationToken);
+            delivery, CollectorCostDigestInterval, now, "collector-cost digest", cancellationToken);
     }
 
     /// <summary>
@@ -2492,7 +2493,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
         await RecordDocumentDeliveredAsync(
             _lastSweepRollup, FleetSweepRollupKey, PgSelfAlertDeliveryStampStore.FleetSweepRollupStateKey,
-            delivery, now, "fleet-sweep rollup", cancellationToken);
+            delivery, FleetSweepRollupInterval, now, "fleet-sweep rollup", cancellationToken);
     }
 
     /* ------------------------- #3712: the analysis singles digest ------------------------- */
@@ -2621,7 +2622,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
         await RecordDocumentDeliveredAsync(
             _lastSinglesDigest, AnalysisSinglesDigestKey, PgSelfAlertDeliveryStampStore.AnalysisSinglesDigestStateKey,
-            delivery, now, "analysis singles digest", cancellationToken);
+            delivery, AnalysisSinglesDigestInterval, now, "analysis singles digest", cancellationToken);
     }
 
     /// <summary>One uncorroborated finding the digest names: the server, the family (the finding's category,
@@ -2950,7 +2951,18 @@ internal sealed class DarlingSelfAlertEvaluator
     private static readonly DateTime NoDeliveryKnown = DateTime.MinValue;
 
     /// <summary>
-    /// Records that a daily document was DELIVERED at <paramref name="now"/> — into process memory and,
+    /// The slot a delivery at <paramref name="now"/> serves (#4652): the latest slot at or before now on the daily
+    /// grid anchored at the previous slot, so a tick that lands late does not push the next day's slot later.
+    /// A missed day is skipped, not replayed (<see cref="CollectorCadence.NextDue"/>). With no previous slot
+    /// (the first delivery, nothing stamped, or a stamp read that failed) the delivery instant starts the grid.
+    /// </summary>
+    internal static DateTime ServedSlot(DateTime? previousSlot, DateTime now, TimeSpan interval) =>
+        previousSlot is DateTime previous && previous != NoDeliveryKnown && now >= previous + interval
+            ? CollectorCadence.NextDue(previous, now, interval) - interval
+            : now;
+
+    /// <summary>
+    /// Records that a daily document was DELIVERED, as the SLOT it served (<see cref="ServedSlot"/>) — into process memory and,
     /// when a store is configured, into the delivery stamp — unless the deliverer reported the send
     /// <see cref="AlertDelivery.ChannelFailed"/> (#3580).
     ///
@@ -2972,12 +2984,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <para><b>The stamp write is failure-isolated and NOT counted</b> — a write, not a condition read,
     /// the <see cref="RecordResolutionAsync"/> distinction. Memory is stamped first, so a store that will
     /// not take the write still gates this process; the warning says the next restart will re-announce.
-    /// The instant recorded is the evaluator's <paramref name="now"/>, the controllable clock, so a test
+    /// The slot recorded is computed from the evaluator's <paramref name="now"/>, the controllable clock, so a test
     /// can place the stamp and the interval compare is against the same clock it was written from.</para>
     /// </summary>
     private async Task RecordDocumentDeliveredAsync(
         ConcurrentDictionary<string, DateTime> lastDelivered, string memoryKey, string stampKey,
-        AlertDelivery? delivery, DateTime now, string documentName, CancellationToken cancellationToken)
+        AlertDelivery? delivery, TimeSpan interval, DateTime now, string documentName, CancellationToken cancellationToken)
     {
         if (delivery is { Channel: AlertDelivery.ChannelFailed })
         {
@@ -2987,7 +2999,12 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        lastDelivered[memoryKey] = now;
+/* #4652: record the SLOT this delivery served, not the send instant, so the next day's slot is one interval
+           after this one however late the tick that sent it ran. The gate above has already cached the previous
+           slot (from memory or the stamp store) under memoryKey. */
+        var previousSlot = lastDelivered.TryGetValue(memoryKey, out var known) ? known : (DateTime?)null;
+        var slot = ServedSlot(previousSlot, now, interval);
+        lastDelivered[memoryKey] = slot;
 
         if (_deliveryStamps is null)
         {
@@ -2996,7 +3013,7 @@ internal sealed class DarlingSelfAlertEvaluator
 
         try
         {
-            await _deliveryStamps.RecordDeliveredAtUtcAsync(stampKey, now, cancellationToken);
+            await _deliveryStamps.RecordDeliveredAtUtcAsync(stampKey, slot, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
