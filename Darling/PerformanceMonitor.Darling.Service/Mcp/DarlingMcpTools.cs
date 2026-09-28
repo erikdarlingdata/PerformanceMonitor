@@ -1025,6 +1025,10 @@ public sealed class DarlingMcpTools
         PgTargetFactKeys.ConfigStatStatementsMissing
             => fact.Value > 0 ? "not loaded" : "loaded",
 
+        /* The evicting hours out of the last six. */
+        PgTargetFactKeys.ConfigStatStatementsEviction
+            => fact.Value.ToString("0", CultureInfo.InvariantCulture) + " of " + EvictionFinding.WindowHours + " hours",
+
         /* A ratio of the configured worst case to the host's physical memory — stated as what it divides, so
            1.4 cannot be read as 1.4 GB. */
         PgTargetFactKeys.ConfigMemoryOvercommit

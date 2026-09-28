@@ -38,7 +38,7 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class PgTargetConfigSnapshotBoundTests
 {
-    /// <summary>The five statements: the const, the file that executes it, and the parameter its lower bound takes.</summary>
+    /// <summary>The six statements: the const, the file that executes it, and the parameter its lower bound takes.</summary>
     private static readonly (string Name, string File, string LowerBound)[] s_reads =
     {
         (nameof(PgTargetFactCollector.PgTargetConfigSnapshotSql), "PgTargetFactCollector.Config.cs", "$3"),
@@ -46,6 +46,7 @@ public sealed class PgTargetConfigSnapshotBoundTests
         (nameof(PgTargetFactCollector.PgTargetBlockingSettingsSql), "PgTargetFactCollector.Blocking.cs", "$3"),
         (nameof(PgTargetFactCollector.PgTargetMemoryConfigSql), "PgTargetFactCollector.Memory.cs", "$3"),
         (nameof(PgTargetBaselineProvider.PgTargetClockSql), "PgTargetBaselineProvider.Clock.cs", "$3"),
+        (nameof(PgTargetFactCollector.StatementsMaxEntriesSql), "PgTargetStatementsEvictionRead.cs", "$3"),
     };
 
     public static TheoryData<string, string> Statements()

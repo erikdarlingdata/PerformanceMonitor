@@ -181,6 +181,7 @@ public sealed class PgStatementStatsCollector : PostgresCollectorDefinitionBase<
         /* The statements epoch (#3653 A5), ordinal 27 on both flavors: StatementsEpochSql, declared at class level
            with the measurement behind its shape (#3818). */
         var statsReset = StatementsEpochSql;
+        var statsDealloc = StatementsDeallocSql;
 
         /* #4428: stats_since arrived in pg_stat_statements 1.11, bundled with PostgreSQL 17 — the moment
            THIS entry was (re-)created in the extension's hashtable, the same series-age signal #2235
@@ -234,7 +235,8 @@ SELECT
     NULL::bigint                       AS max_exec_peakmem,
     {statsReset}                       AS statements_stats_reset,
     {statsSince}                       AS stats_since,
-    {targetNow}                        AS target_now
+    {targetNow}                        AS target_now,
+    {statsDealloc}                     AS stats_dealloc
 FROM public.pg_stat_statements
 WHERE calls > 0";
         }
@@ -270,7 +272,8 @@ SELECT
     max_exec_peakmem::bigint           AS max_exec_peakmem,
     {statsReset}                       AS statements_stats_reset,
     {statsSince}                       AS stats_since,
-    {targetNow}                        AS target_now
+    {targetNow}                        AS target_now,
+    {statsDealloc}                     AS stats_dealloc
 FROM aurora_stat_statements(false)
 WHERE calls > 0";
     }
@@ -342,6 +345,23 @@ WHERE calls > 0";
        ON n.oid = e.extnamespace
     WHERE e.extname = 'pg_stat_statements')";
 
+    /* #4677: the statements EVICTION counter, appended at ordinal 30 on both flavors (27 epoch, 28 stats_since,
+       29 target_now, 30 stats_dealloc). pg_stat_statements_info.dealloc counts the times the module had to drop its
+       least-used entries because pg_stat_statements.max was reached (each pass drops about 5% of max); it restarts
+       from zero with stats_reset. Same existence-gated query_to_xml form as StatementsEpochSql and for the same
+       measured reasons (#3818/#3830): NULL, never an error, where the info view is absent (extension below 1.9, or
+       no pg_extension row), so ServerEpoch reads it as "unknown". */
+    public const string StatementsDeallocSql = @"(SELECT CASE
+            WHEN to_regclass(format('%I.pg_stat_statements_info', n.nspname)) IS NULL THEN NULL::bigint
+            ELSE substring(
+                     query_to_xml(format('SELECT dealloc FROM %I.pg_stat_statements_info', n.nspname), true, false, '')::text
+                     FROM '<dealloc>([^<]+)</dealloc>')::bigint
+        END
+     FROM pg_catalog.pg_extension AS e
+     JOIN pg_catalog.pg_namespace AS n
+       ON n.oid = e.extnamespace
+    WHERE e.extname = 'pg_stat_statements')";
+
     public override string Name => "pg_statement_stats";
 
     public override string TargetTable => "pg_statement_stats";
@@ -402,6 +422,7 @@ WHERE calls > 0";
     {
         ServerEpoch.StatementsStateKey,
         ServerEpoch.StatementsPreviousStateKey,
+        ServerEpoch.StatementsDeallocStateKey,
     };
 
     /// <summary>
@@ -475,10 +496,11 @@ WHERE calls > 0";
             if (!epochObserved)
             {
                 epochObserved = true;
-                ServerEpoch.ObserveStatements(
+                var epochChanged = ServerEpoch.ObserveStatements(
                     context,
                     reader.IsDBNull(27) ? null : reader.GetDateTime(27),
                     DeltaGroups);
+                ServerEpoch.ObserveStatementsDealloc(context, reader.IsDBNull(30) ? null : reader.GetInt64(30), epochChanged);
             }
 
             var queryId = reader.GetInt64(0);

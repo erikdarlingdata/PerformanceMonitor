@@ -174,6 +174,12 @@ public static class PgTargetFactKeys
     public const string ConfigCheckpointTimeout = "CONFIG_PG_CHECKPOINT_TIMEOUT";
     public const string ConfigWalCompression = "CONFIG_PG_WAL_COMPRESSION";
     public const string ConfigStatStatementsMissing = "CONFIG_PG_STAT_STATEMENTS_MISSING";
+    /// <summary>pg_stat_statements evicted statements in at least <see cref="EvictionFinding.MinEvictingHours"/> of
+    /// the last <see cref="EvictionFinding.WindowHours"/> hours with no statements-epoch change in them. Presence-based:
+    /// the fact exists only when that evidence does (Value = the evicting hours), scores the 0.4 advisory base, and
+    /// is never emitted when the eviction count is unknown. <c>Metadata["max_entries"]</c> carries
+    /// <c>pg_stat_statements.max</c> when recorded.</summary>
+    public const string ConfigStatStatementsEviction = "CONFIG_PG_STAT_STATEMENTS_EVICTION";
     /// <summary>Context facts (value-bearing, base 0) lane 3's saturation fact reads at SCORE time.</summary>
     public const string ConfigMaxConnections = "CONFIG_PG_MAX_CONNECTIONS";
     public const string ConfigSuperuserReserved = "CONFIG_PG_SUPERUSER_RESERVED";
@@ -528,6 +534,7 @@ public static class PgTargetFactKeys
         ConfigSuperuserReserved => "superuser_reserved_connections",
         ConfigReservedConnections => "reserved_connections",
         ConfigStatStatementsMissing => "shared_preload_libraries (pg_stat_statements)",
+        ConfigStatStatementsEviction => "pg_stat_statements.max",
         ConfigMemoryOvercommit => "shared_buffers + work_mem × max_connections (composite)",
         ConfigAutovacuumDisabled => "autovacuum_enabled (table reloption)",
         _ => null,
@@ -583,6 +590,7 @@ public static class PgTargetFactKeys
         ConfigCheckpointTimeout,
         ConfigWalCompression,
         ConfigStatStatementsMissing,
+        ConfigStatStatementsEviction,
         ConfigAutovacuumOff,
         PostureFsync,
         PostureFullPageWrites,

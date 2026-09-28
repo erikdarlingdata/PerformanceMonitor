@@ -1801,7 +1801,11 @@ export const POSTGRES_TABS = [
         "queries",
         PG_TOP_QUERY_COLUMNS,
         ctx.label + ", by total execution time",
-        "No query statistics in this window."
+        "No query statistics in this window.",
+        2,
+        /* #4677: the eviction caveat the read builds (null when the counter was read and no pass happened,
+           the unknown sentence when it was never observed), rendered above the rows. */
+        "evictions.note"
       ),
       /* Directly under the query shapes, joined on queryid: a plan only means something beside the
          statement it belongs to. The plan JSON is REDACTED at collection - query text dropped, literals

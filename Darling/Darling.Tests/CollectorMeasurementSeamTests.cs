@@ -541,6 +541,9 @@ public class CollectorMeasurementSeamTests
                    on that run's collection_log row is the discontinuity marker in the store. */
                 ServerEpoch.IdentityChangesMeasurement,
                 ServerEpoch.StatementsChangesMeasurement,
+                /* #4677: the statements eviction count for the pass. Measured by ServerEpoch.ObserveStatementsDealloc on behalf
+                   of pg_statement_stats, declared beside the other markers and placed by its position in ServerEpoch.cs. */
+                ServerEpoch.StatementsDeallocMeasurement,
                 ServerEpoch.PostmasterChangesMeasurement,
                 /* #3885: the job-history identity regression - a numeric epoch on one table, measured by
                    job_history's own ReadAsync (which is why its const lives in JobHistoryCollector.cs).
