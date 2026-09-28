@@ -77,6 +77,8 @@ public partial class PlanViewerControl : UserControl
         (TryFindResource("InsightWaitsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x4F, 0xA3, 0xFF));
     private SolidColorBrush ParamsAccentBrush =>
         (TryFindResource("InsightParamsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x7B, 0xCF, 0x7B));
+    private SolidColorBrush ServerAccentBrush =>
+        (TryFindResource("InsightServerBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x9B, 0x9B, 0xFF));
 
     // Parameters card value brushes: theme tokens shared with the rest of the viewer's alert colours.
     private SolidColorBrush WarningBrush =>
@@ -150,9 +152,22 @@ public partial class PlanViewerControl : UserControl
     /// <summary>
     /// #4530: the server's edition/MAXDOP for rule 38, set by the caller from a store read (this app has no
     /// live connection to the monitored server at plan-view time — see <see cref="LoadPlan"/>). <c>null</c>
-    /// when the caller has no metadata; the analyzer then falls back to rule 38's Info branch.
+    /// when the caller has no metadata; the analyzer then falls back to rule 38's Info branch. Also feeds
+    /// the Server Context card (#4597): setting this after a statement is already showing refreshes that
+    /// card in place, matching PerformanceStudio's <c>Metadata</c> setter
+    /// (erikdarlingdata/PerformanceStudio@85492a1).
     /// </summary>
-    public PerformanceMonitor.PlanAnalysis.ServerMetadata? ServerMetadata { get; set; }
+    private PerformanceMonitor.PlanAnalysis.ServerMetadata? _serverMetadata;
+    public PerformanceMonitor.PlanAnalysis.ServerMetadata? ServerMetadata
+    {
+        get => _serverMetadata;
+        set
+        {
+            _serverMetadata = value;
+            if (_currentStatement != null)
+                ShowServerContext();
+        }
+    }
 
     public async System.Threading.Tasks.Task LoadPlan(string planXml, string label, string? queryText = null)
     {
