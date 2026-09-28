@@ -305,7 +305,7 @@ public partial class PlanViewerControl
             });
         }
 
-        // Total warning count badge on root node. #4629: was the fixed OrangeBrush (#FFB347), 1.78:1
+        // Total warning count badge on root node. #4629: was the fixed OrangeBrush (hex FFB347), 1.78:1
         // on Light's white node background — well under WCAG AA's 4.5:1 floor for text. WarningBrush
         // is the theme token Light/Dark/CoolBreeze each already tune to pass 4.5:1 on their own
         // backgrounds, so the badge keeps its orange/warning meaning in every theme.

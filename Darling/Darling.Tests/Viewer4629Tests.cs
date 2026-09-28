@@ -6,9 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
-using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Windows.Media;
@@ -101,7 +99,7 @@ public class Viewer4629Tests
     [MemberData(nameof(LightDarkThemeFiles))]
     public void WarningBrush_ReadsAsTextOnNodeAndPanelBackgrounds(string relativePath)
     {
-        var declared = ThemeXamlRewriter.DeclaredColors(ReadRepoFile(relativePath));
+        var declared = ThemeXamlRewriter.DeclaredColors(RepoFile.ReadRepoFile(relativePath));
         AssertClearsTextFloor(relativePath, declared, "WarningColor", NodeBackgroundKey);
         AssertClearsTextFloor(relativePath, declared, "WarningColor", PanelBackgroundKey);
     }
@@ -115,7 +113,7 @@ public class Viewer4629Tests
     [MemberData(nameof(LightDarkThemeFiles))]
     public void CriticalTextBrush_ReadsAsTextOnNodePanelAndStatusBarBackgrounds(string relativePath)
     {
-        var xaml = ReadRepoFile(relativePath);
+        var xaml = RepoFile.ReadRepoFile(relativePath);
         var declared = ThemeXamlRewriter.DeclaredColors(xaml);
         var fgHex = LiteralBrushHex(xaml, "CriticalTextBrush");
         Assert.True(fgHex is not null, $"{relativePath}: no CriticalTextBrush.");
@@ -135,7 +133,7 @@ public class Viewer4629Tests
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml", "#A83A0D")]
     public void CriticalTextBrush_MatchesPinnedHex(string relativePath, string expectedHex)
     {
-        var hex = LiteralBrushHex(ReadRepoFile(relativePath), "CriticalTextBrush");
+        var hex = LiteralBrushHex(RepoFile.ReadRepoFile(relativePath), "CriticalTextBrush");
         Assert.True(hex is not null, $"{relativePath}: no CriticalTextBrush.");
         Assert.Equal(expectedHex, hex, ignoreCase: true);
     }
@@ -149,7 +147,7 @@ public class Viewer4629Tests
     [MemberData(nameof(EveryThemeFile))]
     public void EveryTheme_DeclaresBothOrangeKeys(string relativePath)
     {
-        var xaml = ReadRepoFile(relativePath);
+        var xaml = RepoFile.ReadRepoFile(relativePath);
         Assert.True(ThemeXamlRewriter.DeclaredColors(xaml).ContainsKey("WarningColor"), $"{relativePath}: no WarningColor.");
         Assert.True(LiteralBrushHex(xaml, "CriticalTextBrush") is not null, $"{relativePath}: no CriticalTextBrush.");
     }
@@ -181,17 +179,4 @@ public class Viewer4629Tests
         return m.Success ? m.Groups["hex"].Value : null;
     }
 
-    private static string ReadRepoFile(string relativePath) =>
-        File.ReadAllText(Path.Combine(RepoRoot(), relativePath.Replace('/', Path.DirectorySeparatorChar)));
-
-    private static string RepoRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PerformanceMonitor.sln")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new InvalidOperationException("PerformanceMonitor.sln not found above the test output directory.");
-    }
 }
