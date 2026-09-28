@@ -138,6 +138,35 @@ public sealed class PlanSync4534Tests
         Assert.Contains("\"origin_node_ids\":[1]", json.Replace(" ", ""));
     }
 
+    /// <summary>Rule 35 "Expensive Operator" (#4550) is one more rule that adds a warning with no
+    /// origin of its own, so the stamp loop must fill it in too. It only proves this if rule 35
+    /// runs BEFORE the stamp loop — the other order was tried and reverted (see below).</summary>
+    [Fact]
+    public void ExpensiveOperatorWarning_OriginIsTheOperatorItsOwnNode()
+    {
+        const string xml = """
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan" Version="1.564" Build="16.0.4215.2"><BatchSequence><Batch><Statements>
+            <StmtSimple StatementText="SELECT * FROM dbo.T" StatementId="1" StatementCompId="1" StatementType="SELECT">
+              <QueryPlan CachedPlanSize="16" CompileTime="1" CompileCPU="1" CompileMemory="104">
+                <QueryTimeStats ElapsedTime="2000" CpuTime="2000"/>
+                <RelOp NodeId="7" PhysicalOp="Table Scan" LogicalOp="Table Scan" EstimateRows="1000" EstimateIO="0" EstimateCPU="0" AvgRowSize="9" EstimatedTotalSubtreeCost="1" TableCardinality="1000" Parallel="0" EstimateRebinds="0" EstimateRewinds="0" EstimatedExecutionMode="Row">
+                  <OutputList/>
+                  <RunTimeInformation><RunTimeCountersPerThread Thread="0" ActualRows="1000" Batches="0" ActualEndOfScans="1" ActualExecutions="1" ActualElapsedms="1200" ActualExecutionMode="Row"/></RunTimeInformation>
+                  <TableScan><DefinedValues/><Object Database="[db]" Schema="[dbo]" Table="[T]"/></TableScan>
+                </RelOp>
+              </QueryPlan>
+            </StmtSimple>
+            </Statements></Batch></BatchSequence></ShowPlanXML>
+            """;
+
+        var plan = ParseAndAnalyze(xml);
+        var root = plan.Batches.SelectMany(b => b.Statements).Single().RootNode!;
+        var node = root.Children.Single(n => n.PhysicalOp == "Table Scan");
+
+        var warning = Assert.Single(node.Warnings, w => w.WarningType == "Expensive Operator");
+        Assert.Equal(new[] { 7 }, warning.OriginNodeIds);
+    }
+
     private static System.Collections.Generic.IEnumerable<PlanNode> Flatten(PlanNode node)
     {
         yield return node;
