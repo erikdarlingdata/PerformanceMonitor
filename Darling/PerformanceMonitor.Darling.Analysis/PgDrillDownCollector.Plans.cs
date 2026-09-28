@@ -182,7 +182,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var details = PlanAdvisoryAggregator.Extract(planXmls, context.CancellationToken);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {

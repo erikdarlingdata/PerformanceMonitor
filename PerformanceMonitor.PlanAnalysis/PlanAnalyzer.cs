@@ -53,7 +53,8 @@ public static partial class PlanAnalyzer
             AnalyzeStatement(stmt);
 
             if (stmt.RootNode != null)
-                AnalyzeNodeTree(stmt.RootNode, stmt, cancellationToken);        }
+                AnalyzeNodeTree(stmt.RootNode, stmt, cancellationToken);
+        }
     }
 
     private static void AnalyzeStatement(PlanStatement stmt)
