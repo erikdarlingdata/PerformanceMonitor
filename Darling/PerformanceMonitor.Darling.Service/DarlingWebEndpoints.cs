@@ -2618,7 +2618,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             string? defaultAggregate = m.Kind == MeasureKind.Ratio ? null : MeasureCatalog.WireName(m.DefaultTimeAgg);
 
-            measures.Add(new JsonObject
+            var node = new JsonObject
             {
                 ["key"] = m.Key,
                 ["displayName"] = m.DisplayName,
@@ -2635,7 +2635,17 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 /* Per-server-type availability (design D4), off the owning collector's AppliesTo gate — so the
                    composer can grey a measure a given target can't collect (e.g. Agent measures need msdb). */
                 ["appliesTo"] = BuildAppliesToNode(m.SourceTable),
-            });
+            };
+
+            /* #4653: only a measure that really divides carries a suffix; omitted otherwise, so the payload grows
+               by the ratio measures alone (editor.js reads `labelSuffix || ""`, so an absent field renders the same). */
+            var labelSuffix = MeasureCatalog.LabelSuffix(m);
+            if (labelSuffix.Length > 0)
+            {
+                node["labelSuffix"] = labelSuffix;
+            }
+
+            measures.Add(node);
         }
 
         var dimensions = new JsonArray();
