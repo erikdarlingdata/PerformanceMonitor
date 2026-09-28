@@ -16,7 +16,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4605 part 2 (LA-1b) end-to-end against a REAL TimescaleDB: <see cref="RollupCoverage.CeilingOf"/>
+/// #4605 end-to-end against a REAL TimescaleDB: <see cref="RollupCoverage.CeilingOf"/>
 /// matches the engine's own materialization watermark, advances once the rollup is refreshed further, and
 /// stays put for a cycle where the floor (and therefore the ceiling) is reused from cache rather than
 /// re-read.

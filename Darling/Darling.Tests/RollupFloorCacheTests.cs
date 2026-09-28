@@ -254,7 +254,7 @@ public sealed class RollupFloorCacheTests
         Assert.DoesNotContain(view, newEntries.Keys);
     }
 
-    /* ─────────────────────────── #4605 part 2 (LA-1b): the ceiling ─────────────────────────── */
+    /* ─────────────────────────── #4605: the ceiling ─────────────────────────── */
 
     [Fact]
     public void CeilingOf_UnknownView_IsNull()
