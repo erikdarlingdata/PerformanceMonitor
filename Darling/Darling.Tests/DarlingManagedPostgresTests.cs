@@ -1410,9 +1410,10 @@ public sealed class DarlingManagedPostgresTests
             {
                 root.Delete(recursive: true);
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                /* A temp directory the OS still holds is not this test's failure. */
+                /* A temp directory the OS still holds (a file the stopped PostgreSQL process still maps
+                   surfaces as UnauthorizedAccessException on Windows) is not this test's failure. */
             }
         }
     }
@@ -1517,9 +1518,10 @@ public sealed class DarlingManagedPostgresTests
             {
                 root.Delete(recursive: true);
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                /* A temp directory the OS still holds is not this test's failure. */
+                /* A temp directory the OS still holds (a file the stopped PostgreSQL process still maps
+                   surfaces as UnauthorizedAccessException on Windows) is not this test's failure. */
             }
         }
     }
@@ -1598,9 +1600,10 @@ public sealed class DarlingManagedPostgresTests
             {
                 root.Delete(recursive: true);
             }
-            catch (IOException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                /* A temp directory the OS still holds is not this test's failure. */
+                /* A temp directory the OS still holds (a file the stopped PostgreSQL process still maps
+                   surfaces as UnauthorizedAccessException on Windows) is not this test's failure. */
             }
         }
     }
