@@ -13339,7 +13339,7 @@ public sealed class RollupCoverage
     /// <c>HourlyRefreshStartOffset</c> before a refresh, or a seam below a successor's floor, can leave a hole
     /// strictly BELOW the ceiling and above the floor
     /// (<see cref="TimescaleSupport.MaterializationHoleTargets"/>, <c>MaterializationHoles.cs</c> lines 27–40,
-    /// 505–531; the #4301 seam ruling at line 74 states the property a caller needs: contiguity from the
+    /// 505–531; the #4301 seam decision at line 74 states the property a caller needs: contiguity from the
     /// FLOOR upward is what the repair pass (<see cref="TimescaleSupport.RepairMaterializationHolesAsync"/>,
     /// <see cref="TimescaleSupport.RepairMaterializationSeamsAsync"/>) works to hold, not something this probe
     /// measures on every read). A caller that needs a hole-free span checked, rather than assumed, calls
