@@ -144,7 +144,10 @@ public sealed class ForcePlanFailuresMemoLiveTests
 
     /// <summary>One database's batch, written through the runner's real <c>WriteBatchAsync</c> (the COPY
     /// chokepoint) on the rig's own connection.</summary>
-    private static async Task WriteAsync(Rig rig, DateTime collectionTime, params QueryStoreCollector.Row[] rows)
+    private static Task WriteAsync(Rig rig, DateTime collectionTime, params QueryStoreCollector.Row[] rows) =>
+        WriteWithAsync(rig, rig.Runner, collectionTime, rows);
+
+    private static async Task WriteWithAsync(Rig rig, DarlingCollectorRunner runner, DateTime collectionTime, params QueryStoreCollector.Row[] rows)
     {
         var ct = TestContext.Current.CancellationToken;
         var context = new CollectorContext
@@ -156,7 +159,7 @@ public sealed class ForcePlanFailuresMemoLiveTests
             Target = Server.Target,
         };
         var task = (Task)WriteBatchMethod.MakeGenericMethod(typeof(QueryStoreCollector.Row)).Invoke(
-            rig.Runner,
+            runner,
             new object?[] { rig.Connection, QueryStoreCollector.Instance, rows.ToList(), Server, collectionTime, context, ct })!;
         await task;
     }
@@ -356,24 +359,37 @@ public sealed class ForcePlanFailuresMemoLiveTests
         await WriteAsync(rig, t0, PlanRow("d1", 10, 3));
         await WriteAsync(rig, t0.AddMinutes(5), PlanRow("d1", 10, 5));
 
+        /* A memo exists before the write fails. */
+        var warm = await ViaAdapterAsync(rig);
+        Assert.Equal(1, rig.Adapter.ForcePlanFailuresFullReads);
+        Assert.Equal(2L, Assert.Single(warm).Delta);
+        Assert.NotNull(rig.Adapter.MemoGenerationForTests(ServerId));
+
         /* A commit whose acknowledgement never arrived. */
         rig.Fence.BeginWrite(ServerId);
         rig.Fence.EndWrite(ServerId, false);
 
         var first = await ViaAdapterAsync(rig);
         var second = await ViaAdapterAsync(rig);
-        Assert.Equal(2, rig.Adapter.ForcePlanFailuresFullReads);
-        Assert.Null(rig.Adapter.MemoGenerationForTests(ServerId));
+        Assert.Equal(3, rig.Adapter.ForcePlanFailuresFullReads);
         Assert.Equal(await DirectAsync(rig), first);
         Assert.Equal(first, second);
 
-        /* A clean write proves the table state is known again: the next pass memoises, the one after reuses. */
-        await WriteAsync(rig, t0.AddMinutes(10), PlanRow("d1", 10, 6));
-        await ViaAdapterAsync(rig);
-        Assert.Equal(3, rig.Adapter.ForcePlanFailuresFullReads);
+        /* A clean write proves the table state is known again. It lands under the newest collection_time and moves
+           the answer (delta 2 -> 3), so a memo carried across the failed write, whose newest collection is
+           unchanged, would return the old delta. */
+        await WriteAsync(rig, t0.AddMinutes(5), PlanRow("d1", 10, 6));
+        var afterClean = await ViaAdapterAsync(rig);
+        Assert.Equal(4, rig.Adapter.ForcePlanFailuresFullReads);
+        var direct = await DirectAsync(rig);
+        Assert.Equal(3L, Assert.Single(direct).Delta);
+        Assert.Equal(direct, afterClean);
+
+        /* That pass memoised; the one after reuses it. */
         Assert.NotNull(rig.Adapter.MemoGenerationForTests(ServerId));
-        await ViaAdapterAsync(rig);
-        Assert.Equal(3, rig.Adapter.ForcePlanFailuresFullReads);
+        var reused = await ViaAdapterAsync(rig);
+        Assert.Equal(4, rig.Adapter.ForcePlanFailuresFullReads);
+        Assert.Equal(direct, reused);
     }
 
     [Fact]
@@ -415,10 +431,62 @@ public sealed class ForcePlanFailuresMemoLiveTests
         var random = new Random(seed);
         var newest = rig.Anchor.AddMinutes(-60);
         var passes = 0;
+        var written = false;
 
         for (var step = 0; step < 40; step++)
         {
-            if (random.Next(3) == 0)
+            var kind = random.Next(15);
+            if (kind < 3)
+            {
+                /* A write that begins before a pass and ends after it. */
+                var spanDatabase = random.Next(2) == 0 ? "db1" : "db2";
+                var spanPlan = random.Next(1, 4);
+                var spanFailures = random.Next(0, 7);
+                /* Once a collection exists, the spanning write lands under that same collection_time, so the newest
+                   collection a pass probes does not move and only the fence can say the memo is stale. */
+                if (!written)
+                {
+                    newest = newest.AddMinutes(1);
+                    written = true;
+                }
+
+                /* The write the fence brackets is open across the whole step; its rows commit through the real batch
+                   write on a runner with its own fence, so they land without the rig fence's generation moving. */
+                var landing = new DarlingCollectorRunner(
+                    rig.Postgres, new CollectorDeltaCalculator(), queryStoreWriteFence: new QueryStoreWriteFence());
+                rig.Fence.BeginWrite(ServerId);
+
+                passes++;
+                var before = await ViaAdapterAsync(rig);
+                var beforeDirect = await DirectAsync(rig);
+                Assert.True(
+                    beforeDirect.SequenceEqual(before),
+                    $"seed {seed}, step {step}: a pass before a spanning write's commit differs from the direct read " +
+                    $"({before.Count} vs {beforeDirect.Count} rows)");
+
+                await WriteWithAsync(rig, landing, newest, PlanRow(spanDatabase, spanPlan, spanFailures));
+
+                passes++;
+                var during = await ViaAdapterAsync(rig);
+                var duringDirect = await DirectAsync(rig);
+                Assert.True(
+                    duringDirect.SequenceEqual(during),
+                    $"seed {seed}, step {step}: a pass after the commit but before the write ended differs from the direct read " +
+                    $"({during.Count} vs {duringDirect.Count} rows)");
+
+                rig.Fence.EndWrite(ServerId, true);
+
+                passes++;
+                var after = await ViaAdapterAsync(rig);
+                var afterDirect = await DirectAsync(rig);
+                Assert.True(
+                    afterDirect.SequenceEqual(after),
+                    $"seed {seed}, step {step}: the pass after a write that spanned passes differs from the direct read " +
+                    $"({after.Count} vs {afterDirect.Count} rows)");
+                continue;
+            }
+
+            if (kind < 8)
             {
                 passes++;
                 var expected = await DirectAsync(rig);
@@ -447,6 +515,7 @@ public sealed class ForcePlanFailuresMemoLiveTests
             }
 
             await WriteAsync(rig, when, PlanRow(database, plan, failures));
+            written = true;
         }
 
         Assert.True(passes > 5, $"seed {seed}: only {passes} passes ran");
