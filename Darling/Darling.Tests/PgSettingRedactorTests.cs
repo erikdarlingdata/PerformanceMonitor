@@ -445,12 +445,16 @@ public sealed class PgSettingRedactorTests
     /// (test-only flake fix, no issue number). This version asserts two things instead, both measured in the
     /// same run so a loaded runner moves them together:
     /// <list type="bullet">
-    /// <item>the redacted OUTPUT at each size is exactly what a linear, non-timed-out pass produces. This is
-    /// the primary guard: every lookaround-bearing pattern in <see cref="PgSettingRedactor"/> already runs
-    /// under a 100ms match timeout (<see cref="PgSettingRedactor.TimeBoundPattern"/>), so catastrophic
-    /// backtracking does not hang the process — it makes <see cref="PgSettingRedactor.Redact"/> mask the WHOLE
-    /// value instead of matching correctly, and THAT wrong output is what this assertion catches, independent
-    /// of timing;</item>
+    /// <item>the redacted OUTPUT at each size is exactly what a linear, non-timed-out pass produces, checked
+    /// with <see cref="PgSettingRedactor.MatchTimeoutForTest"/> forced to 10s for just these two calls
+    /// (restored in a <c>finally</c>) instead of the production 100ms
+    /// <see cref="PgSettingRedactor.TimeBoundPattern"/> timeout: a loaded CI runner's own scheduling delay,
+    /// not real backtracking, can push even genuinely linear matching past 100ms, and
+    /// <see cref="PgSettingRedactor.Redact"/> cannot tell that apart from catastrophic backtracking -- both
+    /// make it mask the WHOLE value instead of matching correctly. This is still the primary guard: real
+    /// catastrophic backtracking blows past 10s too, and THAT wrong output is what this assertion catches,
+    /// independent of timing (proven with a planted nested-quantifier pattern in the PR that added the
+    /// override -- see its body for the RED run);</item>
     /// <item>elapsed time at 32,000 characters stays well under quadratic relative to a 2,000-character
     /// baseline, taking the MINIMUM of several repeats at each size (a min, not a mean, so one GC pause or
     /// scheduler hiccup can't drag the number up). Linear scaling gives about a 16x ratio (32000 / 2000);
@@ -479,11 +483,30 @@ public sealed class PgSettingRedactorTests
         var expectedBaseline = trailingAssignment ? baselineBody + "=********" : baselineBody;
         var expectedLarge = trailingAssignment ? largeBody + "=********" : largeBody;
 
-        // Output check first — this also serves as the warm-up run for each size: pays JIT/regex-compile cost
-        // once, outside anything the timing below measures.
-        Assert.Equal(expectedBaseline, PgSettingRedactor.Redact("archive_command", baselineValue));
-        Assert.Equal(expectedLarge, PgSettingRedactor.Redact("archive_command", largeValue));
+        // Output check first, now forced to a generous 10s match timeout for JUST these two calls via the
+        // MatchTimeoutForTest seam (#4348): the production 100ms MatchTimeout is a real budget on a quiet box,
+        // but a loaded CI runner's scheduling delay alone can push even genuinely linear matching past 100ms,
+        // which Redact cannot tell apart from catastrophic backtracking -- it masks the whole value either
+        // way, and this equality check would then fail on CORRECT output. The override removes that
+        // false-failure mode while still catching a real backtracking regression. It no longer warms the
+        // compiled, timed path below either way: with the override set, TimeBoundPattern.Replace builds a
+        // throwaway, uncompiled Regex per pattern instead of touching the production _default instances, so
+        // the timing loop's own MINIMUM of several repeats (below) absorbs any first-run cost on the
+        // production path instead.
+        PgSettingRedactor.MatchTimeoutForTest = TimeSpan.FromSeconds(10);
+        try
+        {
+            Assert.Equal(expectedBaseline, PgSettingRedactor.Redact("archive_command", baselineValue));
+            Assert.Equal(expectedLarge, PgSettingRedactor.Redact("archive_command", largeValue));
+        }
+        finally
+        {
+            PgSettingRedactor.MatchTimeoutForTest = null;
+        }
 
+        // Timing repeats stay on the PRODUCTION path (no override): forcing the override here would make
+        // every Redact call build a throwaway, uncompiled Regex per pattern, which would distort the
+        // near-linear-scaling ratio this part measures.
         var baselineMs = MinElapsedMilliseconds(() => PgSettingRedactor.Redact("archive_command", baselineValue), Repeats);
         var largeMs = MinElapsedMilliseconds(() => PgSettingRedactor.Redact("archive_command", largeValue), Repeats);
 
