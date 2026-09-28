@@ -21,7 +21,7 @@ public sealed class WebAutoRefreshPolicyTests
     private static readonly string s_wwwroot = Path.Combine(
         "Darling", "PerformanceMonitor.Darling.Service", "wwwroot", "js");
 
-    private static string Js(params string[] parts) => ReadRepoFile(Path.Combine(new[] { s_wwwroot }.Concat(parts).ToArray()));
+    private static string Js(params string[] parts) => RepoFile.ReadRepoFile(new[] { s_wwwroot }.Concat(parts).ToArray());
 
     private const string Panel =
         "{\"source\":\"wait_stats\",\"measure\":\"wait_time_ms\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}";
@@ -110,7 +110,7 @@ public sealed class WebAutoRefreshPolicyTests
     [Fact]
     public void RefreshPolicyJs_BackOffRunsUnderNode()
     {
-        var script = Path.Combine(FindRepoRoot(), s_wwwroot, "refresh-policy.js");
+        var script = RepoFile.PathTo(s_wwwroot, "refresh-policy.js");
         var url = new Uri(script).AbsoluteUri;
         ProcessStartInfo psi;
         try
@@ -171,17 +171,4 @@ public sealed class WebAutoRefreshPolicyTests
         Assert.Contains("\"Auto-refresh:\"", Js("refresh-control.js"), StringComparison.Ordinal);
         Assert.Contains("REFRESH_CHOICES", Js("views-api.js"), StringComparison.Ordinal);
     }
-
-    private static string FindRepoRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "PerformanceMonitor.sln")))
-        {
-            dir = dir.Parent;
-        }
-
-        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
-    }
-
-    private static string ReadRepoFile(string relative) => File.ReadAllText(Path.Combine(FindRepoRoot(), relative));
 }
