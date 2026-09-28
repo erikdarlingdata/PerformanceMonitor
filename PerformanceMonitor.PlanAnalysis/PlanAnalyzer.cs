@@ -127,6 +127,59 @@ public static partial class PlanAnalyzer
             if (stmt.RootNode != null)
                 AnalyzeNodeTree(stmt.RootNode, stmt, cfg, cancellationToken);
         }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (cfg.Rules?.SeverityOverrides?.Count > 0)
+            ApplySeverityOverrides(plan, cfg);
+    }
+
+    /// <summary>
+    /// #4535, mirroring erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db
+    /// <c>src/PlanViewer.Core/Services/PlanAnalyzer.Helpers.cs</c>: walks
+    /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> — proc and UDF bodies included, the
+    /// same walk <see cref="Analyze"/> just ran — so an override applies to a warning inside an
+    /// EXEC &lt;procedure&gt; body the same as one on the outer batch.
+    /// </summary>
+    private static void ApplySeverityOverrides(ParsedPlan plan, AnalyzerConfig cfg)
+    {
+        foreach (var stmt in PlanStatements.EnumerateAll(plan))
+        {
+            foreach (var w in stmt.PlanWarnings)
+                TryOverrideSeverity(w, cfg);
+
+            if (stmt.RootNode != null)
+                ApplyOverridesToTree(stmt.RootNode, cfg);
+        }
+    }
+
+    private static void ApplyOverridesToTree(PlanNode node, AnalyzerConfig cfg)
+    {
+        foreach (var w in node.Warnings)
+            TryOverrideSeverity(w, cfg);
+        foreach (var child in node.Children)
+            ApplyOverridesToTree(child, cfg);
+    }
+
+    /// <summary>
+    /// #4535: keyed on <see cref="PlanWarning.RuleNumber"/>, the rule that emitted the finding,
+    /// mirroring erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db (PS#575). The
+    /// engine's own warnings (<see cref="PlanWarningSource.SqlServer"/>) carry no rule number
+    /// because no rule of ours produced them, and are never overridden.
+    /// </summary>
+    private static void TryOverrideSeverity(PlanWarning warning, AnalyzerConfig cfg)
+    {
+        if (warning.Source == PlanWarningSource.SqlServer)
+            return;
+
+        if (warning.RuleNumber is not int ruleNumber)
+            return;
+
+        var overrideSeverity = cfg.GetSeverityOverride(ruleNumber);
+        if (overrideSeverity == null)
+            return;
+
+        if (Enum.TryParse<PlanWarningSeverity>(overrideSeverity, ignoreCase: true, out var severity))
+            warning.Severity = severity;
     }
 
     private static void AnalyzeStatement(PlanStatement stmt, AnalyzerConfig cfg, ServerMetadata? serverMetadata)
