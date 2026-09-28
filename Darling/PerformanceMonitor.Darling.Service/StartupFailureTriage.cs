@@ -234,6 +234,22 @@ internal static class StartupFailureTriage
     internal static readonly TimeSpan RetryBudget = TimeSpan.FromSeconds(120);
 
     /// <summary>
+    /// Pause between attempts once <see cref="RetryBudget"/> has already run out on a <see cref="IsRetryable"/>
+    /// failure (#4508). The fast budget above answers "is this an ordinary blip"; once it is spent the
+    /// question has already been answered NO for that meaning, and what is left is a store outage nobody
+    /// has fixed yet. Retrying forever, but slower, is right here for the same reason <see cref="Attempts"/>'s
+    /// own remarks give for NOT making the fast path a supervisor loop: the caller is a straight-line
+    /// startup step that must eventually succeed, not a tick with nothing else to do — except that
+    /// "eventually" for a two-minute store outage is provably wrong, because the old behaviour after the
+    /// fast budget was to give up and never collect again for the life of the process, silently, with the
+    /// host staying up and reporting healthy. A minute is slow enough that a store still down does not get
+    /// hammered by a service that is, by construction, no longer in a hurry, and fast enough that a store
+    /// that comes back is noticed within the span an operator paged for the outage would already be
+    /// watching.
+    /// </summary>
+    internal static readonly TimeSpan SustainedRetryDelay = TimeSpan.FromSeconds(60);
+
+    /// <summary>
     /// <c>SqlState</c>s that mean "not yet" rather than "no" — see the class remarks for what each one was
     /// observed doing. An allowlist: a state absent from it is terminal, which is what keeps a rung that
     /// can never apply from being retried into silence.
@@ -318,4 +334,70 @@ internal static class StartupFailureTriage
 
         return exception is NpgsqlException;
     }
+
+    /// <summary>
+    /// What one of the three collection-blocking startup steps' loops does about a caught
+    /// <paramref name="exception"/> on <paramref name="attempt"/>, having already run <paramref name="elapsed"/>
+    /// since its first attempt (#4508). The whole retry DECISION lives here, pulled out of the loop, so it can
+    /// be pinned without a store, a config file or a migration to fail: given the same three inputs the loop
+    /// itself would have seen, this returns exactly what the loop should do next.
+    ///
+    /// <para><b>The defect this replaces.</b> Before #4508, once <see cref="Attempts"/> or
+    /// <see cref="RetryBudget"/> ran out on a failure <see cref="IsRetryable"/> still accepted, the loop fell
+    /// through to the bare terminal catch — the same <c>LogCritical</c> / <c>PublishStopped</c> / <c>return</c>
+    /// a NON-retryable failure gets, byte for byte. A store outage that outlasted two minutes and a rung that
+    /// can never apply became indistinguishable again, one layer up from the distinction
+    /// <see cref="IsRetryable"/> exists to draw: the process stayed up, reporting healthy, and never collected
+    /// again until a human restarted it.</para>
+    ///
+    /// <para><see cref="RetrySustained"/> is the new third outcome: the fast budget is spent, but the failure
+    /// is still one <see cref="IsRetryable"/> accepts, so the loop keeps going on <see cref="SustainedRetryDelay"/>
+    /// instead of stopping. <paramref name="attempt"/> and <paramref name="elapsed"/> only distinguish
+    /// <see cref="RetryFast"/> from <see cref="RetrySustained"/> for a retryable failure; a NON-retryable one is
+    /// always <see cref="Stop"/>, at any attempt, on any elapsed time — the caller does not need to spend the
+    /// fast budget to learn that a rung that cannot apply will not start applying.</para>
+    /// </summary>
+    /// <param name="attempt">The 1-based attempt that just failed.</param>
+    /// <param name="elapsed">Wall clock since the loop's first attempt.</param>
+    /// <param name="exception">The failure the attempt caught. <see cref="OperationCanceledException"/> is the
+    /// caller's to filter out first — it means shutdown, and this method is never reached for it.</param>
+    internal static NextStartupAction NextAction(int attempt, TimeSpan elapsed, Exception? exception)
+    {
+        if (!IsRetryable(exception))
+        {
+            return new NextStartupAction(StartupRetryDecision.Stop, TimeSpan.Zero);
+        }
+
+        if (attempt < Attempts && elapsed < RetryBudget)
+        {
+            return new NextStartupAction(StartupRetryDecision.RetryFast, RetryDelay);
+        }
+
+        return new NextStartupAction(StartupRetryDecision.RetrySustained, SustainedRetryDelay);
+    }
 }
+
+/// <summary>
+/// What a collection-blocking startup loop should do next, decided by <see cref="StartupFailureTriage.NextAction"/>
+/// (#4508).
+/// </summary>
+internal enum StartupRetryDecision
+{
+    /// <summary>Retry inside the fast budget, after <see cref="StartupFailureTriage.RetryDelay"/>.</summary>
+    RetryFast,
+
+    /// <summary>The fast budget is spent, but the failure is still one <see cref="StartupFailureTriage.IsRetryable"/>
+    /// accepts — keep retrying, slower, after <see cref="StartupFailureTriage.SustainedRetryDelay"/>, rather than
+    /// standing down and never collecting.</summary>
+    RetrySustained,
+
+    /// <summary>The failure is terminal — stop, publish, and return, exactly as before #4508.</summary>
+    Stop,
+}
+
+/// <summary>
+/// One verdict from <see cref="StartupFailureTriage.NextAction"/>: what to do, and how long to wait first.
+/// <see cref="Delay"/> is <see cref="TimeSpan.Zero"/> for <see cref="StartupRetryDecision.Stop"/>, which never
+/// waits.
+/// </summary>
+internal readonly record struct NextStartupAction(StartupRetryDecision Decision, TimeSpan Delay);

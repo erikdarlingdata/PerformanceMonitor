@@ -585,7 +585,12 @@ public class StartupFailureTriageTests
            DarlingWorker - #2997 added a per-run clock to the collector fault arms, hundreds of lines and
            one concern away - which tells nobody whether a fourth retry site appeared. Suffixed, the pin
            measures the thing its own sentence claims. */
-        Assert.Equal(3, CountOf(source, "StartupFailureTriage.IsRetryable(ex)"));
+        /* Four IsRetryable(ex) sites, not three, since #4508: the store site's sustained-retry arm (fast
+           budget spent, still retryable) re-checks the classifier rather than assuming the fast arm's
+           filter already proved it — see TheStoreSustainedRetryArm_LogsCriticalOnceThenWarningPerRetry.
+           Still exactly three stopwatches: the sustained arm reuses storeRetryBudget rather than starting
+           a fourth. */
+        Assert.Equal(4, CountOf(source, "StartupFailureTriage.IsRetryable(ex)"));
         Assert.Equal(3, CountOf(source, "RetryBudget = System.Diagnostics.Stopwatch.StartNew();"));
     }
 
@@ -631,6 +636,121 @@ public class StartupFailureTriageTests
         var guard = ReadRepoFileLf("Darling/PerformanceMonitor.Darling.Service/Program.cs");
         var guardArm = Slice(guard, "Another PerformanceMonitor Darling service instance already holds", "return 4;");
         Assert.DoesNotContain("StartupFailureTriage", guardArm, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4508: within the fast budget, a retryable failure gets <see cref="StartupRetryDecision.RetryFast"/>
+    /// at <see cref="StartupFailureTriage.RetryDelay"/> — the decision the loop's own inline filter used to
+    /// make without a name.
+    /// </summary>
+    [Fact]
+    public void NextAction_WithinBudget_IsRetryFast()
+    {
+        var next = StartupFailureTriage.NextAction(
+            attempt: 1, elapsed: TimeSpan.FromSeconds(1), new NpgsqlException("connection went away"));
+
+        Assert.Equal(StartupRetryDecision.RetryFast, next.Decision);
+        Assert.Equal(StartupFailureTriage.RetryDelay, next.Delay);
+    }
+
+    /// <summary>
+    /// #4508, the defect itself. Before this PR the loop had no arm for "fast budget spent, still
+    /// retryable" — it fell through to the terminal catch, stood down, and never collected again. This is
+    /// the pin RED against dev: <see cref="StartupFailureTriage.NextAction"/> and
+    /// <see cref="StartupRetryDecision.RetrySustained"/> do not exist on dev at all, so this is a compile
+    /// failure there rather than a runtime assertion failure — see the PR body for the RED transcript.
+    /// </summary>
+    [Fact]
+    public void NextAction_BudgetSpentButStillRetryable_IsRetrySustained()
+    {
+        var next = StartupFailureTriage.NextAction(
+            attempt: StartupFailureTriage.Attempts,
+            elapsed: StartupFailureTriage.RetryBudget,
+            new NpgsqlException("connection went away"));
+
+        Assert.Equal(StartupRetryDecision.RetrySustained, next.Decision);
+        Assert.Equal(StartupFailureTriage.SustainedRetryDelay, next.Delay);
+
+        /* Either cap alone reaching its edge is enough — not just both together. */
+        var attemptCapOnly = StartupFailureTriage.NextAction(
+            attempt: StartupFailureTriage.Attempts,
+            elapsed: TimeSpan.FromSeconds(1),
+            new NpgsqlException("connection went away"));
+        Assert.Equal(StartupRetryDecision.RetrySustained, attemptCapOnly.Decision);
+
+        var wallClockCapOnly = StartupFailureTriage.NextAction(
+            attempt: 2,
+            elapsed: StartupFailureTriage.RetryBudget,
+            new NpgsqlException("connection went away"));
+        Assert.Equal(StartupRetryDecision.RetrySustained, wallClockCapOnly.Decision);
+    }
+
+    /// <summary>
+    /// #4508: a non-retryable failure is <see cref="StartupRetryDecision.Stop"/> at ANY attempt and ANY
+    /// elapsed time — including attempt 1, before either cap has moved at all. The budget running out
+    /// changes nothing about a rung that can never apply; #4508 must not blur that boundary while fixing
+    /// the retryable side of it.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 0)]
+    [InlineData(25, 120)]
+    public void NextAction_NonRetryableFailure_IsAlwaysStop(int attempt, int elapsedSeconds)
+    {
+        var terminal = new PostgresException("relation does not exist", "ERROR", "ERROR", "42P01");
+
+        var next = StartupFailureTriage.NextAction(attempt, TimeSpan.FromSeconds(elapsedSeconds), terminal);
+
+        Assert.Equal(StartupRetryDecision.Stop, next.Decision);
+        Assert.Equal(TimeSpan.Zero, next.Delay);
+    }
+
+    /// <summary>
+    /// #4508: the store loop's sustained arm logs CRITICAL exactly once — the moment the fast budget
+    /// first runs out — and WARNING on every later attempt on the same still-down store, mirroring the
+    /// once/per-retry split the fast arm already has between its own single warning template and the
+    /// terminal catch's single critical line. Read off the shipped source, the same way the fast arm's own
+    /// pins are: <c>storeSustainedRetryCriticalLogged</c> gates the critical line and only the critical
+    /// line, and the sustained arm's own catch delays on <c>SustainedRetryDelay</c> rather than the fast
+    /// arm's <c>RetryDelay</c>.
+    /// </summary>
+    [Fact]
+    public void TheStoreSustainedRetryArm_LogsCriticalOnceThenWarningPerRetry()
+    {
+        var source = ReadWorkerSource();
+        var sustainedArm = Slice(
+            source,
+            "catch (Exception ex) when (ex is not OperationCanceledException\n                && StartupFailureTriage.IsRetryable(ex))",
+            "await Task.Delay(next.Delay, stoppingToken);");
+
+        Assert.Contains("storeSustainedRetryCriticalLogged", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("_logger.LogCritical(", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("_logger.LogWarning(", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("StartupFailureTriage.NextAction(attempt, storeRetryBudget.Elapsed, ex)", sustainedArm, StringComparison.Ordinal);
+
+        /* The flag is set to true exactly once, inside the critical branch — not reset per attempt, or
+           every attempt would re-log critical. */
+        Assert.Equal(1, CountOf(sustainedArm, "storeSustainedRetryCriticalLogged = true;"));
+        Assert.Equal(0, CountOf(sustainedArm, "storeSustainedRetryCriticalLogged = false;"));
+    }
+
+    /// <summary>
+    /// #4508: the sustained arm still publishes <see cref="CollectorRuntimeState.CollectorPhase.Retrying"/>,
+    /// not <see cref="CollectorRuntimeState.CollectorPhase.Stopped"/> — the published state has to keep
+    /// saying "retrying" for as long as the loop keeps retrying, or <c>/api/ping</c> would report the
+    /// service stopped while it is, in fact, still trying every minute.
+    /// </summary>
+    [Fact]
+    public void TheStoreSustainedRetryArm_PublishesRetryingNotStopped()
+    {
+        var source = ReadWorkerSource();
+        var sustainedArm = Slice(
+            source,
+            "catch (Exception ex) when (ex is not OperationCanceledException\n                && StartupFailureTriage.IsRetryable(ex))",
+            "await Task.Delay(next.Delay, stoppingToken);");
+
+        Assert.Contains("_collectorState.PublishRetrying(", sustainedArm, StringComparison.Ordinal);
+        Assert.DoesNotContain("_collectorState.PublishStopped(", sustainedArm, StringComparison.Ordinal);
+        Assert.DoesNotContain("return;", sustainedArm, StringComparison.Ordinal);
     }
 
     private static int CountOf(string haystack, string needle)

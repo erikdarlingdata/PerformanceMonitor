@@ -1870,6 +1870,12 @@ public sealed class DarlingWorker : BackgroundService
            job and no reloptions. No rung uses CREATE INDEX CONCURRENTLY or any other statement that
            cannot be transacted. */
         var storeRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+        /* #4508: set once, the first time the fast budget above runs out on a failure that is still
+           retryable — see the arm below. Gates CRITICAL-once/WARNING-per-retry the same way the config
+           and bootstrap sites' single terminal LogCritical already is "once": this is the sustained arm's
+           one moment where the diagnosis is new, and every later attempt on the same still-down store is
+           not. */
+        var storeSustainedRetryCriticalLogged = false;
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -1898,13 +1904,51 @@ public sealed class DarlingWorker : BackgroundService
                     ex,
                     "Cannot reach or migrate the Postgres store yet ({Message}) — attempt {Attempt} of " +
                     "{Total}, retrying in {Delay}s. A store that is restarting, failing over or still " +
-                    "coming up recovers on its own; after the last attempt this becomes a critical line " +
-                    "and collection does not start.",
+                    "coming up recovers on its own; after the last attempt this keeps retrying more slowly " +
+                    "instead of giving up.",
                     ex.Message, attempt, StartupFailureTriage.Attempts,
                     (int)StartupFailureTriage.RetryDelay.TotalSeconds);
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && StartupFailureTriage.IsRetryable(ex))
+            {
+                /* #4508: reached only once the fast arm above has stopped matching — its own attempt/budget
+                   conjuncts are false, so this is a store outage that has already outlasted the two-minute
+                   fast budget while still being a failure StartupFailureTriage.IsRetryable accepts. The old
+                   code had no third arm here: the fast filter going false let this fall straight through to
+                   the terminal catch below, so a store still coming back got the identical CRITICAL /
+                   PublishStopped / return a rung that can never apply gets, and collection never started
+                   again for the life of the process. NextAction is the SAME decision the fast arm's filter
+                   re-derives inline (attempt/budget/classifier) — calling it here, rather than reaching for
+                   SustainedRetryDelay directly, is what routes this arm's delay through the seam instead of
+                   beside it. */
+                var next = StartupFailureTriage.NextAction(attempt, storeRetryBudget.Elapsed, ex);
+                if (!storeSustainedRetryCriticalLogged)
+                {
+                    _logger.LogCritical(
+                        ex,
+                        "Cannot reach or migrate the Postgres store within the {Budget}s retry budget " +
+                        "({Message}); this is still a recoverable failure, so it keeps retrying every " +
+                        "{Delay}s instead of standing down. Collection will not start until it succeeds.",
+                        (int)StartupFailureTriage.RetryBudget.TotalSeconds, ex.Message,
+                        (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                    storeSustainedRetryCriticalLogged = true;
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Still cannot reach or migrate the Postgres store ({Message}) — attempt {Attempt}, " +
+                        "retrying in {Delay}s.",
+                        ex.Message, attempt, (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                }
+
+                _collectorState.PublishRetrying(
+                    CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
+                await Task.Delay(next.Delay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
