@@ -145,20 +145,4 @@ public sealed class PlanSync4535ConfigPlumbingTests
         }
     }
 
-    /// <summary>
-    /// <see cref="PlanWarning.RuleNumber"/> exists and defaults to null on unstamped rules. This
-    /// repro plan's node-level findings (rules 1 and 34) aren't stamped yet — that starts in a
-    /// later step for node rules. Its statement-level finding (rule 3, serial plan) is stamped as
-    /// of this step (#4535 step 2).
-    /// </summary>
-    [Fact]
-    public void RuleNumber_DefaultsToNull_UntilLaterStepsStampIt()
-    {
-        var plan = ShowPlanParser.Parse(ReproXml);
-        PlanAnalysisPipeline.Run(plan);
-
-        var warnings = AllWarnings(plan);
-        Assert.NotEmpty(warnings);
-        Assert.All(warnings, w => Assert.Equal(w.WarningType == "Serial Plan" ? 3 : (int?)null, w.RuleNumber));
-    }
 }
