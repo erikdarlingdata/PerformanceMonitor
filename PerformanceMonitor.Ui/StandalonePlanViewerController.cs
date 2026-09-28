@@ -96,6 +96,8 @@ public sealed class StandalonePlanViewerController
             VerticalAlignment = VerticalAlignment.Center,
             ToolTip = "Open a new plan sub-tab"
         };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only (an element's own Resources are the first place its implicit style is looked up), so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        addTabHeader.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
         var addTab = new TabItem
         {
             Header = addTabHeader,
@@ -263,6 +265,8 @@ public sealed class StandalonePlanViewerController
         };
         var subCloseBtn = new Button { Style = (Style)_planTabControl.FindResource("TabCloseButton") };
         var subTabHeader = new StackPanel { Orientation = Orientation.Horizontal };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        subTabHeader.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
         subTabHeader.Children.Add(labelBlock);
         subTabHeader.Children.Add(subCloseBtn);
 

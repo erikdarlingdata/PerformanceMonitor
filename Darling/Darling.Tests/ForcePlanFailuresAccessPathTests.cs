@@ -115,7 +115,7 @@ public sealed class ForcePlanFailuresAccessPathTests
     }
 
     /// <summary>
-    /// #3579: the observation stamp is the LAST column of the shipped read and is <c>n.collection_time</c> — the
+    /// #3579: the observation stamp keeps ordinal 7 of the shipped read (the prior stamp added by #4659 follows it) and is <c>n.collection_time</c> — the
     /// newer sighting's collector clock — not a new <c>qs.</c> reference. Last, because the reader binds ordinals
     /// 0–6 to the seven pre-#3579 columns and an inserted column would silently shift every one of them onto
     /// its neighbour's type (a string read as a bigint fails; a bigint read as a bigint from the wrong column
@@ -124,16 +124,18 @@ public sealed class ForcePlanFailuresAccessPathTests
     /// store; <c>collection_time</c> is already in the key.
     /// </summary>
     [Fact]
-    public void TheObservationStamp_IsTheLastColumn_AndIsTheNewerSightingsCollectionTime()
+    public void TheObservationStamp_KeepsItsOrdinal_AndOnlyThePriorStampFollows()
     {
         var sql = DarlingAlertReadAdapter.ForcePlanFailuresSql;
         var selectList = sql[sql.LastIndexOf("SELECT", StringComparison.Ordinal)..sql.IndexOf("FROM ranked AS n", StringComparison.Ordinal)];
         var columns = selectList.Replace("SELECT", "", StringComparison.Ordinal)
             .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 
-        Assert.Equal(8, columns.Length);
+        /* #4659: observed_at keeps ordinal 7; the only column after it is the older sighting's stamp. */
+        Assert.Equal(9, columns.Length);
         Assert.Equal("n.failures AS total_failures", columns[6]);
         Assert.Equal("n.collection_time AS observed_at", columns[7]);
+        Assert.Equal("p.collection_time AS prior_observed_at", columns[8]);
 
         /* The set of scan columns did not grow — the same nine the index carried before #3579. */
         Assert.Equal(PgTableTuning.ForcePlanFailuresIndexColumns.Count, ColumnsTheReadReferences().Count);

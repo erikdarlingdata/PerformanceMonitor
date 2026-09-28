@@ -314,13 +314,14 @@ public partial class MainWindow
         {
             CollectorHealthText.Text = $"Collectors: {failing.Count} erroring";
             // #4635: the fixed OrangeRed (#FF4500) was 3.44:1 on Light's status bar, under WCAG AA's 4.5:1 text floor.
-            CollectorHealthText.Foreground = (TryFindResource("CriticalTextBrush") as System.Windows.Media.Brush) ?? System.Windows.Media.Brushes.OrangeRed;
+            /* #4679: a live reference, not a copy - a copy kept the old theme's colour after a theme switch until the next tick. No fallback: all three themes declare the key. */
+            CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, "CriticalTextBrush");
             CollectorHealthText.ToolTip = "Failing: " + string.Join(", ", failing.Select(h => h.CollectorName).Distinct());
         }
         else
         {
             CollectorHealthText.Text = $"Collectors: {health.Count} OK";
-            CollectorHealthText.Foreground = (System.Windows.Media.Brush)FindResource("ForegroundMutedBrush");
+            CollectorHealthText.SetResourceReference(System.Windows.Controls.TextBlock.ForegroundProperty, "ForegroundMutedBrush");
             CollectorHealthText.ToolTip = null;
         }
     }

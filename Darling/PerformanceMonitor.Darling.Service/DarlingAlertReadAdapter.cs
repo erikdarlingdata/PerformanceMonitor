@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -173,6 +174,10 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// engine takes it — a test constructs its own and cannot pollute the shared one. Null (most test call
     /// sites) retries exactly the same way and counts nothing.
     /// </param>
+    /// <param name="queryStoreWriteFence">
+    /// #4659: the fence the collector runner brackets every Query Store write with. Null = the forced-plan
+    /// failure read saves and reuses nothing: every pass runs the full read (any other construction site).
+    /// </param>
     /// <param name="delay">
     /// The pause between a read's two attempts, injectable so a pin can assert the seam WAITED
     /// <see cref="AlertPassRetryDelaySeconds"/> without spending two seconds of test time doing it.
@@ -184,8 +189,10 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
         Func<int, int>? blockingSnapshotCadenceMinutes = null,
         AlertReadFailureCounter? readFailures = null,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        QueryStoreWriteFence? queryStoreWriteFence = null)
     {
+        _queryStoreWriteFence = queryStoreWriteFence;
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
         _blockingSnapshotCadenceMinutes = blockingSnapshotCadenceMinutes;
@@ -1770,6 +1777,11 @@ ORDER BY l.database_name";
     /// <c>per_collection</c>'s GROUP BY and already carried by the covering index: no new <c>qs.</c> column,
     /// so the access path below is untouched (the access-path pins re-derive the list from this text).</para>
     ///
+    /// <para><b>The older sighting's <c>collection_time</c> is the ninth column (#4659)</b>, <c>prior_observed_at</c>:
+    /// <c>p.collection_time</c>, another <c>per_collection</c> GROUP BY key, so no new <c>qs.</c> reference. It lets
+    /// a pass reuse the previous answer while the server's newest collection is unchanged: the window's lower
+    /// edge can only drop a row whose older collection it passes.</para>
+    ///
     /// <para><b>The access path is a covering index, and the column list here is what it covers (#3573).</b>
     /// <c>PgTableTuning.ForcePlanFailuresIndexName</c> is <c>(server_id, collection_time DESC) INCLUDE</c>
     /// every other column this statement touches, so it runs as an Index Only Scan over one server's two
@@ -1814,7 +1826,8 @@ SELECT
     n.reason,
     n.failures - p.failures AS failure_delta,
     n.failures AS total_failures,
-    n.collection_time AS observed_at
+    n.collection_time AS observed_at,
+    p.collection_time AS prior_observed_at
 FROM ranked AS n
 JOIN ranked AS p
   ON  p.database_name = n.database_name
@@ -1825,6 +1838,48 @@ WHERE n.rn = 1
 AND   n.forced = 1
 AND   n.failures > p.failures
 ORDER BY n.database_name, n.query_id, n.plan_id";
+
+    /// <summary>#4659's probe: the server's newest collection inside the window. An Index Only Scan on the same
+    /// covering index (<c>server_id, collection_time DESC</c>) that reads one tuple.</summary>
+    public const string ForcePlanFailuresNewestCollectionSql = @"
+SELECT MAX(qs.collection_time)
+FROM query_store_stats AS qs
+WHERE qs.server_id = $1
+AND   qs.collection_time > $2";
+
+    /// <summary>#4659: one server's last full answer, keyed by the newest collection it was computed at and by the
+    /// write-fence generation it was read under. Each row carries its older (rn = 2) collection so a later pass can
+    /// drop the rows the sliding window has since excluded.</summary>
+    private sealed record ForcePlanFailuresMemo(DateTime NewestCollection, long Generation, IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> Rows);
+
+    private readonly ConcurrentDictionary<int, ForcePlanFailuresMemo> _forcePlanFailuresMemo = new();
+
+    private readonly QueryStoreWriteFence? _queryStoreWriteFence;
+
+    /// <summary>Test seam: awaited after the full read has read its rows and before the fence is checked for the
+    /// save.</summary>
+    internal Func<Task>? BeforeMemoStoreForTests { get; set; }
+
+    /// <summary>Number of times the full forced-plan failure read has run on this adapter (#4659).</summary>
+    internal int ForcePlanFailuresFullReads;
+
+    /// <summary>#4659: keeps the entry read under the higher generation, so a slow pass never overwrites a newer memo.</summary>
+    internal void StoreMemoForTests(int serverId, long generation, DateTime newest) =>
+        StoreMemo(serverId, new ForcePlanFailuresMemo(newest, generation, Array.Empty<(ForcePlanFailureInfo, DateTime)>()));
+
+    internal long? MemoGenerationForTests(int serverId) =>
+        _forcePlanFailuresMemo.TryGetValue(serverId, out var m) ? m.Generation : null;
+
+    private void StoreMemo(int serverId, ForcePlanFailuresMemo fresh) =>
+        _forcePlanFailuresMemo.AddOrUpdate(serverId, fresh, (_, existing) => existing.Generation > fresh.Generation ? existing : fresh);
+
+    /// <summary>#4659, PURE: the previous answer at a later window start. Exactly the full read's answer while the
+    /// server's newest collection is unchanged: the window's lower edge can only remove a plan whose older
+    /// collection it passes, never add one. The returned rows are the memo's own objects, shared across passes and
+    /// with the engine: callers must not mutate them.</summary>
+    internal static List<ForcePlanFailureInfo> ReuseForWindow(
+        IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
+        rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
 
     public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)
@@ -1847,16 +1902,49 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
     {
         var serverId = ParseServerKey(serverKey);
 
-        var items = new List<ForcePlanFailureInfo>();
+        /* One value, whole microseconds, for the probe, the SQL and the trim: Npgsql sends a timestamp at
+           microsecond precision, so the trim compares against exactly what the store compared against. */
+        var windowStart = FloorToMicrosecond(NaiveUtcNow() - ForcePlanFailureWindow);
+        var fence = _queryStoreWriteFence;
+        var before = fence?.Snapshot(serverId);
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        DateTime? newest;
+        using (var probe = new NpgsqlCommand(ForcePlanFailuresNewestCollectionSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+        {
+            probe.Parameters.AddWithValue(serverId);
+            probe.Parameters.AddWithValue(windowStart);
+            var scalar = await probe.ExecuteScalarAsync(cancellationToken);
+            newest = scalar is DateTime stamp ? stamp : null;
+        }
+
+        if (newest is null)
+        {
+            _forcePlanFailuresMemo.TryRemove(serverId, out _);
+            return new List<ForcePlanFailureInfo>();
+        }
+
+        /* Reused only when no Query Store write was in flight when this pass began, the memo was read under the
+           same generation, and nothing began since. A live fan-out commits one database at a time under one
+           collection_time, so the newest collection alone cannot say a later database's rows are still to come. */
+        if (before is { Quiet: true } b
+            && _forcePlanFailuresMemo.TryGetValue(serverId, out var memo)
+            && memo.Generation == b.Generation
+            && memo.NewestCollection == newest.Value
+            && fence!.Snapshot(serverId) == (b.Generation, true))
+        {
+            return ReuseForWindow(memo.Rows, windowStart);
+        }
+
+        Interlocked.Increment(ref ForcePlanFailuresFullReads);
+        var rows = new List<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)>();
         using var command = new NpgsqlCommand(ForcePlanFailuresSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(NaiveUtcNow() - ForcePlanFailureWindow);
-
+        command.Parameters.AddWithValue(windowStart);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new ForcePlanFailureInfo
+            var info = new ForcePlanFailureInfo
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
@@ -1870,10 +1958,28 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
                    The engine only ever compares one plan's stamps with each other, so the Kind is honesty
                    rather than arithmetic. */
                 ObservedAtUtc = reader.IsDBNull(7) ? null : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)
-            });
+            };
+            rows.Add((info, reader.GetDateTime(8)));
         }
 
-        return items;
+        if (BeforeMemoStoreForTests is { } beforeStore)
+        {
+            await beforeStore();
+        }
+
+        /* Saved only if the fence was quiet at both ends and did not move: a write that began, committed or
+           ended during the read may or may not be in what was read. */
+        var after = fence?.Snapshot(serverId);
+        if (before is { Quiet: true } b0 && after is { Quiet: true } a0 && a0.Generation == b0.Generation)
+        {
+            StoreMemo(serverId, new ForcePlanFailuresMemo(newest.Value, b0.Generation, rows));
+        }
+
+        /* Not quiet, or the generation moved: nothing is stored and nothing is removed. A memo that cannot be
+           reused is harmless, because reuse needs an equal generation and a quiet fence; removing here could evict
+           a newer valid memo a concurrent pass just stored. */
+
+        return rows.Select(r => r.Info).ToList();
     }
 
     private int ResolveRunningJobsCadence(int serverId) =>
@@ -1897,6 +2003,10 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
     }
 
     /* ---------------- helpers ---------------- */
+
+    /// <summary>#4659: the value truncated to whole microseconds (10 ticks), the precision a Postgres timestamp holds.</summary>
+    internal static DateTime FloorToMicrosecond(DateTime value) =>
+        DateTime.SpecifyKind(new DateTime(value.Ticks - value.Ticks % 10), value.Kind);
 
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>
     private static DateTime NaiveUtcNow() =>

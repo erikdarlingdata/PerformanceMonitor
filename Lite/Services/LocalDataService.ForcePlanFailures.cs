@@ -45,13 +45,15 @@ public sealed partial class LocalDataService
     /// Darling's twin carries the same bound for the same reason; keeping the two shape-for-shape is what
     /// stops the apps disagreeing about what counts as a new failure.</para>
     ///
-    /// <para>The newer sighting's <c>collection_time</c> rides along as <c>observed_at</c>, the last column
+    /// <para>The newer sighting's <c>collection_time</c> rides along as <c>observed_at</c>, second to last
     /// (#3579): the delta is a fact about two collections that reads identically on every alert pass until
     /// the next collection lands, and the engine needs the observation's identity to fire once per
     /// collection rather than once per cooldown. Appended so the seven ordinals already bound do not move;
     /// Darling's twin carries the same column at the same position, and the Lite.Tests parity pin holds the
     /// two texts equal but for the view name.</para>
     /// </summary>
+    /* The ninth column, prior_observed_at, exists for text parity with Darling (#4659), where it lets a pass
+       reuse its previous answer. Lite does not read it. */
     public const string ForcePlanFailuresSql = @"
 WITH per_collection AS (
     SELECT
@@ -82,7 +84,8 @@ SELECT
     n.reason,
     n.failures - p.failures AS failure_delta,
     n.failures AS total_failures,
-    n.collection_time AS observed_at
+    n.collection_time AS observed_at,
+    p.collection_time AS prior_observed_at
 FROM ranked AS n
 JOIN ranked AS p
   ON  p.database_name = n.database_name
