@@ -99,12 +99,27 @@ public static class McpPlanAnalysisFormatter
         string source,
         string? identifier,
         CancellationToken cancellationToken = default) =>
-        BuildAnalysisResult(xml, serverName, source, identifier, null, cancellationToken);
+        BuildAnalysisResult(xml, serverName, source, identifier, config: null, serverMetadata: null, cancellationToken);
+
+    /// <summary>
+    /// #4535: the config-aware form. A rule the host's <c>analyzer</c> section disables never attaches
+    /// its finding to <paramref name="xml"/>'s plan, so it drops out of the result's warnings/
+    /// critical_count; an overridden severity is already applied before this projects the result.
+    /// Null <paramref name="config"/> behaves exactly like the overload above.
+    /// </summary>
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        AnalyzerConfig? config,
+        CancellationToken cancellationToken = default) =>
+        BuildAnalysisResult(xml, serverName, source, identifier, config, serverMetadata: null, cancellationToken);
 
     /// <summary>
     /// #4530: the <see cref="ServerMetadata"/> overload. Passing the resolved server's metadata through
     /// lets rule 38 (Standard Edition DOP 2 limitation) give its Warning instead of its uninformative Info
-    /// branch. The 5-argument overload forwards <c>null</c>, which <see cref="PlanAnalysisPipeline.Run"/>
+    /// branch. The 6-argument overload forwards <c>null</c>, which <see cref="PlanAnalysisPipeline.Run"/>
     /// treats the same as no metadata available.
     /// </summary>
     public static string BuildAnalysisResult(
@@ -113,10 +128,23 @@ public static class McpPlanAnalysisFormatter
         string source,
         string? identifier,
         ServerMetadata? serverMetadata,
+        CancellationToken cancellationToken = default) =>
+        BuildAnalysisResult(xml, serverName, source, identifier, config: null, serverMetadata, cancellationToken);
+
+    /// <summary>
+    /// #4535/#4530 combined: threads both <paramref name="config"/> and <paramref name="serverMetadata"/>.
+    /// </summary>
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        AnalyzerConfig? config,
+        ServerMetadata? serverMetadata,
         CancellationToken cancellationToken = default)
     {
         var plan = ShowPlanParser.Parse(xml, cancellationToken);
-        PlanAnalysisPipeline.Run(plan, null, serverMetadata, cancellationToken);
+        PlanAnalysisPipeline.Run(plan, config, serverMetadata, cancellationToken);
 
         // #4514: includes statements nested inside a stored procedure or UDF body, so the MCP
         // analyze_plan_xml/analyze_query_plan/analyze_query_store_plan tools see the same

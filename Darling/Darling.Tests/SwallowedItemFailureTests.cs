@@ -312,4 +312,33 @@ public sealed class SwallowedItemFailureTests
             }
         }
     }
+
+    /// <summary>
+    /// #4620: the activity-sourced set, against the catalog, from this SKU's suite too. Every name must be a
+    /// real collector, or a rename silently puts that collector back on the three-run rule. None may be an
+    /// event, on-load or interval-sourced collector, because the predicate checks those arms first and an
+    /// overlapping name would never reach the 72-hour bar. And the two dense collectors the issue grouped
+    /// with them stay out, because their sources have rows on every cycle.
+    /// </summary>
+    [Fact]
+    public void TheActivitySourcedSet_IsReal_AndDisjointFromTheArmsCheckedBeforeIt()
+    {
+        var catalog = new HashSet<string>(CollectorCatalog.All.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+
+        Assert.NotEmpty(CollectorHealthClassifier.ActivitySourcedCollectorNamesForPinning);
+        foreach (var name in CollectorHealthClassifier.ActivitySourcedCollectorNamesForPinning)
+        {
+            Assert.Contains(name, catalog);
+            Assert.True(CollectorHealthClassifier.IsActivitySourcedCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsEventCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsOnLoadCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector(name), name);
+        }
+
+        foreach (var dense in new[] { "memory_grant_stats", "query_stats" })
+        {
+            Assert.Contains(dense, catalog);
+            Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector(dense), dense);
+        }
+    }
 }

@@ -23,6 +23,19 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Added
 
+- **Plan viewer: a Server Context card** ([#4614]) - The Plan Insights strip now opens with a Server Context card, as in PerformanceStudio's desktop viewer. It shows the server a plan belongs to: its name, edition and version, CPUs and memory, MAXDOP, cost threshold for parallelism, max server memory, and the plan's database with its compatibility level, from what the collector has stored for that server.
+- **Plan viewer: a Parameters card** ([#4604]) - The Plan Insights strip now includes a Parameters card, listing each statement parameter's data type, compiled value and runtime value, and flagging a runtime value that differs from its compiled value as possible parameter sniffing.
+- **Plan viewer minimap** ([#4596]) - The plan viewer's toolbar has a "Minimap" toggle that opens a scaled-down overview of the whole plan, with a box showing the current scroll position and a click-to-center shortcut.
+- **Plan analysis flags a possible Standard Edition batch-mode DOP limit, and marks legacy findings** ([#4585]) - A plan that ran at DOP 2 with batch-mode operators gets a Standard Edition DOP Limitation finding (Info until the server's edition is known). Findings from rules that predate the benefit-scoring framework carry `is_legacy` in the MCP plan output and a [legacy] tag in the plan viewer.
+- **Plan viewer: a finding's header links to the operator it came from** ([#4559]) - Plan-level and per-operator warnings that know which operator they came from now show a small arrow in their header; clicking it selects and scrolls to that operator.
+- **The MCP plan tools report which operator each finding came from** ([#4556]) - Every plan analysis finding now carries the node IDs of the operators it came from, empty for findings with no single operator responsible (such as high compile CPU). Carried in `origin_node_ids` in the MCP plan tools' JSON output.
+- **Plan analysis turns a plan's wait statistics into findings, and gives external and preemptive waits a real benefit estimate** ([#4555]) - When an actual plan carries wait statistics, each significant wait type becomes a "Wait: <type>" finding with a description of what the wait means and a severity from its estimated benefit. External and preemptive waits, which the engine spends outside its own scheduler, get their own benefit formula instead of being folded into operator time.
+- **Plan analysis now flags an operator that takes a large share of a statement's run time even when no other rule has advice for it** ([#4550]) - A new "Expensive Operator" finding fires when a single operator's own time is at least 20% of a statement that ran 1 second or longer, so a big chunk of runtime no longer disappears from the findings just because nothing specific was wrong with it.
+- **Plan analysis warns on dynamic cursors and on cursors declared without `LOCAL`, and "Scan With Predicate" names a dynamic cursor when it is the likely cause** ([#4549]) - A dynamic cursor sees data changes between fetches, which blocks many index uses. A cursor declared without `LOCAL` defaults to global scope. A declaration inside a comment or a string does not count.
+- **Plan analysis flags a query whose text was cut off by SQL Server's showplan limit** ([#4548]) - When a statement's copy of its query text hit SQL Server's roughly 4,000-character cap when the plan was captured, the analysis now says so instead of leaving the reader to work out why re-running or formatting that text fails.
+- **Plan analysis: added the "Bare Scan" finding for a full-table or full-clustered-index scan with no predicate** ([#4545]) - A Clustered Index Scan or heap Table Scan with no predicate now gets a covering-index or columnstore suggestion depending on its output width.
+- **Plan analysis now marks which findings are SQL Server's own warnings and which are inferences, and duplicate missing-index suggestions are no longer merged across different databases** ([#4543]) - `PlanWarning.Source` says whether a plan warning came from the engine's own `<Warnings>` element or from the analyzer; the plan viewer tags the engine's with `[SQL Server]` and the MCP plan tools carry it as a `source` field. Rule 30's duplicate-index-suggestion check now keys on database as well as schema and table, so same-named tables in different databases are no longer reported as duplicates of each other.
+- **get_read_latency reports how long the web dashboard's and MCP server's reads take: p50, p95 and p99 per read over a chosen window, with timeout counts** ([#4454]) - the data comes from hourly histograms the service records; the percentiles are bucket upper-bound estimates; the web and MCP store sessions now show their own application_name.
 - **Self-monitoring alerts (Collection Stopped, Capture Down, Collector Cost Regression) open a notebook with the server's collection health and the collector's log and cost** ([#4437])
 - **Analysis-finding alerts open a notebook with that finding's summary and evidence** ([#4436])
 - **Custom-rule alerts open a notebook that charts the rule's own measure with its threshold or band** ([#4433])
@@ -105,6 +118,34 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Changed
 
+- **Darling Viewer and MCP store reads can no longer spill unbounded temporary files** ([#4610]) - The viewer and mcp store roles now carry a temp_file_limit, so a Custom Views panel that would have written gigabytes of temporary files fails at once with a message naming the limit, instead of running to the 60-second statement timeout and slowing the collector's writes.
+- **Plan viewer minimap: resize, double-click zoom, and accuracy-coloured edges** ([#4603]) - The plan viewer's minimap panel can now be resized and remembers its size across plans, double-clicking a minimap node zooms to and selects it, and minimap edges pick up the same over/underestimate colouring as the main canvas.
+- **Rule 38 can now flag a Standard Edition DOP limit as a Warning** ([#4601]) - Plan analysis reads each server's collected edition and MAXDOP wherever it analyzes a stored plan (the MCP plan tools, the drill-downs, and the Darling Viewer and Lite plan viewers). A plan that ran at DOP 2 with batch-mode operators on a Standard Edition server with MAXDOP above 2 now gets a Warning; it stays Info when the edition isn't known.
+- **Plan viewer: one neutral card design for the insights strip** ([#4599]) - Runtime Summary, Missing Index Suggestions, and Wait Stats now share one neutral surface with a thin per-card accent edge instead of a full-color tinted background, and an empty card (for example, no missing index suggestions) shows a dimmed, muted state instead of a loud tinted block.
+- **The plan viewer's Wait Stats rows show each wait's potential benefit and never clip** ([#4595]) - As in PerformanceStudio's desktop viewer, each wait row gains an "up to N%" benefit column taken from the plan's matching wait finding, the name and duration columns take the spare width with an ellipsis and a tooltip, and the bar and benefit columns size to their content so the percentage is never cut off.
+- **Plan viewer costs are formatted as in PerformanceStudio** ([#4592]) - Costs in the properties panel and node tooltips show a trimmed, thousands-separated number instead of six raw decimal places. The sub-millisecond duration format is ported too, but the viewer's statement times are whole milliseconds today, so nothing shows it yet.
+- **The plan viewer's Wait Stats header shows the total wait time and wait-type count on hover** ([#4591]) - Matches the desktop viewer's tooltip behavior; no visible layout change otherwise.
+- **The plan viewer's runtime summary card matches PerformanceStudio's** ([#4590]) - It's titled "Predicted Runtime" for an estimated-only plan, rows are reordered (Elapsed, CPU:Elapsed, DOP, CPU, Compile, Memory grant, Optimization, CE model), the memory grant row is colored by utilization (red over 100% used, orange when any operator spilled or utilization is moderate-low, red when utilization is very low) with a "⚠ spill" tag when any operator in the plan spilled, and compile time is always shown.
+- **The plan viewer's properties panel can be filtered and copied, and keeps its width** ([#4588]) - The panel now has a filter box, a copy menu with "Copy value" / "Copy name and value" / "Copy all properties", and remembers the width you drag it to for the session.
+- **The plan viewer rolls per-thread stats into one collapsed breakdown** ([#4587]) - For an actual parallel plan, the per-thread stats in each properties section collapse into one "Per-thread breakdown (N threads)" section, as in PerformanceStudio, with a skew note in its header when the work is unbalanced, instead of an inline row per thread per metric.
+- **The plan viewer colours actual-plan edges by how far actual rows diverged from the estimate** ([#4586]) - As in PerformanceStudio, an edge turns orange to red when the operator returned far more rows than estimated and blue when it returned far fewer, in three tiers each way, beyond a divergence limit that defaults to 10 and can be set in the settings file of Lite and the Darling Viewer. Estimated plans keep the plain edge colour.
+- **Wait-category colours use PerformanceStudio's contrast-checked palette** ([#4583]) - Wait-category chart colours in the plan viewer and Lite's wait charts now use a laid-out, contrast-checked palette instead of individually picked colours, and three colours that fell short of readable contrast against the dark chart background are fixed.
+- **Plan analysis drops three rules that PerformanceStudio removed** ([#4565]) - CTE Multiple References, Ineffective Parallelism and Parallel Wait Bottleneck are no longer reported. They guessed at what the runtime stats and wait stats already show. The plan viewer's runtime summary shows a CPU:Elapsed ratio instead, with external-wait time left out of CPU, as PerformanceStudio does.
+- **Dependencies: Velopack to 1.2.158, with the release packer moved to match** ([#4563]) - The Lite and Darling Viewer installers and self-updater move from Velopack 1.2.0 to 1.2.158, the `vpk` tool that packs each release moves with it, and every lock file the bump reaches is regenerated.
+- **The store writes much less WAL refreshing its Query Store rollups** ([#4506]) - store rung V152 drops the rollups' automatically created group indexes that no reader uses, and keeps the time and server indexes the reads need.
+- **The store writes less WAL maintaining its query plan and text dimensions** ([#4502]) - a plan or query text that keeps being seen now refreshes its `last_seen` at most every 6 hours instead of every hour, so there are up to 6× fewer of these non-HOT updates. Retention is unchanged: the dimension prune's 2-day margin still covers the guard.
+- **The store's own PostgreSQL log now names the application behind each line** ([#4501]) - Managed stores gain a new configuration block that adds the connecting application's name to each log line, alongside the existing timestamp and process id. This makes it possible to tell which of the service's own connections (or another client) wrote a given line. Both log readers refuse a line whose application name would make it read as a different kind of message (for example, a log line recorded as an error), instead of recording it. Reading RDS and Aurora logs is unchanged.
+- **Darling and Lite now record each Availability Group's `group_id`, so two monitored secondaries of one AG count as one group even without its primary** ([#4495]) - store rung V151 adds the column. Rows collected before it fall back to matching by name and replica.
+- **The Viewer's Job History reads each server's newest runs through an index instead of sorting the whole fleet's window** ([#4493]) - it shows the same rows in the same order, including a server whose registry entry has since been removed.
+- **The service's startup watermark read looks up each collector's newest run through a new index instead of scanning the recent `collection_log` chunks** ([#4489]) - store rung V150 also adds a per-server `job_history` index for the Viewer's Job History.
+- **Darling's service, Viewer, CLI and store-upgrade connections now name themselves in `application_name`** ([#4486]) - as the web and MCP pools already did (now also on a configured or owner-fallback connection), so `pg_stat_activity` and a store log with `%a` in `log_line_prefix` show which surface ran a statement. A bring-your-own connection string's own application name is kept.
+- **The Viewer's Overview runs its fleet collection-health read once per refresh however many server cards load at once, and the status bar measures the store's size at most every 5 minutes** ([#4482]) - in a measured session the Overview issued that read 40 times in 4.5 minutes, and the size walk ran on every refresh.
+- **The startup watermark read no longer walks every compressed `collection_log` chunk in retention** ([#4480]) - it reads only the last two days, which is all the schedule seed needs.
+- **`get_ag_health` returns at most 11 Availability Group views by default, the least healthy first, and says when more exist** ([#4474]) - a fleet-wide call on a large fleet returned hundreds of kilobytes; scope by `server_name` or raise `limit` for the rest.
+- **The Query Store stores write less WAL keeping their plan and text maps current (a quarter to a third less per touch on a test store)** ([#4472]) - the liveness touch now updates rows in place instead of writing a new row version and index entry each time; the two `last_seen` indexes are dropped (store migration V149), and their retention prune reads each table once per run.
+- **Scheduler issues now report SQL Server CPU, other-process CPU, idle CPU, memory utilization, page faults and working-set change from each scheduler-monitor sample, flagged the way sp_HealthParser flags them** ([#4456]) - the old view read scheduler fields that event never carries, so every row came back empty apart from its time; Darling and Lite now read the fields the event does carry, and a sample is significant when SQL Server's CPU is at least 90%, other processes use at least 50%, or memory utilization is at most 50%.
+- **The store now gives the web dashboard's and MCP server's reads up to 60 s before cancelling them, instead of 15 s** ([#4447]) - existing stores still at the shipped 15 s default move to 60 s through store schema rung V147, and an operator-set value other than 15 is left alone. Reads over 5 s are still written to the store's log. The desktop viewer's reads and the shared storage-layer readers keep their own 15 s and 30 s client limits for now. Bring-your-own stores re-run `tools/provision-roles.sql` to pick up the new value.
+- **The managed store checkpoints every 15 minutes instead of 5, cutting write-ahead log volume** ([#4426]) - a new marker block ships `checkpoint_timeout = 15min`, after a trial on one store kept the checkpoint sync phase far under the checkpointer's own sync-phase self-alert.
 - **Report alerts link to their own page: the Fleet Sweep Rollup opens the sweeps page, and the digests carry no link** ([#4421])
 - **`get_top_procedures_by_cpu` and the Top Procedures grid now route to the hourly rollup once raw ages past its retention window, instead of returning nothing** ([#4413]) - Mirrors the routing already shipped for `get_top_queries_by_cpu`; the payload discloses which tier answered and what an hourly-routed row is missing (`object_type`).
 - **Sized the Linux compose store's background-worker slots and `work_mem` from the product's own
@@ -206,6 +247,44 @@ Releases before 3.0.0 are not archived: those entries carry no prose to move.
 
 ### Fixed
 
+- **A rare deadlock between a chunk drop and the alert pass's database-state check no longer fails that pass** ([#4612]) - The alert pass retries its database-state statements once when PostgreSQL picks them as a deadlock victim, the way the daily purge already retries its chunk drop.
+- **Copying from Lite or the Darling Viewer no longer crashes when another program holds the clipboard** ([#4600]) - Every remaining unguarded clipboard write (recommendation copy/AI-prompt buttons, MCP command/URL copy, grid/row/cell copy, chart image copy, alert detail T-SQL copy, sign-in device-code copy) now retries briefly instead of throwing when another process is holding the clipboard.
+- **The plan viewer no longer crashes when another program is holding the clipboard, and "Copy Query Text" now hands back the full query on a truncated single-statement plan** ([#4593]) - Copying anything from the plan viewer, blocking chain, deadlock graph, or a results grid used to crash the app if the Windows clipboard was briefly locked by another program; copies now fail quietly instead. Separately, "Copy Query Text" on a single-statement plan whose text hit SQL Server's 4,000-character cap now returns the full query the plan was captured from, instead of a copy cut off mid-word — for the Query Store and Active Queries plan sources that pass the original query text.
+- **`get_ag_health` keeps its fleet-wide answer within the 32 KB MCP budget** ([#4568]) - The fleet-wide default page now fills most-severe-first by measured size instead of a fixed 11 groups. On a real fleet whose groups carry many databases, those 11 groups came to about twice the budget. `limit` still caps the page, and `groups_truncated` says whether the size budget or the limit cut it.
+- **Plan analysis: the repro script matches PerformanceStudio's hardening** ([#4567]) - Reproduction scripts built from a plan now drop, with a header warning, a parameter whose plan-supplied name or data type is not a plain identifier or type, and use a placeholder for a compiled value that is not a safe literal. Every value written into the script's header comment is escaped so it cannot end the comment, and the `USE [database]` line is left out when the database name contains a control character. Parameters named `@0`, `@1`, … from simple and forced parameterization keep working.
+- **A cancelled analysis, comparison, or collection-cycle read now propagates instead of returning an empty or fallback result** ([#4562]) - A cancelled `get_analysis_facts` or `compare_analysis` MCP call, or a shutdown mid-collection-cycle, used to come back looking like a clean empty result or an ordinary read failure; all now surface the caller's own cancellation.
+- **Lite's MCP analysis tools stop reading when the client cancels the request** ([#4561]) - A cancelled `get_analysis_facts`, `compare_analysis` or `audit_config` request, and the config-change attribution behind it, now stops reading DuckDB and returns as cancelled, instead of reading to the end and logging an error. Darling's analysis tools already did this.
+- **Plan analysis stops when its caller cancels** ([#4560]) - The MCP plan tools stop parsing and analysing a plan when the client cancels the request, and the Darling and Lite analysis passes stop on shutdown instead of finishing a large plan first.
+- **Plan analysis now looks inside a procedure, function or cursor body** ([#4557]) - The plan viewer and the `analyze_plan_xml` MCP tool skipped every statement inside a stored procedure or user-defined function call, and a cursor's own sub-plan was never read at all. An `EXEC <procedure>` plan analyzed as a single statement with no findings, no cost, and no benefit score for the work actually happening in the body.
+- **Plan analysis: the non-SARGable predicate check now knows which table a function, conversion or `ISNULL`/`COALESCE` call is wrapping, so it stops flagging a Nested Loops outer reference or a parameter-side conversion, recognizes `LIKE` as a comparison, and now also catches a function or conversion on an unaliased table variable's own column** ([#4554]) - Each previously produced a Non-SARGable Predicate warning for a predicate that could actually seek (or, for the table-variable case, missed a real one), and pointed at the wrong cause.
+- **The rollup coverage check no longer writes about 170 MB of temp files every five minutes on a large store** ([#4553]) - Finding a rollup's oldest bucket sorts every compressed batch of its oldest chunk. The check now re-measures a rollup only when its oldest chunk changes, and reuses the last measurement otherwise.
+- **Plan analysis now scores each finding's benefit, and the plan viewer and MCP plan tools show it** ([#4552]) - The benefit scorer was never run, so no finding had a benefit value. Findings are now ordered by their estimated benefit. The viewer's headers read "— up to X% benefit", and the MCP plan tools report `max_benefit_percent`. This turns on the Serial Plan and Bare Scan benefit estimates.
+- **A deeply nested execution plan no longer crashes the Darling service, the MCP plan tools or the plan viewer** ([#4551]) - Plans nested deeper than about 80–120 operators overflowed the stack and ended the process that parsed them. Parsing now runs on its own thread with a large enough stack, stops cleanly at 1,000 levels, and rejects plan XML over 16 MB.
+- **Plan analysis: adaptive-join memory grants, redundant UDF findings, and culture-dependent percentages** ([#4548]) - The Excessive Memory Grant finding now notes when an adaptive join ran as Nested Loops, so the unused grant isn't mistaken for a separate problem. Rule 6's Scalar UDF finding no longer duplicates a Serial Plan finding that already names the same UDF as the reason a plan runs serially. Three warning messages that reported a percentage now format it the same way regardless of the machine's locale.
+- **Plan analysis: an operator's reported self-time no longer includes the coordinator thread's wall-clock time or double-counts a batch-mode or Compute Scalar child's time, in either a parallel or a serial plan** ([#4547]) - the "Operator time" text and the severity of plan findings now reflect the operator that actually did the work, not an operator that happened to sit above a batch subtree, a Compute Scalar pass-through, or near the top of a parallel branch.
+- **The Join OR Clause plan-analysis finding no longer fires on a parameterized `IN` list** ([#4544]) - A query such as `WHERE t.A IN (@p1, @p2)` on an indexed column builds a dynamic seek with the same operator shape as a real join OR. The finding now also requires a lookup branch that reads a value from another input.
+- **Plan analysis no longer flags an unexecuted operator as a row estimate mismatch, and stops recommending a rewrite for the engine's own table-valued functions (`STRING_SPLIT`, `OPENJSON`, `GENERATE_SERIES`, DMVs/DMFs)** ([#4542]) - Rule 5 previously warned about a 0-row estimate mismatch on any operator whose branch never ran; it now requires `ActualExecutions > 0`. Rule 23 previously warned on every table-valued function operator; it now skips one whose object has neither a database nor a schema, which is how the engine's own functions appear.
+- **The store no longer compresses every heavy table at once after midnight** ([#4541]) - The nine largest hypertables each become eligible for compression at their own hour (1 to 9 hours after the usual one day), so the nightly compression pass no longer times out collector statements. Existing stores pick up the new delays on their next start.
+- **Plan analysis rules for `MAXDOP 1`, `RECOMPILE`, `OPTIMIZE FOR UNKNOWN`, `NOT IN`, and row-goal causes ignore hints and keywords written inside a comment or a string literal** ([#4540]) - A hint or keyword sitting in a `--`/`/* */` comment or inside a quoted string no longer counts as code, so these rules no longer fire on text that isn't actually part of the query, and no longer miss a real hint hidden behind one.
+- **A managed PostgreSQL or a config load that takes more than two minutes to start no longer leaves Darling running without collecting** ([#4538]) - The sustained start-up retry from [#4509] now also covers the bundled PostgreSQL's own start and, for failures already treated as transient, loading `darling.json`. While that retry runs, `/api/ping` and the status detail say it is a sustained retry, with the interval, instead of reporting an attempt count past the cap.
+- **After a long store outage at start, Darling now keeps retrying and starts collecting when the store is back** ([#4509]) - Once the two-minute startup retry budget for a recoverable store connection or migration failure ran out, Darling stood down and never collected again until the service was restarted, even though the service itself kept running. It now keeps retrying, more slowly, until the store is reachable again.
+- **After a SQL Agent job-history identity reset (a reseed, a restore or a failover), Darling and Lite re-read the recent history once instead of on every collection** ([#4496]) - the watermark read the highest ID ever stored, which a reset leaves above every new ID. One store collected each run about 13 times.
+- **A gap of one hour in the collection-health rollup no longer makes the Viewer, web and MCP health reads scan seven days of raw collection log** ([#4494]) - the missing hours are read raw and the rest still comes from the rollup. A store measured the raw path at 6.6 s against 184 ms.
+- **Lite's perfmon chart and `get_perfmon_trend` also set aside a one-sample Wait Statistics spike and say how many** ([#4492]).
+- **A one-sample spike in a Wait Statistics counter no longer flattens the perfmon chart** ([#4490]) - SQL Server occasionally reports a cumulative-sized value in a per-second instance for a single sample. The Viewer's perfmon chart and `get_perfmon_trend` now set such a sample aside and say how many, and the stored value is unchanged.
+- **Lite's Job History shows that it is loading instead of an empty grid, and says when it shows only the newest rows** ([#4488]).
+- **`query_store` no longer reads as "produced then stopped" between Query Store intervals** ([#4483]) - it runs every 5 minutes, but its source advances once per interval (up to a day). It's flagged only after more than a day plus 15 minutes with nothing new.
+- **The Availability Groups tab and `get_ag_health`'s `distinct_ag_count` no longer count differently-owned AGs that share a name as one group** ([#4481]) - e.g. every Amazon RDS Multi-AZ instance's internal `RDSAG0`. An AG monitored from both its primary and a secondary still counts once.
+- **Job History shows that it is loading instead of an empty grid, and says when it shows only the newest rows** ([#4481]).
+- **Recommendations say "queries", not "querys"** ([#4481]).
+- **Plan analysis now reads the query plan inside an IF condition, and the query and plan hashes of statements that carry several plans** ([#4470]) - an `IF EXISTS (SELECT …)` condition's operators and missing-index suggestions were dropped, and a `MULTIPLE PLAN` statement came back with no hashes.
+- **Upgrading a busy store no longer stops partway and asks for a re-run when the service's process takes a few extra seconds to exit** ([#4467]) - the upgrade script now waits up to two minutes for it before refusing.
+- **Stores that expose the managed PostgreSQL on the network re-verify a settings file left unstamped by a hand edit or an interrupted start, instead of reporting a failure on every start** ([#4465])
+- **Stores that expose the managed PostgreSQL on the network now finish the settings-file migration, instead of restoring the previous file and logging a warning on every start** ([#4464]) - the command-line `listen_addresses` outranks the file, so the check no longer compares keys the command line owns.
+- **The daily chunk-interval adjustment now shrinks a busy table's chunks on stores that hold more than 1,000 chunks in total** ([#4458]) - its 1,000-chunk limit counted every table's chunks on the store, so a store past 1,000 in total held every table at 24 hours however far over its memory budget it was; the limit now applies to each table's own chunk count at the smaller size, and each held table and each run's store total and budget are logged at Information.
+- **Severe-error rows from system_health now carry their database id, and no longer list errors below severity 16 or the two routine connection-error numbers sp_HealthParser ignores** ([#4455]) - the database id was read from the wrong part of the captured event and always came back empty, and the unfiltered view could show errors the proc's own report never would.
+- **A managed PostgreSQL 17 store whose settings carried an old 2 GB maintenance_work_mem starts again after the move to darling-managed.conf** ([#4444]) - a carried value from before the PostgreSQL 17 memory cap is now capped the same way a freshly derived one already was, so `postgres -C` no longer rejects it on start.
+- **After a long outage across an upgrade, repaired hourly query statistics also reach the daily rollup, so the hourly tier's retention isn't held** ([#4439])
 - **PostgreSQL statement statistics count a re-created statement entry's work since it was re-created, instead of under-counting it; on PostgreSQL 16, where the entry's creation time isn't available, such a row is recorded as unknown** ([#4435])
 - **Wait statistics on servers where a scheduled job clears them are counted from each clear instead of being recorded as unknown; only the work between the last collection and the clear stays unknown** ([#4434])
 - **The raw purge gate judges each rollup against the rows that rollup can hold, so an hour of CPU-unknown query statistics at the floor can't hold the purge forever** ([#4432])
@@ -4071,3 +4150,79 @@ Full entries: [docs/changelog/3.0.md](docs/changelog/3.0.md)
 [#4435]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4435
 [#4436]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4436
 [#4437]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4437
+[#4426]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4426
+[#4439]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4439
+[#4444]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4444
+[#4447]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4447
+[#4454]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4454
+[#4455]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4455
+[#4456]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4456
+[#4458]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4458
+[#4464]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4464
+[#4465]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4465
+[#4467]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4467
+[#4470]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4470
+[#4472]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4472
+[#4474]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4474
+[#4480]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4480
+[#4481]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4481
+[#4482]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4482
+[#4483]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4483
+[#4486]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4486
+[#4488]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4488
+[#4489]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4489
+[#4490]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4490
+[#4492]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4492
+[#4493]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4493
+[#4494]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4494
+[#4495]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4495
+[#4496]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4496
+[#4501]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4501
+[#4502]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4502
+[#4506]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4506
+[#4509]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4509
+[#4538]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4538
+[#4540]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4540
+[#4541]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4541
+[#4542]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4542
+[#4543]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4543
+[#4544]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4544
+[#4545]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4545
+[#4547]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4547
+[#4548]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4548
+[#4549]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4549
+[#4550]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4550
+[#4551]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4551
+[#4552]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4552
+[#4553]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4553
+[#4554]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4554
+[#4555]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4555
+[#4556]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4556
+[#4557]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4557
+[#4559]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4559
+[#4560]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4560
+[#4561]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4561
+[#4562]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4562
+[#4563]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4563
+[#4565]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4565
+[#4567]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4567
+[#4568]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4568
+[#4583]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4583
+[#4585]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4585
+[#4586]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4586
+[#4587]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4587
+[#4588]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4588
+[#4590]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4590
+[#4591]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4591
+[#4592]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4592
+[#4593]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4593
+[#4595]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4595
+[#4596]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4596
+[#4599]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4599
+[#4600]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4600
+[#4601]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4601
+[#4603]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4603
+[#4604]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4604
+[#4610]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4610
+[#4612]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4612
+[#4614]: https://github.com/erikdarlingdata/PerformanceMonitor/pull/4614

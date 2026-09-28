@@ -383,9 +383,10 @@ public partial class WaitDrillDownWindow : Window
 
         var label = $"{(isActual ? "Live" : "Est")} Plan - SPID {row.SessionId}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
-            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId);
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, row.DatabaseName);
             await viewer.LoadPlan(planXml, label, row.QueryText);
         }
         catch (Exception ex)
@@ -470,7 +471,7 @@ public partial class WaitDrillDownWindow : Window
             _actualPlanCts.Token);
 
         if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, row.QueryText);
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, row.QueryText, row.DatabaseName);
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

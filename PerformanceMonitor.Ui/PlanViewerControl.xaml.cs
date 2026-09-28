@@ -20,6 +20,15 @@ namespace PerformanceMonitor.Ui;
 
 public partial class PlanViewerControl : UserControl
 {
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule config, set by the host (the Darling Viewer from its
+    /// darling.json "analyzer" section, Lite from settings.json's "analyzer" key) before
+    /// <see cref="LoadPlan"/> runs. Null (the default — no host has set it, or the section is
+    /// omitted) behaves as <see cref="AnalyzerConfig.Default"/>: no rule disabled, no severity
+    /// overridden, exactly today's behavior.
+    /// </summary>
+    public AnalyzerConfig? AnalyzerConfig { get; set; }
+
     private ParsedPlan? _currentPlan;
     private PlanStatement? _currentStatement;
     private int _allStatementsCount;
@@ -78,6 +87,8 @@ public partial class PlanViewerControl : UserControl
         (TryFindResource("InsightWaitsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x4F, 0xA3, 0xFF));
     private SolidColorBrush ParamsAccentBrush =>
         (TryFindResource("InsightParamsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x7B, 0xCF, 0x7B));
+    private SolidColorBrush ServerAccentBrush =>
+        (TryFindResource("InsightServerBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x9B, 0x9B, 0xFF));
 
     // Parameters card value brushes: theme tokens shared with the rest of the viewer's alert colours.
     private SolidColorBrush WarningBrush =>
@@ -172,9 +183,22 @@ public partial class PlanViewerControl : UserControl
     /// <summary>
     /// #4530: the server's edition/MAXDOP for rule 38, set by the caller from a store read (this app has no
     /// live connection to the monitored server at plan-view time — see <see cref="LoadPlan"/>). <c>null</c>
-    /// when the caller has no metadata; the analyzer then falls back to rule 38's Info branch.
+    /// when the caller has no metadata; the analyzer then falls back to rule 38's Info branch. Also feeds
+    /// the Server Context card (#4597): setting this after a statement is already showing refreshes that
+    /// card in place, matching PerformanceStudio's <c>Metadata</c> setter
+    /// (erikdarlingdata/PerformanceStudio@85492a1).
     /// </summary>
-    public PerformanceMonitor.PlanAnalysis.ServerMetadata? ServerMetadata { get; set; }
+    private PerformanceMonitor.PlanAnalysis.ServerMetadata? _serverMetadata;
+    public PerformanceMonitor.PlanAnalysis.ServerMetadata? ServerMetadata
+    {
+        get => _serverMetadata;
+        set
+        {
+            _serverMetadata = value;
+            if (_currentStatement != null)
+                ShowServerContext();
+        }
+    }
 
     /// <summary>
     /// The full query text the host passed <see cref="LoadPlan"/>, held for "Copy Query Text"'s
@@ -201,11 +225,12 @@ public partial class PlanViewerControl : UserControl
         /* Parse + analyze off the UI thread — a multi-MB showplan is two heavy passes that would
            otherwise freeze the window for seconds. Only the render below touches the UI. A refused
            or exception-terminated parse sets ParsedPlan.ParseError instead of throwing; see below. */
+        var analyzerConfig = AnalyzerConfig;
         var serverMetadata = ServerMetadata;
         _currentPlan = await System.Threading.Tasks.Task.Run(() =>
         {
             var plan = ShowPlanParser.Parse(planXml);
-            PlanAnalysisPipeline.Run(plan, null, serverMetadata, System.Threading.CancellationToken.None);
+            PlanAnalysisPipeline.Run(plan, analyzerConfig, serverMetadata, System.Threading.CancellationToken.None);
             return plan;
         });
 

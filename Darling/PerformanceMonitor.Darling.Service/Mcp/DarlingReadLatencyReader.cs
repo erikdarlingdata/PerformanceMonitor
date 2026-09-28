@@ -35,7 +35,7 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 /// <para>Timeouts are counted separately (<c>run_count</c> summed WHERE <c>outcome = 'timeout'</c>, the exact
 /// lowercase spelling <see cref="ReadLatencyAccumulator.FlushAsync"/> writes) rather than folded into the
 /// outcome-blind row: a route's overall latency and its timeout rate are two different questions. The bucket
-/// histogram itself is summed across EVERY outcome (ok, timeout, cancelled, error alike) because a timed-out
+/// histogram itself is summed across EVERY outcome (ok, timeout, cancelled, error, limit alike) because a timed-out
 /// or errored read still took real wall-clock time and belongs in the same "how long did this route take"
 /// picture — <c>get_read_latency</c>'s note says so.</para>
 /// </summary>

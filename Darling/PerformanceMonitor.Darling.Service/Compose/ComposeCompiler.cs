@@ -37,7 +37,8 @@ public sealed record ComposeRunContext(
     IReadOnlyDictionary<string, string?> Variables,
     RollupAvailability Rollups,
     DateTime NowUtc,
-    RollupCoverage Coverage)
+    RollupCoverage Coverage,
+    bool QueryStoreWideEligible = false)
 {
     public static readonly IReadOnlyDictionary<string, string?> NoVariables =
         new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -167,7 +168,7 @@ public static class ComposeCompiler
     /// </summary>
     private static string BuildFactRelation(
         string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam,
-        string? hybridStartParam, string? hybridEndParam, ComposeAggregate aggregate)
+        string? hybridStartParam, string? hybridEndParam, ComposeAggregate aggregate, ComposeRunContext context)
     {
         if (route.Tier == ComposeSourceTier.HourlyRawEdges)
         {
@@ -199,6 +200,21 @@ public static class ComposeCompiler
         if (!string.Equals(sourceTable, QueryStoreTable, StringComparison.Ordinal))
         {
             return $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
+        }
+
+        /* #4605: query_store_interval_wide (V145) already holds the latest snapshot per
+           interval, every outcome — exactly what the raw ROW_NUMBER dedupe below computes — so an eligible
+           run reads it directly instead of re-sorting every raw snapshot in the window. Eligibility
+           (QueryStoreIntervalWide.UseTable plus clause 6, per server in scope) is decided by the runner
+           BEFORE compiling (ComposeRunContext.QueryStoreWideEligible), never here: the compiler stays pure
+           and never opens a connection. The table has no server_name column, so the relation joins the
+           registry (collect.servers, server_id PRIMARY KEY / server_name NOT NULL — 1:1) to restore it,
+           the same column every downstream WHERE/GROUP BY/partition on this fact body reads. */
+        if (context.QueryStoreWideEligible)
+        {
+            return $"(SELECT w.*, s.server_name FROM {PgSchemaGenerator.CollectSchema}.query_store_interval_wide AS w "
+                + $"JOIN {PgSchemaGenerator.CollectSchema}.servers AS s ON s.server_id = w.server_id "
+                + $"WHERE w.{timeColumn} >= {startParam} AND w.{timeColumn} <= {endParam})";
         }
 
         return "(SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY server_id, server_name, database_name, "
@@ -307,7 +323,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, hybridStartParam, hybridEndParam, plan.Aggregate));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, hybridStartParam, hybridEndParam, plan.Aggregate, context));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a

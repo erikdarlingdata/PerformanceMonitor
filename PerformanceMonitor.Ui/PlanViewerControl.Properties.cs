@@ -1644,6 +1644,80 @@ public partial class PlanViewerControl
         SetInsightQuiet(RuntimeSummaryTitle, TooltipFgBrush, RuntimeSummaryAccent, isEmpty: false);
     }
 
+    /// <summary>
+    /// Fills the Server Context card: the server's name/edition/version, hardware, and instance
+    /// settings, in <see cref="ServerContextCard"/>'s order, or the quiet empty state when no
+    /// <see cref="ServerMetadata"/> has been set. Ported from PerformanceStudio dev's
+    /// <c>ShowServerContext</c> (erikdarlingdata/PerformanceStudio@85492a1); the row logic itself
+    /// lives in the pure <see cref="ServerContextCard"/> so it can be pinned outside WPF.
+    /// </summary>
+    private void ShowServerContext()
+    {
+        ServerContextContent.Children.Clear();
+
+        var rows = ServerContextCard.Rows(ServerMetadata);
+        if (rows.Count == 0)
+        {
+            ServerContextEmpty.Visibility = Visibility.Visible;
+            SetInsightQuiet(ServerContextHeader, ServerAccentBrush, ServerContextAccent, isEmpty: true);
+            return;
+        }
+
+        ServerContextEmpty.Visibility = Visibility.Collapsed;
+        SetInsightQuiet(ServerContextHeader, ServerAccentBrush, ServerContextAccent, isEmpty: false);
+
+        var labelBrush = MutedBrush;
+        var valueBrush = TooltipFgBrush;
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        for (int rowIndex = 0; rowIndex < rows.Count; rowIndex++)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var row = rows[rowIndex];
+            var labelText = new TextBlock
+            {
+                Text = row.Label,
+                FontSize = 11,
+                Foreground = labelBrush,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Margin = new Thickness(0, 1, 8, 1)
+            };
+            Grid.SetRow(labelText, rowIndex);
+            Grid.SetColumn(labelText, 0);
+            grid.Children.Add(labelText);
+
+            var valueText = new TextBlock
+            {
+                Text = row.Value,
+                FontSize = 11,
+                Foreground = valueBrush,
+                Margin = new Thickness(0, 1, 0, 1)
+            };
+            Grid.SetRow(valueText, rowIndex);
+            Grid.SetColumn(valueText, 1);
+            grid.Children.Add(valueText);
+        }
+
+        ServerContextContent.Children.Add(grid);
+    }
+
+    /// <summary>
+    /// Formats a memory value given in KB to a human-readable string.
+    /// Under 1,024 KB: show KB. 1,024-1,048,576 KB: show MB (1 decimal). Over 1,048,576 KB: show GB (2 decimals).
+    /// </summary>
+    private static string FormatMemoryGrantKB(long kb)
+    {
+        if (kb < 1024)
+            return $"{kb:N0} KB";
+        if (kb < 1024 * 1024)
+            return $"{kb / 1024.0:N1} MB";
+        return $"{kb / (1024.0 * 1024.0):N2} GB";
+    }
+
     private void UpdateInsightsHeader()
     {
         InsightsPanel.Visibility = Visibility.Visible;

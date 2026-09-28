@@ -65,6 +65,13 @@ public sealed partial class PgFactCollector : IFactCollector
     private readonly ILogger? _logger;
 
     /// <summary>
+    /// #4535: the plan analyzer's per-rule config (darling.json's optional "analyzer" section).
+    /// Same optional-and-defaulted pattern as <see cref="_logger"/>: a caller that constructs this
+    /// collector without one gets <c>AnalyzerConfig.Default</c> — today's behavior, byte-for-byte.
+    /// </summary>
+    private readonly PerformanceMonitor.PlanAnalysis.AnalyzerConfig _analyzerConfig;
+
+    /// <summary>
     /// The per-command deadline for every fact read in this collector (#2810), set explicitly so the
     /// value is a deliberate choice rather than Npgsql's undocumented 30 s default — the #2795 lesson.
     ///
@@ -98,10 +105,11 @@ public sealed partial class PgFactCollector : IFactCollector
     /// <see cref="PgAnomalyDetector"/> and <see cref="PgPlanFetcher"/> in this project — so #2826
     /// cost no call-site churn, and a test constructing a collector without one still compiles.
     /// </summary>
-    public PgFactCollector(NpgsqlDataSource postgres, ILogger? logger = null)
+    public PgFactCollector(NpgsqlDataSource postgres, ILogger? logger = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        _analyzerConfig = analyzerConfig ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
     }
 
     /// <summary>

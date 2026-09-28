@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Linq;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service.Mcp;
 using Xunit;
@@ -44,18 +45,24 @@ public sealed class ProductiveZeroBandingTests
 {
     private static readonly DateTime Now = DateTime.UtcNow;
 
-    /* job_history's cadence (1 min) and a fortnight of it, so the streak widths below are the real
-       collector's rather than a convenient round number. */
+    /* A fortnight of a one-minute collector, so the streak widths below are a real collector's rather than a
+       convenient round number. */
     private const long RowsInPriorWindow = 25_230;
 
     /// <summary>
     /// The regressed row: seven days of productive cycles, then three consecutive SUCCESS/0-row runs. The
     /// success clock reads ONE MINUTE, so every staleness arm says HEALTHY and the floor is the whole
     /// verdict.
+    ///
+    /// <para>On <c>query_stats</c>, a dense one-minute collector that stores rows on nearly every cycle,
+    /// rather than on <c>job_history</c>, the measured case: since #4620 job_history is in the
+    /// activity-sourced set, which also needs <see cref="CollectorHealthClassifier.ActivitySourcedQuietBar"/>
+    /// of quiet before it flags (pinned further down). The streak-only rule these tests pin is the one every
+    /// collector outside that set still gets.</para>
     /// </summary>
     private static CollectorHealth ProducedThenStopped(long trailingZeroRuns = 3) => new()
     {
-        CollectorName = "job_history",
+        CollectorName = "query_stats",
         TotalRuns = 10_080,
         SuccessCount = 10_080,
         ErrorCount = 0,
@@ -225,11 +232,11 @@ public sealed class ProductiveZeroBandingTests
     [Fact]
     public void WithNoProductiveHistory_TheWindowHoldsNoRegression()
     {
-        Assert.False(CollectorHealthClassifier.ProducedThenStopped("job_history", 10_080, null));
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("query_stats", 10_080, null));
 
         /* The positive control for the negation above: the same call with the instant present is true, so
            a mutation that returned false unconditionally cannot pass here. */
-        Assert.True(CollectorHealthClassifier.ProducedThenStopped("job_history", 3, Now.AddHours(-4)));
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped("query_stats", 3, Now.AddHours(-4)));
     }
 
     /// <summary>
@@ -369,7 +376,24 @@ public sealed class ProductiveZeroBandingTests
             Assert.Contains("regressed_from_productive = r.AnyRegression,", payload, StringComparison.Ordinal);
             Assert.Contains("regression_finding = r.AnyRegressionFinding,", payload, StringComparison.Ordinal);
             Assert.Contains("zero_row_success_runs = r.TrailingZeroRowSuccessRuns,", payload, StringComparison.Ordinal);
+
+            /* #4620: the sentence rides on EVERY row shape that can carry the flag, not just the full one.
+               The compact shape is HEALTHY-only and a regressed row is floored to WARNING, so it never meets
+               one; the full and partial shapes both do, so the flag and the sentence appear once in each. A
+               bare Contains could not see the partial copy go missing, because the full one would satisfy it. */
+            Assert.Equal(2, CountOf(payload, "regressed_from_productive = r.AnyRegression,"));
+            Assert.Equal(2, CountOf(payload, "regression_finding = r.AnyRegressionFinding,"));
+            var partialShape = payload[payload.IndexOf("private static object PartialCollectionHealthRow(", StringComparison.Ordinal)..];
+            Assert.Contains("regression_finding = r.AnyRegressionFinding,", partialShape, StringComparison.Ordinal);
         }
+
+        /* And the web table has a column for it: the viewer reads the full shape (full_detail: true), which
+           always carried the sentence, but no column rendered it, so a regressed row read WARNING with every
+           cell beside it blank. */
+        Assert.Contains(
+            "{ key: \"regression_finding\", label: \"Regression\", wrap: true }",
+            ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/wwwroot/js/pages/server-tabs.js"),
+            StringComparison.Ordinal);
 
         /* Lite's health read is an ordinal TWIN of Darling's, and this class is not Darling-specific -
            both SKUs dedup on watermarks, and a watermark whose source identity regressed starves the
@@ -462,5 +486,141 @@ public sealed class ProductiveZeroBandingTests
         Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector("wait_stats"));
         Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector("job_history"));
         Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector(null));
+    }
+
+    /* -- #4620: collectors whose rows exist only while the target is busy ---------------------------
+       On an idle target these return nothing for hours, so the streak alone flagged them WARNING most of
+       the week while they worked. They now also need ActivitySourcedQuietBar of quiet, measured from the
+       last productive run. */
+
+    /// <summary>
+    /// The ruled pin, on every member of the set through the ROW, so the band is asserted and not just the
+    /// predicate: a three-run zero tail whose last productive run was 71 hours ago reads HEALTHY with no
+    /// sentence, and the same row at 73 hours is flagged, WARNING, with the sentence. On dev every one of
+    /// these rows banded WARNING at 71 hours too.
+    /// </summary>
+    [Fact]
+    public void AnActivitySourcedCollector_ReadsHealthyAt71Hours_AndIsFlaggedAt73()
+    {
+        foreach (var name in CollectorHealthClassifier.ActivitySourcedCollectorNamesForPinning)
+        {
+            var quiet = ProducedThenStopped();
+            quiet.CollectorName = name;
+            quiet.LastProductiveTime = Now.AddHours(-71);
+
+            Assert.False(quiet.ProducedThenStopped, name);
+            Assert.False(quiet.AnyRegression, name);
+            Assert.Equal(CollectorHealthClassifier.Healthy, quiet.HealthStatus);
+            Assert.Null(quiet.AnyRegressionFinding);
+
+            var stopped = ProducedThenStopped();
+            stopped.CollectorName = name;
+            stopped.LastProductiveTime = Now.AddHours(-73);
+
+            Assert.True(stopped.ProducedThenStopped, name);
+            Assert.Equal(CollectorHealthClassifier.Warning, stopped.HealthStatus);
+            Assert.Contains("has recorded SUCCESS with zero rows on 3 runs since", stopped.AnyRegressionFinding!, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// The bar itself, on a held clock: exactly <see cref="CollectorHealthClassifier.ActivitySourcedQuietBar"/>
+    /// of quiet is NOT flagged, because the comparison is strictly greater, and one tick more is. The value is
+    /// pinned too, so changing the ruled 72 hours is a deliberate edit to this line rather than a side effect.
+    /// </summary>
+    [Fact]
+    public void TheActivitySourcedBar_Is72Hours_StrictlyGreater()
+    {
+        Assert.Equal(TimeSpan.FromHours(72), CollectorHealthClassifier.ActivitySourcedQuietBar);
+
+        var nowUtc = new DateTime(2026, 9, 28, 12, 0, 0, DateTimeKind.Utc);
+        var lastProductive = nowUtc - CollectorHealthClassifier.ActivitySourcedQuietBar;
+
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 4_320, lastProductive, nowUtc));
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 4_320, lastProductive.AddTicks(-1), nowUtc));
+
+        /* And the bar is not a substitute for the streak: past it, two zero-row runs are still not three. */
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("waiting_tasks", 2, nowUtc.AddHours(-100), nowUtc));
+    }
+
+    /// <summary>
+    /// A dense collector outside the set keeps the three-run rule, minutes after its last productive run.
+    /// <c>memory_grant_stats</c> is named in the issue but reads a view that has rows whether or not
+    /// anything runs, and <c>query_stats</c> stored rows on 99.6-100% of its runs everywhere measured: a zero
+    /// streak on either is a fault, and the longer leash would only hide it.
+    /// </summary>
+    [Theory]
+    [InlineData("query_stats")]
+    [InlineData("memory_grant_stats")]
+    public void ADenseCollectorOutsideTheSet_IsStillFlaggedAtThreeRuns(string name)
+    {
+        Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector(name));
+
+        var row = ProducedThenStopped();
+        row.CollectorName = name;
+
+        Assert.True(row.ProducedThenStopped);
+        Assert.Equal(CollectorHealthClassifier.Warning, row.HealthStatus);
+
+        var twoRuns = ProducedThenStopped(trailingZeroRuns: 2);
+        twoRuns.CollectorName = name;
+        Assert.False(twoRuns.ProducedThenStopped);
+    }
+
+    /// <summary>
+    /// #3885's measured shape on job_history is still caught: 1,900 zero-row successes and a productive
+    /// run six and a half days back is well past the bar and still inside the read's seven-day window. And
+    /// the issue's own case, a job_history on an idle target that last stored a row four hours ago, is no
+    /// longer flagged (on dev it banded WARNING).
+    /// </summary>
+    [Fact]
+    public void JobHistory_TheMeasuredFortnightShape_IsStillCaught_AnIdleEveningIsNot()
+    {
+        Assert.True(CollectorHealthClassifier.ProducedThenStopped("job_history", 1_900, Now.AddDays(-6.5)));
+        Assert.False(CollectorHealthClassifier.ProducedThenStopped("job_history", 3, Now.AddHours(-4)));
+    }
+
+    /// <summary>
+    /// The set, by name: exactly the seven the ruling named, and not the two dense collectors beside them.
+    /// It must also stay disjoint from the event, on-load and interval sets, because the predicate checks
+    /// those first: a member that was also an event collector could never reach this arm. Both suites pin
+    /// the names against the catalog in SwallowedItemFailureTests.
+    /// </summary>
+    [Fact]
+    public void TheActivitySourcedSet_NamesTheSevenActivityReads_AndNothingElse()
+    {
+        var expected = new[]
+        {
+            "waiting_tasks", "query_snapshots", "running_jobs", "job_history",
+            "procedure_stats", "pg_lock_stats", "pg_session_states",
+        };
+
+        Assert.Equal(
+            expected.OrderBy(n => n, StringComparer.Ordinal),
+            CollectorHealthClassifier.ActivitySourcedCollectorNamesForPinning.OrderBy(n => n, StringComparer.Ordinal));
+
+        foreach (var name in expected)
+        {
+            Assert.True(CollectorHealthClassifier.IsActivitySourcedCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsEventCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsOnLoadCollector(name), name);
+            Assert.False(CollectorHealthClassifier.IsIntervalSourcedCollector(name), name);
+        }
+
+        Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector("memory_grant_stats"));
+        Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector("query_stats"));
+        Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector("query_store"));
+        Assert.False(CollectorHealthClassifier.IsActivitySourcedCollector(null));
+    }
+
+    private static int CountOf(string haystack, string needle)
+    {
+        var count = 0;
+        for (var at = haystack.IndexOf(needle, StringComparison.Ordinal); at >= 0; at = haystack.IndexOf(needle, at + needle.Length, StringComparison.Ordinal))
+        {
+            count++;
+        }
+
+        return count;
     }
 }
