@@ -9346,7 +9346,12 @@ WHERE ca.view_schema = 'collect'
     /// the cached floor no longer describes the relation actually being read. <see cref="MeasuredAtUtc"/> backs
     /// <see cref="RollupFloorMaxReuse"/>.
     /// </summary>
-    internal readonly record struct RollupFloorCacheEntry(string? ChunkName, string? MaterializationHypertable, DateTime Floor, DateTime MeasuredAtUtc);
+    /// <para><see cref="Ceiling"/> (#4605 part 2, LA-1) is the materialization ceiling measured in the SAME
+    /// cycle as <see cref="Floor"/> — re-read whenever the floor is (the ceiling moves every refresh, so
+    /// piggybacking on the floor's re-measure cadence, rather than a separate TTL, is the cheap answer: a
+    /// view whose floor is trusted from cache almost never has a stale-enough ceiling to matter, and a
+    /// dedicated per-request re-read would be the expensive scan #4539 already exists to avoid).</para>
+    internal readonly record struct RollupFloorCacheEntry(string? ChunkName, string? MaterializationHypertable, DateTime Floor, DateTime MeasuredAtUtc, DateTime? Ceiling = null);
 
     /// <summary>The oldest-chunk catalog read's per-view identity, before any floor has been attached to it.</summary>
     internal readonly record struct RollupChunkIdentity(string? ChunkName, string? MaterializationHypertable);
@@ -9416,6 +9421,21 @@ WHERE ca.view_schema = 'collect'
         IReadOnlyDictionary<string, RollupChunkIdentity> oldestNow,
         RollupAvailability availability,
         DateTime now)
+        => MergeRollupFloors(measuredThisCycle, cached, oldestNow, availability, now, ceilingsMeasuredThisCycle: null);
+
+    /// <summary>
+    /// #4605 part 2 (LA-1): the same merge, with <paramref name="ceilingsMeasuredThisCycle"/> carrying the
+    /// freshly-read <see cref="RollupMaterializationWatermark"/> for every view re-measured THIS cycle —
+    /// <c>null</c> for the two-argument overload (every pre-#4605 caller and test), which leaves every new
+    /// entry's ceiling unset (the safe "unknown" default) rather than guessing one.
+    /// </summary>
+    internal static (IReadOnlyDictionary<string, DateTime> Floors, IReadOnlyDictionary<string, RollupFloorCacheEntry> NewCacheEntries) MergeRollupFloors(
+        IReadOnlyDictionary<string, DateTime?> measuredThisCycle,
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> cached,
+        IReadOnlyDictionary<string, RollupChunkIdentity> oldestNow,
+        RollupAvailability availability,
+        DateTime now,
+        IReadOnlyDictionary<string, DateTime?>? ceilingsMeasuredThisCycle)
     {
         var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         var newEntries = new Dictionary<string, RollupFloorCacheEntry>(StringComparer.Ordinal);
@@ -9427,7 +9447,10 @@ WHERE ca.view_schema = 'collect'
                 floors[view] = floor;
                 if (oldestNow.TryGetValue(view, out var identity))
                 {
-                    newEntries[view] = new RollupFloorCacheEntry(identity.ChunkName, identity.MaterializationHypertable, floor, now);
+                    DateTime? ceiling = ceilingsMeasuredThisCycle is not null && ceilingsMeasuredThisCycle.TryGetValue(view, out var freshCeiling)
+                        ? freshCeiling
+                        : null;
+                    newEntries[view] = new RollupFloorCacheEntry(identity.ChunkName, identity.MaterializationHypertable, floor, now, ceiling);
                 }
             }
 
@@ -9578,7 +9601,8 @@ WHERE ca.view_schema = 'collect'
                 }
             }
 
-            return new RollupCoverage(floorsWithoutCache, rawOldest, availability);
+            var ceilingsWithoutCache = await MeasureRollupCeilingsAsync(dataSource, floorsWithoutCache.Keys, availability, cancellationToken);
+            return new RollupCoverage(floorsWithoutCache, rawOldest, availability, ceilingsWithoutCache);
         }
 
         var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
@@ -9593,7 +9617,22 @@ WHERE ca.view_schema = 'collect'
             measuredThisCycle[view] = await reader.IsDBNullAsync(i, cancellationToken) ? (DateTime?)null : reader.GetDateTime(i);
         }
 
-        var (floors, newEntries) = MergeRollupFloors(measuredThisCycle, cachedSnapshot, oldestNow, availability, now);
+        /* #4605 part 2 (LA-1): the ceiling is re-read for exactly the views re-measured this cycle (a view
+           whose floor came from cache keeps its cached ceiling below, on the same reuse cadence #4539/#4553
+           already give the floor — no per-request max(bucket)/cagg_watermark scan). */
+        var ceilingsMeasuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+        foreach (var view in measuredThisCycle.Keys)
+        {
+            if (measuredThisCycle[view] is null)
+            {
+                continue;
+            }
+
+            var bucketWidth = RollupViews.First(r => r.View == view).BucketWidth;
+            ceilingsMeasuredThisCycle[view] = await RollupMaterializationWatermark.GetAsync(dataSource, view, bucketWidth, JobCatalogReadTimeoutSeconds, cancellationToken);
+        }
+
+        var (floors, newEntries) = MergeRollupFloors(measuredThisCycle, cachedSnapshot, oldestNow, availability, now, ceilingsMeasuredThisCycle);
 
         lock (cache.Lock)
         {
@@ -9604,7 +9643,45 @@ WHERE ca.view_schema = 'collect'
             }
         }
 
-        return new RollupCoverage(floors, rawOldest, availability);
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        foreach (var (view, entry) in newEntries)
+        {
+            if (entry.Ceiling is DateTime ceiling)
+            {
+                ceilings[view] = ceiling;
+            }
+        }
+
+        return new RollupCoverage(floors, rawOldest, availability, ceilings);
+    }
+
+    /// <summary>
+    /// #4605 part 2 (LA-1): the ceiling read for the catalog-read-failed / no-rollups-present fallback path,
+    /// where every present view was just measured for its floor and has no cache entry to carry a ceiling
+    /// forward from. One <see cref="RollupMaterializationWatermark.GetAsync"/> per view named in
+    /// <paramref name="views"/> — bounded by the same small view list the floor probe itself named, so this
+    /// is no more expensive than the floor read it accompanies.
+    /// </summary>
+    private static async Task<IReadOnlyDictionary<string, DateTime>> MeasureRollupCeilingsAsync(
+        NpgsqlDataSource dataSource, IEnumerable<string> views, RollupAvailability availability, CancellationToken cancellationToken)
+    {
+        var ceilings = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        foreach (var view in views)
+        {
+            var match = RollupViews.FirstOrDefault(r => r.View == view);
+            if (match.View is null || !availability.Has(view))
+            {
+                continue;
+            }
+
+            var ceiling = await RollupMaterializationWatermark.GetAsync(dataSource, view, match.BucketWidth, JobCatalogReadTimeoutSeconds, cancellationToken);
+            if (ceiling is DateTime c)
+            {
+                ceilings[view] = c;
+            }
+        }
+
+        return ceilings;
     }
 
     /// <summary>
@@ -13205,6 +13282,7 @@ public sealed class RollupCoverage
     private readonly IReadOnlyDictionary<string, DateTime> _floorsByView;
     private readonly IReadOnlyDictionary<string, DateTime> _oldestByRawTable;
     private readonly RollupAvailability _availability;
+    private readonly IReadOnlyDictionary<string, DateTime> _ceilingsByView;
 
     public RollupCoverage(
         IReadOnlyDictionary<string, DateTime> floorsByView,
@@ -13225,11 +13303,52 @@ public sealed class RollupCoverage
         IReadOnlyDictionary<string, DateTime> floorsByView,
         IReadOnlyDictionary<string, DateTime> oldestByRawTable,
         RollupAvailability availability)
+        : this(floorsByView, oldestByRawTable, availability, new Dictionary<string, DateTime>(StringComparer.Ordinal))
+    {
+    }
+
+    /// <summary>
+    /// #4605 part 2 (LA-1): the per-view MATERIALIZATION CEILING — how far forward each rollup has actually
+    /// materialized, read from <see cref="RollupMaterializationWatermark"/> in the same probe cycle that
+    /// measures the floor (<see cref="TimescaleSupport.DetectRollupCoverageAsync"/>) and cached the same way.
+    /// A view absent from <paramref name="ceilingsByView"/> answers null from <see cref="CeilingOf"/> — the
+    /// safe "unknown" reading a hybrid raw/rollup route must treat as "do not use the rollup here".
+    /// </summary>
+    public RollupCoverage(
+        IReadOnlyDictionary<string, DateTime> floorsByView,
+        IReadOnlyDictionary<string, DateTime> oldestByRawTable,
+        RollupAvailability availability,
+        IReadOnlyDictionary<string, DateTime> ceilingsByView)
     {
         _floorsByView = floorsByView ?? throw new ArgumentNullException(nameof(floorsByView));
         _oldestByRawTable = oldestByRawTable ?? throw new ArgumentNullException(nameof(oldestByRawTable));
         _availability = availability;
+        _ceilingsByView = ceilingsByView ?? throw new ArgumentNullException(nameof(ceilingsByView));
     }
+
+    /// <summary>
+    /// #4605 part 2 (LA-1): <paramref name="caggView"/>'s MEASURED materialization ceiling — the instant AT
+    /// OR ABOVE which the rollup holds nothing (<see cref="RollupMaterializationWatermark.GetAsync"/>'s
+    /// engine watermark, or its <c>max(bucket) + bucketWidth</c> fallback) — or <c>null</c> when unknown (no
+    /// rollup by this name was probed, or the probe found nothing to measure). A hybrid raw/rollup route
+    /// (#4605 part 2 §2) reads the rollup ONLY for whole buckets strictly below this instant; everything at
+    /// or above it must come from raw, because nothing has materialized there yet.
+    ///
+    /// <para><b>Contiguity below the ceiling is NOT guaranteed by this alone.</b> A ceiling says how far
+    /// materialization has REACHED, not that every bucket beneath it is filled — an outage longer than
+    /// <c>HourlyRefreshStartOffset</c> before a refresh, or a seam below a successor's floor, can leave a hole
+    /// strictly BELOW the ceiling and above the floor
+    /// (<see cref="TimescaleSupport.MaterializationHoleTargets"/>, <c>MaterializationHoles.cs</c> lines 27–40,
+    /// 505–531; the #4301 seam ruling at line 74 states the property a caller needs: contiguity from the
+    /// FLOOR upward is what the repair pass (<see cref="TimescaleSupport.RepairMaterializationHolesAsync"/>,
+    /// <see cref="TimescaleSupport.RepairMaterializationSeamsAsync"/>) works to hold, not something this probe
+    /// measures on every read). A caller that needs a hole-free span checked, rather than assumed, calls
+    /// <see cref="TimescaleSupport.HoleFreeThroughAsync"/> for that exact range — this coverage snapshot does
+    /// not attempt to answer it, because doing so per read would be the same expensive scan
+    /// <see cref="TimescaleSupport.DetectRollupCoverageAsync"/> already exists to avoid for the floor.</para>
+    /// </summary>
+    public DateTime? CeilingOf(string caggView) =>
+        _ceilingsByView.TryGetValue(caggView, out var ceiling) ? ceiling : null;
 
     /// <summary>
     /// THE HOURLY-TIER RELATION for a read whose window starts at <paramref name="windowStartUtc"/> (#3653, Q12):
@@ -13290,7 +13409,8 @@ public sealed class RollupCoverage
     public static RollupCoverage Unknown { get; } = new(
         new Dictionary<string, DateTime>(StringComparer.Ordinal),
         new Dictionary<string, DateTime>(StringComparer.Ordinal),
-        RollupAvailability.None);
+        RollupAvailability.None,
+        new Dictionary<string, DateTime>(StringComparer.Ordinal));
 
     /// <summary>The oldest bucket <paramref name="caggView"/> has materialized, or null when it holds nothing
     /// (or was never probed). Mirrors <see cref="RollupAvailability.Has"/>: an unknown name answers null.</summary>
