@@ -9346,7 +9346,7 @@ WHERE ca.view_schema = 'collect'
     /// the cached floor no longer describes the relation actually being read. <see cref="MeasuredAtUtc"/> backs
     /// <see cref="RollupFloorMaxReuse"/>.
     /// </summary>
-    /// <para><see cref="Ceiling"/> (#4605 part 2, LA-1) is the materialization ceiling measured in the SAME
+    /// <para><see cref="Ceiling"/> (#4605) is the materialization ceiling measured in the SAME
     /// cycle as <see cref="Floor"/> — re-read whenever the floor is (the ceiling moves every refresh, so
     /// piggybacking on the floor's re-measure cadence, rather than a separate TTL, is the cheap answer: a
     /// view whose floor is trusted from cache almost never has a stale-enough ceiling to matter, and a
@@ -9424,7 +9424,7 @@ WHERE ca.view_schema = 'collect'
         => MergeRollupFloors(measuredThisCycle, cached, oldestNow, availability, now, ceilingsMeasuredThisCycle: null);
 
     /// <summary>
-    /// #4605 part 2 (LA-1): the same merge, with <paramref name="ceilingsMeasuredThisCycle"/> carrying the
+    /// #4605: the same merge, with <paramref name="ceilingsMeasuredThisCycle"/> carrying the
     /// freshly-read <see cref="RollupMaterializationWatermark"/> for every view re-measured THIS cycle —
     /// <c>null</c> for the two-argument overload (every pre-#4605 caller and test), which leaves every new
     /// entry's ceiling unset (the safe "unknown" default) rather than guessing one.
@@ -9617,7 +9617,7 @@ WHERE ca.view_schema = 'collect'
             measuredThisCycle[view] = await reader.IsDBNullAsync(i, cancellationToken) ? (DateTime?)null : reader.GetDateTime(i);
         }
 
-        /* #4605 part 2 (LA-1): the ceiling is re-read for exactly the views re-measured this cycle (a view
+        /* #4605: the ceiling is re-read for exactly the views re-measured this cycle (a view
            whose floor came from cache keeps its cached ceiling below, on the same reuse cadence #4539/#4553
            already give the floor — no per-request max(bucket)/cagg_watermark scan). */
         var ceilingsMeasuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
@@ -9656,7 +9656,7 @@ WHERE ca.view_schema = 'collect'
     }
 
     /// <summary>
-    /// #4605 part 2 (LA-1): the ceiling read for the catalog-read-failed / no-rollups-present fallback path,
+    /// #4605: the ceiling read for the catalog-read-failed / no-rollups-present fallback path,
     /// where every present view was just measured for its floor and has no cache entry to carry a ceiling
     /// forward from. One <see cref="RollupMaterializationWatermark.GetAsync"/> per view named in
     /// <paramref name="views"/> — bounded by the same small view list the floor probe itself named, so this
@@ -13308,7 +13308,7 @@ public sealed class RollupCoverage
     }
 
     /// <summary>
-    /// #4605 part 2 (LA-1): the per-view MATERIALIZATION CEILING — how far forward each rollup has actually
+    /// #4605: the per-view MATERIALIZATION CEILING — how far forward each rollup has actually
     /// materialized, read from <see cref="RollupMaterializationWatermark"/> in the same probe cycle that
     /// measures the floor (<see cref="TimescaleSupport.DetectRollupCoverageAsync"/>) and cached the same way.
     /// A view absent from <paramref name="ceilingsByView"/> answers null from <see cref="CeilingOf"/> — the
@@ -13327,7 +13327,7 @@ public sealed class RollupCoverage
     }
 
     /// <summary>
-    /// #4605 part 2 (LA-1): <paramref name="caggView"/>'s MEASURED materialization ceiling — the instant AT
+    /// #4605: <paramref name="caggView"/>'s MEASURED materialization ceiling — the instant AT
     /// OR ABOVE which the rollup holds nothing (<see cref="RollupMaterializationWatermark.GetAsync"/>'s
     /// engine watermark, or its <c>max(bucket) + bucketWidth</c> fallback) — or <c>null</c> when unknown (no
     /// rollup by this name was probed, or the probe found nothing to measure). A hybrid raw/rollup route
@@ -13339,7 +13339,7 @@ public sealed class RollupCoverage
     /// <c>HourlyRefreshStartOffset</c> before a refresh, or a seam below a successor's floor, can leave a hole
     /// strictly BELOW the ceiling and above the floor
     /// (<see cref="TimescaleSupport.MaterializationHoleTargets"/>, <c>MaterializationHoles.cs</c> lines 27–40,
-    /// 505–531; the #4301 seam ruling at line 74 states the property a caller needs: contiguity from the
+    /// 505–531; the #4301 seam decision at line 74 states the property a caller needs: contiguity from the
     /// FLOOR upward is what the repair pass (<see cref="TimescaleSupport.RepairMaterializationHolesAsync"/>,
     /// <see cref="TimescaleSupport.RepairMaterializationSeamsAsync"/>) works to hold, not something this probe
     /// measures on every read). A caller that needs a hole-free span checked, rather than assumed, calls

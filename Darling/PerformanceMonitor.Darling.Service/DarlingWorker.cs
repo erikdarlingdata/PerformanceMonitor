@@ -5012,7 +5012,9 @@ public sealed class DarlingWorker : BackgroundService
                 /* #3848: the same process counter the engine takes below, so a read RETRIED inside the
                    adapter and the same read FAILING in the engine's catch arm land in one bucket under one
                    name. Passed explicitly for the same reason the engine's is — a test builds its own. */
-                readFailures: AlertReadFailureCounter.Shared),
+                readFailures: AlertReadFailureCounter.Shared,
+                /* #4606: the database-state maintenance sequence's own deadlock-retry log. */
+                logger: _logger),
             stateStore,
             deliverer,
             muteRuleService.IsAlertMuted,

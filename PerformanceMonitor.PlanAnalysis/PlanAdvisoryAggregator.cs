@@ -50,7 +50,14 @@ public static class PlanAdvisoryAggregator
         ExtractCancellable(planXmls, CancellationToken.None);
 
     /// <summary>Cancellable form of <see cref="Extract(IEnumerable{string})"/>.</summary>
-    public static Details ExtractCancellable(IEnumerable<string> planXmls, CancellationToken cancellationToken)
+    public static Details ExtractCancellable(IEnumerable<string> planXmls, CancellationToken cancellationToken) =>
+        ExtractCancellable(planXmls, null, cancellationToken);
+
+    /// <summary>
+    /// #4530: the <see cref="ServerMetadata"/> overload. The drill-down callers pass the resolved server's
+    /// metadata so rule 38 can see the edition/MAXDOP; the other overload forwards <c>null</c>.
+    /// </summary>
+    public static Details ExtractCancellable(IEnumerable<string> planXmls, ServerMetadata? serverMetadata, CancellationToken cancellationToken)
     {
         var byKey = new Dictionary<string, MissingIndex>(StringComparer.OrdinalIgnoreCase);
         var warnings = new List<PlanWarning>();
@@ -66,7 +73,7 @@ public static class PlanAdvisoryAggregator
             try
             {
                 plan = ShowPlanParser.Parse(xml, cancellationToken);
-                PlanAnalysisPipeline.Run(plan, cancellationToken);
+                PlanAnalysisPipeline.Run(plan, null, serverMetadata, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
