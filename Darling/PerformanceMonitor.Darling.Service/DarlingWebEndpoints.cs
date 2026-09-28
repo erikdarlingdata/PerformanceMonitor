@@ -167,7 +167,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <param name="Collecting">The same answer as one bit, for a check that wants no string comparison at all.</param>
     /// <param name="Step">Which startup step failed (<c>configuration</c>, <c>managed_store</c>, <c>store</c>); omitted otherwise.</param>
     /// <param name="Attempt">The retry in flight and the cap it counts against; both omitted outside <c>degraded</c>.</param>
-    /// <param name="Attempts">The attempt cap the retry budget allows.</param>
+    /// <param name="Attempts">The attempt cap the retry budget allows; omitted once the fast budget is spent
+    /// and the service is retrying every 60 seconds with no cap (#4508), rather than showing a spent cap as if
+    /// it still bounded anything.</param>
     /// <param name="Detail">The failure message, as the service's own log line reports it; omitted when there is none.</param>
     /// <param name="SinceUtc">When this state began — collection start, or when the failure was last observed.</param>
     internal sealed record PingReport(
@@ -239,7 +241,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             CollectorRuntimeState.CollectorPhase.Retrying =>
                 new PingReport(
                     StatusCodes.Status503ServiceUnavailable, "degraded", false, DescribeStartupStep(snapshot.Step),
-                    snapshot.Attempt, snapshot.Attempts, snapshot.Detail, snapshot.AsOfUtc),
+                    snapshot.Attempt, snapshot.Sustained ? null : snapshot.Attempts, snapshot.Detail, snapshot.AsOfUtc),
 
             CollectorRuntimeState.CollectorPhase.Stopped =>
                 new PingReport(

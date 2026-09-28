@@ -155,10 +155,10 @@ public sealed class CollectorRuntimeState
     /// <see cref="CollectorPhase.Collecting"/> that is when collection started, and for the two failure
     /// phases it is when the failure was last observed.</param>
     /// <param name="Sustained">True once a <see cref="CollectorPhase.Retrying"/> step has spent its fast
-    /// budget and moved to the slower, unbounded retry (#4508) — see <see cref="AttemptStatusText"/> for the
-    /// rendered sentence this distinguishes. Always false outside <see cref="CollectorPhase.Retrying"/>.
-    /// Defaults to false so the existing terminal/collecting publishes, which never pass it, are
-    /// unaffected.</param>
+    /// budget and moved to the slower, unbounded retry (#4508) — see
+    /// <see cref="DarlingWebEndpoints.DescribePing"/> for how the ping body renders it. Always false outside
+    /// <see cref="CollectorPhase.Retrying"/>. Defaults to false so the existing terminal/collecting publishes,
+    /// which never pass it, are unaffected.</param>
     public sealed record Snapshot(
         CollectorPhase Phase,
         StartupStep? Step,
@@ -182,17 +182,6 @@ public sealed class CollectorRuntimeState
         => _current = new Snapshot(
             CollectorPhase.Retrying, step, FirstLineOf(FailureDetailFor(step)), attempt,
             sustained ? 0 : attempts, DateTime.UtcNow, sustained);
-
-    /// <summary>The rendered attempt sentence for a <see cref="CollectorPhase.Retrying"/> snapshot (#4508):
-    /// "attempt 7 of 25" inside the fast budget, or "retrying every 60s, attempt 30 (past the 120s fast
-    /// budget)" once <see cref="Snapshot.Sustained"/> is true. Neither form claims a cap the sustained arm
-    /// does not have — the old text kept naming the spent fast-budget cap ("attempt 30 of 25"), which reads
-    /// as still bounded by it, when the whole point of the sustained arm is that it is not.</summary>
-    public static string AttemptStatusText(Snapshot snapshot)
-        => snapshot.Sustained
-            ? $"retrying every {(int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds}s, attempt "
-                + $"{snapshot.Attempt} (past the {(int)StartupFailureTriage.RetryBudget.TotalSeconds}s fast budget)"
-            : $"attempt {snapshot.Attempt} of {snapshot.Attempts}";
 
     /// <summary>Publishes a terminal failure of <paramref name="step"/> (worker only; called from each
     /// EXCEPTION-path collection-blocking exit, before the <c>return</c> — after the critical line, so a

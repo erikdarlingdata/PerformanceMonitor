@@ -81,37 +81,32 @@ public sealed class CollectorRuntimeStateTests
     }
 
     /// <summary>
-    /// #4508: the fast form renders "attempt N of M", and the sustained form renders "retrying every
-    /// {delay}s, attempt N (past the {budget}s fast budget)" — never "attempt 30 of 25", which is what the
-    /// fast form would say once the fast budget's own cap (25) is spent and the attempt number keeps
-    /// climbing past it under the sustained arm.
+    /// #4508: once a retry is sustained, the ping body carries the attempt in flight but omits the cap
+    /// entirely — not zero, which reads as "attempt 30 of 0", a cap as wrong as the old "attempt 30 of 25".
+    /// The fast form is unchanged: the cap is still reported while it still bounds anything.
     /// </summary>
     [Fact]
-    public void AttemptStatusText_RendersFastFormAndSustainedFormDifferently()
+    public void DescribePing_OmitsAttemptsOnceSustained_ButKeepsItWhileFast()
     {
-        var fast = new CollectorRuntimeState.Snapshot(
-            CollectorRuntimeState.CollectorPhase.Retrying,
-            CollectorRuntimeState.StartupStep.Store,
-            Detail: null,
-            Attempt: 7,
-            Attempts: 25,
-            AsOfUtc: DateTime.UtcNow);
+        var sustained = DarlingWebEndpoints.DescribePing(new CollectorRuntimeState.Snapshot(
+            CollectorRuntimeState.CollectorPhase.Retrying, CollectorRuntimeState.StartupStep.Store,
+            "Connection refused", Attempt: 30, Attempts: 0, AsOfUtc: DateTime.UtcNow, Sustained: true));
+        Assert.Equal(503, sustained.HttpStatus);
+        Assert.Equal("degraded", sustained.Status);
+        Assert.Equal(30, sustained.Attempt);
+        Assert.Null(sustained.Attempts);
 
-        Assert.Equal("attempt 7 of 25", CollectorRuntimeState.AttemptStatusText(fast));
+        var sustainedBody = JsonSerializer.Serialize(sustained, DarlingWebEndpoints.PingJsonOptions);
+        Assert.Contains("\"attempt\":30", sustainedBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"attempts\"", sustainedBody, StringComparison.Ordinal);
 
-        var sustained = new CollectorRuntimeState.Snapshot(
-            CollectorRuntimeState.CollectorPhase.Retrying,
-            CollectorRuntimeState.StartupStep.Store,
-            Detail: null,
-            Attempt: 30,
-            Attempts: 0,
-            AsOfUtc: DateTime.UtcNow,
-            Sustained: true);
+        var fast = DarlingWebEndpoints.DescribePing(new CollectorRuntimeState.Snapshot(
+            CollectorRuntimeState.CollectorPhase.Retrying, CollectorRuntimeState.StartupStep.Store,
+            "Connection refused", Attempt: 7, Attempts: 25, AsOfUtc: DateTime.UtcNow, Sustained: false));
+        Assert.Equal(25, fast.Attempts);
 
-        var sustainedText = CollectorRuntimeState.AttemptStatusText(sustained);
-        Assert.Contains("attempt 30", sustainedText, StringComparison.Ordinal);
-        Assert.DoesNotContain("30 of 25", sustainedText, StringComparison.Ordinal);
-        Assert.DoesNotContain("of 0", sustainedText, StringComparison.Ordinal);
+        var fastBody = JsonSerializer.Serialize(fast, DarlingWebEndpoints.PingJsonOptions);
+        Assert.Contains("\"attempts\":25", fastBody, StringComparison.Ordinal);
     }
 
     /// <summary>Every publish stamps UTC, because the ping body reports it as an instant and a local-time
