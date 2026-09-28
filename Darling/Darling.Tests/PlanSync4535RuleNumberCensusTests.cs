@@ -52,18 +52,21 @@ public sealed class PlanSync4535RuleNumberCensusTests
     /// <c>Source = PlanWarningSource.SqlServer</c>. Brace-balances from the <c>{</c> that follows
     /// <c>new PlanWarning</c> to find each initializer's extent — the same construction the
     /// initializers themselves use, just walked in text rather than compiled.
+    ///
+    /// <para>Walked over <see cref="CSharpSourceWalker.StripCommentsAndStrings"/>'s output rather
+    /// than a hand-rolled <c>//</c>-prefix line filter (#3052): a prefix filter reads a block
+    /// comment's continuation lines as code, and would also leave a brace inside an interpolated
+    /// message's string literal free to unbalance the depth count. The walker blanks both while
+    /// preserving line numbers, which is what the census reports offenders by.</para>
     /// </summary>
     private static List<(int Line, bool HasRuleNumber, bool IsSqlServerSourced)> WalkPlanWarningConstructions()
     {
-        var text = PlanAnalyzerSource();
+        var text = CSharpSourceWalker.StripCommentsAndStrings(PlanAnalyzerSource());
         var lines = text.Split('\n');
         var results = new List<(int, bool, bool)>();
 
         for (var i = 0; i < lines.Length; i++)
         {
-            var trimmed = lines[i].TrimStart();
-            if (trimmed.StartsWith("//", System.StringComparison.Ordinal))
-                continue;
             if (!lines[i].Contains("new PlanWarning"))
                 continue;
 
