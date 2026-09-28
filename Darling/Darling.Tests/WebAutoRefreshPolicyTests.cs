@@ -32,6 +32,21 @@ public sealed class WebAutoRefreshPolicyTests
         "{\"kind\":\"notebook\",\"cells\":[{\"type\":\"markdown\",\"text\":\"n\"}," + Panel.Replace("{", "{\"type\":\"panel\",") + "]" + refresh + "}";
 
     [Theory]
+    [InlineData(@"^function route\(")]
+    [InlineData(@"^function refresh\(")]
+    [InlineData(@"^function isNoPollRoute\(")]
+    [InlineData(@"^async function refreshSidebar\(")]
+    [InlineData(@"^async function refreshAgNav\(")]
+    [InlineData(@"^async function refreshViewList\(")]
+    public void AppJs_DeclaresEachLoopFunctionOnce(string pattern)
+    {
+        // A duplicated paste of these declarations is a SyntaxError in an ES module and blanks the dashboard.
+        var count = System.Text.RegularExpressions.Regex.Matches(
+            Js("app.js"), pattern, System.Text.RegularExpressions.RegexOptions.Multiline).Count;
+        Assert.Equal(1, count);
+    }
+
+    [Theory]
     [InlineData("off")]
     [InlineData("1m")]
     [InlineData("5m")]
