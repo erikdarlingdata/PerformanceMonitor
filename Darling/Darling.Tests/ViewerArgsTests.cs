@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -70,12 +71,106 @@ public sealed class ViewerArgsTests
     [Fact]
     public void RelaunchArguments_CarryOriginalArgs_AndTakeoverExactlyOnce()
     {
-        Assert.Equal("--config \"C:\\my dir\\d.json\" --upgrade-takeover",
+        Assert.Equal("--upgrade-takeover --config \"C:\\my dir\\d.json\"",
             HandoffArgs.BuildRelaunchArguments(new[] { "--config", "C:\\my dir\\d.json" }));
         Assert.Equal("--upgrade-takeover", HandoffArgs.BuildRelaunchArguments(System.Array.Empty<string>()));
         var again = HandoffArgs.BuildRelaunchArguments(new[] { "x.json", "--upgrade-takeover" });
-        Assert.Equal("x.json --upgrade-takeover", again);
-        Assert.Single(again.Split(' ').Where(a => a == "--upgrade-takeover"));
+        Assert.Equal("--upgrade-takeover x.json", again);
+        Assert.Single(again.Split(' '), a => a == "--upgrade-takeover");
+    }
+
+    [Fact]
+    public void RelaunchArguments_DanglingConfig_KeepsTakeoverFirst()
+        => Assert.Equal("--upgrade-takeover --config", HandoffArgs.BuildRelaunchArguments(new[] { "--config" }));
+
+    [Fact]
+    public void ExplicitConfigPath_DanglingConfig_IsNull()
+    {
+        Assert.Null(ViewerArgs.ExplicitConfigPath(new[] { "--config" }));
+        Assert.Null(ViewerArgs.ExplicitConfigPath(new[] { "--config", "--upgrade-takeover" }));
+        Assert.Null(ViewerArgs.ExplicitConfigPath(new[] { "--upgrade-takeover", "--config" }));
+        Assert.Null(ViewerArgs.ExplicitConfigPath(new[] { "--config", "--open-server", "X" }));
+        Assert.Equal("a.json", ViewerArgs.ExplicitConfigPath(new[] { "--config", "a.json", "--upgrade-takeover" }));
+    }
+
+    [Fact]
+    public void OpenServerName_ReadsOnlyARealValue()
+    {
+        Assert.Null(ViewerArgs.OpenServerName(new[] { "--open-server" }));
+        Assert.Null(ViewerArgs.OpenServerName(new[] { "--open-server", "--config", "a.json" }));
+        Assert.Equal("S1", ViewerArgs.OpenServerName(new[] { "--open-server", "S1" }));
+    }
+
+    public static TheoryData<string> HardArguments => new(HardList);
+
+    private static readonly string[] HardList =
+    {
+        "", "\t", "a\"b", "a\\\"b", "trailing\\", "\\\\host\\share\\", "line\none", "naïve Ünïcödé 日本",
+        "a\" --config \\\\host\\share\\x.json", "C:\\my dir\\", "say \"hi\"", "plain",
+    };
+
+    [Theory]
+    [MemberData(nameof(HardArguments))]
+    public void QuoteWindowsArgs_RoundTripsThroughCommandLineToArgvW_OneArgument(string argument)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "CommandLineToArgvW is Windows-only.");
+        Assert.Equal(new[] { argument }, WindowsArgv(HandoffArgs.QuoteWindowsArgs(new[] { argument })));
+    }
+
+    [Fact]
+    public void QuoteWindowsArgs_RoundTripsThroughCommandLineToArgvW_AllTogether()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "CommandLineToArgvW is Windows-only.");
+        Assert.Equal(HardList, WindowsArgv(HandoffArgs.QuoteWindowsArgs(HardList)));
+    }
+
+    [Fact]
+    public void Relaunch_NeverChangesWhichConfigTheChildReads()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "CommandLineToArgvW is Windows-only.");
+        var inputs = new[]
+        {
+            System.Array.Empty<string>(),
+            new[] { "--config" },
+            new[] { "--config", "C:\\my dir\\d.json" },
+            new[] { "a b.json" },
+            new[] { "--config", "--open-server", "X" },
+            new[] { "--open-server", "X", "c.json" },
+        };
+        foreach (var input in inputs)
+        {
+            var child = WindowsArgv(HandoffArgs.BuildRelaunchArguments(input));
+            Assert.Equal(ViewerArgs.ExplicitConfigPath(input), ViewerArgs.ExplicitConfigPath(child));
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LocalFree(IntPtr hMem);
+
+    /// <summary>Windows' own parse of <paramref name="arguments"/>, after a stand-in program name.
+    /// argv[0] is dropped (it has its own rules, and an empty command line returns the exe path).</summary>
+    private static string[] WindowsArgv(string arguments)
+    {
+        var argv = CommandLineToArgvW("x.exe " + arguments, out var count);
+        Assert.NotEqual(IntPtr.Zero, argv);
+        try
+        {
+            var result = new string[count - 1];
+            for (var i = 1; i < count; i++)
+            {
+                result[i - 1] = System.Runtime.InteropServices.Marshal.PtrToStringUni(
+                    System.Runtime.InteropServices.Marshal.ReadIntPtr(argv, i * IntPtr.Size))!;
+            }
+
+            return result;
+        }
+        finally
+        {
+            LocalFree(argv);
+        }
     }
 
     private static string RepoRoot([CallerFilePath] string thisFile = "")

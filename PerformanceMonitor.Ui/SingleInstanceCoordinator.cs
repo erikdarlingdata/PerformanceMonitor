@@ -22,14 +22,14 @@ namespace PerformanceMonitor.Ui
         public const string AutoConfirm = "--upgrade-takeover";
 
         /// <summary>
-        /// The command line for the elevated relaunch, PURE: the first launch's arguments in order, with
-        /// <see cref="AutoConfirm"/> added exactly once, each quoted for the Windows command line.
+        /// The command line for the elevated relaunch, PURE: <see cref="AutoConfirm"/> exactly once and FIRST
+        /// (so it can never become a dangling option's value), then the first launch's other arguments in
+        /// order, each quoted for the Windows command line.
         /// </summary>
         public static string BuildRelaunchArguments(IEnumerable<string> originalArgs)
         {
-            var args = originalArgs.ToList();
-            if (!args.Any(a => string.Equals(a, AutoConfirm, StringComparison.OrdinalIgnoreCase)))
-                args.Add(AutoConfirm);
+            var args = new List<string> { AutoConfirm };
+            args.AddRange(originalArgs.Where(a => !string.Equals(a, AutoConfirm, StringComparison.OrdinalIgnoreCase)));
             return QuoteWindowsArgs(args);
         }
 
@@ -336,6 +336,7 @@ namespace PerformanceMonitor.Ui
                     Arguments = HandoffArgs.BuildRelaunchArguments(Environment.GetCommandLineArgs().Skip(1)),
                     UseShellExecute = true,
                     Verb = "runas",
+                    WorkingDirectory = Environment.CurrentDirectory, // runas would otherwise start the child in System32, breaking relative --config paths
                 });
             }
             catch (Win32Exception ex) when (ex.NativeErrorCode == 1223) // ERROR_CANCELLED — user dismissed UAC

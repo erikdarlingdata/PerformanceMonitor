@@ -538,18 +538,7 @@ public partial class MainWindow : Window
 
     /// <summary>The value following --open-server, or null when absent/dangling.</summary>
     private static string? OpenServerNameFromArgs()
-    {
-        var args = Environment.GetCommandLineArgs();
-        for (var i = 1; i < args.Length - 1; i++)
-        {
-            if (string.Equals(args[i], "--open-server", StringComparison.OrdinalIgnoreCase))
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
-    }
+        => ViewerArgs.OpenServerName(Environment.GetCommandLineArgs().Skip(1).ToArray());
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
