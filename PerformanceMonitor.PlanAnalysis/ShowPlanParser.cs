@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
+using System.Xml;
 using System.Xml.Linq;
 
 namespace PerformanceMonitor.PlanAnalysis;
@@ -56,6 +57,10 @@ public static class ShowPlanParser
         return result;
     }
 
+    // This runs on the dedicated thread started in Parse, not a thread-pool thread. An
+    // unhandled exception on a non-pool thread is fatal to the whole process (the runtime has
+    // nowhere to route it), so every statement below must stay inside one of the two try blocks
+    // here; nothing may run between or after them unguarded.
     private static void ParseOnDedicatedThread(string xml, ParsedPlan plan)
     {
         XDocument doc;
@@ -63,8 +68,9 @@ public static class ShowPlanParser
         {
             doc = XDocument.Parse(xml);
         }
-        catch
+        catch (XmlException ex)
         {
+            plan.ParseError = $"The plan XML could not be read: {ex.Message}";
             return;
         }
 
@@ -1870,14 +1876,26 @@ public static class ShowPlanParser
             ComputeNodeCosts(child, totalStatementCost);
     }
 
+    // Iterative equivalent of a depth-first walk: for each child of `element`, in document
+    // order, an element named RelOp is skipped along with its whole subtree; a matching element
+    // is yielded; then its own children are walked (pre-order) before the next sibling. An
+    // explicit stack replaces recursion here, because this walk has no depth guard of its own —
+    // MaxParseDepth bounds ParseRelOp/ParseStatementAndChildren, not this helper — so a plan with
+    // a very deep run of non-RelOp elements inside one operator could otherwise overflow the
+    // stack before any depth check ever saw it.
     private static IEnumerable<XElement> ScopedDescendants(XElement element, XName name)
     {
-        foreach (var child in element.Elements())
+        var stack = new Stack<XElement>();
+        foreach (var child in element.Elements().Reverse())
+            stack.Push(child);
+
+        while (stack.Count > 0)
         {
-            if (child.Name == Ns + "RelOp") continue;
-            if (child.Name == name) yield return child;
-            foreach (var desc in ScopedDescendants(child, name))
-                yield return desc;
+            var current = stack.Pop();
+            if (current.Name == Ns + "RelOp") continue;
+            if (current.Name == name) yield return current;
+            foreach (var child in current.Elements().Reverse())
+                stack.Push(child);
         }
     }
 
