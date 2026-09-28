@@ -1,3 +1,4 @@
+using System;
 using PerformanceMonitor.PlanAnalysis;
 using Xunit;
 
@@ -204,6 +205,9 @@ public class PlanSync4613ReproScriptTests
     [InlineData("nvarchar(٤)")]        // an Arabic-Indic digit
     [InlineData("nvarchar(４)")]        // a full-width digit
     [InlineData("varchar(max,2)")]          // max takes no second part
+    [InlineData("vector(3,[x) SELECT 2 --])")] // a bracketed second part that closes the type early
+    [InlineData("vector(3,'x')")]           // a quote in the second part
+    [InlineData("decimal(18,&#9;2)")]       // a tab after the comma: only spaces may separate the parts
     public void BuildReproScript_MalformedDataType_IsDropped(string dataType)
     {
         /* The check before this fix was a list of characters, and it passed every one of these but the one
@@ -213,5 +217,69 @@ public class PlanSync4613ReproScriptTests
 
         Assert.Contains("1 parameter(s) omitted", sql);
         Assert.DoesNotContain("SELECT 2", sql);
+    }
+
+    private static string TwoStatementPlan(string column, string dataType, string firstValue, string secondValue) =>
+        $"""
+         <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+           <BatchSequence><Batch><Statements>
+             <StmtSimple><QueryPlan><ParameterList>
+               <ColumnReference Column="{column}" ParameterDataType="{dataType}" ParameterCompiledValue="{firstValue}" />
+             </ParameterList></QueryPlan></StmtSimple>
+             <StmtSimple><QueryPlan><ParameterList>
+               <ColumnReference Column="{column}" ParameterDataType="{dataType}" ParameterCompiledValue="{secondValue}" />
+             </ParameterList></QueryPlan></StmtSimple>
+           </Statements></Batch></BatchSequence>
+         </ShowPlanXML>
+         """;
+
+    [Fact]
+    public void BuildReproScript_HostileNameWithConflictingTypes_IsOmittedAndTheHeaderStaysClosed()
+    {
+        /* A name that would end the header comment is not a valid parameter name, so both entries are
+           dropped and counted, and nothing of the name reaches the script. */
+        const string plan = """
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+              <BatchSequence><Batch><Statements>
+                <StmtSimple><QueryPlan><ParameterList>
+                  <ColumnReference Column="@id*/ PRINT 1 /*" ParameterDataType="int" ParameterCompiledValue="(1)" />
+                </ParameterList></QueryPlan></StmtSimple>
+                <StmtSimple><QueryPlan><ParameterList>
+                  <ColumnReference Column="@id*/ PRINT 1 /*" ParameterDataType="bigint" ParameterCompiledValue="(1)" />
+                </ParameterList></QueryPlan></StmtSimple>
+              </Statements></Batch></BatchSequence>
+            </ShowPlanXML>
+            """;
+        var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", "db", plan, null);
+
+        Assert.Contains("2 parameter(s) omitted", sql);
+        Assert.DoesNotContain("PRINT 1", sql);
+        /* The header opens once at the top and the first close ends it: no opener or closer inside. */
+        Assert.Equal(0, sql.IndexOf("/*", StringComparison.Ordinal));
+        var headerEnd = sql.IndexOf("*/", StringComparison.Ordinal);
+        Assert.True(headerEnd > 0);
+        Assert.Equal(-1, sql.IndexOf("/*", 2, headerEnd - 2, StringComparison.Ordinal));
+        Assert.Contains("2 parameter(s) omitted", sql[..headerEnd]);
+    }
+
+    [Fact]
+    public void BuildReproScript_ParameterGroupWithOnlyUnsafeOrEmptyValues_FallsBackToAPlaceholder()
+    {
+        var plan = TwoStatementPlan("@id", "int", "1; DROP TABLE x --", "");
+        var sql = ReproScriptBuilder.BuildReproScript("(@id int)SELECT COUNT_BIG(*) FROM dbo.T AS t WHERE t.id > @id", "db", plan, null);
+
+        Assert.Contains("@id = ?", sql);
+        Assert.DoesNotContain("DROP", sql);
+        Assert.Equal(1, sql.Split("@id = ").Length - 1);
+    }
+
+    [Fact]
+    public void BuildReproScript_ParameterGroupWithAnUnsafeAndASafeValue_UsesTheSafeValue()
+    {
+        var plan = TwoStatementPlan("@id", "int", "1; DROP TABLE x --", "(5)");
+        var sql = ReproScriptBuilder.BuildReproScript("(@id int)SELECT COUNT_BIG(*) FROM dbo.T AS t WHERE t.id > @id", "db", plan, null);
+
+        Assert.Contains("@id = 5", sql);
+        Assert.DoesNotContain("DROP", sql);
     }
 }
