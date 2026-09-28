@@ -137,7 +137,7 @@ public sealed class PlanSync4519Tests
     [Fact]
     public void TempTableFullTempdbName_OwnerComparisonMatches_EndToEnd()
     {
-        var fullName = "#t" + new string('_', 110) + "000000000003";
+        var fullName = "#t" + new string('_', 110) + "00000000000A";
         var planXml =
             Header +
             $"""
@@ -166,7 +166,7 @@ public sealed class PlanSync4519Tests
     [Fact]
     public void TempTableFullTempdbName_AnotherTempTable_NotFlagged_EndToEnd()
     {
-        var otherFullName = "#u" + new string('_', 110) + "000000000004";
+        var otherFullName = "#u" + new string('_', 110) + "00000000000B";
         var planXml =
             Header +
             $"""
