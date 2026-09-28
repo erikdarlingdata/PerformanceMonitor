@@ -64,7 +64,7 @@ public sealed class StoreSessionTimeZoneLiveTests
 
         /* ALTER DATABASE ... SET only takes effect for sessions opened AFTER it commits, so migrate through a
            fresh connection rather than the admin one above. */
-        await using (var migrate = new NpgsqlConnection(scratch.ConnectionString))
+        await using (var migrate = new NpgsqlConnection(scratch.UnpinnedConnectionString))
         {
             await migrate.OpenAsync(ct);
             await PgMigrations.MigrateAsync(migrate, ct);
@@ -72,14 +72,14 @@ public sealed class StoreSessionTimeZoneLiveTests
 
         /* The database's own default, UNPINNED — confirms the fixture set up a genuinely non-UTC store
            before asserting that the product's pin overrides it. */
-        await using (var unpinned = new NpgsqlConnection(scratch.ConnectionString))
+        await using (var unpinned = new NpgsqlConnection(scratch.UnpinnedConnectionString))
         {
             await unpinned.OpenAsync(ct);
             Assert.Equal("America/New_York", await ShowTimeZoneAsync(unpinned, ct));
         }
 
         /* The way the product opens a STORE connection: PinSessionTimeZoneUtc first, then the connection. */
-        var pinnedConnectionString = DarlingStoreConnection.PinSessionTimeZoneUtc(scratch.ConnectionString);
+        var pinnedConnectionString = DarlingStoreConnection.PinSessionTimeZoneUtc(scratch.UnpinnedConnectionString);
         await using var connection = new NpgsqlConnection(pinnedConnectionString);
         await connection.OpenAsync(ct);
 

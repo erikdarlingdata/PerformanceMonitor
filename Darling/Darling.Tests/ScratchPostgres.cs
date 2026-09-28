@@ -23,8 +23,15 @@ internal sealed class ScratchPostgres : IAsyncDisposable
 
     public string ConnectionString { get; }
 
-    private ScratchPostgres(string adminConnectionString, string databaseName, string connectionString)
+    /// <summary>
+    /// The same store WITHOUT the session time-zone pin, so a session opened through it reports the database's own
+    /// default zone. It exists for tests that must observe that default (e.g. to prove the product pin overrides it).
+    /// </summary>
+    public string UnpinnedConnectionString { get; }
+
+    private ScratchPostgres(string adminConnectionString, string databaseName, string connectionString, string unpinnedConnectionString)
     {
+        UnpinnedConnectionString = unpinnedConnectionString;
         _adminConnectionString = adminConnectionString;
         DatabaseName = databaseName;
         ConnectionString = connectionString;
@@ -48,7 +55,13 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             Pooling = false,
         };
 
-        return new ScratchPostgres(baseConnectionString, databaseName, builder.ConnectionString);
+        /* Pinned to UTC the way every product store connection is, so a cluster whose default zone is behind UTC
+           cannot skew timestamp round trips (a chunk's range_end read back through a ::timestamp cast). */
+        return new ScratchPostgres(
+            baseConnectionString,
+            databaseName,
+            PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString),
+            builder.ConnectionString);
     }
 
     public async ValueTask DisposeAsync()
