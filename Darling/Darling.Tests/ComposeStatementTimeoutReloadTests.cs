@@ -54,6 +54,22 @@ public sealed class ComposeStatementTimeoutReloadTests
            the same renderer, and is written once too. */
         Assert.Equal(2, Regex.Matches(batch, @"SET statement_timeout = '").Count);
         Assert.Equal(2, Regex.Matches(batch, @"SET log_min_duration_statement = '").Count);
+        Assert.Equal(2, Regex.Matches(batch, @"SET temp_file_limit = '").Count);
+    }
+
+    /// <summary>
+    /// #4605: the on-disk-spill backstop rides the SAME single renderer as statement_timeout, on both compose
+    /// identities and never admin -- so provisioning and the control-plane reload can never disagree about
+    /// the temp_file_limit ceiling either, the exact drift the renderer already exists to prevent for
+    /// statement_timeout.
+    /// </summary>
+    [Fact]
+    public void TheRenderer_SetsTempFileLimitOnBothComposeRoles_AndNotAdmin()
+    {
+        var sql = DarlingManagedRoles.BuildComposeStatementTimeoutSql(60);
+
+        Assert.Contains($"ALTER ROLE viewer SET temp_file_limit = '{ComposeLimits.TempFileLimit}';", sql, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE mcp    SET temp_file_limit = '{ComposeLimits.TempFileLimit}';", sql, StringComparison.Ordinal);
     }
 
     /// <summary>
