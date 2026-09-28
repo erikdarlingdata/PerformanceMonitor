@@ -53,4 +53,24 @@ public static class PlanWarningDisplay
 
     private static string FormatBenefitPercent(double pct) =>
         pct >= 100 ? $"{pct:N0}" : $"{pct:N1}";
+
+    /// <summary>
+    /// #4534: the text the viewer needs to turn a warning header into a link to the operator it came
+    /// from. Null when <paramref name="originNodeIds"/> is empty — a finding with no known operator
+    /// origin (for example one that happened before any row was read) gets no affordance, rather than
+    /// a link that would go somewhere arbitrary. Mirrors PerformanceStudio's
+    /// <c>AttachOriginNavigation</c>: one origin names it directly, several name the first as the
+    /// navigation target and list the rest in the tooltip so the count is visible.
+    /// </summary>
+    public static (string Suffix, string Tooltip)? OriginNavigationText(IReadOnlyList<int> originNodeIds)
+    {
+        if (originNodeIds.Count == 0)
+            return null;
+
+        var tooltip = originNodeIds.Count == 1
+            ? $"Go to operator (Node {originNodeIds[0]})"
+            : $"Go to Node {originNodeIds[0]} \u2014 also from {string.Join(", ", originNodeIds.Skip(1).Select(id => "Node " + id))}";
+
+        return ("  \u2192", tooltip);
+    }
 }
