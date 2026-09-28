@@ -420,6 +420,21 @@ public class SelfAlertDeliveryStampTests
         Assert.Equal(Day + d * 5, DarlingSelfAlertEvaluator.ServedSlot(Day, Day + d * 5 + TimeSpan.FromHours(3), d));
     }
 
+    /// <summary>The worker stamps the hourly tick and the fleet sweep through NextGridStamp, so a daily slot keeps its grid (#4652).</summary>
+    [Fact]
+    public void TheWorkerStampsTheHourlyTickAndTheFleetSweep_OnTheGrid()
+    {
+        var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        const string hourly = "_nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);";
+        const string sweep = "_nextFleetSweepUtc = NextGridStamp(_nextFleetSweepUtc, DateTime.UtcNow, TimeSpan.FromMinutes(fleetSweepMinutes));";
+        Assert.Equal(1, worker.Split(hourly).Length - 1);
+        Assert.Equal(1, worker.Split(sweep).Length - 1);
+        Assert.DoesNotContain("_nextStoreMetricsUtc = DateTime.UtcNow", worker, StringComparison.Ordinal);
+        Assert.DoesNotContain("_nextFleetSweepUtc = DateTime.UtcNow", worker, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void NextGridStamp_AnchorsAtNowThenKeepsTheGrid()
     {
