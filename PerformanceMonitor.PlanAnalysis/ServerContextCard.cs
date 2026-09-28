@@ -20,6 +20,9 @@ namespace PerformanceMonitor.PlanAnalysis;
 /// </summary>
 public static class ServerContextCard
 {
+    /// <summary>Empty-state sentence shown when the host supplied no server metadata.</summary>
+    public const string EmptyText = "Server context is shown for plans opened from a monitored server's data.";
+
     /// <summary>
     /// Whether the card has anything to show. PS shows the card border in both states (metadata or
     /// none), but the quiet/populated split — and this pure function's contract — is "no metadata,
