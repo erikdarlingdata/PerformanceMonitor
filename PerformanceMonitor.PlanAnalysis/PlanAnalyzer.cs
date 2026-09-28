@@ -20,6 +20,12 @@ public static partial class PlanAnalyzer
     // Matches CTE definitions: WITH name AS ( or , name AS (
     private static readonly Regex CteDefinitionRegex = CteDefinitionRegExp();
 
+    // A name in a ScalarString: one bracketed part or a dotted chain of them ([@p1], [Expr1003],
+    // [db].[dbo].[T].[c]). A name followed by ( is a function call. String literals are matched
+    // first, so a bracket inside one ('[x]') is never read as a name. Only a match with the
+    // name group is a name.
+    private static readonly Regex BracketedNameRegex = BracketedNameRegExp();
+
     public static void Analyze(ParsedPlan plan)
     {
         foreach (var batch in plan.Batches)
@@ -895,16 +901,21 @@ public static partial class PlanAnalyzer
         if (node.PhysicalOp == "Concatenation")
         {
             var constantScanBranches = node.Children
-                .Count(c => c.PhysicalOp == "Constant Scan" ||
+                .Where(c => c.PhysicalOp == "Constant Scan" ||
                             (c.PhysicalOp == "Compute Scalar" &&
-                             c.Children.Any(gc => gc.PhysicalOp == "Constant Scan")));
+                             c.Children.Any(gc => gc.PhysicalOp == "Constant Scan")))
+                .ToList();
 
-            if (constantScanBranches >= 2 && IsOrExpansionChain(node))
+            // #4521: WHERE t.A IN (@p1, @p2) builds the same operator chain, as a dynamic seek
+            // over the parameter values, and there is no join to rewrite. Only a lookup that
+            // takes its value from another input's row makes the OR a join OR.
+            if (constantScanBranches.Count >= 2 && IsOrExpansionChain(node) &&
+                constantScanBranches.Any(LookupReadsAnotherInput))
             {
                 node.Warnings.Add(new PlanWarning
                 {
                     WarningType = "Join OR Clause",
-                    Message = $"OR in a join predicate. SQL Server rewrote the OR as {constantScanBranches} separate lookups, each evaluated independently — this multiplies the work on the inner side. Rewrite as separate queries joined with UNION ALL. For example, change \"FROM a JOIN b ON a.x = b.x OR a.y = b.y\" to \"FROM a JOIN b ON a.x = b.x UNION ALL FROM a JOIN b ON a.y = b.y\".",
+                    Message = $"OR in a join predicate. SQL Server rewrote the OR as {constantScanBranches.Count} separate lookups, each evaluated independently — this multiplies the work on the inner side. Rewrite as separate queries joined with UNION ALL. For example, change \"FROM a JOIN b ON a.x = b.x OR a.y = b.y\" to \"FROM a JOIN b ON a.x = b.x UNION ALL FROM a JOIN b ON a.y = b.y\".",
                     Severity = PlanWarningSeverity.Warning
                 });
             }
@@ -1310,6 +1321,54 @@ public static partial class PlanAnalyzer
                 });
             }
         }
+    }
+
+    /// <summary>
+    /// True when a lookup branch under an OR expansion's Concatenation builds its seek value from
+    /// another input. A join OR does: in ON u.Id = p.OwnerUserId OR u.Id = p.LastEditorUserId the
+    /// branches produce [Posts].[OwnerUserId] and [Posts].[LastEditorUserId], once per outer row.
+    /// The dynamic seek for an IN list of parameters has the same operator shape, but its
+    /// branches produce only parameters and literals ([@p1], (62)), which no outer row changes.
+    /// </summary>
+    private static bool LookupReadsAnotherInput(PlanNode branch)
+    {
+        var values = branch.PhysicalOp == "Constant Scan"
+            ? branch.ConstantScanValues
+            : branch.DefinedValues;
+
+        // Nothing to read, so nothing proves a parameter list: keep the warning.
+        if (string.IsNullOrEmpty(values))
+            return true;
+
+        return ReadsAnotherInput(values);
+    }
+
+    /// <summary>
+    /// True when a ScalarString names anything other than a parameter or a variable: a column
+    /// ([db].[dbo].[T].[c], or @tv.[c] as [v].[c] on a table variable) or an expression column
+    /// ([Expr1003]). Function names ([dbo].[fn](...)) and string literals are skipped. An
+    /// expression column counts too: an OR join on o.X + 1 renders its branches as [Expr1002],
+    /// computed on the outer input. The Constant Scan under a lookup branch is normally empty,
+    /// so the branch has no expression of its own to name, and a name that cannot be proved to
+    /// be a parameter keeps the warning, as the shape check alone did. Internal so the shapes
+    /// can be tested as raw strings.
+    /// </summary>
+    internal static bool ReadsAnotherInput(string scalarString)
+    {
+        foreach (Match match in BracketedNameRegex.Matches(scalarString))
+        {
+            if (!match.Groups["name"].Success || match.Groups["call"].Success)
+                continue; // a string literal, or the name of a function
+
+            var name = match.Groups["name"].Value;
+            if (name.StartsWith("[@", StringComparison.Ordinal) &&
+                !name.Contains("].[", StringComparison.Ordinal))
+                continue; // a parameter or a variable: [@p1]
+
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -2032,4 +2091,6 @@ public static partial class PlanAnalyzer
     private static partial Regex OptimizeForUnknownRegExp();
     [GeneratedRegex(@"\bNOT\s+IN\b", RegexOptions.IgnoreCase)]
     private static partial Regex NotInRegExp();
+    [GeneratedRegex(@"'(?:[^']|'')*'|(?<name>\[(?:[^\]]|\]\])*\](?:\.\[(?:[^\]]|\]\])*\])*)(?<call>\s*\()?")]
+    private static partial Regex BracketedNameRegExp();
 }
