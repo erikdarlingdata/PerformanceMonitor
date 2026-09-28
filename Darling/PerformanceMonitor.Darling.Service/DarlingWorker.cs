@@ -1318,6 +1318,13 @@ public sealed class DarlingWorker : BackgroundService
            The terminal arm stays a bare catch (Exception), OperationCanceledException included, exactly as
            before — shutdown during Load() still reports the same way it always has. */
         var configRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+        /* #4508: set once, the first time the fast budget above runs out on a failure that is still
+           retryable — the config-load mirror of the store site's storeSustainedRetryCriticalLogged. Config
+           load already used StartupFailureTriage.IsRetryable, so this widens no retryable class; it only
+           gives an already-retryable failure the same sustained arm the store site got, instead of the fast
+           budget running out and falling through to the identical terminal stand-down a missing or
+           malformed file gets. */
+        var configSustainedRetryCriticalLogged = false;
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -1342,6 +1349,40 @@ public sealed class DarlingWorker : BackgroundService
                 _collectorState.PublishRetrying(
                     CollectorRuntimeState.StartupStep.Configuration, attempt, StartupFailureTriage.Attempts);
                 await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException
+                && StartupFailureTriage.IsRetryable(ex))
+            {
+                /* #4508: reached only once the fast arm above has stopped matching. A darling.json another
+                   process is still mid-write past the two-minute fast budget keeps retrying on
+                   SustainedRetryDelay instead of falling through to the terminal catch below, which used to
+                   stand collection down for the life of the process identically to a missing or malformed
+                   file. */
+                var next = StartupFailureTriage.NextAction(attempt, configRetryBudget.Elapsed, ex);
+                if (!configSustainedRetryCriticalLogged)
+                {
+                    _logger.LogCritical(
+                        ex,
+                        "Cannot load configuration within the {Budget}s retry budget ({Message}); this is " +
+                        "still a recoverable failure, so it keeps retrying every {Delay}s instead of " +
+                        "standing down. Collection will not start until it succeeds.",
+                        (int)StartupFailureTriage.RetryBudget.TotalSeconds, ex.Message,
+                        (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                    configSustainedRetryCriticalLogged = true;
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Still cannot load configuration ({Message}) — attempt {Attempt}, retrying in " +
+                        "{Delay}s.",
+                        ex.Message, attempt, (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                }
+
+                _collectorState.PublishRetrying(
+                    CollectorRuntimeState.StartupStep.Configuration, attempt, StartupFailureTriage.Attempts,
+                    sustained: true);
+                await Task.Delay(next.Delay, stoppingToken);
             }
             catch (Exception ex)
             {
@@ -1458,6 +1499,11 @@ public sealed class DarlingWorker : BackgroundService
                "throw => service-exit": for a classified-transient throw it is now retry-then-service-exit.
                Terminal throws behave exactly as before. */
             var bootstrapRetryBudget = System.Diagnostics.Stopwatch.StartNew();
+            /* #4508: set once, the first time the fast budget above runs out on a failure that is still
+               retryable — see the sustained arm below. Same gating shape as the store site's
+               storeSustainedRetryCriticalLogged: one CRITICAL the moment the diagnosis is new, then a
+               WARNING on every later attempt against the same still-failing bootstrap. */
+            var bootstrapSustainedRetryCriticalLogged = false;
             for (var attempt = 1; ; attempt++)
             {
                 try
@@ -1486,6 +1532,41 @@ public sealed class DarlingWorker : BackgroundService
                     _collectorState.PublishRetrying(
                         CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts);
                     await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException
+                    && StartupFailureTriage.IsRetryable(ex))
+                {
+                    /* #4508: reached only once the fast arm above has stopped matching — the managed-Postgres
+                       bootstrap mirror of the store site's sustained arm just above this block. A bootstrap
+                       still failing on a classified-transient cause (a store still coming up, a transiently
+                       locked file) keeps retrying on SustainedRetryDelay instead of falling through to the
+                       terminal catch below, which used to stand collection down for the life of the process
+                       identically to a broken package or a stale credential. */
+                    var next = StartupFailureTriage.NextAction(attempt, bootstrapRetryBudget.Elapsed, ex);
+                    if (!bootstrapSustainedRetryCriticalLogged)
+                    {
+                        _logger.LogCritical(
+                            ex,
+                            "Managed Postgres bootstrap has not succeeded within the {Budget}s retry budget " +
+                            "({Message}); this is still a recoverable failure, so it keeps retrying every " +
+                            "{Delay}s instead of standing down. Collection will not start until it succeeds.",
+                            (int)StartupFailureTriage.RetryBudget.TotalSeconds, ex.Message,
+                            (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                        bootstrapSustainedRetryCriticalLogged = true;
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            ex,
+                            "Managed Postgres bootstrap still has not succeeded ({Message}) — attempt " +
+                            "{Attempt}, retrying in {Delay}s.",
+                            ex.Message, attempt, (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds);
+                    }
+
+                    _collectorState.PublishRetrying(
+                        CollectorRuntimeState.StartupStep.ManagedStore, attempt, StartupFailureTriage.Attempts,
+                        sustained: true);
+                    await Task.Delay(next.Delay, stoppingToken);
                 }
                 catch (Exception ex)
                 {
@@ -1947,7 +2028,7 @@ public sealed class DarlingWorker : BackgroundService
                 }
 
                 _collectorState.PublishRetrying(
-                    CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts);
+                    CollectorRuntimeState.StartupStep.Store, attempt, StartupFailureTriage.Attempts, sustained: true);
                 await Task.Delay(next.Delay, stoppingToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
