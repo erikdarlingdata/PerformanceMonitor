@@ -115,7 +115,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
 
         /* ---- (1) the reader itself, direct call, against the migrated store. ---- */
-        var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, TestServerId, ct);
+        var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, TestServerId, cancellationToken: ct);
         Assert.NotNull(metadata);
         Assert.Contains("Standard", metadata!.Edition, StringComparison.Ordinal);
         Assert.Equal(8, metadata.MaxDop);
@@ -130,7 +130,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)", connection);
         Assert.Contains("MAXDOP is set to 8", warning.GetProperty("message").GetString());
 
         /* ---- (3) a server with no rows at all: reader returns null, rule 38 stays Info. ---- */
-        var noRowsMetadata = await DarlingServerMetadataReader.ReadAsync(postgres, TestServerId - 1, ct);
+        var noRowsMetadata = await DarlingServerMetadataReader.ReadAsync(postgres, TestServerId - 1, cancellationToken: ct);
         Assert.Null(noRowsMetadata);
 
         var withoutMetadata = McpPlanAnalysisFormatter.BuildAnalysisResult(
