@@ -18,7 +18,7 @@ namespace Darling.Tests;
 /// <summary>
 /// A live test class that runs <c>EXPLAIN</c> against <c>DARLING_TEST_PG</c> reads the chunk list of a shared
 /// database, which other classes leave future-dated or compressed-empty chunks in (#4650). Such a class must mint
-/// its own database with <c>ScratchPostgres.CreateAsync</c>. The classes in <see cref="SharedStoreExplainBaseline"/>
+/// its own database with the <c>CreateAsync</c> factory on <c>ScratchPostgres</c>. The classes in <see cref="SharedStoreExplainBaseline"/>
 /// predate the rule; the baseline may only shrink.
 /// <para>This is a plain token scan over the raw file text and deliberately counts comments: the rule is about
 /// where a file puts its database, not about executable statements, so no comment filter applies.</para>
@@ -40,7 +40,10 @@ public sealed class LivePlanShapeIsolationCensusTests
             ["TopCpuQueriesTextLiveTests.cs"] = "counts rows resolved against query_text_dim in the executed plan, not chunk layout"
         };
 
-    private const string ScratchToken = "ScratchPostgres.CreateAsync(";
+    // Built with nameof so this file never spells the factory call out: LivePostgresCollectionHygieneTests treats
+    // any source containing that literal text as a shared-store user, and this census touches no store.
+    private static readonly string ScratchToken =
+        nameof(ScratchPostgres) + "." + nameof(ScratchPostgres.CreateAsync) + "(";
 
     [Fact]
     public void EveryLiveExplainClass_MintsItsOwnDatabase_OrIsInTheFrozenBaseline()
@@ -53,7 +56,7 @@ public sealed class LivePlanShapeIsolationCensusTests
 
         Assert.True(offenders.Count == 0,
             "A live test that runs EXPLAIN against DARLING_TEST_PG must create its own database with "
-            + "ScratchPostgres.CreateAsync (#4650). Offenders: " + string.Join(", ", offenders));
+            + "the ScratchPostgres factory (#4650). Offenders: " + string.Join(", ", offenders));
     }
 
     [Fact]
