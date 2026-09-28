@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "purpose": "Single source of truth for wait stat handling. Per issue #215, this file drives the wait stats functionality. Attributes 1-8 are populated from existing tool behavior; attributes 9-12 (applicable operators, descriptions, URLs, internal comment) need domain expertise and are open for contribution.",
+    "purpose": "Single source of truth for wait stat handling. Per erikdarlingdata/PerformanceStudio#215, this file drives the wait stats functionality. Attributes 1-8 are populated from existing tool behavior; attributes 9-12 (applicable operators, descriptions, URLs, internal comment) need domain expertise and are open for contribution.",
     "schema": {
       "name": "Wait stat name (e.g., PAGEIOLATCH_SH).",
       "isPreemptive": "True iff the wait runs preemptively (Windows kernel time, name prefix PREEMPTIVE_).",
