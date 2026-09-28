@@ -1541,9 +1541,9 @@ public static partial class PlanAnalyzer
     /// </summary>
     private static long GetEffectiveChildElapsedMs(PlanNode child)
     {
-        // Exchange operators have unreliable times — skip to their child
+        // Exchange operators: unreliable times, use max child
         if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
-            return child.Children.Max(c => c.ActualElapsedMs);
+            return child.Children.Max(GetEffectiveChildElapsedMs);
 
         var mode = child.ActualExecutionMode ?? child.ExecutionMode;
         if (mode == "Batch" && child.HasActualStats)
