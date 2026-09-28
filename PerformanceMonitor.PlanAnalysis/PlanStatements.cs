@@ -57,7 +57,7 @@ public static class PlanStatements
         }
     }
 
-    private static void PushAll(IReadOnlyList<PlanStatement> statements, Stack<PlanStatement> pending)
+    private static void PushAll(List<PlanStatement> statements, Stack<PlanStatement> pending)
     {
         for (var i = statements.Count - 1; i >= 0; i--)
             pending.Push(statements[i]);
