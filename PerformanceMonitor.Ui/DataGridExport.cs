@@ -47,7 +47,7 @@ public static class DataGridExport
         if (cell.Column == null || cell.Item == null) return;
 
         var value = GetCellValue(cell.Column, cell.Item);
-        if (value.Length > 0) Clipboard.SetDataObject(value, false);
+        if (value.Length > 0) ClipboardText.TrySetText(value);
     }
 
     /// <summary>
@@ -63,7 +63,7 @@ public static class DataGridExport
         var item = FindRowItem(sender) ?? grid.CurrentItem ?? grid.SelectedItem;
         if (item == null) return;
 
-        Clipboard.SetDataObject(string.Join("\t", GetRowValues(grid, item)), false);
+        ClipboardText.TrySetText(string.Join("\t", GetRowValues(grid, item)));
     }
 
     /// <summary>Copies the whole grid (header + all rows, tab-delimited) to the clipboard.</summary>
@@ -72,7 +72,7 @@ public static class DataGridExport
         var grid = FindDataGrid(sender);
         if (grid == null || grid.Items.Count == 0) return;
 
-        Clipboard.SetDataObject(BuildClipboardText(grid), false);
+        ClipboardText.TrySetText(BuildClipboardText(grid));
     }
 
     /// <summary>
