@@ -5834,9 +5834,10 @@ RETURNING s.state_key";
             var result = await command.ExecuteScalarAsync(cancellationToken);
             return result is bool b && b;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* Fail toward first-run (all-history) — matches a fresh store with no log yet. */
+            /* Fail toward first-run (all-history) — matches a fresh store with no log yet. A cancelled
+               request must propagate rather than read as an ordinary read failure, matching Lite's twin. */
             return false;
         }
     }

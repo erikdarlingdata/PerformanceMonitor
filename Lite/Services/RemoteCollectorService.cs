@@ -1435,9 +1435,11 @@ WHERE server_id = $3";
             if (result is DateTime dt)
                 return dt;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            /* If DuckDB query fails, caller uses fallback window */
+            /* If DuckDB query fails, caller uses fallback window. A cancelled token must propagate
+               instead of being read as "query failed, use the fallback window" — the caller cannot tell
+               a real shutdown apart from an ordinary failure otherwise. */
         }
         return null;
     }
@@ -1485,7 +1487,7 @@ WHERE server_id = $3";
                     return (reader.GetDateTime(1), false);
             }
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* If DuckDB query fails, caller uses fallback window — the sibling's contract. */
         }
@@ -1533,7 +1535,7 @@ WHERE server_id = $3";
             if (result is DateTime dt)
                 return dt;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* If DuckDB query fails, caller uses fallback window */
         }
@@ -1572,7 +1574,7 @@ WHERE server_id = $3";
             if (result is not null && result != DBNull.Value)
                 return Convert.ToInt64(result);
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* If DuckDB query fails, caller uses fallback window */
         }
@@ -1600,7 +1602,7 @@ WHERE server_id = $3";
             var result = await cmd.ExecuteScalarAsync(cancellationToken);
             return result is not null && result != DBNull.Value && Convert.ToInt64(result) > 0;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             /* Fail toward first-run (all-history) — matches a fresh store with no log yet. */
             return false;

@@ -749,8 +749,12 @@ public sealed class DarlingAnalysisService
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Cancellation (an abandoned web/MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault — this read has no per-pass budget
+               of its own, so the only source of a cancelled context.CancellationToken is the caller's own
+               token, the same reasoning CollectConfigAuditFactsAsync's catch already states (#4203). */
             _logger?.LogError("[DarlingAnalysisService] Fact collection or anomaly detection failed for {Server}: {Message}",
                 serverName, ex.Message);
             return ([], null, CollectionCaveatState.From(context));
@@ -870,8 +874,12 @@ public sealed class DarlingAnalysisService
 
             return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* Cancellation (an abandoned web/MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault — this read has no per-pass budget
+               of its own, so the only source of a cancelled comparisonContext.CancellationToken is the
+               caller's own token, the same reasoning CollectConfigAuditFactsAsync's catch already states (#4203). */
             _logger?.LogError("[DarlingAnalysisService] Period comparison failed for {Server}: {Message}",
                 serverName, ex.Message);
             return ([], [], null, null, new Dictionary<string, BaselineBucket>());
