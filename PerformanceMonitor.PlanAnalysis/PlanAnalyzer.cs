@@ -337,7 +337,7 @@ public static partial class PlanAnalyzer
         {
             // Detect duplicate suggestions for the same table
             var tableSuggestionCount = stmt.MissingIndexes
-                .GroupBy(mi => $"{mi.Schema}.{mi.Table}", StringComparer.OrdinalIgnoreCase)
+                .GroupBy(mi => $"{mi.Database}.{mi.Schema}.{mi.Table}", StringComparer.OrdinalIgnoreCase)
                 .Where(g => g.Count() > 1)
                 .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
 
@@ -345,7 +345,7 @@ public static partial class PlanAnalyzer
             {
                 var keyCount = mi.EqualityColumns.Count + mi.InequalityColumns.Count;
                 var includeCount = mi.IncludeColumns.Count;
-                var tableKey = $"{mi.Schema}.{mi.Table}";
+                var tableKey = $"{mi.Database}.{mi.Schema}.{mi.Table}";
 
                 // Low-impact suggestion (< 25% improvement)
                 if (mi.Impact < 25)
