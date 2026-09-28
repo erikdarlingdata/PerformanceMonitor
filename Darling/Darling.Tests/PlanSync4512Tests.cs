@@ -38,18 +38,17 @@ public sealed class PlanSync4512Tests
     /// the pre-fix parser this crashes the test host with a StackOverflowException, so it is
     /// NOT run against dev's code (see <see cref="RecursionGuardMutationProof"/> for the
     /// runtime RED instead). Fixed, the guard fires well short of 1,500 and the process
-    /// survives with <see cref="ParsedPlan.ParseError"/> set.
+    /// survives with <see cref="ParsedPlan.ParseError"/> set — even when this test's own
+    /// calling thread has only a 1 MB stack, the size of the smallest real caller (the WPF UI
+    /// thread), because <c>ShowPlanParser.Parse</c> now runs its walk on its own
+    /// dedicated-size thread rather than the caller's.
     /// </summary>
     [Fact]
     public void DeeplyNestedRelOpsFailWithACatchableErrorInsteadOfCrashing()
     {
         var xml = NestedRelOpPlan(1500);
 
-        // The guard fires at depth 1,001, but reaching it still means about a thousand nested
-        // calls of real parsing work below this test's own stack frame. A dedicated thread with
-        // a deliberately generous stack keeps that deterministic regardless of build config or
-        // future frame-size drift, the same way PerformanceStudio's equivalent test does.
-        var plan = ParseOnBigStackThread(xml);
+        var plan = ParseOnOneMegabyteStackThread(xml);
 
         Assert.NotNull(plan!.ParseError);
         Assert.Contains("depth limit", plan.ParseError);
@@ -68,7 +67,7 @@ public sealed class PlanSync4512Tests
     {
         var xml = NestedProcedurePlan(1500);
 
-        var plan = ParseOnBigStackThread(xml);
+        var plan = ParseOnOneMegabyteStackThread(xml);
 
         Assert.NotNull(plan!.ParseError);
         Assert.Contains("depth limit", plan.ParseError);
@@ -158,25 +157,27 @@ public sealed class PlanSync4512Tests
     {
         var xml = NestedRelOpPlan(1001);
 
-        var plan = ParseOnBigStackThread(xml);
+        var plan = ParseOnOneMegabyteStackThread(xml);
 
         Assert.NotNull(plan!.ParseError);
         Assert.Contains("depth limit", plan.ParseError);
     }
 
     /// <summary>
-    /// Runs <see cref="ShowPlanParser.Parse"/> on a dedicated thread with an 8 MB stack, so tests
-    /// that push recursion right up to <see cref="ShowPlanParser.MaxParseDepth"/> stay
-    /// deterministic on the guard firing rather than on how much stack the test host's own
-    /// thread happened to have left.
+    /// Calls <see cref="ShowPlanParser.Parse"/> from a caller thread with only a 1 MB stack —
+    /// the size of the smallest real caller in production (the WPF plan viewer's UI thread;
+    /// thread-pool and ASP.NET threads get 1.5 MB). Measured directly (#4512 follow-up): a 1 MB
+    /// thread recursing through this parser's own call shape overflows at roughly depth 80, and
+    /// a 1.5 MB thread at roughly depth 119 — both far short of <c>MaxParseDepth</c> (1,000) —
+    /// so before the fix, <c>MaxParseDepth</c> alone never protected these callers; the crash
+    /// happened first. <c>Parse</c> now runs its recursive walk on its own dedicated-size
+    /// thread, so this 1 MB caller thread is only how <c>Parse</c> gets invoked, not what the
+    /// recursion actually runs on.
     /// </summary>
-    private static ParsedPlan? ParseOnBigStackThread(string xml)
+    private static ParsedPlan? ParseOnOneMegabyteStackThread(string xml)
     {
         ParsedPlan? plan = null;
-        // PM's ParseRelOp carries more locals per frame than PerformanceStudio's did, so an 8 MB
-        // stack (PS's own margin) is not enough headroom at ~1,500 levels; 64 MB comfortably
-        // covers every depth this class exercises while staying nowhere near a real crash.
-        var thread = new Thread(() => plan = ShowPlanParser.Parse(xml), 64 * 1024 * 1024);
+        var thread = new Thread(() => plan = ShowPlanParser.Parse(xml), 1 * 1024 * 1024);
         thread.Start();
         thread.Join();
         return plan;

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Threading;
 using System.Xml.Linq;
 
 namespace PerformanceMonitor.PlanAnalysis;
@@ -17,6 +18,18 @@ public static class ShowPlanParser
     internal const int MaxParseDepth = 1000;
     internal const int MaxParseCharacters = 16 * 1024 * 1024;
 
+    // #4512 follow-up: the depth guard above only helps if 1,000 levels actually fit in the
+    // stack the caller happens to be running on. Measured against this parser's own recursion
+    // (a synthetic plan shaped like the deepest real one, ParseRelOp's NestedLoops descent):
+    // depth 1,000 needs ~13 MB of stack and depth 2,000 (2x margin) needs ~27 MB, on both a
+    // .NET thread-pool/ASP.NET thread (1.5 MB) and the WPF UI thread (1 MB) that call this in
+    // production. Neither has anywhere close to that: measured directly, those threads
+    // overflow at roughly depth 80 (1 MB) and depth 119 (1.5 MB) — long before MaxParseDepth
+    // fires — so the guard alone does not stop the crash it's meant to stop. Run the walk on a
+    // dedicated thread sized for MaxParseDepth with 2x margin instead, so the guard's own limit
+    // is always reachable regardless of the caller's stack.
+    private const int ParseThreadStackBytes = 32 * 1024 * 1024;
+
     public static ParsedPlan Parse(string xml)
     {
         var plan = new ParsedPlan { RawXml = xml };
@@ -29,6 +42,22 @@ public static class ShowPlanParser
             return plan;
         }
 
+        // The recursive tree walk below can need more stack than the calling thread has
+        // (see ParseThreadStackBytes above), so it always runs on a dedicated thread sized to
+        // guarantee MaxParseDepth is reachable, regardless of whether the caller is a
+        // thread-pool worker, an ASP.NET request thread, or the WPF UI thread.
+        var result = plan;
+        var thread = new Thread(() => ParseOnDedicatedThread(xml, result), ParseThreadStackBytes)
+        {
+            IsBackground = true,
+        };
+        thread.Start();
+        thread.Join();
+        return result;
+    }
+
+    private static void ParseOnDedicatedThread(string xml, ParsedPlan plan)
+    {
         XDocument doc;
         try
         {
@@ -36,7 +65,7 @@ public static class ShowPlanParser
         }
         catch
         {
-            return plan;
+            return;
         }
 
         // The tree walk below can throw on hostile/malformed plans (including the depth guards
@@ -45,7 +74,7 @@ public static class ShowPlanParser
         try
         {
             var root = doc.Root;
-            if (root == null) return plan;
+            if (root == null) return;
 
             plan.BuildVersion = root.Attribute("Version")?.Value;
             plan.Build = root.Attribute("Build")?.Value;
@@ -90,7 +119,6 @@ public static class ShowPlanParser
         {
             plan.ParseError = ex.Message;
         }
-        return plan;
     }
 
     /// <summary>
