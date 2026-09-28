@@ -216,6 +216,10 @@ public static class McpPlanAnalysisFormatter
             server = serverName,
             source,
             identifier,
+            /* #4551: a refused or exception-terminated plan still returns whatever parsed before the
+               failure, so statement_count/statements below can be 0 or partial. parse_error surfaces the
+               reason instead of letting a partial result look complete; null when the plan parsed fine. */
+            parse_error = plan.ParseError,
             statement_count = statements.Count,
             total_warnings = totalWarnings,
             total_critical = totalCritical,
