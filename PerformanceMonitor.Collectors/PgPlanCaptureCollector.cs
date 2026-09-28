@@ -156,17 +156,18 @@ SELECT
     CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
          WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,
     CASE WHEN m[2] !~ '^[0-9]{1,15}(\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,
-    replace(m[3], chr(9), '')                        AS plan_json
+    replace(m[3], chr(9), '')                        AS plan_json,
+    pg_catalog.current_setting('log_line_prefix', true)  AS line_prefix
 FROM tail,
      regexp_matches(
          tail.body,
          '^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? [^ [\n]+ [^[\n]*\[\d+\] (-?\d+) " + PlanMarkerLiteral + @"([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)',
          'gn') AS m
 UNION ALL
-SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
+SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"'
+SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 2000";
 
@@ -245,7 +246,8 @@ SELECT
     CASE WHEN m[1] !~ '^-?[0-9]{1,19}$' THEN NULL
          WHEN (m[1])::numeric BETWEEN -9223372036854775808 AND 9223372036854775807 THEN (m[1])::bigint END AS query_id,
     CASE WHEN m[2] !~ '^[0-9]{1,15}(\.[0-9]{1,9})?$' THEN NULL ELSE (m[2])::double precision END AS duration_ms,
-    replace(m[3], chr(9), '')                        AS plan_json
+    replace(m[3], chr(9), '')                        AS plan_json,
+    pg_catalog.current_setting('log_line_prefix', true)  AS line_prefix
 FROM tail,
      regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
@@ -253,10 +255,10 @@ FROM tail,
          'gn') AS m
 WHERE pg_catalog.position(tail.body, '" + PlanMarkerLiteral + @"'::bytea) > 0
 UNION ALL
-SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"'
+SELECT NULL::bigint, NULL::double precision, '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
-SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"'
+SELECT NULL::bigint, NULL::double precision, '" + PgNoStderrLogFileException.Marker + @"', NULL
 WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
 LIMIT 2000";
 
@@ -568,11 +570,20 @@ LIMIT 2000";
                 continue;
             }
 
+            /* #4501: the digits regexp_matches captured right after the pid are trusted as the real
+               %Q query id only when the target's own collected log_line_prefix puts %Q there. Under the
+               v17 managed default '%m [%p] %a ' that position renders application_name instead, and an
+               all-digit application name would otherwise attach as a plausible-looking but wrong query
+               id. A NULL line_prefix (not collected — current_setting's own "true" missing-ok argument)
+               keeps this route's pre-#4501 behaviour of trusting the capture unconditionally. */
+            var linePrefix = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var queryId = PgPlanLogParser.PrefixCarriesQueryIdAfterPid(linePrefix) ? reader.GetInt64(0) : 0;
+
             /* Extraction, redaction and hashing live in PgPlanLogParser, shared with the RDS log-API
                transport (#2538). Two implementations of the redaction would eventually disagree, and the
                cost of THAT divergence is customer data rather than a wrong number. */
             var parsed = PgPlanLogParser.FromBlock(
-                reader.GetInt64(0),
+                queryId,
                 reader.GetDouble(1),
                 planJson);
 
