@@ -12,6 +12,7 @@ using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Analysis;
 
 public partial class DrillDownCollector
@@ -80,7 +81,7 @@ LIMIT 1";
             if (!string.IsNullOrWhiteSpace(plan.ParseError))
                 return;
 
-            PlanAnalysisPipeline.Run(plan, context.CancellationToken);
+            PlanAnalysisPipeline.Run(plan, App.AnalyzerConfig, serverMetadata: null, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
             // finding inside an EXEC <procedure> plan's body reaches the drill-down.
@@ -171,7 +172,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, context.CancellationToken);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, App.AnalyzerConfig, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {

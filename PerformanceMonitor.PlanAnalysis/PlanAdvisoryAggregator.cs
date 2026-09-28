@@ -31,9 +31,18 @@ public static class PlanAdvisoryAggregator
         SummarizeCancellable(planXmls, CancellationToken.None);
 
     /// <summary>Cancellable form of <see cref="Summarize(IEnumerable{string})"/>.</summary>
-    public static Summary SummarizeCancellable(IEnumerable<string> planXmls, CancellationToken cancellationToken)
+    public static Summary SummarizeCancellable(IEnumerable<string> planXmls, CancellationToken cancellationToken) =>
+        SummarizeCancellable(planXmls, config: null, cancellationToken);
+
+    /// <summary>
+    /// #4535: the config-aware form. A disabled rule's findings never appear in
+    /// <see cref="Summary.WarningCount"/>/<see cref="Summary.CriticalCount"/>; a severity override is
+    /// reflected in <see cref="Summary.CriticalCount"/>. Null <paramref name="config"/> behaves exactly
+    /// like the overload above (<see cref="AnalyzerConfig.Default"/>).
+    /// </summary>
+    public static Summary SummarizeCancellable(IEnumerable<string> planXmls, AnalyzerConfig? config, CancellationToken cancellationToken)
     {
-        var details = ExtractCancellable(planXmls, cancellationToken);
+        var details = ExtractCancellable(planXmls, config, cancellationToken);
         var maxImpact = details.MissingIndexes.Count > 0
             ? details.MissingIndexes.Max(i => i.Impact)
             : 0.0;
@@ -50,7 +59,16 @@ public static class PlanAdvisoryAggregator
         ExtractCancellable(planXmls, CancellationToken.None);
 
     /// <summary>Cancellable form of <see cref="Extract(IEnumerable{string})"/>.</summary>
-    public static Details ExtractCancellable(IEnumerable<string> planXmls, CancellationToken cancellationToken)
+    public static Details ExtractCancellable(IEnumerable<string> planXmls, CancellationToken cancellationToken) =>
+        ExtractCancellable(planXmls, config: null, cancellationToken);
+
+    /// <summary>
+    /// #4535: the config-aware form <see cref="SummarizeCancellable(IEnumerable{string}, AnalyzerConfig?, CancellationToken)"/>
+    /// delegates to. Threads <paramref name="config"/> into <see cref="PlanAnalysisPipeline.Run(ParsedPlan, AnalyzerConfig?, ServerMetadata?, CancellationToken)"/>
+    /// for every plan, so a disabled rule drops out of <c>plan.AllWarnings</c> before it ever
+    /// reaches this aggregator, and an override is already applied to <c>PlanWarning.Severity</c>.
+    /// </summary>
+    public static Details ExtractCancellable(IEnumerable<string> planXmls, AnalyzerConfig? config, CancellationToken cancellationToken)
     {
         var byKey = new Dictionary<string, MissingIndex>(StringComparer.OrdinalIgnoreCase);
         var warnings = new List<PlanWarning>();
@@ -66,7 +84,7 @@ public static class PlanAdvisoryAggregator
             try
             {
                 plan = ShowPlanParser.Parse(xml, cancellationToken);
-                PlanAnalysisPipeline.Run(plan, cancellationToken);
+                PlanAnalysisPipeline.Run(plan, config, serverMetadata: null, cancellationToken);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

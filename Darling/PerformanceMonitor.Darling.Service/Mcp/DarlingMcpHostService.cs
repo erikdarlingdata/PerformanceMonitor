@@ -512,6 +512,10 @@ public sealed class DarlingMcpHostService : BackgroundService
                but injecting only the two fields GatherAsync reads means a future [McpServerTool] that
                takes a PostgresConfig parameter cannot receive the owner secret through this seat. */
             builder.Services.AddSingleton(new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory });
+            /* #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
+               section. Null (section omitted) is AnalyzerConfig.Default; DarlingMcpPlanTools takes this
+               as an [McpServerTool] method parameter the same way it takes NpgsqlDataSource above. */
+            builder.Services.AddSingleton(config.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default);
             /* #4214 round-1 review, Medium 2: get_store_host's 5-minute shared cache — the process-wide
                Shared instance, not a fresh one per request, so every caller (MCP and the direct-call web
                path below) actually shares the one cache window. Typed-generic AddSingleton<T>, not the

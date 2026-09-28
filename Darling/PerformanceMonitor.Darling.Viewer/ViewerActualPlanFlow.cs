@@ -105,6 +105,7 @@ public static class ViewerActualPlanFlow
     public static async Task OpenFloatingPlanAsync(Window owner, string planXml, string label, string? queryText)
     {
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             await viewer.LoadPlan(planXml, label, queryText);

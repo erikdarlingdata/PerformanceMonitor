@@ -24,6 +24,7 @@ using static PerformanceMonitor.Ui.FileSaveHelper;
 using static PerformanceMonitor.Ui.DataGridHelpers;
 using PerformanceMonitor.PlanAnalysis;
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Controls;
 
 public partial class ServerTab : UserControl
@@ -253,6 +254,7 @@ public partial class ServerTab : UserControl
     {
         HidePlanLoading();
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = App.AnalyzerConfig;
         try
         {
             /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed

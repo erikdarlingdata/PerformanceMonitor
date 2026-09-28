@@ -243,6 +243,7 @@ public partial class QueryStatsHistoryWindow : Window
 
         var label = $"Est Plan - {_queryHash}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             await viewer.LoadPlan(planXml, label, _queryText);
@@ -331,6 +332,7 @@ public partial class QueryStatsHistoryWindow : Window
         }
 
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             await viewer.LoadPlan(result.PlanXml, label, queryText);

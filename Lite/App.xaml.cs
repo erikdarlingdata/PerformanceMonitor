@@ -91,6 +91,15 @@ public partial class App : Application
     /// <summary>
     /// Gets the default time range in hours for new server tabs.
     /// </summary>
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule config, read from settings.json's optional "analyzer" key
+    /// (the same shape darling.json's "analyzer" section takes) alongside the other UI defaults
+    /// <see cref="LoadDefaultTimeRange"/> reads. Never null; a missing key or malformed settings.json
+    /// is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>.
+    /// </summary>
+    public static PerformanceMonitor.PlanAnalysis.AnalyzerConfig AnalyzerConfig { get; set; } =
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
+
     public static int DefaultTimeRangeHours { get; set; } = 4;
 
     /// <summary>
@@ -985,6 +994,14 @@ public partial class App : Application
             if (read.TryGetProperty("auto_refresh_interval_seconds", out var refreshSeconds))
             {
                 AutoRefreshIntervalSeconds = refreshSeconds.WholeNumber(AutoRefreshIntervalSeconds);
+            }
+
+            /* #4535: "analyzer" is a JSON OBJECT, not a scalar the SettingsReader's Bool/WholeNumber
+               helpers handle — read its raw text (when present) through ConfigLoader.Parse, which already
+               falls back to AnalyzerConfig.Default on anything malformed. */
+            if (read.TryGetProperty("analyzer", out var analyzerValue))
+            {
+                AnalyzerConfig = PerformanceMonitor.PlanAnalysis.ConfigLoader.Parse(analyzerValue.Element.GetRawText());
             }
 
             /* #2444: this loader named its keys even when it had only one, which is the behaviour

@@ -55,6 +55,7 @@ public partial class ViewerServerTab
     {
         HidePlanLoading();
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             await viewer.LoadPlan(planXml, label, queryText);

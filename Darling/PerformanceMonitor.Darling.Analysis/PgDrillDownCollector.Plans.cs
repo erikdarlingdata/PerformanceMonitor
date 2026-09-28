@@ -82,7 +82,7 @@ LIMIT 1";
             if (!string.IsNullOrWhiteSpace(plan.ParseError))
                 return;
 
-            PlanAnalysisPipeline.Run(plan, context.CancellationToken);
+            PlanAnalysisPipeline.Run(plan, _analyzerConfig, serverMetadata: null, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
             // finding inside an EXEC <procedure> plan's body reaches the drill-down.
@@ -182,7 +182,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, context.CancellationToken);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, _analyzerConfig, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {

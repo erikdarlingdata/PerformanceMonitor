@@ -98,10 +98,25 @@ public static class McpPlanAnalysisFormatter
         string? serverName,
         string source,
         string? identifier,
+        CancellationToken cancellationToken = default) =>
+        BuildAnalysisResult(xml, serverName, source, identifier, config: null, cancellationToken);
+
+    /// <summary>
+    /// #4535: the config-aware form. A rule the host's <c>analyzer</c> section disables never attaches
+    /// its finding to <paramref name="xml"/>'s plan, so it drops out of the result's warnings/
+    /// critical_count; an overridden severity is already applied before this projects the result.
+    /// Null <paramref name="config"/> behaves exactly like the overload above.
+    /// </summary>
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        AnalyzerConfig? config,
         CancellationToken cancellationToken = default)
     {
         var plan = ShowPlanParser.Parse(xml, cancellationToken);
-        PlanAnalysisPipeline.Run(plan, cancellationToken);
+        PlanAnalysisPipeline.Run(plan, config, serverMetadata: null, cancellationToken);
 
         // #4514: includes statements nested inside a stored procedure or UDF body, so the MCP
         // analyze_plan_xml/analyze_query_plan/analyze_query_store_plan tools see the same

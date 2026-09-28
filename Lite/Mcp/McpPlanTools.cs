@@ -9,6 +9,7 @@ using PerformanceMonitor.Common;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Mcp;
 
 [McpServerToolType]
@@ -41,7 +42,7 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for query_hash '{query_hash}'. The query may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, App.AnalyzerConfig, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -77,7 +78,7 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for plan_handle '{plan_handle}'. The procedure may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle, App.AnalyzerConfig, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -125,7 +126,7 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for plan_id {plan_id} in database '{database_name}'. Query Store may not be enabled or the plan may have been purged.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", App.AnalyzerConfig, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -153,7 +154,7 @@ public sealed class McpPlanTools
 
         try
         {
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, App.AnalyzerConfig, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

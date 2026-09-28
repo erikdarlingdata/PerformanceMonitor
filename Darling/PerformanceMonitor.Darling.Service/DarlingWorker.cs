@@ -705,6 +705,13 @@ public sealed class DarlingWorker : BackgroundService
     /* Set once by ExecuteAsync before the loop starts; the observability writes need it. */
     private NpgsqlDataSource? _postgres;
 
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule config (darling.json's optional "analyzer" section), set
+    /// once at startup config load, same lifetime as <see cref="_capturePlans"/>-style file knobs.
+    /// Null (section omitted) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>.
+    /// </summary>
+    private PerformanceMonitor.PlanAnalysis.AnalyzerConfig? _analyzerConfig;
+
     /* #4299: set for the lifetime of a materialization-hole repair this process launched, cleared in a
        finally around the same call — the Periodic pass's "no repair running in this process" half of the
        relaunch gate. A per-process flag, not a store one: the epoch stamp in the store (RawRepairEpochStampSql)
@@ -1331,6 +1338,7 @@ public sealed class DarlingWorker : BackgroundService
             {
                 configPath = DarlingConfig.ResolveConfigPath();
                 config = DarlingConfig.Load();
+                _analyzerConfig = config.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
                 _logger.LogInformation("Loaded configuration from {Path}: {ServerCount} server(s)", configPath, config.Servers.Count);
                 break;
             }
@@ -8420,7 +8428,7 @@ AND   j.hypertable_name = '{relation}'", connection))
 
         try
         {
-            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache);
+            var analysisService = new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig);
 
             /* #2430: the TOKEN is the budget now; the Task.Delay below is only this sweep's patience.
                Before this, AnalyzeAsync received the STOPPING token and nothing else, so the timeout

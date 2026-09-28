@@ -383,6 +383,7 @@ public partial class WaitDrillDownWindow : Window
 
         var label = $"{(isActual ? "Live" : "Est")} Plan - SPID {row.SessionId}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             await viewer.LoadPlan(planXml, label, row.QueryText);

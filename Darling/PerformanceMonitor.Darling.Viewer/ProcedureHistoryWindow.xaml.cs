@@ -244,6 +244,7 @@ public partial class ProcedureHistoryWindow : Window
 
         var label = $"Est Plan - {fullName}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             await viewer.LoadPlan(planXml, label, queryText: null);
@@ -306,6 +307,7 @@ public partial class ProcedureHistoryWindow : Window
         }
 
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             await viewer.LoadPlan(result.PlanXml, label, queryText);

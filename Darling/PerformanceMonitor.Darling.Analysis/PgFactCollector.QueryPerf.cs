@@ -758,7 +758,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var summary = PlanAdvisoryAggregator.SummarizeCancellable(planXmls, context.CancellationToken);
+            var summary = PlanAdvisoryAggregator.SummarizeCancellable(planXmls, _analyzerConfig, context.CancellationToken);
 
             if (summary.MissingIndexCount > 0)
             {
