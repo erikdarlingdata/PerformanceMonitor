@@ -82,8 +82,9 @@ LIMIT 1";
             if (!string.IsNullOrWhiteSpace(plan.ParseError))
                 return;
 
-            // #4530: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP.
-            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, context.CancellationToken);
+            // #4530/#4597: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP. No
+            // database name is known at this call site (query_hash lookup only), so Database stays null.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, cancellationToken: context.CancellationToken);
             PlanAnalysisPipeline.Run(plan, _analyzerConfig, metadata, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
@@ -184,8 +185,10 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            // #4530: one store read per collector call so rule 38 can see the server's edition/MAXDOP.
-            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, context.CancellationToken);
+            // #4530/#4597: one store read per collector call so rule 38 can see the server's edition/MAXDOP.
+            // This aggregates plans across whatever databases fed the top-10-by-cost set (no single database
+            // name), so Database stays null here.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, cancellationToken: context.CancellationToken);
             var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, _analyzerConfig, metadata, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)

@@ -17,12 +17,19 @@ namespace PerformanceMonitor.Darling.Service;
 /// <see cref="CollectorFaultCancelOrigin"/>'s own SQLSTATE-plus-wording rule rather than re-deriving it: a
 /// 57014 whose message names the store's own <c>statement_timeout</c> is <see cref="ReadOutcome.Timeout"/>,
 /// any OTHER 57014 (an external <c>pg_cancel_backend()</c>, or the wording unproven) is
-/// <see cref="ReadOutcome.Cancelled"/> — a user/operator cancel, not our own store's ceiling — and the
-/// caller's own token going away is <see cref="ReadOutcome.Cancelled"/> whatever the exception looked like,
-/// since that is not a store answer at all.
+/// <see cref="ReadOutcome.Cancelled"/> — a user/operator cancel, not our own store's ceiling — a 53400
+/// <c>configuration_limit_exceeded</c> (#4605, the viewer/mcp role's <c>temp_file_limit</c> refusing a read's
+/// on-disk spill) is <see cref="ReadOutcome.Limit"/> — the store refusing the read on purpose, a distinct
+/// answer from a wall-clock cancel — and the caller's own token going away is <see
+/// cref="ReadOutcome.Cancelled"/> whatever the exception looked like, since that is not a store answer at
+/// all.
 /// </summary>
 public static class ReadOutcomeClassifier
 {
+    /// <summary>The SQLSTATE PostgreSQL raises when a role's <c>temp_file_limit</c> is exceeded
+    /// (<c>configuration_limit_exceeded</c>, #4605) — "temporary file size exceeds temp_file_limit".</summary>
+    internal const string ConfigurationLimitExceeded = "53400";
+
     /// <summary>The caller's own token already carries the cancellation — the request left, or an operator's
     /// explicit cancel. Checked FIRST: a request whose own token fired is <see cref="ReadOutcome.Cancelled"/>
     /// no matter what exception shape follows, since the caller is why it stopped, not the store.</summary>
@@ -31,6 +38,11 @@ public static class ReadOutcomeClassifier
         if (requestToken.IsCancellationRequested)
         {
             return ReadOutcome.Cancelled;
+        }
+
+        if (exception is PostgresException { SqlState: ConfigurationLimitExceeded })
+        {
+            return ReadOutcome.Limit;
         }
 
         if (exception is PostgresException { SqlState: CollectorFaultCancelOrigin.QueryCanceled } postgres)

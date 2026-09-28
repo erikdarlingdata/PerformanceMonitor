@@ -1035,22 +1035,35 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#4283 review round 1 (M1): the PostgresException SQLSTATEs a Custom Views panel author can act
     /// on by editing their own panel — a statement_timeout cancel, or a class-22/class-42 error other than
-    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel). Everything else (28P01
-    /// auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...) is a STORE
-    /// fault the author cannot fix.</summary>
+    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel), or (#4605) a 53400
+    /// <c>configuration_limit_exceeded</c> — the viewer/mcp role's <c>temp_file_limit</c> refusing the panel's
+    /// own on-disk spill, which the author fixes the same way they fix a statement_timeout cancel: narrow the
+    /// panel. Everything else (28P01 auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000
+    /// unknown database, ...) is a STORE fault the author cannot fix.</summary>
     internal static bool IsComposeRunAuthorActionable(string? sqlState) =>
         sqlState == "57014"
+        || sqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded
         || (sqlState is { Length: 5 } && sqlState.StartsWith("22", StringComparison.Ordinal))
         || (sqlState is { Length: 5 } && sqlState.StartsWith("42", StringComparison.Ordinal) && sqlState != "42501");
+
+    /// <summary>#4605: the caller-facing text for a composed read the viewer/mcp role's <c>temp_file_limit</c>
+    /// refused (SQLSTATE 53400) — named separately from the generic "Query failed: {MessageText}" text
+    /// (#4283) because the store's own wording ("temporary file size exceeds temp_file_limit") names an
+    /// internal setting the panel author has no way to change; this names the ACTIONS they can take
+    /// instead.</summary>
+    internal const string TempFileLimitExceededMessage =
+        "This panel needed more temporary disk space than a dashboard read may use. Narrow the time window, choose an hourly or daily grain, or add a filter.";
 
     /// <summary>#4293 round 2 (R2-L1, R2-L2): the compose runner's PostgresException decision, pulled out of the
     /// catch so a test runs it. <see cref="IsComposeRunAuthorActionable"/>'s SQLSTATEs count only at ERROR
     /// severity: a FATAL or PANIC is a connection-level store fault whatever its class (a startup parameter the
     /// server rejects answers FATAL 22023 or 42704, which names the configured setting and its value).</summary>
     internal static ComposeRunOutcome FromPostgresException(PostgresException ex) =>
-        IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
-            ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
-            : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+        ex.SqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+            ? ComposeRunOutcome.AuthorQueryError(TempFileLimitExceededMessage, ex.SqlState)
+            : IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+                ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
+                : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
     /// <summary>
     /// Compile-and-run a single composed panel spec (Custom Views v2, #1563) against <paramref name="postgres"/>
@@ -1114,19 +1127,22 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                author could not have caused -- classified the same way the web loop classifies any exception.
                outcome.AuthorSqlState is set only for an author-actionable PostgresException (#4283 M1/#4293
                R2), and that allow-list includes 57014 -- a panel query hitting the store's own
-               statement_timeout is a Timeout sample even though it answers the caller at 400, not 500.
-               Anything else that did not produce a payload (a validation BadRequest with no exception at
-               all, or the generic-Exception ServerError arm) is Error, unless the caller's own token already
-               explains it. */
+               statement_timeout is a Timeout sample even though it answers the caller at 400, not 500 -- and
+               (#4605) 53400, the viewer/mcp role's temp_file_limit refusing the panel's own spill, which is a
+               Limit sample for the same reason. Anything else that did not produce a payload (a validation
+               BadRequest with no exception at all, or the generic-Exception ServerError arm) is Error, unless
+               the caller's own token already explains it. */
             var readOutcome = outcome.Payload is not null
                 ? ReadOutcome.Ok
                 : outcome.AuthorSqlState == CollectorFaultCancelOrigin.QueryCanceled
                     ? ReadOutcome.Timeout
-                    : outcome.Fault is not null
-                        ? ReadOutcomeClassifier.Classify(outcome.Fault, cancellationToken)
-                        : cancellationToken.IsCancellationRequested
-                            ? ReadOutcome.Cancelled
-                            : ReadOutcome.Error;
+                    : outcome.AuthorSqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded
+                        ? ReadOutcome.Limit
+                        : outcome.Fault is not null
+                            ? ReadOutcomeClassifier.Classify(outcome.Fault, cancellationToken)
+                            : cancellationToken.IsCancellationRequested
+                                ? ReadOutcome.Cancelled
+                                : ReadOutcome.Error;
 
             s_readLatency?.Record(ReadSurface.Compose, measureKey, readOutcome, elapsedMs);
         }
