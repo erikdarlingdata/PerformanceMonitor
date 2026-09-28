@@ -1301,6 +1301,156 @@ public partial class PlanViewerControl
         }
     }
 
+    /// <summary>
+    /// Fills the Parameters card: the row grid (Name | Data Type | Compiled | Runtime, columns
+    /// dropped per <see cref="ParameterCard.Columns"/> when nothing carries them), a runtime value
+    /// tinted the warning colour when it looks sniffed, and the annotation lines below the table.
+    /// Ported from PerformanceStudio dev's <c>ShowParameters</c>
+    /// (erikdarlingdata/PerformanceStudio@85492a1); the row/flag/annotation logic itself lives in
+    /// the pure <see cref="ParameterCard"/> so it can be pinned outside WPF.
+    /// </summary>
+    private void ShowParameters(PlanStatement statement)
+    {
+        ParametersContent.Children.Clear();
+        ParametersEmpty.Visibility = Visibility.Collapsed;
+
+        var parameters = statement.Parameters;
+        var maskedText = PlanAnalyzer.MaskCommentsAndLiterals(statement.StatementText);
+        var unresolved = ParameterCard.FindUnresolvedVariables(statement.StatementText, parameters, statement.RootNode);
+
+        if (parameters.Count == 0)
+        {
+            ParametersHeader.Text = ParameterCard.HeaderText(0);
+
+            var annotations = ParameterCard.Annotations(parameters, statement.StatementText, maskedText, unresolved);
+            if (annotations.Count > 0)
+            {
+                // Local variables are still something to say, so this card stays lit.
+                foreach (var annotation in annotations)
+                    AddParameterAnnotation(annotation);
+                SetInsightQuiet(ParametersHeader, ParamsAccentBrush, ParametersAccent, isEmpty: false);
+            }
+            else
+            {
+                ParametersEmpty.Visibility = Visibility.Visible;
+                SetInsightQuiet(ParametersHeader, ParamsAccentBrush, ParametersAccent, isEmpty: true);
+            }
+            return;
+        }
+
+        ParametersHeader.Text = ParameterCard.HeaderText(parameters.Count);
+        SetInsightQuiet(ParametersHeader, ParamsAccentBrush, ParametersAccent, isEmpty: false);
+
+        var columns = ParameterCard.Columns(parameters);
+        var allCompiledNull = parameters.All(p => p.CompiledValue == null);
+
+        var colDef = new List<GridLength> { GridLength.Auto, GridLength.Auto };
+        int compiledCol = -1, runtimeCol = -1;
+        int nextCol = 2;
+        if (columns.ShowCompiled)
+        {
+            colDef.Add(new GridLength(1, GridUnitType.Star));
+            compiledCol = nextCol++;
+        }
+        if (columns.ShowRuntime)
+        {
+            colDef.Add(new GridLength(1, GridUnitType.Star));
+            runtimeCol = nextCol++;
+        }
+
+        var grid = new Grid();
+        foreach (var width in colDef)
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = width });
+
+        var columnHeaderBrush = ParamsAccentBrush;
+        var valueBrush = TooltipFgBrush;
+        var missingBrush = ErrorBrush;
+        var sniffedBrush = WarningBrush;
+
+        int rowIndex = 0;
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        AddParamCell(grid, rowIndex, 0, "Parameter", columnHeaderBrush, FontWeights.SemiBold);
+        AddParamCell(grid, rowIndex, 1, "Data Type", columnHeaderBrush, FontWeights.SemiBold);
+        if (compiledCol >= 0)
+            AddParamCell(grid, rowIndex, compiledCol, columns.CompiledHeaderText, columnHeaderBrush, FontWeights.SemiBold);
+        if (runtimeCol >= 0)
+            AddParamCell(grid, rowIndex, runtimeCol, "Runtime", columnHeaderBrush, FontWeights.SemiBold);
+        rowIndex++;
+
+        foreach (var param in parameters)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            var row = ParameterCard.Row(param, allCompiledNull);
+
+            AddParamCell(grid, rowIndex, 0, row.Name, valueBrush, FontWeights.SemiBold);
+            AddParamCell(grid, rowIndex, 1, row.DataType, valueBrush);
+
+            if (compiledCol >= 0)
+            {
+                var compiledBrush = row.CompiledIsMissing ? missingBrush : valueBrush;
+                AddParamCell(grid, rowIndex, compiledCol, row.CompiledText, compiledBrush);
+            }
+
+            if (runtimeCol >= 0)
+            {
+                var tooltip = row.Sniffed
+                    ? "Runtime value differs from compiled — possible parameter sniffing"
+                    : null;
+                AddParamCell(grid, rowIndex, runtimeCol, row.RuntimeText, row.Sniffed ? sniffedBrush : valueBrush, tooltip: tooltip);
+            }
+
+            rowIndex++;
+        }
+
+        ParametersContent.Children.Add(grid);
+
+        foreach (var annotation in ParameterCard.Annotations(parameters, statement.StatementText, maskedText, unresolved))
+            AddParameterAnnotation(annotation);
+    }
+
+    private static void AddParamCell(Grid grid, int row, int col, string text, Brush brush,
+        FontWeight fontWeight = default, string? tooltip = null)
+    {
+        var tb = new TextBlock
+        {
+            Text = text,
+            FontSize = 11,
+            FontWeight = fontWeight == default ? FontWeights.Normal : fontWeight,
+            Foreground = brush,
+            Margin = new Thickness(0, 2, 10, 2),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 200,
+            Background = Brushes.Transparent
+        };
+        // Name and DataType columns are short — no need for max width.
+        if (col <= 1)
+            tb.MaxWidth = double.PositiveInfinity;
+        if (tooltip != null)
+            tb.ToolTip = tooltip;
+        else if (text.Length > 30)
+            tb.ToolTip = text;
+        Grid.SetRow(tb, row);
+        Grid.SetColumn(tb, col);
+        grid.Children.Add(tb);
+    }
+
+    private void AddParameterAnnotation(ParameterCardAnnotation annotation)
+    {
+        var brush = annotation.Tone == ParameterCardAnnotationTone.Accent
+            ? AccentBrush
+            : WarningBrush;
+        ParametersContent.Children.Add(new TextBlock
+        {
+            Text = annotation.Text,
+            FontSize = 11,
+            FontStyle = FontStyles.Italic,
+            Foreground = brush,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 6, 0, 0)
+        });
+    }
+
     private void ShowWaitStats(List<WaitStatInfo> waits, List<PlanWarning> statementWarnings, bool isActualPlan)
     {
         WaitStatsContent.Children.Clear();
