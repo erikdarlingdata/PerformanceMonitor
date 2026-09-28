@@ -60,6 +60,7 @@
                 </Expander.Header>
                 <Grid MaxHeight="220">
                     <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="ServerContextColumn" Width="Auto" MinWidth="180"/>
                         <ColumnDefinition Width="Auto" MinWidth="180"/>
                         <ColumnDefinition Width="Auto" MinWidth="200"/>
                         <ColumnDefinition Width="Auto" MinWidth="200"/>
@@ -78,8 +79,34 @@
                         accent, since it is the neutral centre.
                     -->
 
-                    <!-- Runtime Summary (left, neutral centre: no accent, just the alignment gutter) -->
+                    <!-- Server Context (first, placeholder when no metadata) -->
                     <Border Grid.Column="0"
+                            Background="{DynamicResource BackgroundLightBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+                        <DockPanel>
+                            <Border x:Name="ServerContextAccent" DockPanel.Dock="Left" Width="3"
+                                    Background="{DynamicResource InsightServerBrush}"/>
+                            <ScrollViewer Margin="10,4,10,8"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel>
+                                    <TextBlock x:Name="ServerContextHeader"
+                                               Text="Server Context"
+                                               FontSize="13"
+                                               FontWeight="SemiBold" Foreground="{DynamicResource InsightServerBrush}"
+                                               Margin="0,0,0,6"/>
+                                    <StackPanel x:Name="ServerContextContent"/>
+                                    <TextBlock x:Name="ServerContextEmpty"
+                                               Text="Run Repro Script to capture server context"
+                                               FontSize="12" Visibility="Collapsed"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Runtime Summary (neutral centre: no accent, just the alignment gutter) -->
+                    <Border Grid.Column="1"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -97,7 +124,7 @@
                     </Border>
 
                     <!-- Missing Indexes (center) -->
-                    <Border Grid.Column="1"
+                    <Border Grid.Column="2"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -123,7 +150,7 @@
                     </Border>
 
                     <!-- Parameters -->
-                    <Border Grid.Column="2"
+                    <Border Grid.Column="3"
                             Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <DockPanel>
@@ -149,7 +176,7 @@
                     </Border>
 
                     <!-- Wait Stats (right, fills remaining space; last card in the strip, no separator) -->
-                    <Border Grid.Column="3"
+                    <Border Grid.Column="4"
                             Background="{DynamicResource BackgroundLightBrush}">
                         <DockPanel>
                             <Border x:Name="WaitStatsAccent" DockPanel.Dock="Left" Width="3"

@@ -49,6 +49,7 @@ public partial class PlanViewerControl
         ShowParameters(statement);
         ShowWaitStats(statement.WaitStats, statement.PlanWarnings, statement.QueryTimeStats != null);
         ShowRuntimeSummary(statement);
+        ShowServerContext();
         UpdateInsightsHeader();
 
         // Update cost text

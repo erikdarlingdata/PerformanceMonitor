@@ -1403,7 +1403,7 @@
     <SolidColorBrush x:Key="InsightIndexBrush" Color="#BF4700"/>
     <SolidColorBrush x:Key="InsightWaitsBrush" Color="#0D47A1"/>
     <SolidColorBrush x:Key="InsightParamsBrush" Color="#2E7D32"/>
-
+    <SolidColorBrush x:Key="InsightServerBrush" Color="#4527A0"/>
 </ResourceDictionary>
 
 
