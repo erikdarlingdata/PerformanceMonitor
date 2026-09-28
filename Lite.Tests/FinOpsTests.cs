@@ -111,6 +111,30 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
         Assert.True(results[0].ImpactScore >= 80, $"Dominant query should score >= 80, got {results[0].ImpactScore}");
     }
 
+    /// <summary>
+    /// Pure-function proof for <see cref="HoursBackCoveringTestPeriod"/>: the read window it computes must
+    /// cover the seeded rows (TestPeriodEnd - 30m) at the worst minute of day, 03:59 UTC — one minute before
+    /// TestDataSeeder's UTC-midnight anchor rolls TestPeriodEnd forward to today, which is when a fixed
+    /// hoursBack: 24 window (measured from "now") is furthest from the seed. Mirrors
+    /// TestDataSeeder.AnchorPeriodEndToUtcMidnight's logic directly since that helper is private.
+    /// </summary>
+    [Fact]
+    public void HighImpactWindowCoversSeedAtWorstHour()
+    {
+        var worstNowUtc = DateTime.UtcNow.Date.AddHours(3).AddMinutes(59); // 03:59 UTC today
+        var midnight = worstNowUtc.Date;
+        if (worstNowUtc.Hour < 4) midnight = midnight.AddDays(-1);
+        var periodEnd = midnight.AddHours(4);
+        var periodStart = periodEnd.AddHours(-4);
+        var seedTime = periodEnd.AddMinutes(-30);
+
+        var hoursBack = (int)Math.Ceiling((worstNowUtc - periodStart).TotalHours) + 1;
+        var cutoff = worstNowUtc.AddHours(-hoursBack);
+
+        Assert.True(cutoff <= seedTime,
+            $"Read window (cutoff {cutoff:O}) must cover the seeded row ({seedTime:O}) at 03:59 UTC, hoursBack={hoursBack}");
+    }
+
     /* ── HighImpactScorer Pure Function Tests ── */
 
     [Fact]
@@ -231,14 +255,30 @@ public class FinOpsTests : IClassFixture<SharedDuckDbFixture>
     }
 
     private async Task<List<HighImpactQueryRow>> RunHighImpactAsync(
-        Func<TestDataSeeder, Task> seedAction, int hoursBack = 24)
+        Func<TestDataSeeder, Task> seedAction, int? hoursBack = null)
     {
         using var seeder = new TestDataSeeder(_duckDb);
         await seedAction(seeder);
 
         var dataService = new LocalDataService(_duckDb);
-        return await dataService.GetHighImpactQueriesAsync(TestDataSeeder.TestServerId, hoursBack);
+
+        // GetHighImpactQueriesAsync reads collection_time >= DateTime.UtcNow.AddHours(-hoursBack), but the
+        // seed rows are stamped relative to TestDataSeeder.TestPeriodEnd, which is anchored to the most
+        // recent UTC-midnight-plus-4h boundary (#4385) rather than to "now". A fixed hoursBack: 24 window
+        // read from "now" can land up to ~28h after that anchor, so shortly before 04:00 UTC each day the
+        // seeded rows (TestPeriodEnd - 30m) fall outside a naive 24h lookback. Compute hoursBack from
+        // "now" back to TestPeriodStart instead, so the read window always covers the seed at any hour.
+        var effectiveHoursBack = hoursBack ?? HoursBackCoveringTestPeriod();
+        return await dataService.GetHighImpactQueriesAsync(TestDataSeeder.TestServerId, effectiveHoursBack);
     }
+
+    /// <summary>
+    /// Smallest whole hour count such that DateTime.UtcNow.AddHours(-hoursBack) is at or before
+    /// TestDataSeeder.TestPeriodStart, at any time of day the suite runs. See <see cref="HighImpactWindowCoversSeedAtWorstHour"/>
+    /// for the boundary-case proof (03:59 UTC, the worst minute before the anchor rolls forward a day).
+    /// </summary>
+    private static int HoursBackCoveringTestPeriod()
+        => (int)Math.Ceiling((DateTime.UtcNow - TestDataSeeder.TestPeriodStart).TotalHours) + 1;
 
     private static void PrintRecommendations(string scenario, List<RecommendationRow> recs)
     {
