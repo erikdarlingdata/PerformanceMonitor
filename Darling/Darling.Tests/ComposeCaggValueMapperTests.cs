@@ -89,7 +89,7 @@ public sealed class ComposeCaggValueMapperTests
     {
         /* The exact reconstruction: AVG(delta) == SUM(x_sum)/SUM(sample_count), never AVG(x_sum). */
         Assert.Equal(
-            "(CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0))",
+            "CAST(SUM(f.worker_time_sum)::numeric / NULLIF(SUM(f.sample_count), 0) AS double precision)",
             ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("query_worker_us"), ComposeAggregate.Avg));
     }
 
@@ -169,7 +169,7 @@ public sealed class ComposeCaggValueMapperTests
     public void QueryStore_Executions_Avg_IsSumOverSampleCount()
     {
         Assert.Equal(
-            "(CAST(SUM(f.execution_count_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0))",
+            "CAST(SUM(f.execution_count_sum)::numeric / NULLIF(SUM(f.sample_count), 0) AS double precision)",
             ComposeCaggValueMapper.BuildCaggNativeExpr(Measure("qs_executions"), ComposeAggregate.Avg));
     }
 
