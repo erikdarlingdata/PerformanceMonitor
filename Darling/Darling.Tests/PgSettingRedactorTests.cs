@@ -457,7 +457,10 @@ public sealed class PgSettingRedactorTests
     /// catastrophic backtracking that stays just under the 100ms timeout at both sizes — where the output
     /// assertion above would not catch it — pushes the ratio toward 256x (16x squared). The bar sits at 64x:
     /// comfortably above the ~16x a linear pass measures, comfortably below the ~256x a quadratic one
-    /// would.</item>
+    /// would. The baseline is floored at 1ms before dividing, because a 2,000-character pass can take a
+    /// fraction of a millisecond, where timer noise would swing the ratio. So while the baseline is under
+    /// 1ms the bar is really 64ms at 32,000 characters (still the minimum of the repeats), and a machine slow
+    /// enough to push the baseline past 1ms raises the bar with it.</item>
     /// </list>
     /// </summary>
     [Theory]
@@ -484,6 +487,7 @@ public sealed class PgSettingRedactorTests
         var baselineMs = MinElapsedMilliseconds(() => PgSettingRedactor.Redact("archive_command", baselineValue), Repeats);
         var largeMs = MinElapsedMilliseconds(() => PgSettingRedactor.Redact("archive_command", largeValue), Repeats);
 
+        // Floored at 1ms: a sub-millisecond baseline is mostly timer noise (see the summary above).
         var ratio = largeMs / Math.Max(baselineMs, 1.0);
 
         Assert.True(
