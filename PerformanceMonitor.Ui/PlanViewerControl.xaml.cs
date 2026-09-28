@@ -116,7 +116,7 @@ public partial class PlanViewerControl : UserControl
         _currentPlan = await System.Threading.Tasks.Task.Run(() =>
         {
             var plan = ShowPlanParser.Parse(planXml);
-            PlanAnalyzer.Analyze(plan);
+            PlanAnalysisPipeline.Run(plan);
             return plan;
         });
 
