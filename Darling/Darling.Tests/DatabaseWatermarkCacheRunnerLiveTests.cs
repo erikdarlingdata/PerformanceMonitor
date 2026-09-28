@@ -24,8 +24,8 @@ namespace Darling.Tests;
 /// (gated on DARLING_TEST_PG). Every read the cache answers is compared with the bounded store read it stands
 /// in for, and statement counts come from <see cref="CommandCountingLoggerFactory"/>.
 ///
-/// <para>Every test here creates and drops its own scratch database through <see cref="ScratchPostgres"/>,
-/// so none is in the <c>live-postgres</c> collection.</para>
+/// <para><b>#1776 own-store</b> - every test here creates and drops its own scratch database through
+/// <see cref="ScratchPostgres"/>, so none is in the <c>live-postgres</c> collection.</para>
 /// </summary>
 public sealed class DatabaseWatermarkCacheRunnerLiveTests
 {
@@ -343,5 +343,97 @@ public sealed class DatabaseWatermarkCacheRunnerLiveTests
         Assert.Equal(1, Reads(rig.Logger));
         Assert.Equal(await StoreAsync(rig.Runner, after, token), result);
         Assert.Equal(0, insideReads);
+    }
+
+    private async Task SeedNullAsync(Rig rig, ServerRuntime server, CancellationToken token)
+    {
+        await ResolveAsync(rig.Runner, server, T0, token);
+        rig.Logger.Provider.Reset();
+        await ResolveAsync(rig.Runner, server, T0.AddMinutes(1), token);
+        Assert.Equal(0, Reads(rig.Logger));
+    }
+
+    private async Task AssertNextReadsStoreOnceAsync(Rig rig, ServerRuntime server, CancellationToken token)
+    {
+        rig.Logger.Provider.Reset();
+        var result = await ResolveAsync(rig.Runner, server, T0.AddMinutes(2), token);
+        Assert.Equal(1, Reads(rig.Logger));
+        Assert.Equal(await StoreAsync(rig.Runner, T0.AddMinutes(2), token), result);
+    }
+
+    [Fact]
+    public async Task G_ARunAsyncFault_DropsTheServersEntries_SoTheNextResolveReadsTheStore()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #4661 pins.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+        await SeedNullAsync(rig, server, token);
+
+        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(token);
+        await cancelled.CancelAsync();
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => rig.Runner.RunAsync(QueryStoreCollector.Instance, server, cancelled.Token));
+
+        await AssertNextReadsStoreOnceAsync(rig, server, token);
+    }
+
+    [Fact]
+    public async Task H_AnItemError_DropsThatDatabasesEntry_AndItsStagedContribution()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #4661 pins.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+        await SeedNullAsync(rig, server, token);
+
+        var staged = new Dictionary<string, StagedDatabaseWatermark>
+        {
+            [Db] = DarlingCollectorRunner.StageQueryStoreDatabaseWatermark(new List<QueryStoreCollector.Row>(), Db, T0),
+        };
+        rig.Runner.DiscardQueryStoreDatabaseWatermark(server, Db, staged);
+
+        Assert.Empty(staged);
+        await AssertNextReadsStoreOnceAsync(rig, server, token);
+    }
+
+    [Fact]
+    public async Task I_AForeignRowBatch_InvalidatesInsteadOfAdvancing()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #4661 pins.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+        await SeedNullAsync(rig, server, token);
+
+        var rows = new List<QueryStoreCollector.Row> { Row(1, T0.AddMinutes(-1), "otherdb") };
+        var staged = DarlingCollectorRunner.StageQueryStoreDatabaseWatermark(rows, Db, T0);
+        Assert.True(staged.Foreign);
+        rig.Runner.CommitQueryStoreDatabaseWatermark(server, Db, staged);
+
+        await AssertNextReadsStoreOnceAsync(rig, server, token);
+    }
+
+    [Fact]
+    public async Task J_ABackfillThatCommitsBetweenTheReadAndTheSeed_RejectsTheSeed()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(BaseConnectionString), "Set DARLING_TEST_PG to run the #4661 pins.");
+        var token = TestContext.Current.CancellationToken;
+        await using var rig = await Rig.OpenAsync(token);
+        var server = MakeServer();
+
+        var cache = (DatabaseWatermarkCache)typeof(DarlingCollectorRunner)
+            .GetField("_databaseWatermarkCache", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(rig.Runner)!;
+
+        var captured = cache.TokenFor(ServerId, Db);
+        var readBeforeBackfill = await StoreAsync(rig.Runner, T0, token);
+        Assert.Null(readBeforeBackfill);
+
+        var backfillRows = new List<QueryStoreCollector.Row> { Row(9, T0.AddMinutes(-30)) };
+        await rig.Runner.WriteBackfillBatchAsync(
+            QueryStoreCollector.Instance, backfillRows, server, T0.AddMinutes(-20), MakeContext(server, T0), token);
+
+        cache.Seed(ServerId, Db, readBeforeBackfill, WatermarkPolicy.ReadFloor(T0)!.Value, T0, captured);
+        await AssertNextReadsStoreOnceAsync(rig, server, token);
     }
 }

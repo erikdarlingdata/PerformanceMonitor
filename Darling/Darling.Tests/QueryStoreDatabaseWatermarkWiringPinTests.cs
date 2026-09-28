@@ -9,7 +9,6 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using Xunit;
 
@@ -17,13 +16,13 @@ namespace Darling.Tests;
 
 /// <summary>
 /// Source-position pins for the per-database Query Store watermark cache (#4661). The cache is exact only
-/// while it advances strictly AFTER the item's COPY transaction commits, and while nothing but the known
-/// writers touches <c>query_store_stats</c>; both are properties of where code sits, not of what exists.
+/// while it advances strictly AFTER the item's COPY transaction commits,.
+/// The writer set is pinned in <see cref="QueryStoreWriterSetPinTests"/>.
 /// </summary>
 public sealed class QueryStoreDatabaseWatermarkWiringPinTests
 {
     private static string RunnerSource() =>
-        File.ReadAllText(Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs"));
+        RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
 
     [Fact]
     public void TheCommit_IsCalledOnce_AndOnlyFromOnItemComplete_AndTheStageOnlyFromReadItem()
@@ -48,35 +47,5 @@ public sealed class QueryStoreDatabaseWatermarkWiringPinTests
 
         var stage = src.IndexOf("stagedDatabaseWatermarks[item] =", StringComparison.Ordinal);
         Assert.InRange(stage, readItem, writeBatch);
-    }
-
-    [Fact]
-    public void OnlyTheKnownWriters_TouchQueryStoreStats()
-    {
-        var root = Path.Combine(RepoRoot(), "Darling");
-        var writer = new Regex(@"(INSERT\s+INTO|DELETE\s+FROM|UPDATE|COPY|TRUNCATE)\s+(collect\.)?query_store_stats\b", RegexOptions.IgnoreCase);
-        var offenders = Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains(Path.DirectorySeparatorChar + "Darling.Tests" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                        && !f.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-                        && !f.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            .Where(f => writer.IsMatch(File.ReadAllText(f)))
-            .Select(f => Path.GetRelativePath(root, f))
-            .ToList();
-
-        Assert.True(offenders.Count == 0,
-            "a new writer of query_store_stats must invalidate DatabaseWatermarkCache (see its remarks): " + string.Join(", ", offenders));
-    }
-
-    private static string RepoRoot([CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null
-               && !File.Exists(Path.Combine(dir, "PerformanceMonitor.sln"))
-               && !Directory.Exists(Path.Combine(dir, ".git")))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        return dir ?? throw new InvalidOperationException("repo root not found");
     }
 }

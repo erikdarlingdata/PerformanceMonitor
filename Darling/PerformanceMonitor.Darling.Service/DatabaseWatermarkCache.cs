@@ -45,7 +45,10 @@ internal readonly record struct StagedDatabaseWatermark(DateTime? BatchMax, bool
 /// <para><b>Assumption:</b> the only writers of <c>query_store_stats</c> are the runner's live path (which
 /// advances this cache), the backfill (which invalidates it) and retention (which drops whole days, never
 /// a row newer than the floor). Retention is configured in whole days, so it can never remove a witness
-/// row inside a three-hour floor. A new writer must invalidate this cache.</para>
+/// row inside a three-hour floor. A new writer must invalidate this cache.
+/// A point-in-time restore, or an async-replica failover of an external store, can leave the cached value too
+/// HIGH for up to <see cref="ReseedInterval"/>. It has the same shape as the second-writer case, and the
+/// hourly re-seed limits it.</para>
 ///
 /// <para><b>Hourly re-seed.</b> One writer per store is the product's invariant, and the hourly re-seed makes an
 /// unsupported second writer's deletion non-fatal: the cached watermark comes back down within the hour, while
@@ -53,14 +56,20 @@ internal readonly record struct StagedDatabaseWatermark(DateTime? BatchMax, bool
 /// store read (<see cref="Seed"/>) resets it.</para>
 ///
 /// <para>Values are truncated to microseconds (what the store keeps) and returned with Kind Unspecified,
-/// as the store read returns them. <see cref="Advance"/> on a missing entry never seeds, and bumps the
+/// as the store read returns them. <see cref="Advance"/> on a missing entry never seeds, and bumps that key's
 /// generation so a store read that started earlier cannot land after a newer batch committed.</para>
+///
+/// <para><b>Generations are per key, plus a per-server epoch.</b> A seed lands only if the token captured before
+/// its store read (<see cref="TokenFor"/>) still equals the key's current token. A bump on one server or
+/// database must not reject another's seed, or a mixed fleet would keep rejecting seeds and the cache would
+/// never fill.</para>
 /// </summary>
 internal sealed class DatabaseWatermarkCache
 {
     private readonly object _gate = new();
     private readonly Dictionary<(int ServerId, string Database), DatabaseWatermarkEntry> _entries = new();
-    private long _generation;
+    private readonly Dictionary<(int ServerId, string Database), long> _keyGeneration = new();
+    private readonly Dictionary<int, long> _serverEpoch = new();
 
     /// <summary>The longest an entry may answer without a fresh store read.</summary>
     internal static readonly TimeSpan ReseedInterval = TimeSpan.FromHours(1);
@@ -68,9 +77,28 @@ internal sealed class DatabaseWatermarkCache
     internal static DateTime Micro(DateTime v) =>
         DateTime.SpecifyKind(new DateTime(v.Ticks - v.Ticks % TimeSpan.TicksPerMicrosecond), DateTimeKind.Unspecified);
 
-    public long Generation
+    /// <summary>
+    /// The state a store read must still find unchanged when it lands: the server's epoch and the key's
+    /// generation. A bump on one server or database does not change another key's token.
+    /// </summary>
+    internal readonly record struct SeedToken(long Epoch, long KeyGeneration);
+
+    /// <summary>Captures the token for a key. Call it BEFORE the store read that will seed the key.</summary>
+    public SeedToken TokenFor(int serverId, string database)
     {
-        get { lock (_gate) { return _generation; } }
+        lock (_gate)
+        {
+            return TokenLocked(serverId, database);
+        }
+    }
+
+    private SeedToken TokenLocked(int serverId, string database) =>
+        new(_serverEpoch.GetValueOrDefault(serverId), _keyGeneration.GetValueOrDefault((serverId, database)));
+
+    private void BumpKey(int serverId, string database)
+    {
+        var k = (serverId, database);
+        _keyGeneration[k] = _keyGeneration.GetValueOrDefault(k) + 1;
     }
 
     public bool TryGet(int serverId, string database, DateTime floor, DateTime now, out DateTime? value)
@@ -103,11 +131,11 @@ internal sealed class DatabaseWatermarkCache
         }
     }
 
-    public void Seed(int serverId, string database, DateTime? value, DateTime floor, DateTime now, long generation)
+    public void Seed(int serverId, string database, DateTime? value, DateTime floor, DateTime now, SeedToken token)
     {
         lock (_gate)
         {
-            if (generation != _generation)
+            if (TokenLocked(serverId, database) != token)
             {
                 return;
             }
@@ -123,7 +151,7 @@ internal sealed class DatabaseWatermarkCache
         {
             if (!_entries.TryGetValue((serverId, database), out var e))
             {
-                _generation++;
+                BumpKey(serverId, database);
                 return;
             }
 
@@ -145,20 +173,25 @@ internal sealed class DatabaseWatermarkCache
         }
     }
 
+    /// <summary>
+    /// Drops one key's entry and bumps only that key's generation, so it rejects an in-flight seed for the same
+    /// key and no other. That makes a per-database invalidate harmless to every other server and database.
+    /// </summary>
     public void Invalidate(int serverId, string database)
     {
         lock (_gate)
         {
-            _generation++;
+            BumpKey(serverId, database);
             _entries.Remove((serverId, database));
         }
     }
 
+    /// <summary>Drops every entry of one server and bumps that server's epoch; other servers are untouched.</summary>
     public void InvalidateServer(int serverId)
     {
         lock (_gate)
         {
-            _generation++;
+            _serverEpoch[serverId] = _serverEpoch.GetValueOrDefault(serverId) + 1;
             foreach (var k in _entries.Keys.Where(k => k.ServerId == serverId).ToList())
             {
                 _entries.Remove(k);

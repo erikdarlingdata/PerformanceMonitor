@@ -1675,12 +1675,12 @@ public sealed class DarlingCollectorRunner
             return cached;
         }
 
-        var generation = _databaseWatermarkCache.Generation;
+        var token = _databaseWatermarkCache.TokenFor(server.ServerId, database);
         var (value, ok) = await ReadLastCollectedTimeForDatabaseAsync(
             server.ServerId, table, column, dbColumn, database, ct, readFloor);
         if (ok)
         {
-            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, generation);
+            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, token);
         }
 
         return value;
@@ -1712,6 +1712,14 @@ public sealed class DarlingCollectorRunner
         }
 
         return new StagedDatabaseWatermark(max, foreign, collectionTime);
+    }
+
+    /// <summary>A failed item may or may not have committed rows: drop its staged contribution and its cache entry.</summary>
+    internal void DiscardQueryStoreDatabaseWatermark(
+        ServerRuntime server, string database, Dictionary<string, StagedDatabaseWatermark> staged)
+    {
+        staged.Remove(database);
+        _databaseWatermarkCache.Invalidate(server.ServerId, database);
     }
 
     /// <summary>Lands a staged contribution. Called only after the item's COPY transaction committed.</summary>
@@ -3003,8 +3011,7 @@ public sealed class DarlingCollectorRunner
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             OnQueryStoreItemFailed(server.ServerId, item);
-                            stagedDatabaseWatermarks.Remove(item);
-                            _databaseWatermarkCache.Invalidate(server.ServerId, item);
+                            DiscardQueryStoreDatabaseWatermark(server, item, stagedDatabaseWatermarks);
                         }
 
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
@@ -5785,8 +5792,10 @@ RETURNING s.state_key";
         }
         finally
         {
-            /* Backfill only inserts, so it can only raise the true maximum; the commit may be unknown after
-               a fault, so drop in a finally. */
+            /* Backfill only inserts, so it can only raise the true maximum and a stale cache is merely low, never
+               too high. The invalidate exists for exactness: without it the cache would lag the store and the
+               live path would re-collect rows the backfill already wrote, as duplicates. It runs in a finally
+               because the commit may be unknown after a fault. */
             foreach (var db in DistinctQueryStoreDatabases(rows) ?? [])
             {
                 _databaseWatermarkCache.Invalidate(server.ServerId, db);
