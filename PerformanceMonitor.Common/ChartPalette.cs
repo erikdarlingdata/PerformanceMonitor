@@ -147,46 +147,53 @@ namespace PerformanceMonitor.Common
             => Accents.TryGetValue(name, out var hex) ? hex : "#B0BEC5";
 
         // ── Wait categories ────────────────────────────────────────────────────────────────
-        // PerformanceStudio's ~21 semantic wait-category colors (Themes/DarkTheme.axaml). Constant
-        // across themes EXCEPT the handful flagged near-invisible on a light background, which get a
-        // darker variant when lightBackground = true (D3).
+        // PerformanceStudio's wait-category colors (Themes/DarkTheme.axaml, laid out rather than
+        // picked: erikdarlingdata/PerformanceStudio@161785f). Hue carries the family - greens for
+        // compute, blues for storage and network, warm for contention, grey for "no information" -
+        // and within a family the categories climb a lightness ladder, which is what keeps
+        // neighbours apart under simulated deuteranopia. Every color clears 3:1 contrast against
+        // the dark chart background. Constant across themes EXCEPT the handful flagged
+        // near-invisible on a light background, which get a darker variant when
+        // lightBackground = true (D3).
         private static readonly Dictionary<string, string> WaitCategoryColors =
             new(StringComparer.OrdinalIgnoreCase)
             {
-                ["CPU"]              = "#00BD23",
-                ["Worker Thread"]    = "#52E3B5",
-                ["Lock"]             = "#EE5A24",
-                ["Latch"]            = "#F368E0",
-                ["Buffer Latch"]     = "#F5069E",
-                ["Buffer IO"]        = "#2D13F2",
-                ["Compilation"]      = "#A29BFE",
-                ["SQL CLR"]          = "#B8DCDC",
-                ["Mirroring"]        = "#54625F",
-                ["Transaction"]      = "#C77416",
-                ["Preemptive"]       = "#FD79A8",
-                ["Service Broker"]   = "#E17055",
-                ["Tran Log IO"]      = "#0984E3",
-                ["Network IO"]       = "#75BBF8",
-                ["Parallelism"]      = "#7B4FFF",
+                ["CPU"]              = "#3EBD50",
+                ["Worker Thread"]    = "#72E1A9",
+                ["Lock"]             = "#FB6640",
+                ["Latch"]            = "#FEB5ED",
+                ["Buffer Latch"]     = "#E8469D",
+                ["Buffer IO"]        = "#238CFA",
+                ["Compilation"]      = "#A1A3FB",
+                ["SQL CLR"]          = "#63C5C6",
+                ["Mirroring"]        = "#30907E",
+                ["Transaction"]      = "#DB9027",
+                ["Preemptive"]       = "#FFA8C0",
+                ["Service Broker"]   = "#FF9289",
+                ["Tran Log IO"]      = "#8AC6FF",
+                ["Network IO"]       = "#BBE2FE",
+                ["Parallelism"]      = "#9A84FE",
                 ["Batch Mode"]       = "#00CEC9",
-                ["Memory"]           = "#FDCB6E",
-                ["Tracing"]          = "#B2BEC3",
-                ["Full Text Search"] = "#DFE6E9",
-                ["Other Disk IO"]    = "#636E72",
-                ["Replication"]      = "#81ECEC",
-                ["Log Rate Governor"]= "#FAB1A0",
-                ["Unknown"]          = "#8E8E93",
-                ["Others"]           = "#555D66",
+                ["Memory"]           = "#FFE6B1",
+                ["Tracing"]          = "#BDC8CE",
+                ["Full Text Search"] = "#D8F2FC",
+                ["Other Disk IO"]    = "#0FB3E2",
+                ["Replication"]      = "#5DF9ED",
+                ["Log Rate Governor"]= "#FFCACA",
+                ["Unknown"]          = "#9CA1A5",
+                ["Others"]           = "#676E73",
             };
 
-        // Darker variants for the three categories that are near-invisible on light/CoolBreeze
-        // backgrounds (D3). Only consulted when lightBackground = true.
+        // Darker variants for the categories that are near-invisible on light/CoolBreeze
+        // backgrounds (D3). Only consulted when lightBackground = true. Re-checked against the
+        // new hexes above (161785f): SQL CLR and Full Text Search still need a light-theme
+        // override; Replication's new hue is dark enough to read on light backgrounds unmodified,
+        // so its override is dropped (PM-ahead: kept the mechanism, retired the entry).
         private static readonly Dictionary<string, string> WaitCategoryColorsLight =
             new(StringComparer.OrdinalIgnoreCase)
             {
-                ["SQL CLR"]          = "#5BA3A3", // was #B8DCDC
-                ["Full Text Search"] = "#8FA3AB", // was #DFE6E9
-                ["Replication"]      = "#1FA8A8", // was #81ECEC
+                ["SQL CLR"]          = "#3E8384", // was #5BA3A3, now darkened vs new #63C5C6
+                ["Full Text Search"] = "#6E8890", // was #8FA3AB, now darkened vs new #D8F2FC
             };
 
         /// <summary>Color for a wait category. Pass lightBackground=true on Light/CoolBreeze themes.</summary>
