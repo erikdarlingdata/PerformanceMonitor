@@ -104,7 +104,7 @@ public static class ViewerActualPlanFlow
     /// </summary>
     public static async Task OpenFloatingPlanAsync(Window owner, string planXml, string label, string? queryText)
     {
-        var viewer = new PlanViewerControl();
+        var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = ViewerExportSettings.AccuracyRatioDivergenceLimit };
         try
         {
             await viewer.LoadPlan(planXml, label, queryText);
