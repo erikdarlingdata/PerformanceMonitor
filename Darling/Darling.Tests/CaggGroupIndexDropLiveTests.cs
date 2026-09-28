@@ -9,10 +9,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Darling.Storage;
+using PerformanceMonitor.Darling.Viewer;
 using Xunit;
 
 namespace Darling.Tests;
@@ -203,6 +205,124 @@ public sealed class CaggGroupIndexDropLiveTests
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
         }
+    }
+
+    /// <summary>
+    /// The reviewer's false-positive case: a store at V150 with no rollup materialized at all does NOT
+    /// map to 152 — V151's own sentinel (the <c>ag_replica_states.group_id</c> column) is false at V150,
+    /// so the V152 arm's AND fails and the version falls through correctly.
+    /// </summary>
+    [Fact]
+    public async Task AStoreAtV150WithNoRollup_DoesNotMapToV152()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the V150 false-positive pin (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            /* Roll the version stamp back to V150 — no rollup, no group_id column, plain PostgreSQL,
+               exactly the reviewer's false-positive shape. */
+            await using (var rollback = new NpgsqlCommand("DELETE FROM darling_schema_version WHERE version >= 151", connection))
+            {
+                await rollback.ExecuteNonQueryAsync(ct);
+            }
+
+            await using (var dropColumn = new NpgsqlCommand(
+                "ALTER TABLE collect.ag_replica_states DROP COLUMN IF EXISTS group_id", connection))
+            {
+                await dropColumn.ExecuteNonQueryAsync(ct);
+            }
+
+            var version = await ProbedVersionAsync(connection, ct);
+            Assert.Equal(150, version);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>
+    /// A TimescaleDB store fully migrated to V151 (the index present, before V152's drop rung has run)
+    /// maps to exactly 151 — the group index is still there, so the negative NOT EXISTS half of the V152
+    /// sentinel is false.
+    /// </summary>
+    [Fact]
+    public async Task ATimescaleDbStoreAtV151WithTheGroupIndexPresent_MapsToV151()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the V151 probe pin (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
+            Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the V151 probe pin");
+
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+            /* Roll back to V151, then create the rollups the V151-era way — default create_group_indexes,
+               the group index still present — the same fixture shape CaggGroupIndexDropUpgradeLiveTests uses. */
+            await using (var rollback = new NpgsqlCommand("DELETE FROM darling_schema_version WHERE version >= 152", connection))
+            {
+                await rollback.ExecuteNonQueryAsync(ct);
+            }
+
+            var v151Shape = TimescaleSupport.CreateQueryStoreStatsHourlySql.Replace(
+                ", timescaledb.create_group_indexes = false", string.Empty, StringComparison.Ordinal);
+            await using (var create = new NpgsqlCommand(v151Shape, connection))
+            {
+                await create.ExecuteNonQueryAsync(ct);
+            }
+
+            var version = await ProbedVersionAsync(connection, ct);
+            Assert.Equal(151, version);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    private static async Task<int> ProbedVersionAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var arity = method.GetParameters().Length;
+
+        await using var command = new NpgsqlCommand(ViewerDataService.StoreSchemaProbeSql, connection);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        Assert.True(await reader.ReadAsync(ct));
+
+        var sentinels = new object[arity];
+        for (var i = 0; i < arity; i++)
+        {
+            sentinels[i] = reader.GetBoolean(i);
+        }
+
+        return (int)method.Invoke(null, sentinels)!;
     }
 
     private static async Task<(string Schema, string Name)> MaterializationOfAsync(NpgsqlConnection connection, string view, CancellationToken ct)
