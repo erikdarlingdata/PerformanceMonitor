@@ -39,7 +39,7 @@ public sealed class PlanSync4512PostParseTests
     /// <summary>
     /// A depth-999 tree — the largest <c>ShowPlanParser</c> now returns — through parse, analyze,
     /// score, and layout, all on a genuine 1 MB caller thread (the WPF UI thread's size). This is
-    /// the fact the brief asked for directly: every post-parse walk completes on the smallest
+    /// the fact this class exists to pin: every post-parse walk completes on the smallest
     /// real caller, with a sane result.
     /// </summary>
     [Fact]
