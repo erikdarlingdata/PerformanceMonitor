@@ -1306,6 +1306,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// sharing the grid's; it starts at the grid's own measured 12h pending a composer-specific measurement.</summary>
     internal static readonly TimeSpan ComposeQueryStoreWideMinWindow = QueryStoreIntervalWide.GridWideMinWindow;
 
+    /// <summary>#4617: named so the MCP read census (<see cref="Darling.Tests.McpReadCommandTimeoutTests"/>)
+    /// recognises the <c>NpgsqlCommand(string, connection)</c> construction below as a store read rather
+    /// than an unrecognised receiver.</summary>
+    private const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
+
+    /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
+    private const string QueryStoreWideServerIdsSql =
+        "SELECT server_id FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
+
     /// <summary>
     /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
     /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
@@ -1332,7 +1341,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
 
             int schemaVersion;
-            await using (var probe = new NpgsqlCommand("SELECT COALESCE(MAX(version), 0) FROM darling_schema_version", connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            await using (var probe = new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 schemaVersion = (int)(await probe.ExecuteScalarAsync(cancellationToken))!;
             }
@@ -1343,9 +1352,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             }
 
             var serverIds = new List<int>();
-            await using (var servers = new NpgsqlCommand(
-                "SELECT server_id FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))", connection)
-                { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 servers.Parameters.Add(new NpgsqlParameter
                 {
