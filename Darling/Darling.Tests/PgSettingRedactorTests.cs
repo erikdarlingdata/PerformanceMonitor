@@ -20,10 +20,11 @@ public sealed class PgSettingRedactorTests
 {
     /// <summary>
     /// Runs one <see cref="PgSettingRedactor.Redact"/> call with <see cref="PgSettingRedactor.MatchTimeoutForTest"/>
-    /// forced to a generous 10s for just that call, restoring whatever value was there before (not a hard
-    /// null) in a <c>finally</c> even if the call throws — so a caller nested inside some other override is
-    /// not clobbered once this call returns. Every exact-output correctness assertion in this class goes
-    /// through this one seam (test-only flake fix, no issue number): the production 100ms
+    /// forced to a generous 10s for just that call via <see cref="GenerousRedactorTimeout"/>, which restores
+    /// whatever value was there before (not a hard null) once the <c>using</c> scope ends, even if the call
+    /// throws — so a caller nested inside some other override is not clobbered once this call returns. Every
+    /// exact-output correctness assertion in this class goes through this one seam (test-only flake fix, no
+    /// issue number): the production 100ms
     /// <see cref="PgSettingRedactor.TimeBoundPattern"/> timeout is a real budget on a quiet box, but a loaded
     /// runner's own scheduling delay — not real backtracking — can push even genuinely linear matching past
     /// it, and <see cref="PgSettingRedactor.Redact"/> cannot tell that apart from catastrophic backtracking:
@@ -38,16 +39,8 @@ public sealed class PgSettingRedactorTests
     /// </summary>
     private static string? RedactUnderGenerousTimeout(string? name, string? value, Action<string?>? onMatchTimeout = null)
     {
-        var priorOverride = PgSettingRedactor.MatchTimeoutForTest;
-        PgSettingRedactor.MatchTimeoutForTest = TimeSpan.FromSeconds(10);
-        try
-        {
-            return PgSettingRedactor.Redact(name, value, onMatchTimeout);
-        }
-        finally
-        {
-            PgSettingRedactor.MatchTimeoutForTest = priorOverride;
-        }
+        using var _ = GenerousRedactorTimeout.Begin();
+        return PgSettingRedactor.Redact(name, value, onMatchTimeout);
     }
 
     [Fact]

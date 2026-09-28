@@ -28,6 +28,18 @@ namespace Darling.Tests;
 /// sharing the live fixture, so it is deliberately NOT in the <c>live-postgres</c> collection: it creates its
 /// own hypertable/compression shape on <c>collect.pg_server_config</c>, which the shared fixture must never
 /// inherit from a test.</para>
+///
+/// <para>Every method whose assertions depend on the EXACT text <see cref="PgSettingScrub.RunAsync"/> writes —
+/// a specific control value surviving byte-identical, a specific masked shape — opens the scope with
+/// <see cref="GenerousRedactorTimeout"/> before its first await (test-only flake fix, PR #4663, same seam as
+/// <see cref="PgSettingRedactorTests"/>'s <c>RedactUnderGenerousTimeout</c>): on the production 100ms
+/// <c>PgSettingRedactor.MatchTimeoutForTest</c>, a loaded runner's scheduling delay, not real backtracking,
+/// can mask a value WHOLE and break that exact-output check. Two methods deliberately do NOT open it:
+/// <see cref="TheScrubMasksEveryRedactorRuleShape"/> only checks that the raw secret is gone and the row
+/// count/marker moved, both true whether a value is masked in part or in whole, so a spurious timeout there
+/// cannot fail it; <see cref="TheScrubTimesOutOnOneServer_AndStillRedactsTheOther"/> tests a DIFFERENT,
+/// database-side command timeout (<c>TestOnlyUpdateCommandTimeoutSecondsOverride</c>), not the redactor's own
+/// regex match timeout, and its own assertions already tolerate either masked shape.</para>
 /// </summary>
 public sealed class PgSettingScrubLiveTests
 {
@@ -49,6 +61,7 @@ public sealed class PgSettingScrubLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4351 H1 batching pin (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        using var generousTimeout = GenerousRedactorTimeout.Begin(); // #4663: see class remarks.
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
 
@@ -112,6 +125,7 @@ public sealed class PgSettingScrubLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4351 M3(a) decompress-limit pin (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        using var generousTimeout = GenerousRedactorTimeout.Begin(); // #4663: see class remarks.
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
 
@@ -176,6 +190,7 @@ public sealed class PgSettingScrubLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4351 M3(b) per-server isolation pin (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        using var generousTimeout = GenerousRedactorTimeout.Begin(); // #4663: see class remarks.
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
 
@@ -301,6 +316,7 @@ public sealed class PgSettingScrubLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4348 scrub test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        using var generousTimeout = GenerousRedactorTimeout.Begin(); // #4663: see class remarks.
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -380,6 +396,7 @@ public sealed class PgSettingScrubLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4348 hour-slice pin (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        using var generousTimeout = GenerousRedactorTimeout.Begin(); // #4663: see class remarks.
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         try
@@ -450,6 +467,7 @@ public sealed class PgSettingScrubLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4348 interrupted-slice pin (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        using var generousTimeout = GenerousRedactorTimeout.Begin(); // #4663: see class remarks.
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         try
