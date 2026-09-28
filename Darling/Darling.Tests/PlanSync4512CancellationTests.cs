@@ -55,20 +55,37 @@ public sealed class PlanSync4512CancellationTests
     }
 
     /// <summary>
-    /// (b) Cancelled MID-parse, deterministically: a 35,000-statement plan (13 MB, under
-    /// <see cref="ShowPlanParser.MaxParseCharacters"/>) takes roughly 700ms to walk on this
-    /// machine — measured directly while writing this test — so a 50ms <c>CancelAfter</c> fires
-    /// while the dedicated parse thread is still inside the per-statement walk, never after it
-    /// finishes. Five manual trials during development all threw; this run is one more.
+    /// (b) Cancelled MID-parse, deterministically: <see cref="ShowPlanParser.OnStatementParsedForTest"/>
+    /// fires after each statement the walk finishes, on the dedicated parse thread, so the hook
+    /// cancels the token itself as soon as it sees statement 3 of 50 — no timer, no race against
+    /// how long <c>XDocument.Parse</c> takes on the machine running this. The walk must stop at
+    /// statement 3: the hook is asserted to never see statement 5 or later, which proves the
+    /// cancellation actually cut the walk short instead of racing to the end anyway.
     /// </summary>
     [Fact]
     public void ParseCancelledDuringTheWalkThrowsOperationCanceledException()
     {
-        var xml = ManyStatementsPlan(35_000);
+        var xml = ManyStatementsPlan(50);
         using var cts = new CancellationTokenSource();
-        cts.CancelAfter(50);
+        var highestStatementSeen = 0;
 
-        Assert.Throws<OperationCanceledException>(() => ShowPlanParser.Parse(xml, cts.Token));
+        ShowPlanParser.OnStatementParsedForTest = count =>
+        {
+            highestStatementSeen = count;
+            if (count == 3)
+                cts.Cancel();
+        };
+        try
+        {
+            Assert.Throws<OperationCanceledException>(() => ShowPlanParser.Parse(xml, cts.Token));
+        }
+        finally
+        {
+            ShowPlanParser.OnStatementParsedForTest = null;
+        }
+
+        Assert.True(highestStatementSeen <= 4,
+            $"the walk should have stopped at or just past statement 3, but saw statement {highestStatementSeen}");
     }
 
     /// <summary>(b), async side: same mid-walk cancellation on <see cref="ShowPlanParser.ParseAsync"/>.</summary>
@@ -138,8 +155,7 @@ public sealed class PlanSync4512CancellationTests
 
     /// <summary>
     /// (f) A cancellation from <see cref="ShowPlanParser.Parse"/> inside a drill-down must reach
-    /// the collector's own abandonment handling, not get swallowed as a bad plan. This is a
-    /// code-reading pin rather than an exercised one: both
+    /// the collector's own abandonment handling, not get swallowed as a bad plan. Both
     /// <c>Darling/PerformanceMonitor.Darling.Analysis/PgDrillDownCollector.Plans.cs</c> and
     /// <c>Lite/Analysis/DrillDownCollector.Plans.cs</c> wrap their single-plan
     /// <c>ShowPlanParser.Parse(planXml, context.CancellationToken)</c> call in
@@ -149,11 +165,13 @@ public sealed class PlanSync4512CancellationTests
     /// <c>passToken.IsCancellationRequested</c>; its filter runs before the catch body, so with
     /// the token cancelled the <c>when</c> clause is false and the
     /// <see cref="OperationCanceledException"/> propagates out of the catch instead of being
-    /// caught and reported as a parse failure. This pin asserts that the classifier itself
-    /// returns true for exactly that shape, which is the half of the guard both call sites share.
+    /// caught and reported as a parse failure. This pin covers only the classifier itself
+    /// (<see cref="AnalysisShutdown.IsExpectedAbandon"/> returning true for exactly that shape),
+    /// which is the half of the guard both call sites share — it does not exercise the
+    /// drill-down catch's <c>when</c> clause directly.
     /// </summary>
     [Fact]
-    public void DrillDownAbandonClassifierRecognizesOperationCanceledExceptionAsExpected()
+    public void AbandonClassifier_TreatsCancelledParseAsExpected()
     {
         using var cts = new CancellationTokenSource();
         cts.Cancel();

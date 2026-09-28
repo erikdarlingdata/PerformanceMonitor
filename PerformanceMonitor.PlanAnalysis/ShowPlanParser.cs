@@ -155,6 +155,16 @@ public static class ShowPlanParser
     // ParseStatementAndChildren that stop unbounded recursion). Contain it so a bad plan becomes
     // a ParseError, never a crash for the caller — except a cancellation, which is rethrown so
     // the caller sees OperationCanceledException rather than a parse failure.
+    // #4560: a test-only seam so a mid-walk cancellation can be pinned deterministically instead
+    // of racing a timer against XDocument.Parse. Invoked after each statement the loop below
+    // finishes, with the running count, so a test can cancel the token from inside the callback
+    // and assert exactly how many statements were seen before the walk stopped. The walk itself
+    // runs on ParseOnDedicatedThread's own Thread (see Parse above), never the test's thread, so
+    // this has to be a plain static field visible across threads — a [ThreadStatic] set from the
+    // test method would never be observed here. Tests must reset it in a finally block; nothing
+    // in product code ever sets it.
+    internal static Action<int>? OnStatementParsedForTest;
+
     private static void ParseDocument(XDocument doc, ParsedPlan plan, CancellationToken cancellationToken)
     {
         try
@@ -169,6 +179,7 @@ public static class ShowPlanParser
 
             // Standard path: ShowPlanXML → BatchSequence → Batch → Statements
             var batches = root.Descendants(Ns + "Batch");
+            var statementsParsedForTest = 0;
             foreach (var batchEl in batches)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -181,6 +192,8 @@ public static class ShowPlanParser
                     {
                         var stmts = ParseStatementAndChildren(stmtEl, 0, cancellationToken);
                         batch.Statements.AddRange(stmts);
+                        statementsParsedForTest++;
+                        OnStatementParsedForTest?.Invoke(statementsParsedForTest);
                     }
                 }
                 if (batch.Statements.Count > 0)
