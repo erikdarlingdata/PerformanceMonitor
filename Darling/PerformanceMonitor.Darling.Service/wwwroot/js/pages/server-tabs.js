@@ -3410,6 +3410,10 @@ const COLLECTOR_COLUMNS = [
      column is blank on a plainly healthy collector. Composed server-side from the shared formatter, so
      this table cannot render the sentence a second way. */
   { key: "output_finding", label: "Output", wrap: true },
+  /* #4620: why a collector that stopped doing what it used to do reads WARNING. The Status column already
+     showed the floor, but no column showed the sentence behind it, so a regressed row read WARNING with
+     every other cell blank. Composed server-side from the shared formatter, like the two columns above. */
+  { key: "regression_finding", label: "Regression", wrap: true },
 ];
 
 const HEAVIEST_COLUMNS = [

@@ -1512,6 +1512,80 @@ namespace PerformanceMonitor.Common
         public static readonly TimeSpan QueryStoreLongestIntervalSlack = TimeSpan.FromMinutes(1440 + 15);
 
         /// <summary>
+        /// The collectors whose rows exist only while the target is DOING something (#4620): a task
+        /// waiting (<c>waiting_tasks</c>), a request running (<c>query_snapshots</c>), a job running or
+        /// finishing (<c>running_jobs</c>, <c>job_history</c>), a procedure executing since the last cycle
+        /// (<c>procedure_stats</c>, a delta read), another backend holding or queueing a lock
+        /// (<c>pg_lock_stats</c>), a session holding a transaction open (<c>pg_session_states</c>). On a
+        /// target that sits idle for a night or a weekend, each of these correctly returns nothing for hours
+        /// at a time, so three zero-row cycles after a productive one is their ordinary shape there rather
+        /// than a regression. <see cref="ProducedThenStopped"/> holds them to
+        /// <see cref="ActivitySourcedQuietBar"/> as well as the streak.
+        ///
+        /// <para><b>Deliberately NOT in it:</b> <c>memory_grant_stats</c>, which reads
+        /// <c>sys.dm_exec_query_resource_semaphores</c> and so has rows whether or not anything is running,
+        /// and <c>query_stats</c>, which stored rows on 99.6–100% of its runs on every target measured. A
+        /// zero streak on either is a real fault, and both keep the streak-only rule.</para>
+        ///
+        /// <para><b>Polarity.</b> This list names the collectors to GIVE the longer leash to, so an omission
+        /// fails toward the louder answer (the streak-only rule, a WARNING within minutes), never toward a
+        /// quieter one. Kept as an explicit name set for the same reason <see cref="OnLoadCollectorNames"/>
+        /// is, and pinned by both suites against the catalog's real names so a typo or a rename cannot
+        /// silently drop a collector from it.</para>
+        /// </summary>
+        private static readonly HashSet<string> ActivitySourcedCollectorNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "waiting_tasks",
+            "query_snapshots",
+            "running_jobs",
+            "job_history",
+            "procedure_stats",
+            "pg_lock_stats",
+            "pg_session_states",
+        };
+
+        /// <summary>
+        /// True when this collector's rows exist only while the target has activity for it to report
+        /// (<see cref="ActivitySourcedCollectorNames"/>, #4620). False for every other collector, and for a
+        /// null name — absence of a name is not a claim about category.
+        /// </summary>
+        public static bool IsActivitySourcedCollector(string? collectorName) =>
+            collectorName is not null && ActivitySourcedCollectorNames.Contains(collectorName);
+
+        /// <summary>
+        /// The names in <see cref="ActivitySourcedCollectorNames"/>, exposed read-only so both suites can pin
+        /// the set against the catalog's real collector names.
+        /// </summary>
+        public static IReadOnlyCollection<string> ActivitySourcedCollectorNamesForPinning => ActivitySourcedCollectorNames;
+
+        /// <summary>
+        /// How long an activity-sourced collector (<see cref="IsActivitySourcedCollector"/>) may go without
+        /// storing a row before <see cref="ProducedThenStopped"/> flags its zero-row streak (#4620): 72 hours.
+        ///
+        /// <para><b>Why a bar in hours at all.</b> Three runs is 3–15 minutes. On a busy target the gaps
+        /// between this set's productive runs are minutes too, so the streak alone reads them correctly
+        /// there. On an idle target the gaps are hours, and the streak alone banded these collectors
+        /// WARNING nearly all the time. Measured over seven days on 5 mostly idle SQL Server test instances
+        /// and 1 pgbench PostgreSQL instance, every series of these collectors that stored rows on only some
+        /// of its runs sat at WARNING for 81–100% of the time after its first productive run, while it was
+        /// working correctly.</para>
+        ///
+        /// <para><b>Why 72.</b> It clears a target that sits idle over a weekend, Friday evening to Monday
+        /// morning being about 60 hours, with slack for the collector's own cadence. On the same fleet it
+        /// cut the worst series to 39% and most to 8% or less (the PostgreSQL ones to 0%), where the one-day
+        /// slack <see cref="QueryStoreLongestIntervalSlack"/> uses left 72% and 48 hours left 54%.</para>
+        ///
+        /// <para><b>What the longer bar costs, and why that is cheap.</b> This arm catches exactly one
+        /// thing: a SILENT stop, a SUCCESS that stores nothing. Errors, denials, abandons and staleness are
+        /// caught at once by the other arms whatever this value is. So on a busy target the only cost is
+        /// that a silent stop is flagged 72 hours in rather than minutes in. #3885's measured case, a
+        /// fortnight of zero-row successes, is still flagged: from 72 hours after the last productive run
+        /// until that run ages out of the read's seven-day window. The comparison is strictly greater, like
+        /// the interval arm's, so a target sitting exactly on the bar is still read as quiet.</para>
+        /// </summary>
+        public static readonly TimeSpan ActivitySourcedQuietBar = TimeSpan.FromHours(72);
+
+        /// <summary>
         /// The collectors whose enumeration draws its item list from the target's USER DATABASES — exactly
         /// the collectors that override <c>BuildEnumerationQuery</c> today. For these, and only these,
         /// "the enumeration yielded 0 items" is worth qualifying against whether the target has any user
@@ -1567,9 +1641,10 @@ namespace PerformanceMonitor.Common
         /// catalog - and pinned by both suites against the catalog's real names so a typo or a rename
         /// cannot silently drop a collector from it.</para>
         ///
-        /// <para><b>Deliberately NOT in it:</b> the polled snapshots of current activity (waiting_tasks,
-        /// query_snapshots, memory_grant_stats, running_jobs, job_history) whose zero on an idle
-        /// target is legitimate too. They are not event captures, and the non-event sentence is worded to
+        /// <para><b>Deliberately NOT in it:</b> the polled reads of current activity (waiting_tasks,
+        /// query_snapshots, running_jobs, job_history and the rest of
+        /// <see cref="ActivitySourcedCollectorNames"/>) whose zero on an idle target is legitimate too. They
+        /// are not event captures, and the non-event sentence is worded to
         /// be honest for them without alarm - it says the source returned nothing on every run and that
         /// this needs a look "on a target that has anything for it to report", which an operator reading
         /// an idle development box can answer for themselves. Wrongly OMITTING a collector costs a
@@ -1772,11 +1847,17 @@ namespace PerformanceMonitor.Common
         /// <para><b>Justified from the collectors' own cadence, not picked.</b> Every scheduled collector
         /// in <c>CollectorScheduleDefaults</c> that stores rows on a periodic loop runs at 1–5 minutes, so
         /// three consecutive runs is 3–15 minutes of a source returning nothing. A single empty cycle is
-        /// ordinary on nearly all of them (a quiet minute on <c>job_history</c>, <c>running_jobs</c>,
-        /// <c>waiting_tasks</c> — nothing ran, nothing waited); two is ordinary on a genuinely idle target
-        /// at 3 a.m. Three in a row on a collector that was producing earlier in the SAME window is the
-        /// shape that does not happen by accident, and 3–15 minutes is far below any window an operator
-        /// would call a gap.</para>
+        /// ordinary on nearly all of them; two is ordinary on a quiet target at 3 a.m. Three in a row on a
+        /// collector that was producing earlier in the SAME window is the shape that does not happen by
+        /// accident on a source that always has something to return, and 3–15 minutes is far below any
+        /// window an operator would call a gap.</para>
+        ///
+        /// <para><b>The exception #4620 measured.</b> A collector whose source is current ACTIVITY
+        /// (<c>job_history</c>, <c>running_jobs</c>, <c>waiting_tasks</c> and the rest of
+        /// <see cref="IsActivitySourcedCollector"/>'s set) goes quiet for hours, not minutes, on an idle
+        /// target, so three zero-row runs there DOES happen by accident, every night.
+        /// <see cref="ProducedThenStopped"/> holds those to <see cref="ActivitySourcedQuietBar"/> as well as
+        /// this streak.</para>
         ///
         /// <para><b>Why not higher.</b> The measured case ran 1,900+ consecutive zero-row successes over a
         /// fortnight, so any N from 3 upward would have caught it; N is therefore chosen for the FALSE
@@ -1803,10 +1884,12 @@ namespace PerformanceMonitor.Common
         ///
         /// <para><b>Why a streak and not just "zero rows now".</b> Zero rows on one cycle is the ordinary
         /// resting state of most polled snapshots: nothing ran, nothing blocked, nothing waited. What is
-        /// never ordinary is zero rows on EVERY cycle for <see cref="ProductiveZeroRunStreak"/> runs on a
+        /// not ordinary is zero rows on EVERY cycle for <see cref="ProductiveZeroRunStreak"/> runs on a
         /// collector that produced earlier in the same window — that is a reader whose source went away or
         /// whose filter stopped matching, and it is a different fact from a collector that never produced
-        /// here.</para>
+        /// here. The one place a streak that short IS ordinary is a collector whose source is current
+        /// activity on an idle target (#4620), which is why those are also held to
+        /// <see cref="ActivitySourcedQuietBar"/>.</para>
         ///
         /// <para><b>What stays benign, deliberately.</b> An event collector
         /// (<see cref="IsEventCollector"/>) stores a row only when the monitored engine recorded an event,
@@ -1863,8 +1946,10 @@ namespace PerformanceMonitor.Common
         /// minutes while its interval can be up to a day wide. So for that collector the flag also requires
         /// <paramref name="nowUtc"/> to be more than <see cref="QueryStoreLongestIntervalSlack"/> PAST
         /// <paramref name="lastProductiveTimeUtc"/> — strictly greater, so a target sitting exactly at the
-        /// slack boundary is still read as within its normal cadence. Every other collector keeps the
-        /// existing streak-only rule unchanged.
+        /// slack boundary is still read as within its normal cadence. An activity-sourced collector
+        /// (<see cref="IsActivitySourcedCollector"/>, #4620) gets the same shape with
+        /// <see cref="ActivitySourcedQuietBar"/> as its bound. Every other collector keeps the streak-only
+        /// rule unchanged.
         /// </summary>
         /// <param name="nowUtc">
         /// The instant to measure the gap against, in UTC. Every caller passes <see cref="DateTime.UtcNow"/>
@@ -1899,6 +1984,14 @@ namespace PerformanceMonitor.Common
             if (IsIntervalSourcedCollector(collectorName))
             {
                 return nowUtc - lastProductiveTimeUtc.Value > QueryStoreLongestIntervalSlack;
+            }
+
+            /* An activity-sourced collector on an idle target returns nothing for hours at a time, which
+               the streak alone read as a stop every night (#4620). Same shape as the interval arm: the
+               streak AND a quiet longer than anything an idle weekend explains. */
+            if (IsActivitySourcedCollector(collectorName))
+            {
+                return nowUtc - lastProductiveTimeUtc.Value > ActivitySourcedQuietBar;
             }
 
             return true;

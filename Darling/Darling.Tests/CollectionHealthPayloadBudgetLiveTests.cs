@@ -235,6 +235,111 @@ public sealed class CollectionHealthPayloadBudgetLiveTests
         }
     }
 
+    /// <summary>
+    /// #4620: whenever a row says <c>regressed_from_productive</c>, it carries the sentence that explains it,
+    /// on the default shape and on full_detail alike. Until this issue the partial shape carried the flag
+    /// with no sentence, so a WARNING row whose only issue was a regression said nothing about why. Seeds one
+    /// row of each regression shape through the real read: a dense collector three zero-row runs after its
+    /// last productive one (query_stats), an activity-only collector 73 hours after its last productive run
+    /// (job_history), and a skip regression (wait_stats, PERMISSIONS on every run since it last stored rows).
+    /// Beside them, an activity-only collector only 71 hours quiet (waiting_tasks) reads HEALTHY and compacts,
+    /// where before #4620 it banded WARNING.
+    /// </summary>
+    [Fact]
+    public async Task ARegressedRow_CarriesItsSentence_OnEveryRowShape()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to run the live get_collection_health row-shape test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+        var bodySucceeded = false;
+        try
+        {
+            await RegisterServerAsync(connection, ct);
+            var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+
+            /* Dense: productive every hour until an hour ago, then three zero-row successes. */
+            for (var i = 1; i <= 6; i++)
+                await InsertLogRowAsync(connection, "query_stats", now.AddHours(-i), "SUCCESS", 80, 40, null, ct);
+            for (var i = 1; i <= 3; i++)
+                await InsertLogRowAsync(connection, "query_stats", now.AddMinutes(-i), "SUCCESS", 20, 0, null, ct);
+
+            /* Activity-only, last productive 73 hours ago, four zero-row successes since: flagged. */
+            await InsertLogRowAsync(connection, "job_history", now.AddHours(-74), "SUCCESS", 80, 12, null, ct);
+            await InsertLogRowAsync(connection, "job_history", now.AddHours(-73), "SUCCESS", 80, 12, null, ct);
+            foreach (var hoursAgo in new[] { 72.0, 48.0, 24.0, 0.05 })
+                await InsertLogRowAsync(connection, "job_history", now.AddHours(-hoursAgo), "SUCCESS", 20, 0, null, ct);
+
+            /* Activity-only, last productive 71 hours ago, four zero-row successes since: HEALTHY. */
+            await InsertLogRowAsync(connection, "waiting_tasks", now.AddHours(-72), "SUCCESS", 80, 3, null, ct);
+            await InsertLogRowAsync(connection, "waiting_tasks", now.AddHours(-71), "SUCCESS", 80, 3, null, ct);
+            foreach (var hoursAgo in new[] { 70.0, 48.0, 24.0, 0.05 })
+                await InsertLogRowAsync(connection, "waiting_tasks", now.AddHours(-hoursAgo), "SUCCESS", 20, 0, null, ct);
+
+            /* The skip class (#3819): productive, then PERMISSIONS on every run since. */
+            for (var i = 3; i <= 5; i++)
+                await InsertLogRowAsync(connection, "wait_stats", now.AddHours(-i), "SUCCESS", 80, 40, null, ct);
+            for (var i = 1; i <= 2; i++)
+                await InsertLogRowAsync(connection, "wait_stats", now.AddHours(-i), "PERMISSIONS", 20, null, "VIEW SERVER STATE permission was denied", ct);
+
+            var defaultJson = await DarlingMcpDataTools.GetCollectionHealth(postgres, ServerName);
+            var fullJson = await DarlingMcpDataTools.GetCollectionHealth(postgres, ServerName, full_detail: true);
+
+            foreach (var json in new[] { defaultJson, fullJson })
+            {
+                using var doc = JsonDocument.Parse(json);
+                var rows = doc.RootElement.GetProperty("collectors").EnumerateArray()
+                    .ToDictionary(r => r.GetProperty("collector").GetString()!, r => r.Clone());
+
+                /* The general claim, over every row the read returned: a regressed row always has its sentence. */
+                var regressed = rows
+                    .Where(kv => kv.Value.TryGetProperty("regressed_from_productive", out var flag) && flag.GetBoolean())
+                    .Select(kv => kv.Key)
+                    .OrderBy(n => n, StringComparer.Ordinal)
+                    .ToArray();
+                Assert.Equal(new[] { "job_history", "query_stats", "wait_stats" }, regressed);
+                foreach (var name in regressed)
+                {
+                    Assert.True(rows[name].TryGetProperty("regression_finding", out var finding), $"{name} is regressed but carries no regression_finding.");
+                    Assert.Equal(JsonValueKind.String, finding.ValueKind);
+                    Assert.False(string.IsNullOrWhiteSpace(finding.GetString()), name);
+                    Assert.Equal(CollectorHealthClassifier.Warning, rows[name].GetProperty("status").GetString());
+                }
+
+                Assert.Contains("has recorded SUCCESS with zero rows on 3 runs since", rows["query_stats"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
+                Assert.Contains("has recorded SUCCESS with zero rows on 4 runs since", rows["job_history"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
+                Assert.Contains("has reported PERMISSIONS since", rows["wait_stats"].GetProperty("regression_finding").GetString()!, StringComparison.Ordinal);
+
+                Assert.Equal(CollectorHealthClassifier.Healthy, rows["waiting_tasks"].GetProperty("status").GetString());
+            }
+
+            /* On the default call the regressed rows are partial rows, which is the shape that used to drop the
+               sentence, and the quiet activity-only row compacts. */
+            using var defaultDoc = JsonDocument.Parse(defaultJson);
+            var defaultRows = defaultDoc.RootElement.GetProperty("collectors").EnumerateArray()
+                .ToDictionary(r => r.GetProperty("collector").GetString()!, r => r.Clone());
+            foreach (var name in new[] { "job_history", "query_stats", "wait_stats" })
+            {
+                Assert.True(defaultRows[name].TryGetProperty("partial_detail", out var partial) && partial.GetBoolean(), $"{name} must be a partial row by default.");
+            }
+
+            Assert.True(defaultRows["waiting_tasks"].TryGetProperty("compact", out var compact) && compact.GetBoolean(),
+                "an activity-only collector 71 hours quiet is healthy and should compact.");
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) => await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static async Task RegisterServerAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         using var command = new NpgsqlCommand(@"
