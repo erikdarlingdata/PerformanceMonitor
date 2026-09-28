@@ -74,7 +74,7 @@ LIMIT 1";
         try
         {
             var plan = ShowPlanParser.Parse(planXml);
-            PlanAnalyzer.Analyze(plan);
+            PlanAnalysisPipeline.Run(plan);
 
             var allWarnings = plan.Batches
                 .SelectMany(b => b.Statements)

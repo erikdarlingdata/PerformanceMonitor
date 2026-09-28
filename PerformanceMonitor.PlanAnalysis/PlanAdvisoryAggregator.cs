@@ -55,7 +55,7 @@ public static class PlanAdvisoryAggregator
             try
             {
                 plan = ShowPlanParser.Parse(xml);
-                PlanAnalyzer.Analyze(plan);
+                PlanAnalysisPipeline.Run(plan);
             }
             catch
             {
