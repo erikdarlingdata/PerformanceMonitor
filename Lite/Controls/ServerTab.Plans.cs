@@ -286,6 +286,8 @@ public partial class ServerTab : UserControl
         }
 
         var header = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        header.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
         header.Children.Add(new TextBlock
         {
             Text = label.Length > 30 ? label[..30] + "…" : label,

@@ -730,27 +730,36 @@ public partial class MainWindow : Window
             selectedServerId = serverTab.ServerId;
         }
 
-        var health = _collectorService.GetHealthSummary(selectedServerId);
+        PaintCollectorHealth(CollectorHealthText, _collectorService.GetHealthSummary(selectedServerId));
+    }
 
+    /// <summary>
+    /// Paints the status bar's collector-health text (#4679). The ink is a <c>SetResourceReference</c>, not a copy of
+    /// the brush: a copy kept the OLD theme's colour after a live theme switch (Dark's #E4E6EB on Light's white bar,
+    /// 1.25:1) until the next 30 s tick. Every theme in Lite and the Darling Viewer declares <c>CriticalTextBrush</c>
+    /// (Viewer4629Tests pins it), so there is no fallback brush. "Logging: BROKEN" used a fixed Brushes.Red, 4.00:1 on
+    /// Light, 3.84:1 on Dark and 3.61:1 on Cool Breeze; CriticalTextBrush is 6.41, 5.59 and 5.79.
+    /// </summary>
+    internal static void PaintCollectorHealth(TextBlock text, CollectorHealthSummary health)
+    {
         if (health.TotalCollectors == 0)
         {
-            CollectorHealthText.Text = "";
+            text.Text = "";
             return;
         }
 
         if (health.LoggingFailures > 0)
         {
-            CollectorHealthText.Text = $"Logging: BROKEN ({health.LoggingFailures} failures)";
-            CollectorHealthText.Foreground = System.Windows.Media.Brushes.Red;
-            CollectorHealthText.ToolTip = $"collection_log INSERT is failing.\nThis means collector errors are invisible.\nCheck the log file for details.";
+            text.Text = $"Logging: BROKEN ({health.LoggingFailures} failures)";
+            text.SetResourceReference(TextBlock.ForegroundProperty, "CriticalTextBrush");
+            text.ToolTip = $"collection_log INSERT is failing.\nThis means collector errors are invisible.\nCheck the log file for details.";
         }
         else if (health.ErroringCollectors > 0)
         {
             var names = string.Join(", ", health.Errors.Select(e => e.CollectorName));
-            CollectorHealthText.Text = $"Collectors: {health.ErroringCollectors} erroring";
-            // #4635: the fixed OrangeRed (#FF4500) was 3.44:1 on Light's status bar, under WCAG AA's 4.5:1 text floor.
-            CollectorHealthText.Foreground = (TryFindResource("CriticalTextBrush") as System.Windows.Media.Brush) ?? System.Windows.Media.Brushes.OrangeRed;
-            CollectorHealthText.ToolTip = $"Failing: {names}\n\n" +
+            text.Text = $"Collectors: {health.ErroringCollectors} erroring";
+            text.SetResourceReference(TextBlock.ForegroundProperty, "CriticalTextBrush");
+            text.ToolTip = $"Failing: {names}\n\n" +
                 string.Join("\n", health.Errors.Select(e =>
                     $"{e.CollectorName}: {e.ConsecutiveErrors}x consecutive - {e.LastErrorMessage}"));
         }
@@ -760,17 +769,16 @@ public partial class MainWindow : Window
                increment ConsecutiveErrors, so without this branch the status bar
                would show OK while blocking/deadlock capture is dead. */
             var names = string.Join(", ", health.XeSessionFailures.Select(e => e.CollectorName));
-            CollectorHealthText.Text = $"Capture down: {names}";
-            // #4635: the fixed OrangeRed (#FF4500) was 3.44:1 on Light's status bar, under WCAG AA's 4.5:1 text floor.
-            CollectorHealthText.Foreground = (TryFindResource("CriticalTextBrush") as System.Windows.Media.Brush) ?? System.Windows.Media.Brushes.OrangeRed;
-            CollectorHealthText.ToolTip = string.Join("\n", health.XeSessionFailures.Select(e =>
+            text.Text = $"Capture down: {names}";
+            text.SetResourceReference(TextBlock.ForegroundProperty, "CriticalTextBrush");
+            text.ToolTip = string.Join("\n", health.XeSessionFailures.Select(e =>
                 $"{e.CollectorName}: {e.XeSessionMessage}"));
         }
         else
         {
-            CollectorHealthText.Text = $"Collectors: {health.TotalCollectors} OK";
-            CollectorHealthText.Foreground = (System.Windows.Media.Brush)FindResource("ForegroundBrush");
-            CollectorHealthText.ToolTip = null;
+            text.Text = $"Collectors: {health.TotalCollectors} OK";
+            text.SetResourceReference(TextBlock.ForegroundProperty, "ForegroundBrush");
+            text.ToolTip = null;
         }
     }
 
@@ -1106,6 +1114,8 @@ public partial class MainWindow : Window
     private StackPanel CreateTabHeader(ServerConnection server)
     {
         var panel = new StackPanel { Orientation = Orientation.Horizontal };
+        /* #4678: an empty implicit TextBlock style shadows the theme's app-level one for this header only, so the label inherits the TabItem's Foreground (AccentForegroundBrush on the selected tab) instead of the style's ForegroundBrush. Set here, not on the TabItem style: the tab BODY is also logically parented to the TabItem. */
+        panel.Resources.Add(typeof(TextBlock), new Style(typeof(TextBlock)));
 
         var tabLabel = server.ReadOnlyIntent ? $"{server.DisplayName} (RO)" : server.DisplayName;
         panel.Children.Add(new TextBlock

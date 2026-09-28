@@ -563,6 +563,8 @@
                     <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed">
                         <TabItem.Header>
                             <StackPanel Orientation="Horizontal">
+                                <!-- #4678: shadow the app-level TextBlock style so the label inherits the TabItem Foreground (AccentForegroundBrush when selected). -->
+                                <StackPanel.Resources><Style TargetType="TextBlock"/></StackPanel.Resources>
                                 <TextBlock Text="Plan Viewer" VerticalAlignment="Center" FontWeight="SemiBold"/>
                                 <Button Style="{DynamicResource TabCloseButton}"
                                         Click="MainWindowPlanViewerClose_Click"
