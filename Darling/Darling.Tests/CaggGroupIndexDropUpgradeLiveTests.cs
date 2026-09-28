@@ -176,6 +176,113 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
     }
 
     /// <summary>
+    /// #4503: V152's <c>SET LOCAL lock_timeout</c> is derived from
+    /// <see cref="PgMigrations.MigrationCommandTimeoutSeconds"/> so the rung WAITS OUT a running rollup
+    /// refresh's <c>AccessExclusiveLock</c> on a materialization hypertable rather than failing on it.
+    /// A second connection locks one rollup's materialization for about 8 s; the migration, started on
+    /// another task, must still finish once that lock is released.
+    ///
+    /// <para><b>RED at the pre-#4503 head:</b> that build's lock_timeout is a flat <c>'5s'</c>, shorter
+    /// than the 8 s hold, so the migration's <c>DROP INDEX</c> statement fails with <c>55P03</c>
+    /// ("canceling statement due to lock timeout") before the lock is ever released. See the PR body for
+    /// the captured exception.</para>
+    /// </summary>
+    [Fact]
+    public async Task ARunningRollupRefreshHoldingTheMaterializationLockForEightSeconds_IsWaitedOut_AndTheMigrationReaches152()
+    {
+        var baseConnectionString = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the V152 lock-wait pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
+            Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the V152 lock-wait pin");
+
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+
+            /* Stop this scratch database's TimescaleDB scheduler (the CollectionHealthAggregateTests
+               precedent): the refresh policy CreateV151ShapeRollupsAsync installs below would otherwise
+               launch its own first run and contend with this test's own ACCESS SHARE lock, which measured
+               as a 40P01 deadlock rather than the clean queue-and-wait this pin means to exercise. */
+            await ExecAsync(connection, ct, "SELECT _timescaledb_functions.stop_background_workers()");
+
+            /* Roll the version stamp back and create the rollups the V151-era way (the default
+               create_group_indexes shape) — the same fixture CreateV151ShapeRollupsAsync builds for the
+               upgrade-equivalence pin above. Only that shape has a group index on the hourly view's
+               materialization for V152's DROP INDEX to actually take an AccessExclusiveLock on; the
+               current build's already-pruned kept-index shape has nothing there for a lock to contend
+               over, so the wait this pin measures would never happen against it. */
+            await ExecAsync(connection, ct, "DELETE FROM darling_schema_version WHERE version >= " + RungVersion);
+            using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))
+            {
+                Assert.Equal(PreviousVersion, Convert.ToInt32(await version.ExecuteScalarAsync(ct)));
+            }
+
+            await CreateV151ShapeRollupsAsync(connection, ct);
+
+            var (matSchema, matTable) = await MaterializationOfAsync(connection, TimescaleSupport.QueryStoreStatsHourlyView, ct);
+
+            await using var lockConnection = new NpgsqlConnection(scratch.ConnectionString);
+            await lockConnection.OpenAsync(ct);
+            await using var lockTransaction = await lockConnection.BeginTransactionAsync(ct);
+            await using (var lockCommand = new NpgsqlCommand(
+                $"LOCK TABLE {matSchema}.{matTable} IN ACCESS SHARE MODE", lockConnection, lockTransaction))
+            {
+                await lockCommand.ExecuteNonQueryAsync(ct);
+            }
+
+            var releaseAfter = Task.Delay(TimeSpan.FromSeconds(8), ct);
+
+            var started = DateTime.UtcNow;
+            var migrateTask = Task.Run(async () =>
+            {
+                await using var migrateConnection = new NpgsqlConnection(scratch.ConnectionString);
+                await migrateConnection.OpenAsync(ct);
+                return await PgMigrations.MigrateAsync(migrateConnection, ct);
+            }, ct);
+
+            await releaseAfter;
+            await lockTransaction.CommitAsync(ct);
+
+            var applied = await migrateTask;
+            var elapsed = DateTime.UtcNow - started;
+
+            Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= RungVersion), applied);
+            Assert.True(elapsed >= TimeSpan.FromSeconds(7), $"expected the migration to have waited out the lock (~8s hold); it finished in {elapsed}");
+
+            using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))
+            {
+                Assert.Equal(RungVersion, Convert.ToInt32(await version.ExecuteScalarAsync(ct)));
+            }
+
+            var indexes = await IndexColumnsAsync(connection, matSchema, matTable, ct);
+            foreach (var dropped in DroppedFirstColumnsFor(TimescaleSupport.QueryStoreStatsHourlyView))
+            {
+                Assert.DoesNotContain(indexes, idx => idx.Count == 2 && idx[0] == dropped && idx[1] == "bucket");
+            }
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await Task.CompletedTask;
+            });
+        }
+    }
+
+    /// <summary>
     /// The keep/drop decision (#4503, restated for this pin): <c>bucket_idx</c> and
     /// <c>(server_id, bucket)</c> on all six, plus <c>(server_name, bucket)</c> on the two hourly views.
     /// </summary>
