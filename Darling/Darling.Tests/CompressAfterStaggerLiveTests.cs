@@ -15,6 +15,9 @@ using Xunit;
 
 namespace Darling.Tests;
 
+/* #1776 own-store: this fact mints its own scratch database through ScratchPostgres and never touches the
+   shared store, so it cannot race the other live classes. */
+
 /// <summary>
 /// #4510, live: <see cref="TimescaleSupport.ConvergeCompressionScheduleAsync(NpgsqlConnection, Microsoft.Extensions.Logging.ILogger, System.Threading.CancellationToken)"/>
 /// retunes a real hypertable's <c>compress_after</c> onto its own <see cref="TimescaleSupport.CompressAfterFor"/>
