@@ -1709,9 +1709,10 @@ jobs:
             webjs:
               - 'Darling/PerformanceMonitor.Darling.Service/wwwroot/js/**'
               - '.github/scripts/check-web-js.sh'
+              - '.github/scripts/esm-link-check.mjs'
               - '.github/workflows/build.yml'
 
-      - name: Parse every wwwroot/js module
+      - name: Parse and link every wwwroot/js module
         if: ${{ github.event_name != 'pull_request' || steps.filter.outputs.webjs == 'true' }}
         shell: bash
         run: bash .github/scripts/check-web-js.sh

@@ -2,7 +2,9 @@
 # Parses every web-dashboard JavaScript file as an ES module with `node --check`.
 # Usage: check-web-js.sh [root]   (root defaults to the wwwroot/js tree of this checkout)
 # Each file is copied to a temp .mjs first, so Node treats it as a module whatever the
-# nearest package.json says. Exits non-zero when any file fails to parse, or none is found.
+# nearest package.json says. A second pass (esm-link-check.mjs) then links the modules together, which
+# catches a missing import target or a missing named export that a per-file parse cannot see.
+# Exits non-zero when any file fails to parse or link, or none is found.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -13,6 +15,7 @@ if [ ! -d "$root" ]; then
   exit 2
 fi
 
+echo "== Pass 1: parse each module (node --check) =="
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -38,4 +41,9 @@ if [ "$count" -eq 0 ]; then
 fi
 
 echo "$count file(s) checked, $failed failed"
-[ "$failed" -eq 0 ]
+
+echo "== Pass 2: link modules together (vm.SourceTextModule) =="
+link_status=0
+node --experimental-vm-modules --no-warnings "$repo_root/.github/scripts/esm-link-check.mjs" "$(dirname "$root")" || link_status=$?
+
+[ "$failed" -eq 0 ] && [ "$link_status" -eq 0 ]
