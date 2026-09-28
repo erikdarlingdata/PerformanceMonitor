@@ -82,6 +82,18 @@ public static partial class PlanAnalyzer
     // Groups[1] match is a real operator.
     private static readonly Regex LogicalOperatorRegex = LogicalOperatorRegExp();
 
+    /// <summary>
+    /// #4512 follow-up: <c>ShowPlanParser.Parse</c> now returns trees up to <c>MaxParseDepth</c>
+    /// (1,000) levels deep, parsed on its own dedicated 32 MB thread. This walk runs on
+    /// whichever thread the CALLER is on instead — the Darling service's analysis pass
+    /// (thread-pool, ~1.5 MB), the plan viewer's WPF UI thread (1 MB), or the analyze_plan_xml
+    /// / analyze_query_plan / analyze_query_store_plan MCP tools and the web host that front
+    /// them (thread-pool). Measured directly against a depth-999 tree shaped like this walk's
+    /// own recursion (<see cref="AnalyzeNodeTree"/>/<see cref="CheckForTableVariables"/>): it
+    /// survives on a 1 MB caller thread down to roughly 130 KB of stack, and on a 1.5 MB caller
+    /// down to roughly 110 KB — both with well over 2x margin below the smallest real caller, so
+    /// unlike the parser, this walk needs no dedicated thread of its own.
+    /// </summary>
     public static void Analyze(ParsedPlan plan)
     {
         foreach (var batch in plan.Batches)
@@ -174,7 +186,7 @@ public static partial class PlanAnalyzer
             {
                 var text = MaskCommentsAndLiterals(stmt.StatementText); // #4524
                 var hasMaxdop1InText = Regex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase);
-                var isTruncated = text.Length >= 3990;
+                var isTruncated = stmt.IsTextTruncated;
 
                 if (hasMaxdop1InText)
                 {
@@ -220,10 +232,17 @@ public static partial class PlanAnalyzer
                 {
                     var grantMB = grant.GrantedMemoryKB / 1024.0;
                     var usedMB = grant.MaxUsedMemoryKB / 1024.0;
+                    var message = $"Granted {grantMB:N0} MB but only used {usedMB:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.";
+
+                    // Note adaptive joins that chose Nested Loops at runtime — the grant
+                    // was sized for a hash join that never happened.
+                    if (stmt.RootNode != null && HasAdaptiveJoinChoseNestedLoop(stmt.RootNode))
+                        message += " An adaptive join in this plan executed as a Nested Loop at runtime — the memory grant was sized for the hash join alternative that wasn't used.";
+
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Excessive Memory Grant",
-                        Message = $"Granted {grantMB:N0} MB but only used {usedMB:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.",
+                        Message = message,
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -462,7 +481,10 @@ public static partial class PlanAnalyzer
             var hasTableVar = false;
             var isModification = stmt.StatementType is "INSERT" or "UPDATE" or "DELETE" or "MERGE";
             var modifiesTableVar = false;
-            CheckForTableVariables(stmt.RootNode, isModification, ref hasTableVar, ref modifiesTableVar);
+            var referencingNodeIds = new List<int>();
+            var modifyingNodeIds = new List<int>();
+            CheckForTableVariables(stmt.RootNode, isModification, ref hasTableVar, ref modifiesTableVar,
+                referencingNodeIds, modifyingNodeIds);
 
             if (hasTableVar && !modifiesTableVar)
             {
@@ -470,7 +492,8 @@ public static partial class PlanAnalyzer
                 {
                     WarningType = "Table Variable",
                     Message = "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
-                    Severity = PlanWarningSeverity.Warning
+                    Severity = PlanWarningSeverity.Warning,
+                    OriginNodeIds = referencingNodeIds
                 });
             }
 
@@ -480,28 +503,102 @@ public static partial class PlanAnalyzer
                 {
                     WarningType = "Table Variable",
                     Message = "This query modifies a table variable, which forces the entire plan to run single-threaded. SQL Server cannot use parallelism for modifications to table variables. Replace with a #temp table to allow parallel execution.",
-                    Severity = PlanWarningSeverity.Critical
+                    Severity = PlanWarningSeverity.Critical,
+                    OriginNodeIds = modifyingNodeIds
                 });
             }
         }
+
+        // Rule 36: Dynamic cursor. Dynamic cursors can prevent index usage
+        // because they must tolerate underlying data changes between fetches, forcing
+        // scans and extra work per fetch. Switching to FAST_FORWARD, STATIC, or KEYSET
+        // often delivers a dramatic improvement.
+        if (string.Equals(stmt.CursorActualType, "Dynamic", StringComparison.OrdinalIgnoreCase))
+        {
+            var cursorLabel = string.IsNullOrEmpty(stmt.CursorName) ? "Cursor" : $"Cursor \"{stmt.CursorName}\"";
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "Dynamic Cursor",
+                Message = $"{cursorLabel} is a dynamic cursor. Dynamic cursors tolerate underlying data changes between fetches, which prevents many index uses and forces extra work per fetch. If you don't need that semantic, switching to FAST_FORWARD (or STATIC / KEYSET, depending on requirements) typically gives a large performance improvement.",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 37: CURSOR declaration without LOCAL. Default cursor scope
+        // is GLOBAL in SQL Server, which puts cursors in a shared namespace and can
+        // bloat the plan cache (Erik's writeup:
+        // https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/).
+        if (!string.IsNullOrEmpty(stmt.StatementText))
+        {
+            var maskedText = MaskCommentsAndLiterals(stmt.StatementText); // #4524
+
+            // DECLARE <name> [INSENSITIVE|SCROLL] CURSOR [qualifier(s)] FOR ...
+            // In the T-SQL extended syntax, LOCAL/GLOBAL appear AFTER the CURSOR
+            // keyword (only INSENSITIVE/SCROLL are legal before it), so the LOCAL
+            // qualifier must be looked for between CURSOR and the FOR that introduces
+            // the SELECT. Capturing tokens *before* CURSOR never sees LOCAL and would
+            // fire on every cursor, including ones already declared LOCAL.
+            var cursorDeclMatch = Regex.Match(
+                maskedText,
+                @"\bDECLARE\s+\w+\s+(?:INSENSITIVE\s+|SCROLL\s+)*CURSOR\b(.*?)\bFOR\b",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            if (cursorDeclMatch.Success)
+            {
+                var qualifiers = cursorDeclMatch.Groups[1].Value;
+                if (!Regex.IsMatch(qualifiers, @"\bLOCAL\b", RegexOptions.IgnoreCase))
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Cursor Missing LOCAL",
+                        Message = "CURSOR declaration is missing the LOCAL keyword. Default cursor scope is GLOBAL, which puts the cursor in a shared namespace and can bloat the plan cache (see https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/). Adding LOCAL is cheap and usually right.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+            }
+        }
+
+        // Rule 39: the plan's copy of the query text hit SQL Server's showplan cap.
+        // Everything downstream that reads this text — advice, Copy Query Text, Open in Query
+        // Editor — is working from a query that stops mid-statement.
+        if (stmt.IsTextTruncated)
+        {
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "Truncated Query Text",
+                Message =
+                    "SQL Server truncated this query's text at 4,000 characters when it wrote the plan, "
+                    + "so the query shown here stops early and is not valid T-SQL on its own. "
+                    + "Advice, copied text, and Open in Query Editor are all working from the shortened "
+                    + "version. Go back to the original query text to re-run or format it.",
+                Severity = PlanWarningSeverity.Info
+            });
+        }
     }
 
+    // #4534: collects the operators it found, because this walk already knows exactly which ones
+    // touched a table variable and used to throw that away. Two lists rather than one, since the
+    // two warnings this feeds are about different operators: every operator referencing a table
+    // variable, versus only the ones modifying it (which is what forces the plan serial).
     private static void CheckForTableVariables(PlanNode node, bool isModification,
-        ref bool hasTableVar, ref bool modifiesTableVar)
+        ref bool hasTableVar, ref bool modifiesTableVar,
+        List<int>? referencingNodeIds = null, List<int>? modifyingNodeIds = null)
     {
         if (!string.IsNullOrEmpty(node.ObjectName) && node.ObjectName.StartsWith("@", StringComparison.OrdinalIgnoreCase))
         {
             hasTableVar = true;
+            referencingNodeIds?.Add(node.NodeId);
             if (isModification && (node.PhysicalOp.Contains("Insert", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Update", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Delete", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase)))
             {
                 modifiesTableVar = true;
+                modifyingNodeIds?.Add(node.NodeId);
             }
         }
         foreach (var child in node.Children)
-            CheckForTableVariables(child, isModification, ref hasTableVar, ref modifiesTableVar);
+            CheckForTableVariables(child, isModification, ref hasTableVar, ref modifiesTableVar,
+                referencingNodeIds, modifyingNodeIds);
     }
 
     private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt)
@@ -637,6 +734,15 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 6: Scalar UDF references (works on estimated plans too)
+        // Suppress when a Serial Plan finding is already on the statement for a UDF-related
+        // reason — that finding already explains the issue, so this would be redundant.
+        var serialPlanCoversUdf =
+            (stmt.NonParallelPlanReason is
+                "TSQLUserDefinedFunctionsNotParallelizable"
+                or "CLRUserDefinedFunctionRequiresDataAccess"
+                or "CouldNotGenerateValidParallelPlan")
+            && stmt.PlanWarnings.Any(w => w.WarningType == "Serial Plan");
+        if (!serialPlanCoversUdf)
         foreach (var udf in node.ScalarUdfs)
         {
             var type = udf.IsClrFunction ? "CLR" : "T-SQL";
@@ -676,7 +782,7 @@ public static partial class PlanAnalyzer
                     if (stmtMs > 0 && operatorMs > 0)
                     {
                         var pct = (double)operatorMs / stmtMs;
-                        w.Message += $" Operator time: {operatorMs:N0}ms ({pct:P0} of statement).";
+                        w.Message += $" Operator time: {operatorMs:N0}ms ({pct * 100:N0}% of statement).";
                     }
                 }
             }
@@ -689,7 +795,7 @@ public static partial class PlanAnalyzer
                 if (stmtMs > 0)
                 {
                     var pct = (double)operatorMs / stmtMs;
-                    w.Message += $" Operator time: {operatorMs:N0}ms ({pct:P0} of statement).";
+                    w.Message += $" Operator time: {operatorMs:N0}ms ({pct * 100:N0}% of statement).";
 
                     if (pct >= 0.5)
                         w.Severity = PlanWarningSeverity.Critical;
@@ -716,7 +822,7 @@ public static partial class PlanAnalyzer
                 var skewThreshold = workerThreads.Count <= 2 ? 0.80 : 0.50;
                 if (skewRatio >= skewThreshold)
                 {
-                    var message = $"Thread {maxThread.ThreadId} processed {skewRatio:P0} of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.";
+                    var message = $"Thread {maxThread.ThreadId} processed {skewRatio * 100:N0}% of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.";
                     var severity = PlanWarningSeverity.Warning;
 
                     // Batch mode sorts produce all output on a single thread by design
@@ -833,7 +939,16 @@ public static partial class PlanAnalyzer
             var message = "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
             if (!string.IsNullOrEmpty(details.Summary))
                 message += $" {details.Summary}";
-            message += " Check that you have appropriate indexes.";
+
+            // If the statement is executing a dynamic cursor, that's usually
+            // the reason an index didn't get used. Call it out so the user looks there
+            // first rather than hunting for a missing index.
+            var isDynamicCursor = string.Equals(stmt.CursorActualType, "Dynamic",
+                StringComparison.OrdinalIgnoreCase);
+            if (isDynamicCursor)
+                message += " This query is running inside a dynamic cursor, which can prevent index usage; changing the cursor type (FAST_FORWARD / STATIC / KEYSET) often fixes scans like this without any indexing change.";
+            else
+                message += " Check that you have appropriate indexes.";
 
             // I/O waits specifically confirm the scan is hitting disk — elevate
             if (HasSignificantIoWaits(stmt.WaitStats) && details.CostPct >= 50
@@ -1250,6 +1365,43 @@ public static partial class PlanAnalyzer
                 w.Message = $"Implicit conversion prevented an index seek, forcing a scan instead. Fix the data type mismatch: ensure the parameter or variable type matches the column type exactly. {w.Message}";
             }
         }
+
+        // Rule 35: Expensive Operator — always show operators that take a significant
+        // share of statement time even when no other rule has something to say. Threshold:
+        // self-time >= 20% of statement elapsed. Only emits if no other warning is already
+        // on the node, to avoid doubling up, and only once the statement itself has run long
+        // enough (>= 1,000ms) that a 20% share means something — in a statement of a few ms,
+        // one or two operators always take most of the time just because there's almost
+        // nothing else to divide it among, so the share points at nothing. The benefit % is
+        // just the self-time share.
+        if (node.HasActualStats && node.Warnings.Count == 0
+            && stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs >= 1000)
+        {
+            var selfMs = GetOperatorOwnElapsedMs(node);
+            var pct = (double)selfMs / stmt.QueryTimeStats.ElapsedTimeMs * 100;
+            if (pct >= 20.0)
+            {
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Expensive Operator",
+                    Message = $"{node.PhysicalOp} took {selfMs:N0}ms ({pct:N1}% of statement elapsed) but no specific rule identified a fix. Worth investigating: is the row volume necessary? Are upstream estimates driving this operator harder than it should be?",
+                    Severity = pct >= 50 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning,
+                    MaxBenefitPercent = Math.Round(Math.Min(100.0, pct), 1)
+                });
+            }
+        }
+
+        // #4534: an operator warning's origin is the operator it is hanging off, so it is stamped
+        // here rather than at each of the many sites above that add one. A rule you have to
+        // remember at every construction site eventually gets forgotten, and the UI would quietly
+        // lose a link that existed. This only fills what a rule left empty, so a rule that already
+        // knows the operator that CAUSED the problem (rather than the one reporting it) keeps its
+        // own answer.
+        foreach (var warning in node.Warnings)
+        {
+            if (warning.OriginNodeIds.Count == 0)
+                warning.OriginNodeIds.Add(node.NodeId);
+        }
     }
 
     /// <summary>
@@ -1608,6 +1760,23 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Returns true if the plan contains an adaptive join that executed as a Nested Loop.
+    /// Indicates a memory grant was sized for the hash alternative but never needed.
+    /// </summary>
+    private static bool HasAdaptiveJoinChoseNestedLoop(PlanNode node)
+    {
+        if (node.IsAdaptive && node.ActualJoinType != null
+            && node.ActualJoinType.Contains("Nested", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        foreach (var child in node.Children)
+            if (HasAdaptiveJoinChoseNestedLoop(child))
+                return true;
+
+        return false;
+    }
+
+    /// <summary>
     /// Finds Sort and Hash Match operators in the tree that consume memory.
     /// </summary>
     private static void FindMemoryConsumers(PlanNode node, List<string> consumers)
@@ -1667,35 +1836,39 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Threads that actually did work. In a parallel plan thread 0 is the
+    /// coordinator: it carries no rows, and its ActualElapsedMs is the wall clock
+    /// of the whole parallel branch. Including it in a per-thread self-time
+    /// calculation hands the operator the branch's entire duration.
+    /// A serial plan has a single thread numbered 0, which IS a worker, so only
+    /// exclude thread 0 when other threads exist.
+    /// </summary>
+    private static List<PerThreadRuntimeInfo> WorkThreads(PlanNode node)
+    {
+        var workers = node.PerThreadStats.Where(t => t.ThreadId > 0).ToList();
+        return workers.Count > 0 ? workers : node.PerThreadStats;
+    }
+
+    /// <summary>
     /// Per-thread self-time calculation for parallel row mode operators.
-    /// For each thread: self = parent_elapsed[t] - sum(children_elapsed[t]).
-    /// Returns max across threads.
+    /// For each worker thread: self = parent[t] - sum(effective children[t]).
+    /// Returns max across worker threads. Thread 0 (the coordinator) is excluded
+    /// from the parent side by WorkThreads, and the child side looks through
+    /// batch subtrees and pass-throughs the same way the serial path does.
     /// </summary>
     private static long GetPerThreadOwnElapsed(PlanNode node)
     {
-        // Build lookup: threadId -> parent elapsed for this node
+        // Build lookup: threadId -> parent elapsed for this node (worker threads only)
         var parentByThread = new Dictionary<int, long>();
-        foreach (var ts in node.PerThreadStats)
+        foreach (var ts in WorkThreads(node))
             parentByThread[ts.ThreadId] = ts.ActualElapsedMs;
 
-        // Build lookup: threadId -> sum of all direct children's elapsed
+        // Build lookup: threadId -> sum of effective children's elapsed
         var childSumByThread = new Dictionary<int, long>();
         foreach (var child in node.Children)
-        {
-            var childNode = child;
+            AddEffectiveChildElapsedByThread(child, childSumByThread);
 
-            // Exchange operators have unreliable times — look through to their child
-            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
-                childNode = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
-
-            foreach (var ts in childNode.PerThreadStats)
-            {
-                childSumByThread.TryGetValue(ts.ThreadId, out var existing);
-                childSumByThread[ts.ThreadId] = existing + ts.ActualElapsedMs;
-            }
-        }
-
-        // Self-time per thread = parent - children, take max across threads
+        // Self-time per thread = parent - children, take max across worker threads
         var maxSelf = 0L;
         foreach (var (threadId, parentMs) in parentByThread)
         {
@@ -1708,24 +1881,262 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
-    /// Serial row mode self-time: subtract all direct children's elapsed.
-    /// Exchange children are skipped through to their real child.
+    /// Max per-thread self-CPU for this operator.
+    /// Parallel: for each thread, self_cpu = thread_cpu - Σ same-thread child cpu; take max.
+    /// Serial / single-thread: operator_cpu - Σ effective child cpu.
+    /// Needed for external-wait benefit scoring (Joe's formula).
+    /// </summary>
+    internal static long GetOperatorMaxThreadOwnCpuMs(PlanNode node)
+    {
+        if (!node.HasActualStats || node.ActualCPUMs <= 0) return 0;
+
+        if (node.PerThreadStats.Count > 1)
+        {
+            var parentByThread = new Dictionary<int, long>();
+            foreach (var ts in WorkThreads(node))
+                parentByThread[ts.ThreadId] = ts.ActualCPUMs;
+
+            var childSumByThread = new Dictionary<int, long>();
+            foreach (var child in node.Children)
+                AddEffectiveChildCpuByThread(child, childSumByThread);
+
+            var maxSelf = 0L;
+            foreach (var (threadId, parentCpu) in parentByThread)
+            {
+                childSumByThread.TryGetValue(threadId, out var childCpu);
+                var self = Math.Max(0, parentCpu - childCpu);
+                if (self > maxSelf) maxSelf = self;
+            }
+            return maxSelf;
+        }
+
+        // Serial: operator_cpu - Σ effective child cpu
+        var totalChildCpu = 0L;
+        foreach (var child in node.Children)
+            totalChildCpu += GetEffectiveChildCpuMs(child);
+        return Math.Max(0, node.ActualCPUMs - totalChildCpu);
+    }
+
+    /// <summary>
+    /// Per-thread mirror of <see cref="GetEffectiveChildCpuMs"/>, following the
+    /// same look-through rules as <see cref="AddEffectiveChildElapsedByThread"/>
+    /// (batch-mode subtree, pass-through nodes) so a row-mode operator can't be
+    /// crowned above a batch subtree for CPU the same way it can't for elapsed.
+    /// </summary>
+    private static void AddEffectiveChildCpuByThread(PlanNode child, Dictionary<int, long> acc)
+    {
+        // Exchange operators have unreliable times — look through to their child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+        {
+            var dominant = child.Children.OrderByDescending(c => c.ActualCPUMs).First();
+            AddEffectiveChildCpuByThread(dominant, acc);
+            return;
+        }
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+        {
+            AddBatchSubtreeCpuByThread(child, acc);
+            return;
+        }
+
+        if (child.HasActualStats && child.ActualCPUMs > 0)
+        {
+            foreach (var ts in WorkThreads(child))
+            {
+                acc.TryGetValue(ts.ThreadId, out var existing);
+                acc[ts.ThreadId] = existing + ts.ActualCPUMs;
+            }
+            return;
+        }
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        foreach (var grandchild in child.Children)
+            AddEffectiveChildCpuByThread(grandchild, acc);
+    }
+
+    /// <summary>
+    /// Per-thread CPU sum across a contiguous batch-mode zone, stopping at
+    /// exchanges. The CPU twin of <see cref="AddBatchSubtreeElapsedByThread"/>.
+    /// </summary>
+    private static void AddBatchSubtreeCpuByThread(PlanNode node, Dictionary<int, long> acc)
+    {
+        foreach (var ts in WorkThreads(node))
+        {
+            acc.TryGetValue(ts.ThreadId, out var existing);
+            acc[ts.ThreadId] = existing + ts.ActualCPUMs;
+        }
+
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                AddBatchSubtreeCpuByThread(child, acc);
+            else
+                AddEffectiveChildCpuByThread(child, acc);
+        }
+    }
+
+    private static long GetEffectiveChildCpuMs(PlanNode child)
+    {
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+            return child.Children.Max(GetEffectiveChildCpuMs);
+        if (child.ActualCPUMs > 0)
+            return child.ActualCPUMs;
+        if (child.Children.Count == 0)
+            return 0;
+        var sum = 0L;
+        foreach (var grandchild in child.Children)
+            sum += GetEffectiveChildCpuMs(grandchild);
+        return sum;
+    }
+
+    /// <summary>
+    /// What a child contributes to its parent's per-thread elapsed total. The
+    /// per-thread mirror of the serial path's child look-through, and it must
+    /// look through the same two shapes or the parent absorbs the subtree
+    /// beneath them:
+    ///
+    ///   - A batch-mode child reports STANDALONE time, so only its own value
+    ///     would come off and the rest of the batch zone would stay in the
+    ///     parent.
+    ///   - A pass-through child (Compute Scalar) carries no runtime stats at
+    ///     all, so zero would come off.
+    ///
+    /// Together these can crown a row-mode operator above a batch subtree as
+    /// the hottest operator in its plan, with the subtree's time double-counted.
+    /// </summary>
+    private static void AddEffectiveChildElapsedByThread(PlanNode child, Dictionary<int, long> acc)
+    {
+        // Exchange operators have unreliable times — look through to their child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+        {
+            var dominant = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
+            AddEffectiveChildElapsedByThread(dominant, acc);
+            return;
+        }
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+        {
+            AddBatchSubtreeElapsedByThread(child, acc);
+            return;
+        }
+
+        if (child.HasActualStats && child.ActualElapsedMs > 0)
+        {
+            foreach (var ts in WorkThreads(child))
+            {
+                acc.TryGetValue(ts.ThreadId, out var existing);
+                acc[ts.ThreadId] = existing + ts.ActualElapsedMs;
+            }
+            return;
+        }
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        foreach (var grandchild in child.Children)
+            AddEffectiveChildElapsedByThread(grandchild, acc);
+    }
+
+    /// <summary>
+    /// Per-thread sum across a contiguous batch-mode zone, stopping at exchanges.
+    /// Batch operators pipeline, so their times add rather than nest.
+    /// </summary>
+    private static void AddBatchSubtreeElapsedByThread(PlanNode node, Dictionary<int, long> acc)
+    {
+        foreach (var ts in WorkThreads(node))
+        {
+            acc.TryGetValue(ts.ThreadId, out var existing);
+            acc[ts.ThreadId] = existing + ts.ActualElapsedMs;
+        }
+
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                AddBatchSubtreeElapsedByThread(child, acc);
+            else
+                AddEffectiveChildElapsedByThread(child, acc);
+        }
+    }
+
+    /// <summary>
+    /// Serial row mode self-time: subtract all direct children's effective
+    /// elapsed. The child side looks through the same two shapes as the
+    /// per-thread path above — a pass-through child (Compute Scalar) with no
+    /// runtime stats, and a batch-mode child's whole contiguous subtree —
+    /// or the parent absorbs the subtree beneath them as its own self-time.
     /// </summary>
     private static long GetSerialOwnElapsed(PlanNode node)
     {
         var totalChildElapsed = 0L;
         foreach (var child in node.Children)
-        {
-            var childElapsed = child.ActualElapsedMs;
-
-            // Exchange operators have unreliable times — skip to their child
-            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
-                childElapsed = child.Children.Max(c => c.ActualElapsedMs);
-
-            totalChildElapsed += childElapsed;
-        }
+            totalChildElapsed += GetEffectiveChildElapsedMs(child);
 
         return Math.Max(0, node.ActualElapsedMs - totalChildElapsed);
+    }
+
+    /// <summary>
+    /// What a child contributes to its parent's serial self-time. Exchange
+    /// operators have unreliable times, so this looks through to their
+    /// dominant child. A batch-mode child reports STANDALONE time, so this
+    /// sums the whole contiguous batch zone rather than just the direct
+    /// child. A child with no runtime stats at all (a Compute Scalar
+    /// pass-through) contributes zero directly, so this looks through to the
+    /// descendants that do have stats.
+    /// </summary>
+    private static long GetEffectiveChildElapsedMs(PlanNode child)
+    {
+        // Exchange operators: unreliable times, use max child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+            return child.Children.Max(GetEffectiveChildElapsedMs);
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+            return SumBatchSubtreeElapsedMs(child);
+
+        if (child.ActualElapsedMs > 0)
+            return child.ActualElapsedMs;
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        if (child.Children.Count == 0)
+            return 0;
+
+        var sum = 0L;
+        foreach (var grandchild in child.Children)
+            sum += GetEffectiveChildElapsedMs(grandchild);
+        return sum;
+    }
+
+    /// <summary>
+    /// Sums ActualElapsedMs across a contiguous batch-mode zone, stopping at
+    /// exchange boundaries. Batch operators pipeline — elapsed times are
+    /// standalone, not cumulative — so summing gives the total work the zone
+    /// did, which is what a row-mode parent above the zone should subtract
+    /// to get its own self-time.
+    /// </summary>
+    private static long SumBatchSubtreeElapsedMs(PlanNode node)
+    {
+        var sum = node.ActualElapsedMs;
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                sum += SumBatchSubtreeElapsedMs(child);
+            else
+                sum += GetEffectiveChildElapsedMs(child);
+        }
+
+        return sum;
     }
 
     /// <summary>

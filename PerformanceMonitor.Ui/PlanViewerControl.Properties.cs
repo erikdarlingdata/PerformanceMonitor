@@ -811,18 +811,21 @@ public partial class PlanViewerControl
             if (s.PlanWarnings.Count > 0)
             {
                 AddPropertySection("Plan Warnings");
-                foreach (var w in s.PlanWarnings)
+                foreach (var w in PlanWarningDisplay.OrderByBenefit(s.PlanWarnings))
                 {
                     var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
                         : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
                     var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
-                    warnPanel.Children.Add(new TextBlock
+                    var planWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
+                    var planWarnHeaderBlock = new TextBlock
                     {
-                        Text = $"\u26A0 {w.WarningType}{WarningSourceTag(w)}",
+                        Text = planWarnHeaderText,
                         FontWeight = FontWeights.SemiBold,
                         FontSize = 11,
                         Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
-                    });
+                    };
+                    AttachOriginNavigation(planWarnHeaderBlock, planWarnHeaderText, w.OriginNodeIds);
+                    warnPanel.Children.Add(planWarnHeaderBlock);
                     warnPanel.Children.Add(new TextBlock
                     {
                         Text = w.Message,
@@ -852,18 +855,21 @@ public partial class PlanViewerControl
         if (node.HasWarnings)
         {
             AddPropertySection("Warnings");
-            foreach (var w in node.Warnings)
+            foreach (var w in PlanWarningDisplay.OrderByBenefit(node.Warnings))
             {
                 var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
                     : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
                 var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
-                warnPanel.Children.Add(new TextBlock
+                var opWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
+                var opWarnHeaderBlock = new TextBlock
                 {
-                    Text = $"\u26A0 {w.WarningType}{WarningSourceTag(w)}",
+                    Text = opWarnHeaderText,
                     FontWeight = FontWeights.SemiBold,
                     FontSize = 11,
                     Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
-                });
+                };
+                AttachOriginNavigation(opWarnHeaderBlock, opWarnHeaderText, w.OriginNodeIds);
+                warnPanel.Children.Add(opWarnHeaderBlock);
                 warnPanel.Children.Add(new TextBlock
                 {
                     Text = w.Message,
@@ -1117,13 +1123,8 @@ public partial class PlanViewerControl
 
     // Wait category + color come from the shared ChartPalette (PerformanceStudio's ~21-category
     // taxonomy + palette), with a light-theme override for the near-invisible pale colors (D3).
-    /// <summary>
-    /// #4520: marks the warnings SQL Server itself wrote into the plan, so they are not read as one of
-    /// the analyzer's inferences. Only the engine's are tagged — they are the minority, and a badge on
-    /// every warning would carry no information.
-    /// </summary>
-    private static string WarningSourceTag(PlanWarning warning) =>
-        warning.Source == PlanWarningSource.SqlServer ? " [SQL Server]" : "";
+    // #4520/#4546: the source tag and the header text (with its benefit suffix) now live in
+    // PlanWarningDisplay, shared with the test suite (WPF can't run a unit test on macOS).
 
     private static string GetWaitCategory(string waitType) => ChartPalette.WaitCategory(waitType);
 

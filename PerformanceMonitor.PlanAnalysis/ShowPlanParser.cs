@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Threading;
+using System.Xml;
 using System.Xml.Linq;
 
 namespace PerformanceMonitor.PlanAnalysis;
@@ -10,70 +12,135 @@ public static class ShowPlanParser
 {
     private static readonly XNamespace Ns = "http://schemas.microsoft.com/sqlserver/2004/07/showplan";
 
+    // Plan XML is untrusted input (opened/pasted/downloaded, or handed to the analyze_plan_xml
+    // MCP tool by a client). Cap recursion depth so a maliciously deep tree throws a catchable
+    // exception instead of an uncatchable StackOverflowException that takes the whole process
+    // down. Internal so tests can pin behavior just past each limit without hardcoding the values.
+    internal const int MaxParseDepth = 1000;
+    internal const int MaxParseCharacters = 16 * 1024 * 1024;
+
+    // #4512 follow-up: the depth guard above only helps if 1,000 levels actually fit in the
+    // stack the caller happens to be running on. Measured against this parser's own recursion
+    // (a synthetic plan shaped like the deepest real one, ParseRelOp's NestedLoops descent):
+    // depth 1,000 needs ~13 MB of stack and depth 2,000 (2x margin) needs ~27 MB, on both a
+    // .NET thread-pool/ASP.NET thread (1.5 MB) and the WPF UI thread (1 MB) that call this in
+    // production. Neither has anywhere close to that: measured directly, those threads
+    // overflow at roughly depth 80 (1 MB) and depth 119 (1.5 MB) — long before MaxParseDepth
+    // fires — so the guard alone does not stop the crash it's meant to stop. Run the walk on a
+    // dedicated thread sized for MaxParseDepth with 2x margin instead, so the guard's own limit
+    // is always reachable regardless of the caller's stack.
+    private const int ParseThreadStackBytes = 32 * 1024 * 1024;
+
     public static ParsedPlan Parse(string xml)
     {
         var plan = new ParsedPlan { RawXml = xml };
 
+        // The input is already an in-memory string here, so a length check is the guard; the
+        // limit is in characters, not bytes.
+        if (xml.Length > MaxParseCharacters)
+        {
+            plan.ParseError = $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.";
+            return plan;
+        }
+
+        // The recursive tree walk below can need more stack than the calling thread has
+        // (see ParseThreadStackBytes above), so it always runs on a dedicated thread sized to
+        // guarantee MaxParseDepth is reachable, regardless of whether the caller is a
+        // thread-pool worker, an ASP.NET request thread, or the WPF UI thread.
+        var result = plan;
+        var thread = new Thread(() => ParseOnDedicatedThread(xml, result), ParseThreadStackBytes)
+        {
+            IsBackground = true,
+        };
+        thread.Start();
+        thread.Join();
+        return result;
+    }
+
+    // This runs on the dedicated thread started in Parse, not a thread-pool thread. An
+    // unhandled exception on a non-pool thread is fatal to the whole process (the runtime has
+    // nowhere to route it), so every statement below must stay inside one of the two try blocks
+    // here; nothing may run between or after them unguarded.
+    private static void ParseOnDedicatedThread(string xml, ParsedPlan plan)
+    {
         XDocument doc;
         try
         {
             doc = XDocument.Parse(xml);
         }
-        catch
+        catch (XmlException ex)
         {
-            return plan;
+            plan.ParseError = $"The plan XML could not be read: {ex.Message}";
+            return;
         }
 
-        var root = doc.Root;
-        if (root == null) return plan;
-
-        plan.BuildVersion = root.Attribute("Version")?.Value;
-        plan.Build = root.Attribute("Build")?.Value;
-        plan.ClusteredMode = root.Attribute("ClusteredMode")?.Value is "true" or "1";
-
-        // Standard path: ShowPlanXML → BatchSequence → Batch → Statements
-        var batches = root.Descendants(Ns + "Batch");
-        foreach (var batchEl in batches)
+        // The tree walk below can throw on hostile/malformed plans (including the depth guards
+        // in ParseRelOp/ParseStatementAndChildren that stop unbounded recursion). Contain it so
+        // a bad plan becomes a ParseError, never a crash for the caller.
+        try
         {
-            var batch = new PlanBatch();
-            // A Batch can contain multiple <Statements> elements (e.g., DECLARE + SELECT).
-            // Use Elements() to iterate all of them, not just the first.
-            foreach (var statementsEl in batchEl.Elements(Ns + "Statements"))
+            var root = doc.Root;
+            if (root == null) return;
+
+            plan.BuildVersion = root.Attribute("Version")?.Value;
+            plan.Build = root.Attribute("Build")?.Value;
+            plan.ClusteredMode = root.Attribute("ClusteredMode")?.Value is "true" or "1";
+
+            // Standard path: ShowPlanXML → BatchSequence → Batch → Statements
+            var batches = root.Descendants(Ns + "Batch");
+            foreach (var batchEl in batches)
             {
-                foreach (var stmtEl in statementsEl.Elements())
+                var batch = new PlanBatch();
+                // A Batch can contain multiple <Statements> elements (e.g., DECLARE + SELECT).
+                // Use Elements() to iterate all of them, not just the first.
+                foreach (var statementsEl in batchEl.Elements(Ns + "Statements"))
                 {
-                    var stmts = ParseStatementAndChildren(stmtEl);
-                    batch.Statements.AddRange(stmts);
+                    foreach (var stmtEl in statementsEl.Elements())
+                    {
+                        var stmts = ParseStatementAndChildren(stmtEl, 0);
+                        batch.Statements.AddRange(stmts);
+                    }
                 }
+                if (batch.Statements.Count > 0)
+                    plan.Batches.Add(batch);
             }
-            if (batch.Statements.Count > 0)
-                plan.Batches.Add(batch);
-        }
 
-        // Fallback: some plan XML has StmtSimple directly under QueryPlan
-        if (plan.Batches.Count == 0)
-        {
-            var batch = new PlanBatch();
-            foreach (var stmtEl in root.Descendants(Ns + "StmtSimple"))
+            // Fallback: some plan XML has StmtSimple directly under QueryPlan
+            if (plan.Batches.Count == 0)
             {
-                var stmt = ParseStatement(stmtEl);
-                if (stmt != null)
-                    batch.Statements.Add(stmt);
+                var batch = new PlanBatch();
+                foreach (var stmtEl in root.Descendants(Ns + "StmtSimple"))
+                {
+                    var stmt = ParseStatement(stmtEl, 0);
+                    if (stmt != null)
+                        batch.Statements.Add(stmt);
+                }
+                if (batch.Statements.Count > 0)
+                    plan.Batches.Add(batch);
             }
-            if (batch.Statements.Count > 0)
-                plan.Batches.Add(batch);
-        }
 
-        ComputeOperatorCosts(plan);
-        return plan;
+            ComputeOperatorCosts(plan);
+        }
+        catch (Exception ex)
+        {
+            plan.ParseError = ex.Message;
+        }
     }
 
     /// <summary>
     /// Handles StmtSimple, StmtCond (IF/ELSE), and StmtCursor recursively.
     /// Returns a flat list of all parseable statements found.
     /// </summary>
-    private static List<PlanStatement> ParseStatementAndChildren(XElement stmtEl)
+    /// <param name="depth">
+    /// Nesting depth, carried across StoredProc/UDF sub-plan descent as well as IF/ELSE
+    /// branches, so <see cref="MaxParseDepth"/> sees the plan's TRUE nesting rather than
+    /// resetting to zero at every procedure or function boundary.
+    /// </param>
+    private static List<PlanStatement> ParseStatementAndChildren(XElement stmtEl, int depth)
     {
+        if (depth > MaxParseDepth)
+            throw new InvalidOperationException("Plan statement nesting exceeds the supported depth limit.");
+
         var results = new List<PlanStatement>();
         var localName = stmtEl.Name.LocalName;
 
@@ -93,8 +160,8 @@ public static class ShowPlanParser
                 {
                     var condRelOpEl = condQueryPlanEl.Element(Ns + "RelOp");
                     var condStmt = condRelOpEl != null
-                        ? ParseQueryPlanAsStatement(stmtEl, condQueryPlanEl, condRelOpEl)
-                        : ParseStatement(stmtEl);
+                        ? ParseQueryPlanAsStatement(stmtEl, condQueryPlanEl, condRelOpEl, depth)
+                        : ParseStatement(stmtEl, depth);
                     if (condStmt != null)
                         results.Add(condStmt);
                 }
@@ -106,7 +173,7 @@ public static class ShowPlanParser
                     if (udfStmts != null)
                     {
                         foreach (var child in udfStmts.Elements())
-                            results.AddRange(ParseStatementAndChildren(child));
+                            results.AddRange(ParseStatementAndChildren(child, depth + 1));
                     }
                 }
             }
@@ -115,14 +182,14 @@ public static class ShowPlanParser
             if (thenStmts != null)
             {
                 foreach (var child in thenStmts.Elements())
-                    results.AddRange(ParseStatementAndChildren(child));
+                    results.AddRange(ParseStatementAndChildren(child, depth + 1));
             }
 
             var elseStmts = stmtEl.Element(Ns + "Else")?.Element(Ns + "Statements");
             if (elseStmts != null)
             {
                 foreach (var child in elseStmts.Elements())
-                    results.AddRange(ParseStatementAndChildren(child));
+                    results.AddRange(ParseStatementAndChildren(child, depth + 1));
             }
         }
         else if (localName == "StmtCursor")
@@ -147,7 +214,7 @@ public static class ShowPlanParser
                     var relOpEl = qpEl.Element(Ns + "RelOp");
                     if (relOpEl == null) continue;
 
-                    var stmt = ParseQueryPlanAsStatement(stmtEl, qpEl, relOpEl);
+                    var stmt = ParseQueryPlanAsStatement(stmtEl, qpEl, relOpEl, depth);
                     if (stmt != null)
                     {
                         // Override statement text with cursor context
@@ -166,7 +233,7 @@ public static class ShowPlanParser
         else
         {
             // StmtSimple or any other statement type
-            var stmt = ParseStatement(stmtEl);
+            var stmt = ParseStatement(stmtEl, depth);
             if (stmt != null)
                 results.Add(stmt);
         }
@@ -174,7 +241,7 @@ public static class ShowPlanParser
         return results;
     }
 
-    private static PlanStatement? ParseStatement(XElement stmtEl)
+    private static PlanStatement? ParseStatement(XElement stmtEl, int depth)
     {
         var stmt = new PlanStatement
         {
@@ -262,7 +329,7 @@ public static class ShowPlanParser
         var relOpEl = queryPlanEl.Element(Ns + "RelOp");
         if (relOpEl != null)
         {
-            var opNode = ParseRelOp(relOpEl);
+            var opNode = ParseRelOp(relOpEl, 0);
             var stmtType = stmt.StatementType.Length > 0
                 ? stmt.StatementType.ToUpperInvariant()
                 : "QUERY";
@@ -288,7 +355,10 @@ public static class ShowPlanParser
             stmt.RootNode = stmtNode;
         }
 
-        // XSD gap: UDF sub-plans
+        // XSD gap: UDF sub-plans. The depth argument here is the fix for #4512: before it, this
+        // descent (and the StoredProc one below) called ParseStatementAndChildren without
+        // carrying the caller's depth, so nesting silently reset to zero at every UDF/procedure
+        // boundary and MaxParseDepth could never fire across that nesting.
         foreach (var udfEl in stmtEl.Elements(Ns + "UDF"))
         {
             var udfInfo = new FunctionPlanInfo
@@ -301,14 +371,15 @@ public static class ShowPlanParser
             {
                 foreach (var childStmt in udfStmts.Elements())
                 {
-                    var parsed = ParseStatementAndChildren(childStmt);
+                    var parsed = ParseStatementAndChildren(childStmt, depth + 1);
                     udfInfo.Statements.AddRange(parsed);
                 }
             }
             stmt.UdfPlans.Add(udfInfo);
         }
 
-        // XSD gap: StoredProc sub-plan
+        // XSD gap: StoredProc sub-plan. See the UDF descent above: depth + 1 carries the true
+        // nesting through this boundary too.
         var storedProcEl = stmtEl.Element(Ns + "StoredProc");
         if (storedProcEl != null)
         {
@@ -322,7 +393,7 @@ public static class ShowPlanParser
             {
                 foreach (var childStmt in spStmts.Elements())
                 {
-                    var parsed = ParseStatementAndChildren(childStmt);
+                    var parsed = ParseStatementAndChildren(childStmt, depth + 1);
                     spInfo.Statements.AddRange(parsed);
                 }
             }
@@ -335,7 +406,7 @@ public static class ShowPlanParser
     /// <summary>
     /// Parse a QueryPlan element that comes from a cursor Operation (no parent StmtSimple attributes).
     /// </summary>
-    private static PlanStatement? ParseQueryPlanAsStatement(XElement stmtEl, XElement queryPlanEl, XElement relOpEl)
+    private static PlanStatement? ParseQueryPlanAsStatement(XElement stmtEl, XElement queryPlanEl, XElement relOpEl, int depth)
     {
         var stmt = new PlanStatement
         {
@@ -347,7 +418,7 @@ public static class ShowPlanParser
         ParseStmtAttributes(stmt, stmtEl);
         ParseQueryPlanElements(stmt, stmtEl, queryPlanEl);
 
-        var opNode = ParseRelOp(relOpEl);
+        var opNode = ParseRelOp(relOpEl, 0);
         var stmtType = stmt.StatementType.Length > 0
             ? stmt.StatementType.ToUpperInvariant()
             : "QUERY";
@@ -651,8 +722,12 @@ public static class ShowPlanParser
         }
     }
 
-    private static PlanNode ParseRelOp(XElement relOpEl)
+    /// <param name="depth">Nesting depth of this operator below the statement's root RelOp.</param>
+    private static PlanNode ParseRelOp(XElement relOpEl, int depth)
     {
+        if (depth > MaxParseDepth)
+            throw new InvalidOperationException("Plan operator nesting exceeds the supported depth limit.");
+
         var node = new PlanNode
         {
             NodeId = (int)ParseDouble(relOpEl.Attribute("NodeId")?.Value),
@@ -1404,7 +1479,7 @@ public static class ShowPlanParser
         // Recurse into child RelOps
         foreach (var childRelOp in FindChildRelOps(relOpEl))
         {
-            var childNode = ParseRelOp(childRelOp);
+            var childNode = ParseRelOp(childRelOp, depth + 1);
             childNode.Parent = node;
             node.Children.Add(childNode);
         }
@@ -1801,14 +1876,26 @@ public static class ShowPlanParser
             ComputeNodeCosts(child, totalStatementCost);
     }
 
+    // Iterative equivalent of a depth-first walk: for each child of `element`, in document
+    // order, an element named RelOp is skipped along with its whole subtree; a matching element
+    // is yielded; then its own children are walked (pre-order) before the next sibling. An
+    // explicit stack replaces recursion here, because this walk has no depth guard of its own —
+    // MaxParseDepth bounds ParseRelOp/ParseStatementAndChildren, not this helper — so a plan with
+    // a very deep run of non-RelOp elements inside one operator could otherwise overflow the
+    // stack before any depth check ever saw it.
     private static IEnumerable<XElement> ScopedDescendants(XElement element, XName name)
     {
-        foreach (var child in element.Elements())
+        var stack = new Stack<XElement>();
+        foreach (var child in element.Elements().Reverse())
+            stack.Push(child);
+
+        while (stack.Count > 0)
         {
-            if (child.Name == Ns + "RelOp") continue;
-            if (child.Name == name) yield return child;
-            foreach (var desc in ScopedDescendants(child, name))
-                yield return desc;
+            var current = stack.Pop();
+            if (current.Name == Ns + "RelOp") continue;
+            if (current.Name == name) yield return current;
+            foreach (var child in current.Elements().Reverse())
+                stack.Push(child);
         }
     }
 
