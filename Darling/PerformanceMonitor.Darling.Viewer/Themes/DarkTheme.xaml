@@ -81,8 +81,8 @@
     <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
          Tuned per theme so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
     <SolidColorBrush x:Key="WarningTextBrush" Color="#FFB347"/>
-    <!-- #4632 (was PlanCriticalOrangeColor/Brush, #4629): critical-tier plan-viewer text, same
-         shape as WarningTextBrush above, a literal hex with no override-palette key. -->
+    <!-- #4629/#4635: critical-tier text (plan viewer, status bar). A literal hex like WarningTextBrush
+         above, so it stays out of the user-overridable palette. -->
     <SolidColorBrush x:Key="CriticalTextBrush" Color="#FF7043"/>
     <!-- Apex (lead-blocker) node + legend border. Theme-aware so it clears >=3:1 as a graphical border on
          the light node card (bright #4FA3FF is only ~2.6:1 on white). The LEAD BLOCKER badge fill keeps the

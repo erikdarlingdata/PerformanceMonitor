@@ -25,8 +25,8 @@ namespace Darling.Tests;
 /// <para>The fix reuses the existing theme-token <c>WarningBrush</c> for the "warning" tier (badge,
 /// impact %, skew, cost 25-49%) and adds one new theme token for the "critical" tier (cost &gt;= 50%,
 /// elapsed/CPU &gt;= 1s, row estimate off by 10x+) — still orange, still one tier more severe than the
-/// warning brush, tuned per theme. That token is <c>CriticalTextBrush</c> (#4632: renamed from the
-/// original <c>PlanCriticalOrangeColor</c>/<c>PlanCriticalOrangeBrush</c> pair) — a literal-hex
+/// warning brush, tuned per theme. That token is <c>CriticalTextBrush</c> (#4629/#4635: critical-tier
+/// text, plan viewer and status bar) — a literal-hex
 /// <c>SolidColorBrush</c> with no backing <c>&lt;Color&gt;</c> key, the same shape as
 /// <c>WarningTextBrush</c>, so it sits outside the eighteen-key user-overridable palette
 /// <c>ThemeColorOverrideTests</c> pins. This reads every theme's real declared hex, the same way
