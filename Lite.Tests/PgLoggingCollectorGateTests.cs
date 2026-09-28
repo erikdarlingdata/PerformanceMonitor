@@ -197,6 +197,7 @@ public sealed class PgLoggingCollectorGateTests
             1L,
             12.5,
             "{ \"Plan\": { \"Node Type\": \"Seq Scan\", \"Relation Name\": \"dl\" } }",
+            DBNull.Value, // #4501: line_prefix not collected keeps the pre-#4501 trust-unconditionally route
         });
 
         var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
