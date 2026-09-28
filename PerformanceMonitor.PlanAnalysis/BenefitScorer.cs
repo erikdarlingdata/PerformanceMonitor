@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -34,17 +35,20 @@ public static class BenefitScorer
     /// wires this in yet; the margin holds regardless of which thread eventually calls it,
     /// since it is measured against caller thread SIZE, not a specific call site.)
     /// </summary>
-    public static void Score(ParsedPlan plan)
+    public static void Score(ParsedPlan plan, CancellationToken cancellationToken = default)
     {
         /* #4514: PlanAnalyzer.Analyze creates findings on statements inside a stored procedure
            or UDF body via the same PlanStatements.EnumerateAll walk. Without it here, those
-           findings would never get a MaxBenefitPercent or wait-stat score. */
+           findings would never get a MaxBenefitPercent or wait-stat score.
+           #4512: cancellationToken is checked per statement and down the node-tree walk, the
+           same shape as PlanAnalyzer.Analyze. */
         foreach (var stmt in PlanStatements.EnumerateAll(plan))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             ScoreStatementWarnings(stmt);
 
             if (stmt.RootNode != null)
-                ScoreNodeTree(stmt.RootNode, stmt);
+                ScoreNodeTree(stmt.RootNode, stmt, cancellationToken);
 
             if (stmt.WaitStats.Count > 0 && stmt.QueryTimeStats != null)
                 ScoreWaitStats(stmt);
@@ -183,12 +187,13 @@ public static class BenefitScorer
         }
     }
 
-    private static void ScoreNodeTree(PlanNode node, PlanStatement stmt)
+    private static void ScoreNodeTree(PlanNode node, PlanStatement stmt, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ScoreNodeWarnings(node, stmt);
 
         foreach (var child in node.Children)
-            ScoreNodeTree(child, stmt);
+            ScoreNodeTree(child, stmt, cancellationToken);
     }
 
     private static void ScoreNodeWarnings(PlanNode node, PlanStatement stmt)

@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
 
@@ -31,7 +33,7 @@ public static class ShowPlanParser
     // is always reachable regardless of the caller's stack.
     private const int ParseThreadStackBytes = 32 * 1024 * 1024;
 
-    public static ParsedPlan Parse(string xml)
+    public static ParsedPlan Parse(string xml, CancellationToken cancellationToken = default)
     {
         var plan = new ParsedPlan { RawXml = xml };
 
@@ -43,26 +45,97 @@ public static class ShowPlanParser
             return plan;
         }
 
+        // #4512: the tree walk below can be cancelled by the caller — the dedicated thread it
+        // runs on has no way to see the CALLER's OperationCanceledException, so an exception
+        // captured on that thread crosses back over the Join() below and gets rethrown here.
+        Exception? capturedException = null;
+
         // The recursive tree walk below can need more stack than the calling thread has
         // (see ParseThreadStackBytes above), so it always runs on a dedicated thread sized to
         // guarantee MaxParseDepth is reachable, regardless of whether the caller is a
         // thread-pool worker, an ASP.NET request thread, or the WPF UI thread.
         var result = plan;
-        var thread = new Thread(() => ParseOnDedicatedThread(xml, result), ParseThreadStackBytes)
+        var thread = new Thread(() =>
+            {
+                try
+                {
+                    ParseOnDedicatedThread(xml, result, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    // Caught here (rather than inside ParseOnDedicatedThread's own try/catch)
+                    // because that catch turns everything into a ParseError, and a cancellation
+                    // must reach the caller as OperationCanceledException, not ParseError.
+                    capturedException = new OperationCanceledException(cancellationToken);
+                }
+            },
+            ParseThreadStackBytes)
         {
             IsBackground = true,
         };
         thread.Start();
         thread.Join();
+        if (capturedException is not null)
+            throw capturedException;
         return result;
+    }
+
+    /// <summary>
+    /// The async path: enforces <see cref="MaxParseCharacters"/> at the reader level via
+    /// <see cref="XmlReaderSettings.MaxCharactersInDocument"/> (the synchronous <see cref="Parse"/>
+    /// checks the string length up front; this path streams instead, so the reader itself is the
+    /// guard), and observes <paramref name="cancellationToken"/> while loading and while walking
+    /// the tree. Used by callers already on an async path (the MCP plan tools, the Darling and
+    /// Lite analysis passes) so a caller's cancellation reaches the parser instead of running to
+    /// completion on a plan nobody is waiting for.
+    /// </summary>
+    public static async Task<ParsedPlan> ParseAsync(string xml, CancellationToken cancellationToken)
+    {
+        var plan = new ParsedPlan { RawXml = xml };
+        try
+        {
+            var settings = new XmlReaderSettings
+            {
+                Async = true,
+                DtdProcessing = DtdProcessing.Prohibit,
+                MaxCharactersInDocument = MaxParseCharacters,
+                XmlResolver = null
+            };
+            using var textReader = new StringReader(xml);
+            using var xmlReader = XmlReader.Create(textReader, settings);
+            var document = await XDocument
+                .LoadAsync(xmlReader, LoadOptions.None, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            ParseDocument(document, plan, cancellationToken);
+            return plan;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (XmlException ex)
+        {
+            plan.ParseError = $"The plan XML could not be read: {ex.Message}";
+            return plan;
+        }
+        catch (Exception ex)
+        {
+            plan.ParseError = ex.Message;
+            return plan;
+        }
     }
 
     // This runs on the dedicated thread started in Parse, not a thread-pool thread. An
     // unhandled exception on a non-pool thread is fatal to the whole process (the runtime has
     // nowhere to route it), so every statement below must stay inside one of the two try blocks
-    // here; nothing may run between or after them unguarded.
-    private static void ParseOnDedicatedThread(string xml, ParsedPlan plan)
+    // here; nothing may run between or after them unguarded. A cancellation thrown from either
+    // try block propagates past this method to the wrapper in Parse, which captures it and
+    // rethrows it on the caller's thread — it must NOT be caught by the generic catch below,
+    // since that would turn it into a ParseError instead of an OperationCanceledException.
+    private static void ParseOnDedicatedThread(string xml, ParsedPlan plan, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         XDocument doc;
         try
         {
@@ -74,11 +147,19 @@ public static class ShowPlanParser
             return;
         }
 
-        // The tree walk below can throw on hostile/malformed plans (including the depth guards
-        // in ParseRelOp/ParseStatementAndChildren that stop unbounded recursion). Contain it so
-        // a bad plan becomes a ParseError, never a crash for the caller.
+        ParseDocument(doc, plan, cancellationToken);
+    }
+
+    // Shared by the synchronous dedicated-thread path and ParseAsync. The tree walk below can
+    // throw on hostile/malformed plans (including the depth guards in ParseRelOp/
+    // ParseStatementAndChildren that stop unbounded recursion). Contain it so a bad plan becomes
+    // a ParseError, never a crash for the caller — except a cancellation, which is rethrown so
+    // the caller sees OperationCanceledException rather than a parse failure.
+    private static void ParseDocument(XDocument doc, ParsedPlan plan, CancellationToken cancellationToken)
+    {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var root = doc.Root;
             if (root == null) return;
 
@@ -90,6 +171,7 @@ public static class ShowPlanParser
             var batches = root.Descendants(Ns + "Batch");
             foreach (var batchEl in batches)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var batch = new PlanBatch();
                 // A Batch can contain multiple <Statements> elements (e.g., DECLARE + SELECT).
                 // Use Elements() to iterate all of them, not just the first.
@@ -97,7 +179,7 @@ public static class ShowPlanParser
                 {
                     foreach (var stmtEl in statementsEl.Elements())
                     {
-                        var stmts = ParseStatementAndChildren(stmtEl, 0);
+                        var stmts = ParseStatementAndChildren(stmtEl, 0, cancellationToken);
                         batch.Statements.AddRange(stmts);
                     }
                 }
@@ -111,7 +193,8 @@ public static class ShowPlanParser
                 var batch = new PlanBatch();
                 foreach (var stmtEl in root.Descendants(Ns + "StmtSimple"))
                 {
-                    var stmt = ParseStatement(stmtEl, 0);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var stmt = ParseStatement(stmtEl, 0, cancellationToken);
                     if (stmt != null)
                         batch.Statements.Add(stmt);
                 }
@@ -119,7 +202,12 @@ public static class ShowPlanParser
                     plan.Batches.Add(batch);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             ComputeOperatorCosts(plan);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -136,8 +224,9 @@ public static class ShowPlanParser
     /// branches, so <see cref="MaxParseDepth"/> sees the plan's TRUE nesting rather than
     /// resetting to zero at every procedure or function boundary.
     /// </param>
-    private static List<PlanStatement> ParseStatementAndChildren(XElement stmtEl, int depth)
+    private static List<PlanStatement> ParseStatementAndChildren(XElement stmtEl, int depth, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (depth > MaxParseDepth)
             throw new InvalidOperationException("Plan statement nesting exceeds the supported depth limit.");
 
@@ -160,8 +249,8 @@ public static class ShowPlanParser
                 {
                     var condRelOpEl = condQueryPlanEl.Element(Ns + "RelOp");
                     var condStmt = condRelOpEl != null
-                        ? ParseQueryPlanAsStatement(stmtEl, condQueryPlanEl, condRelOpEl, depth)
-                        : ParseStatement(stmtEl, depth);
+                        ? ParseQueryPlanAsStatement(stmtEl, condQueryPlanEl, condRelOpEl, depth, cancellationToken)
+                        : ParseStatement(stmtEl, depth, cancellationToken);
                     if (condStmt != null)
                         results.Add(condStmt);
                 }
@@ -173,7 +262,7 @@ public static class ShowPlanParser
                     if (udfStmts != null)
                     {
                         foreach (var child in udfStmts.Elements())
-                            results.AddRange(ParseStatementAndChildren(child, depth + 1));
+                            results.AddRange(ParseStatementAndChildren(child, depth + 1, cancellationToken));
                     }
                 }
             }
@@ -182,14 +271,14 @@ public static class ShowPlanParser
             if (thenStmts != null)
             {
                 foreach (var child in thenStmts.Elements())
-                    results.AddRange(ParseStatementAndChildren(child, depth + 1));
+                    results.AddRange(ParseStatementAndChildren(child, depth + 1, cancellationToken));
             }
 
             var elseStmts = stmtEl.Element(Ns + "Else")?.Element(Ns + "Statements");
             if (elseStmts != null)
             {
                 foreach (var child in elseStmts.Elements())
-                    results.AddRange(ParseStatementAndChildren(child, depth + 1));
+                    results.AddRange(ParseStatementAndChildren(child, depth + 1, cancellationToken));
             }
         }
         else if (localName == "StmtCursor")
@@ -214,7 +303,7 @@ public static class ShowPlanParser
                     var relOpEl = qpEl.Element(Ns + "RelOp");
                     if (relOpEl == null) continue;
 
-                    var stmt = ParseQueryPlanAsStatement(stmtEl, qpEl, relOpEl, depth);
+                    var stmt = ParseQueryPlanAsStatement(stmtEl, qpEl, relOpEl, depth, cancellationToken);
                     if (stmt != null)
                     {
                         // Override statement text with cursor context
@@ -231,7 +320,7 @@ public static class ShowPlanParser
                            ParseQueryPlanAsStatement, and never pass through ParseStatement — so
                            a function called by the cursor's query, whose sub-plan sits on this
                            same Operation element beside the QueryPlan, was never read. */
-                        ParseSubPlans(stmt, opEl, depth);
+                        ParseSubPlans(stmt, opEl, depth, cancellationToken);
                         results.Add(stmt);
                     }
                 }
@@ -240,7 +329,7 @@ public static class ShowPlanParser
         else
         {
             // StmtSimple or any other statement type
-            var stmt = ParseStatement(stmtEl, depth);
+            var stmt = ParseStatement(stmtEl, depth, cancellationToken);
             if (stmt != null)
                 results.Add(stmt);
         }
@@ -248,8 +337,9 @@ public static class ShowPlanParser
         return results;
     }
 
-    private static PlanStatement? ParseStatement(XElement stmtEl, int depth)
+    private static PlanStatement? ParseStatement(XElement stmtEl, int depth, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var stmt = new PlanStatement
         {
             StatementText = stmtEl.Attribute("StatementText")?.Value ?? "",
@@ -309,7 +399,7 @@ public static class ShowPlanParser
            matters (an EXEC with no plan of its own) never did. The same was true of a UDF call
            whose calling statement carries no plan. Shared with the StmtCursor branch (#4514)
            below, and depth + 1 (the #4512 fix) carries the true nesting through this boundary. */
-        ParseSubPlans(stmt, stmtEl, depth);
+        ParseSubPlans(stmt, stmtEl, depth, cancellationToken);
 
         if (queryPlanEl == null)
         {
@@ -345,7 +435,7 @@ public static class ShowPlanParser
         var relOpEl = queryPlanEl.Element(Ns + "RelOp");
         if (relOpEl != null)
         {
-            var opNode = ParseRelOp(relOpEl, 0);
+            var opNode = ParseRelOp(relOpEl, 0, cancellationToken);
             var stmtType = stmt.StatementType.Length > 0
                 ? stmt.StatementType.ToUpperInvariant()
                 : "QUERY";
@@ -388,7 +478,7 @@ public static class ShowPlanParser
     /// sub-plan boundary would reopen the MaxParseDepth bypass this shares with the non-cursor
     /// descent.
     /// </summary>
-    private static void ParseSubPlans(PlanStatement stmt, XElement containerEl, int depth)
+    private static void ParseSubPlans(PlanStatement stmt, XElement containerEl, int depth, CancellationToken cancellationToken)
     {
         // XSD gap: UDF sub-plans
         foreach (var udfEl in containerEl.Elements(Ns + "UDF"))
@@ -403,7 +493,7 @@ public static class ShowPlanParser
             {
                 foreach (var childStmt in udfStmts.Elements())
                 {
-                    var parsed = ParseStatementAndChildren(childStmt, depth + 1);
+                    var parsed = ParseStatementAndChildren(childStmt, depth + 1, cancellationToken);
                     udfInfo.Statements.AddRange(parsed);
                 }
             }
@@ -424,7 +514,7 @@ public static class ShowPlanParser
             {
                 foreach (var childStmt in spStmts.Elements())
                 {
-                    var parsed = ParseStatementAndChildren(childStmt, depth + 1);
+                    var parsed = ParseStatementAndChildren(childStmt, depth + 1, cancellationToken);
                     spInfo.Statements.AddRange(parsed);
                 }
             }
@@ -435,8 +525,9 @@ public static class ShowPlanParser
     /// <summary>
     /// Parse a QueryPlan element that comes from a cursor Operation (no parent StmtSimple attributes).
     /// </summary>
-    private static PlanStatement? ParseQueryPlanAsStatement(XElement stmtEl, XElement queryPlanEl, XElement relOpEl, int depth)
+    private static PlanStatement? ParseQueryPlanAsStatement(XElement stmtEl, XElement queryPlanEl, XElement relOpEl, int depth, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var stmt = new PlanStatement
         {
             StatementText = stmtEl.Attribute("StatementText")?.Value ?? "",
@@ -447,7 +538,7 @@ public static class ShowPlanParser
         ParseStmtAttributes(stmt, stmtEl);
         ParseQueryPlanElements(stmt, stmtEl, queryPlanEl);
 
-        var opNode = ParseRelOp(relOpEl, 0);
+        var opNode = ParseRelOp(relOpEl, 0, cancellationToken);
         var stmtType = stmt.StatementType.Length > 0
             ? stmt.StatementType.ToUpperInvariant()
             : "QUERY";
@@ -752,8 +843,9 @@ public static class ShowPlanParser
     }
 
     /// <param name="depth">Nesting depth of this operator below the statement's root RelOp.</param>
-    private static PlanNode ParseRelOp(XElement relOpEl, int depth)
+    private static PlanNode ParseRelOp(XElement relOpEl, int depth, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (depth > MaxParseDepth)
             throw new InvalidOperationException("Plan operator nesting exceeds the supported depth limit.");
 
@@ -1508,7 +1600,7 @@ public static class ShowPlanParser
         // Recurse into child RelOps
         foreach (var childRelOp in FindChildRelOps(relOpEl))
         {
-            var childNode = ParseRelOp(childRelOp, depth + 1);
+            var childNode = ParseRelOp(childRelOp, depth + 1, cancellationToken);
             childNode.Parent = node;
             node.Children.Add(childNode);
         }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -38,17 +39,21 @@ public static partial class PlanAnalyzer
     /// down to roughly 110 KB — both with well over 2x margin below the smallest real caller, so
     /// unlike the parser, this walk needs no dedicated thread of its own.
     /// </summary>
-    public static void Analyze(ParsedPlan plan)
+    public static void Analyze(ParsedPlan plan, CancellationToken cancellationToken = default)
     {
         /* #4514: every statement, including the ones inside a stored procedure or UDF body.
            This used to walk batch.Statements alone, so an EXEC <procedure> plan analyzed as a
-           single statement with nothing to say about the statements actually doing the work. */
+           single statement with nothing to say about the statements actually doing the work.
+           #4512: cancellationToken is checked per statement (the EnumerateAll loop below) and
+           down the node-tree walk, so a caller cancelling mid-analysis stops the walk instead of
+           running the analyzer to completion against a plan nobody is waiting for. */
         foreach (var stmt in PlanStatements.EnumerateAll(plan))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             AnalyzeStatement(stmt);
 
             if (stmt.RootNode != null)
-                AnalyzeNodeTree(stmt.RootNode, stmt);
+                AnalyzeNodeTree(stmt.RootNode, stmt, cancellationToken);
         }
     }
 
@@ -545,12 +550,13 @@ public static partial class PlanAnalyzer
                 referencingNodeIds, modifyingNodeIds);
     }
 
-    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt)
+    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         AnalyzeNode(node, stmt);
 
         foreach (var child in node.Children)
-            AnalyzeNodeTree(child, stmt);
+            AnalyzeNodeTree(child, stmt, cancellationToken);
     }
 
     private static void AnalyzeNode(PlanNode node, PlanStatement stmt)
