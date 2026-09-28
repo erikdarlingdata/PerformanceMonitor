@@ -110,6 +110,14 @@ public partial class App : Application
     /// </summary>
     public static int AutoRefreshIntervalSeconds { get; set; } = 60;
 
+    /// <summary>
+    /// How far a plan operator's actual row count may diverge from its estimate before the plan viewer
+    /// colors the edge feeding it (#4579), matching PerformanceStudio's <c>AccuracyRatioDivergenceLimit</c>
+    /// setting. The viewer floors this at <see cref="PerformanceMonitor.PlanAnalysis.PlanEdgeColour.MinDivergenceLimit"/>
+    /// when it renders, so a hand-edited settings.json value below that has no effect.
+    /// </summary>
+    public static double AccuracyRatioDivergenceLimit { get; set; } = PerformanceMonitor.PlanAnalysis.PlanEdgeColour.DefaultDivergenceLimit;
+
     /* Alert settings */
     public static bool AlertsEnabled { get; set; } = true;
     public static bool NotifyConnectionChanges { get; set; } = true;
@@ -985,6 +993,11 @@ public partial class App : Application
             if (read.TryGetProperty("auto_refresh_interval_seconds", out var refreshSeconds))
             {
                 AutoRefreshIntervalSeconds = refreshSeconds.WholeNumber(AutoRefreshIntervalSeconds);
+            }
+
+            if (read.TryGetProperty("accuracy_ratio_divergence_limit", out var divergenceLimit))
+            {
+                AccuracyRatioDivergenceLimit = divergenceLimit.Number(AccuracyRatioDivergenceLimit, 2.0, 1000000.0);
             }
 
             /* #2444: this loader named its keys even when it had only one, which is the behaviour
