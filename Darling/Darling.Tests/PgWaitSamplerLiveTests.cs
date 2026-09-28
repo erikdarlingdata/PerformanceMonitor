@@ -131,16 +131,16 @@ public sealed class PgWaitSamplerLiveTests
             Assert.InRange(wall.ElapsedMilliseconds, expectedWindowMs, expectedWindowMs + 30_000);
 
             /* 2. The rows: at the sampler's period, with the two workloads visible. */
-            var rows = new List<(string Type, string Event, long Samples, int PeriodMs, int Backends, int? SampledMs)>();
+            var rows = new List<(string Type, string Event, long QueryId, long Samples, int PeriodMs, int Backends, int? SampledMs)>();
             await using (var read = postgres.CreateCommand(
-                "SELECT event_type, event, sample_count, profile_period_ms, backend_count, sampled_ms FROM pg_wait_sampling WHERE server_id = $1"))
+                "SELECT event_type, event, query_id, sample_count, profile_period_ms, backend_count, sampled_ms FROM pg_wait_sampling WHERE server_id = $1"))
             {
                 read.Parameters.AddWithValue(ServerId);
                 await using var reader = await read.ExecuteReaderAsync(ct);
                 while (await reader.ReadAsync(ct))
                 {
-                    rows.Add((reader.GetString(0), reader.GetString(1), reader.GetInt64(2), reader.GetInt32(3), reader.GetInt32(4),
-                        reader.IsDBNull(5) ? null : reader.GetInt32(5)));
+                    rows.Add((reader.GetString(0), reader.GetString(1), reader.IsDBNull(2) ? 0L : reader.GetInt64(2), reader.GetInt64(3), reader.GetInt32(4), reader.GetInt32(5),
+                        reader.IsDBNull(6) ? null : reader.GetInt32(6)));
                 }
             }
 
@@ -151,18 +151,30 @@ public sealed class PgWaitSamplerLiveTests
                divides by instead of the 300 s interval. Through the real runner and the real COPY, so the
                appended column's position is proven against the migrated table, not a fake writer. */
             Assert.All(rows, r => Assert.Equal(PgWaitSamplingCollector.SamplerSnapshotsPerCycle * PgWaitSamplingCollector.SamplerPeriodMs, r.SampledMs));
-            var lockRow = Assert.Single(rows, r => r.Type == "Lock" && r.Event == "relation");
+            /* More than one (Lock, relation) row can land here, and no longer only because of a shared
+               query_id=0 bucket: the sampler polls pg_stat_activity cluster-wide with no per-database filter,
+               correctly, so a concurrent own-store class's unrelated relation-lock wait on its own scratch
+               database - on this same server - can surface as a SECOND row, either folded into the same
+               (event_type, event, query_id) key as this test's waiter or, once CI preloads pg_stat_statements
+               and compute_query_id starts giving backends non-zero ids, keyed apart by a different query_id
+               entirely. Assert.Single is not robust to that, so the row is chosen deterministically instead:
+               this test's own waiter blocks on the lock for the whole window, so ITS row has the highest
+               sample_count of any (Lock, relation) row; a concurrent class's incidental lock wait is
+               comparatively brief and cannot outscore it. Reproduced directly: holding an unrelated ACCESS
+               EXCLUSIVE lock on a second database for the run added a second, lower-count (Lock, relation) row
+               alongside this one at 30/30. */
+            var lockCandidates = rows.Where(r => r.Type == "Lock" && r.Event == "relation").ToList();
+            Assert.NotEmpty(lockCandidates);
+            var lockRow = lockCandidates.OrderByDescending(r => r.Samples).First();
             /* Held for the whole window, so seen in nearly every snapshot; allow for the first snapshot racing the
                waiter. Upper bound scales with the row's own backend_count rather than a flat SnapshotsPerCycle
                (#3939): the sampler polls pg_stat_activity cluster-wide with no per-database filter, correctly, so
-               a concurrent own-store class's unrelated relation-lock wait on its own scratch database - on this
-               same server - lands in this exact (Lock, relation, query_id=0) bucket (query_id is 0 for every
-               backend on this rig; compute_query_id has nothing to turn it on). Reproduced directly: holding an
-               unrelated ACCESS EXCLUSIVE lock on a second database for the run pushed this row from 30/30 to
-               49 samples across 2 backends. Each distinct backend the window observed can contribute at most
-               SamplerSnapshotsPerCycle samples, so bounding by Backends x SnapshotsPerCycle stays exactly as tight
-               as before (<=30) in the ordinary one-backend case and only relaxes by as much real, distinct
-               concurrent activity the window actually saw. */
+               a concurrent own-store class's unrelated relation-lock wait can inflate this row's own backend_count
+               too. Reproduced directly: holding an unrelated ACCESS EXCLUSIVE lock on a second database for the
+               run pushed this row from 30/30 to 49 samples across 2 backends. Each distinct backend the window
+               observed can contribute at most SamplerSnapshotsPerCycle samples, so bounding by Backends x
+               SnapshotsPerCycle stays exactly as tight as before (<=30) in the ordinary one-backend case and only
+               relaxes by as much real, distinct concurrent activity the window actually saw. */
             Assert.InRange(lockRow.Samples, PgWaitSamplingCollector.SamplerSnapshotsPerCycle / 2, PgWaitSamplingCollector.SamplerSnapshotsPerCycle * lockRow.Backends);
             /* At least the test's own waiter; full-suite load can add another backend's unrelated relation-lock
                wait to this same cluster-wide bucket (#3939), so this no longer pins the count to exactly 1. */
@@ -178,7 +190,7 @@ public sealed class PgWaitSamplerLiveTests
             Assert.Equal(PgWaitInstrument.ServiceSampled, instrument.Instrument);
 
             var tally = await ReadStateAsync(postgres, PgWaitSamplingCollector.TallyStateKey, ct);
-            Assert.Equal(lockRow.Samples, PgWaitSamplingCollector.ParseTally(tally)[("Lock", "relation", 0)]);
+            Assert.Equal(lockRow.Samples, PgWaitSamplingCollector.ParseTally(tally)[("Lock", "relation", lockRow.QueryId)]);
 
             /* 4. The read discloses it. */
             var page = await DarlingPgWaitSamplingReader.GetPgWaitSamplingPageAsync(
