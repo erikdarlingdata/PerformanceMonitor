@@ -166,8 +166,25 @@ public static class ComposeCompiler
     /// them; both are functionally dependent on <c>query_id</c>, so they add no groups.</para>
     /// </summary>
     private static string BuildFactRelation(
-        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam)
+        string sourceTable, ComposeRoute route, string timeColumn, string startParam, string endParam,
+        string? hybridStartParam, string? hybridEndParam, ComposeAggregate aggregate)
     {
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges)
+        {
+            var groups = ComposeHybridColumns.GroupColumns[sourceTable];
+            var suffix = aggregate == ComposeAggregate.Max ? "_max" : "_sum";
+            var mid = ComposeRoute.HybridMidAlias;
+            var midCols = string.Join(", ", groups.Select(c => $"{mid}.{c}"))
+                + $", {mid}.bucket AS collection_time, "
+                + string.Join(", ", ComposeHybridColumns.Measures.Select(kv => $"{mid}.{kv.Value}{suffix} AS {kv.Key}"))
+                + ", 1 AS sample_interval_seconds";
+            var rawCols = string.Join(", ", groups) + ", collection_time, "
+                + string.Join(", ", ComposeHybridColumns.Measures.Keys) + ", sample_interval_seconds";
+            return $"(SELECT {midCols} FROM {route.CaggFromClause} WHERE {mid}.bucket >= {hybridStartParam} AND {mid}.bucket < {hybridEndParam} "
+                + $"UNION ALL SELECT {rawCols} FROM {PgSchemaGenerator.CollectSchema}.{sourceTable} "
+                + $"WHERE collection_time >= {startParam} AND collection_time <= {endParam} AND (collection_time < {hybridStartParam} OR collection_time >= {hybridEndParam}))";
+        }
+
         if (route.IsCagg)
         {
             /* #3653 A6: CaggFromClause is the FROM-clause item (decision 2) — either
@@ -224,12 +241,6 @@ public static class ComposeCompiler
            remapped to the CAGG columns (CanRemap; the overlay AND-gate below). */
         var route = ComposeSourceRouter.Resolve(
             plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage, plan.Mode, effectiveBucket);
-        if (route.Tier == ComposeSourceTier.HourlyRawEdges)
-        {
-            /* #4605: the hybrid's raw-edge union is added separately; until then the panel reads raw. */
-            route = ComposeRoute.Raw;
-        }
-
         if (route.IsCagg
             && (!ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate)
                 || (plan.Overlay is ComposeOverlay o && !ComposeCaggValueMapper.CanRemap(o.Measure, o.Aggregate))))
@@ -270,6 +281,12 @@ public static class ComposeCompiler
         var endParam = p.AddTimestamp(context.EndUtc);
         var hasServerScope = context.Servers is { Count: > 0 };
         var serverScopeParam = hasServerScope ? p.AddTextArray(context.Servers!) : null;
+        string? hybridStartParam = null, hybridEndParam = null;
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges)
+        {
+            hybridStartParam = p.AddTimestamp(route.EdgeStartUtc!.Value);
+            hybridEndParam = p.AddTimestamp(route.EdgeEndUtc!.Value);
+        }
 
         /* Filter predicates are built — and their values BOUND — once, in filter order, so the parameter
            order is identical for every mode (window, scope, filters, then topN). RankedTimeSeries (#2734)
@@ -290,7 +307,7 @@ public static class ComposeCompiler
            inside the CTE without changing the outer query's byte-for-byte shape. */
         void AppendFactBody(string indent)
         {
-            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam));
+            sql.Append(indent).Append("FROM ").Append(BuildFactRelation(plan.Measure.SourceTable, route, timeColumn, startParam, endParam, hybridStartParam, hybridEndParam, plan.Aggregate));
 
             /* #3653 A6: a CAGG route's FROM-clause item (route.CaggFromClause) is already a complete, aliased
                relation — "collect.<x> AS f" or a stitched "(... UNION ALL ...) AS f" — so it must NOT get a

@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
@@ -55,6 +56,30 @@ public sealed record ComposeRoute(
     /// <summary>The compiler's fact-table alias every CAGG <see cref="CaggFromClause"/> is built with (#3653
     /// A6): <c>f</c>, matching <c>ComposeCompiler.FactAlias</c>.</summary>
     public const string FactAlias = "f";
+
+    /// <summary>The hybrid route's rollup-side alias (#4605): the whole-hour middle reads the successor hourly as
+    /// <c>mid</c> inside the stitching union.</summary>
+    public const string HybridMidAlias = "mid";
+}
+
+/// <summary>#4605: the column map the hybrid union projects. Group columns and measures are named identically
+/// in raw and in the successor hourly rollup, so one SELECT list serves both halves of the union.</summary>
+internal static class ComposeHybridColumns
+{
+    // Rollup group columns, identical names in raw and the successor hourly rollup.
+    public static readonly IReadOnlyDictionary<string, string[]> GroupColumns = new Dictionary<string, string[]>(StringComparer.Ordinal)
+    {
+        ["query_stats"] = new[] { "server_id", "server_name", "database_name", "query_hash", "sql_handle" },
+        ["procedure_stats"] = new[] { "server_id", "server_name", "database_name", "schema_name", "object_name" },
+    };
+
+    // Raw delta column -> rollup base name (the rollup has <base>_sum / <base>_max).
+    public static readonly IReadOnlyDictionary<string, string> Measures = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        ["delta_worker_time"] = "worker_time",
+        ["delta_elapsed_time"] = "elapsed_time",
+        ["delta_execution_count"] = "execution_count",
+    };
 }
 
 /// <summary>One raw table's continuous-aggregate coverage: its hourly (and optional daily) rollup view names and
@@ -428,6 +453,24 @@ public static class ComposeSourceRouter
             return null;
         }
 
+        if (plan.Measure.AggregationColumn is not string aggColumn || !ComposeHybridColumns.Measures.ContainsKey(aggColumn)
+            || (plan.Overlay is ComposeOverlay ov && (ov.Measure.SourceTable != plan.Measure.SourceTable
+                || ov.Aggregate != plan.Aggregate
+                || ov.Measure.AggregationColumn is not string ovColumn
+                || !ComposeHybridColumns.Measures.ContainsKey(ovColumn))))
+        {
+            return null;
+        }
+
+        var groupColumns = ComposeHybridColumns.GroupColumns[plan.Measure.SourceTable];
+        foreach (var dimension in plan.GroupBy.Concat(plan.Filters.Select(f => f.Dimension)))
+        {
+            if (!dimension.ViaModuleJoin && Array.IndexOf(groupColumns, dimension.Column) < 0)
+            {
+                return null;
+            }
+        }
+
         var cagg = ComposeCaggCatalog.For(plan.Measure.SourceTable)!;
         var successor = TimescaleSupport.SuccessorOf(cagg.HourlyView) ?? cagg.HourlyView;
         if (!rollups.Has(successor))
@@ -461,7 +504,7 @@ public static class ComposeSourceRouter
         return new ComposeRoute(
             ComposeSourceTier.HourlyRawEdges,
             successor,
-            coverage.StitchedRelationSql(cagg.HourlyView, ComposeRoute.FactAlias, hStart, RollupCoverage.StitchTier.Hourly),
+            coverage.StitchedRelationSql(cagg.HourlyView, ComposeRoute.HybridMidAlias, hStart, RollupCoverage.StitchTier.Hourly),
             hStart,
             hEnd);
     }

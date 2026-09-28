@@ -2871,33 +2871,87 @@ public sealed class DarlingComposeTests
         Assert.Equal(ComposeSourceTier.Raw, compiled.Route.Tier);
     }
 
-    /// <summary>
-    /// #4605 part 2: a hybrid-eligible panel (SUM, Ranked, query_stats, a window and successor coverage that
-    /// would satisfy every <c>TryHybrid</c> gate) still compiles to today's raw SQL — the compiler keeps the
-    /// route's tier for later but recompiles it as <see cref="ComposeRoute.Raw"/> until the raw-edge union
-    /// exists. No existing SQL/route pin changes; this only proves the fallback fires.
-    /// </summary>
-    [Fact]
-    public void Compile_HybridEligiblePanel_StillCompilesRaw()
+    private static (ComposeCompiled Compiled, DateTime Start, DateTime Now) CompileHybrid(PanelPlan plan)
     {
-        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}");
         var now = WindowEnd;
         var windowStart = now.AddHours(-12);
-        var successorView = TimescaleSupport.SuccessorOf("query_stats_hourly")!;
+        var successorView = TimescaleSupport.SuccessorOf(plan.Measure.SourceTable + "_hourly")!;
         var coverage = new RollupCoverage(
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = now.AddDays(-5) },
             new Dictionary<string, DateTime>(StringComparer.Ordinal),
             RollupAvailability.All,
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = now.AddHours(-1) },
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = now.AddHours(-23) });
-
         var (compiled, error) = ComposeCompiler.Compile(
             plan, new ComposeRunContext(null, windowStart, now, ComposeRunContext.NoVariables, RollupAvailability.All, now, coverage));
-
         Assert.True(error is null, error);
-        Assert.Contains("FROM collect.query_stats AS f", compiled!.Sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
+        return (compiled!, windowStart, now);
+    }
+
+    /// <summary>#4605: a hybrid-eligible SUM panel reads the successor hourly for the whole-hour middle and raw
+    /// for the edges, in one union; the hybrid bounds bind right after the window params.</summary>
+    [Fact]
+    public void Compile_HybridSumPanel_UnionsSuccessorMiddleWithRawEdges()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}");
+        var (compiled, windowStart, now) = CompileHybrid(plan);
+
+        Assert.Equal(ComposeSourceTier.HourlyRawEdges, compiled.Route.Tier);
+        Assert.Contains("FROM (SELECT mid.server_id, mid.server_name, mid.database_name, mid.query_hash, mid.sql_handle, mid.bucket AS collection_time, "
+            + "mid.worker_time_sum AS delta_worker_time, mid.elapsed_time_sum AS delta_elapsed_time, mid.execution_count_sum AS delta_execution_count, "
+            + "1 AS sample_interval_seconds FROM ", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("AS mid WHERE mid.bucket >= $3 AND mid.bucket < $4 UNION ALL SELECT server_id, server_name, database_name, query_hash, sql_handle, collection_time, "
+            + "delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds FROM collect.query_stats "
+            + "WHERE collection_time >= $1 AND collection_time <= $2 AND (collection_time < $3 OR collection_time >= $4)) AS f", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_max", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HybridMaxPanel_ReadsTheMaxColumns()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"max\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}");
+        var (compiled, _, _) = CompileHybrid(plan);
+
+        Assert.Equal(ComposeSourceTier.HourlyRawEdges, compiled.Route.Tier);
+        Assert.Contains("mid.worker_time_max AS delta_worker_time", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_sum AS", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_HybridProcedurePanel_ProjectsTheProcedureGroupColumns()
+    {
+        var plan = ValidPlan("{\"source\":\"procedure_stats\",\"measure\":\"proc_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}");
+        var (compiled, _, _) = CompileHybrid(plan);
+
+        Assert.Equal(ComposeSourceTier.HourlyRawEdges, compiled.Route.Tier);
+        Assert.Contains("SELECT mid.server_id, mid.server_name, mid.database_name, mid.schema_name, mid.object_name, mid.bucket AS collection_time, ", compiled.Sql, StringComparison.Ordinal);
+        Assert.Contains("FROM collect.procedure_stats WHERE collection_time >= $1", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>A grouping dimension that is not a rollup group column (and not via the module join) keeps the
+    /// hybrid-eligible panel on raw.</summary>
+    [Fact]
+    public void Compile_HybridEligiblePanel_WithNonRollupDimension_StaysRaw()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}");
+        var odd = plan with { GroupBy = new[] { new ComposeDimension("query_stats", "plan_hash", "query_plan_hash", true) } };
+        var (compiled, _, _) = CompileHybrid(odd);
+
         Assert.Equal(ComposeSourceTier.Raw, compiled.Route.Tier);
+        Assert.Contains("FROM collect.query_stats AS f", compiled.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNION ALL", compiled.Sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>An overlay measured with a different aggregate keeps the panel on raw.</summary>
+    [Fact]
+    public void Compile_HybridEligiblePanel_WithMismatchedOverlayAggregate_StaysRaw()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}");
+        var withOverlay = plan with { Overlay = new ComposeOverlay(plan.Measure, ComposeAggregate.Max, "us") };
+        var (compiled, _, _) = CompileHybrid(withOverlay);
+
+        Assert.Equal(ComposeSourceTier.Raw, compiled.Route.Tier);
+        Assert.Contains("FROM collect.query_stats AS f", compiled.Sql, StringComparison.Ordinal);
     }
 
     /// <summary>The compiled result carries the route it took — the runner's input for the notice.</summary>
