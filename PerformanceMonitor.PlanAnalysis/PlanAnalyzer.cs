@@ -1694,6 +1694,120 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Max per-thread self-CPU for this operator.
+    /// Parallel: for each thread, self_cpu = thread_cpu - Σ same-thread child cpu; take max.
+    /// Serial / single-thread: operator_cpu - Σ effective child cpu.
+    /// Needed for external-wait benefit scoring (Joe's formula).
+    /// </summary>
+    internal static long GetOperatorMaxThreadOwnCpuMs(PlanNode node)
+    {
+        if (!node.HasActualStats || node.ActualCPUMs <= 0) return 0;
+
+        if (node.PerThreadStats.Count > 1)
+        {
+            var parentByThread = new Dictionary<int, long>();
+            foreach (var ts in WorkThreads(node))
+                parentByThread[ts.ThreadId] = ts.ActualCPUMs;
+
+            var childSumByThread = new Dictionary<int, long>();
+            foreach (var child in node.Children)
+                AddEffectiveChildCpuByThread(child, childSumByThread);
+
+            var maxSelf = 0L;
+            foreach (var (threadId, parentCpu) in parentByThread)
+            {
+                childSumByThread.TryGetValue(threadId, out var childCpu);
+                var self = Math.Max(0, parentCpu - childCpu);
+                if (self > maxSelf) maxSelf = self;
+            }
+            return maxSelf;
+        }
+
+        // Serial: operator_cpu - Σ effective child cpu
+        var totalChildCpu = 0L;
+        foreach (var child in node.Children)
+            totalChildCpu += GetEffectiveChildCpuMs(child);
+        return Math.Max(0, node.ActualCPUMs - totalChildCpu);
+    }
+
+    /// <summary>
+    /// Per-thread mirror of <see cref="GetEffectiveChildCpuMs"/>, following the
+    /// same look-through rules as <see cref="AddEffectiveChildElapsedByThread"/>
+    /// (batch-mode subtree, pass-through nodes) so a row-mode operator can't be
+    /// crowned above a batch subtree for CPU the same way it can't for elapsed.
+    /// </summary>
+    private static void AddEffectiveChildCpuByThread(PlanNode child, Dictionary<int, long> acc)
+    {
+        // Exchange operators have unreliable times — look through to their child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+        {
+            var dominant = child.Children.OrderByDescending(c => c.ActualCPUMs).First();
+            AddEffectiveChildCpuByThread(dominant, acc);
+            return;
+        }
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+        {
+            AddBatchSubtreeCpuByThread(child, acc);
+            return;
+        }
+
+        if (child.HasActualStats && child.ActualCPUMs > 0)
+        {
+            foreach (var ts in WorkThreads(child))
+            {
+                acc.TryGetValue(ts.ThreadId, out var existing);
+                acc[ts.ThreadId] = existing + ts.ActualCPUMs;
+            }
+            return;
+        }
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        foreach (var grandchild in child.Children)
+            AddEffectiveChildCpuByThread(grandchild, acc);
+    }
+
+    /// <summary>
+    /// Per-thread CPU sum across a contiguous batch-mode zone, stopping at
+    /// exchanges. The CPU twin of <see cref="AddBatchSubtreeElapsedByThread"/>.
+    /// </summary>
+    private static void AddBatchSubtreeCpuByThread(PlanNode node, Dictionary<int, long> acc)
+    {
+        foreach (var ts in WorkThreads(node))
+        {
+            acc.TryGetValue(ts.ThreadId, out var existing);
+            acc[ts.ThreadId] = existing + ts.ActualCPUMs;
+        }
+
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                AddBatchSubtreeCpuByThread(child, acc);
+            else
+                AddEffectiveChildCpuByThread(child, acc);
+        }
+    }
+
+    private static long GetEffectiveChildCpuMs(PlanNode child)
+    {
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+            return child.Children.Max(GetEffectiveChildCpuMs);
+        if (child.ActualCPUMs > 0)
+            return child.ActualCPUMs;
+        if (child.Children.Count == 0)
+            return 0;
+        var sum = 0L;
+        foreach (var grandchild in child.Children)
+            sum += GetEffectiveChildCpuMs(grandchild);
+        return sum;
+    }
+
+    /// <summary>
     /// What a child contributes to its parent's per-thread elapsed total. The
     /// per-thread mirror of the serial path's child look-through, and it must
     /// look through the same two shapes or the parent absorbs the subtree
