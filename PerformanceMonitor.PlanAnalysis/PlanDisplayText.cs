@@ -19,11 +19,11 @@ public static class PlanDisplayText
 
     /// <summary>
     /// The Wait Stats card's collapsible header text, matching erikdarlingdata/PerformanceStudio@9b8252e:
-    /// "Wait Stats" alone when there's nothing to show, or "Wait Stats" plus the total wait time in
-    /// milliseconds when there is. <paramref name="totalWaitMs"/> is the sum of every wait's WaitTimeMs.
+    /// "Wait Stats" alone when there's nothing to show, or "Wait Stats \u2014 Nms total" when there
+    /// is. <paramref name="totalWaitMs"/> is the sum of every wait's WaitTimeMs.
     /// </summary>
     public static string WaitStatsHeader(int waitCount, long totalWaitMs) =>
-        waitCount > 0 ? $"Wait Stats {totalWaitMs:N0} ms" : "Wait Stats";
+        waitCount > 0 ? $"Wait Stats \u2014 {totalWaitMs:N0}ms total" : "Wait Stats";
 
     /// <summary>
     /// The CPU:Elapsed ratio shown in the runtime summary, matching
