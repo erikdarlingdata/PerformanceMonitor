@@ -8,7 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -296,6 +295,25 @@ public sealed class AnalysisPassTokenThreadingTests
     ///
     /// <para>Held behind a real write lock on another thread, which is what an archival looks like from
     /// here. The old overload would block for the full hold; the token'd one gives up when asked.</para>
+    ///
+    /// <para><b>Both waits below are signalled, never timed.</b> This used to arm a
+    /// <c>CancellationTokenSource(TimeSpan.FromMilliseconds(250))</c> and trust that 250ms was enough for
+    /// the read-lock attempt to already be polling by the time it fired. That delay cancels through a
+    /// <see cref="System.Threading.Timer"/> callback, which the CLR ThreadPool has to schedule — and under
+    /// a loaded runner (a parallel run of the rest of this suite queues real work onto that same
+    /// ThreadPool, and <c>s_dbLock</c> inside <see cref="DuckDbInitializer"/> is one static field every
+    /// test in the process contends for) that scheduling can lag the 250ms mark by seconds. The lock's own
+    /// poll was never the slow part — <see cref="DuckDbInitializer.AcquireReadLock(CancellationToken)"/>
+    /// only checks its token between 50ms <c>TryEnterReadLock</c> attempts, so it reacts within about one
+    /// interval of the token actually firing. What flaked was getting the token to fire promptly at all.
+    /// So the reader now cancels explicitly, from the thread that already knows it is waiting, instead of
+    /// hoping a background timer beats a race it does not control: the writer signals once it holds the
+    /// lock, the reader signals once it is about to call <c>AcquireReadLock</c>, and only once both signals
+    /// are observed does the test call <c>Cancel()</c> itself. Because the writer still holds its exclusive
+    /// lock at that point — nothing releases it before the <c>finally</c> below — the reader is guaranteed
+    /// to be genuinely waiting on the writer, not merely about to check a token it has not tried yet, when
+    /// the cancellation arrives. The one wall-clock number left, on the final wait, is a generous backstop
+    /// against a genuine hang, not a budget this test is trying to meet.</para>
     /// </summary>
     [Fact]
     public async Task TheReadLockWaitIsAbandonableWhileAWriterHoldsIt()
@@ -304,6 +322,8 @@ public sealed class AnalysisPassTokenThreadingTests
 
         var writerHasIt = new ManualResetEventSlim(false);
         var releaseWriter = new ManualResetEventSlim(false);
+        var readerIsWaiting = new ManualResetEventSlim(false);
+        using var cts = new CancellationTokenSource();
 
         var writer = Task.Run(() =>
         {
@@ -314,20 +334,32 @@ public sealed class AnalysisPassTokenThreadingTests
 
         try
         {
-            Assert.True(writerHasIt.Wait(TimeSpan.FromSeconds(5)), "the writer never took the lock");
+            /* Generous: a hang backstop, not a timing budget. s_dbLock is one static field shared by
+               every DuckDbInitializer in the process, so a parallel run of the rest of the suite can
+               legitimately queue this writer behind another test's own hold of the same lock. */
+            Assert.True(writerHasIt.Wait(TimeSpan.FromSeconds(30)), "the writer never took the lock");
 
-            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
-            var elapsed = Stopwatch.StartNew();
-
-            Assert.Throws<OperationCanceledException>(() =>
+            /* No token passed to Task.Run itself — only to AcquireReadLock below — so a thrown
+               OperationCanceledException faults this task rather than putting it in the Canceled state,
+               and awaiting it rethrows that same exception instead of a wrapping TaskCanceledException. */
+            var reader = Task.Run(() =>
             {
+                readerIsWaiting.Set();
                 using var read = initializer.AcquireReadLock(cts.Token);
             });
 
-            /* Generously bounded — the assertion is "it gave up while the writer still held it",
-               not a latency measurement. The writer holds for up to 30s. */
-            Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(10),
-                $"the read lock gave up only after {elapsed.Elapsed.TotalSeconds:F1}s");
+            Assert.True(readerIsWaiting.Wait(TimeSpan.FromSeconds(30)), "the reader never started waiting");
+
+            /* Explicit and synchronous — Cancel() runs on this thread, not a delay-timer callback that
+               needs its own ThreadPool slot, so nothing races the reader's start-up anymore. */
+            cts.Cancel();
+
+            /* The 10s bound is the one wall-clock number left, and it is a hang backstop: a cancelled
+               poll should return within about one 50ms interval, so this only matters if the lock stopped
+               observing its token, in which case WaitAsync's TimeoutException fails this assertion just
+               as loudly as a wrong exception type would. */
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => reader.WaitAsync(TimeSpan.FromSeconds(10)));
         }
         finally
         {
