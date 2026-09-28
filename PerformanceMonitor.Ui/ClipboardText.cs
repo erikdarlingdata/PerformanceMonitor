@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,21 +26,46 @@ namespace PerformanceMonitor.Ui;
 /// in a short bounded retry and returns failure on persistent inability to open instead of throwing,
 /// letting callers show a graceful notice (button paths) or simply no-op (Ctrl+V paths).
 ///
+/// <para><b>The worst case is seconds, not milliseconds (#4624).</b> Every retry attempt calls straight
+/// into a WPF <see cref="Clipboard"/> method, and WPF runs its own internal OLE retry loop before that call
+/// gives up and throws - measured at roughly 1.1 s per failed call, not the handful of milliseconds an
+/// earlier version of this class assumed. Nothing here can see or shorten that internal loop; the only
+/// lever this class has is whether to make ANOTHER attempt once one returns. So the bound is two numbers,
+/// not one: a small attempt count, and a <c>Stopwatch</c> time budget checked between attempts - once the
+/// budget is already spent, the next attempt is skipped even if the attempt count has not run out, so one
+/// slower-than-measured call cannot compound with a second. See the constants below for the numbers this
+/// defends and why.</para>
+///
 /// Two read variants share one guarded read-attempt helper: the synchronous <see cref="TryRead"/> (for any
 /// non-async caller) sleeps the calling thread between attempts, while <see cref="TryReadAsync"/> awaits
 /// <see cref="Task.Delay(int)"/> for the same backoff so a UI-thread caller keeps its WPF message pump
-/// responsive on the rare failure path instead of freezing for up to the worst-case retry span (#2837).
+/// responsive BETWEEN attempts (#2837) - each attempt itself still blocks the UI thread for WPF's own
+/// ~1.1 s, since that block happens inside the underlying <see cref="Clipboard"/> call, not in the gap
+/// <see cref="Task.Delay(int)"/> covers.
 /// <see cref="TrySetText"/> is the write sibling: every call site today is a synchronous button/menu-item
 /// handler, so it sleeps like <see cref="TryRead"/> rather than needing an async twin.
 /// </summary>
 public static class ClipboardText
 {
-    // CLIPBRD_E_CANT_OPEN is transient: another process holds the clipboard for a few milliseconds. Retry a
-    // handful of times, ~25 ms apart, before giving up - a worst-case ~175 ms span only on the rare failure
-    // path, versus the crash we are replacing. TryRead spends that span in Thread.Sleep (fine for a non-UI
-    // caller); TryReadAsync spends it awaiting Task.Delay so the UI message pump keeps running (#2837).
-    private const int MaxAttempts = 8;
+    // CLIPBRD_E_CANT_OPEN is transient, but every attempt still pays WPF's own internal OLE retry before it
+    // throws - about 1.1 s per failed call, measured in #4624. Two attempts, ~25 ms apart, bound the honest
+    // typical worst case to roughly 2.3 s (2 * ~1.1 s + one 25 ms gap). TryRead spends the gap in
+    // Thread.Sleep (fine for a non-UI caller); TryReadAsync spends it awaiting Task.Delay so the UI message
+    // pump keeps running between attempts (#2837) - the attempt itself still blocks either way.
+    private const int MaxAttempts = 2;
     private const int RetryDelayMs = 25;
+
+    // The backstop for a call slower than the ~1.1 s #4624 measured: checked between attempts, never
+    // mid-attempt (a WPF call already in flight can't be interrupted), so a slow attempt skips the next
+    // retry instead of compounding with it. Keeps the worst case near ~2.5 s even if one attempt runs
+    // longer than typical, instead of two slow attempts stacking past it.
+    private static readonly TimeSpan RetryBudget = TimeSpan.FromSeconds(2.5);
+
+    // Shared by every retry loop below: true while there is both an attempt and a time budget left to
+    // spend on one more try. Checked between attempts, so a budget already spent skips straight to the
+    // failure return instead of starting another ~1.1 s wait.
+    private static bool HasRetryBudget(int attempt, Stopwatch stopwatch) =>
+        attempt < MaxAttempts && stopwatch.Elapsed < RetryBudget;
 
     /// <summary>
     /// Synchronously attempts to read the clipboard's text, retrying briefly if the clipboard cannot be opened.
@@ -53,6 +79,8 @@ public static class ClipboardText
     /// </summary>
     public static bool TryRead(out string text)
     {
+        var stopwatch = Stopwatch.StartNew();
+
         for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
             if (TryReadOnce(out text))
@@ -60,10 +88,12 @@ public static class ClipboardText
                 return true;
             }
 
-            if (attempt < MaxAttempts)
+            if (!HasRetryBudget(attempt, stopwatch))
             {
-                Thread.Sleep(RetryDelayMs);
+                break;
             }
+
+            Thread.Sleep(RetryDelayMs);
         }
 
         text = string.Empty;
@@ -85,6 +115,8 @@ public static class ClipboardText
     /// </summary>
     public static async Task<(bool Ok, string Text)> TryReadAsync()
     {
+        var stopwatch = Stopwatch.StartNew();
+
         for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
             if (TryReadOnce(out var text))
@@ -92,16 +124,23 @@ public static class ClipboardText
                 return (true, text);
             }
 
-            if (attempt < MaxAttempts)
+            if (!HasRetryBudget(attempt, stopwatch))
             {
-                // No ConfigureAwait(false): the next attempt calls Clipboard.GetText(), which must run on the
-                // STA UI thread, so we deliberately resume on the captured (UI) SynchronizationContext.
-                await Task.Delay(RetryDelayMs);
+                break;
             }
+
+            // No ConfigureAwait(false): the next attempt calls Clipboard.GetText(), which must run on the
+            // STA UI thread, so we deliberately resume on the captured (UI) SynchronizationContext.
+            await Task.Delay(RetryDelayMs);
         }
 
         return (false, string.Empty);
     }
+
+    // The actual read, swapped out by tests so a pin can force the clipboard-open failure - with a
+    // controlled delay standing in for WPF's own ~1.1 s internal retry (#4624) - without a real busy
+    // clipboard. Defaults to the real WPF call. Matches WriteOnce's role for TrySetText below.
+    internal static Func<string> ReadOnce { get; set; } = Clipboard.GetText;
 
     /// <summary>
     /// One guarded <see cref="Clipboard.GetText()"/> attempt, shared by <see cref="TryRead"/> and
@@ -113,7 +152,7 @@ public static class ClipboardText
     {
         try
         {
-            text = Clipboard.GetText();
+            text = ReadOnce();
             return true;
         }
         catch (ExternalException)
@@ -139,6 +178,8 @@ public static class ClipboardText
     /// </summary>
     public static bool TrySetText(string text)
     {
+        var stopwatch = Stopwatch.StartNew();
+
         for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
             if (TrySetTextOnce(text))
@@ -146,10 +187,12 @@ public static class ClipboardText
                 return true;
             }
 
-            if (attempt < MaxAttempts)
+            if (!HasRetryBudget(attempt, stopwatch))
             {
-                Thread.Sleep(RetryDelayMs);
+                break;
             }
+
+            Thread.Sleep(RetryDelayMs);
         }
 
         return false;
@@ -187,6 +230,8 @@ public static class ClipboardText
     /// </summary>
     public static bool TrySetDataObject(object data, bool copy = false)
     {
+        var stopwatch = Stopwatch.StartNew();
+
         for (var attempt = 1; attempt <= MaxAttempts; attempt++)
         {
             if (TrySetDataObjectOnce(data, copy))
@@ -194,10 +239,12 @@ public static class ClipboardText
                 return true;
             }
 
-            if (attempt < MaxAttempts)
+            if (!HasRetryBudget(attempt, stopwatch))
             {
-                Thread.Sleep(RetryDelayMs);
+                break;
             }
+
+            Thread.Sleep(RetryDelayMs);
         }
 
         return false;
