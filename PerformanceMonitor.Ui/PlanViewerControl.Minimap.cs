@@ -13,6 +13,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using PerformanceMonitor.PlanAnalysis;
 
 using WpfPath = System.Windows.Shapes.Path;
@@ -42,6 +43,18 @@ public partial class PlanViewerControl
     private Point _minimapResizeStart;
     private double _minimapResizeStartWidth;
     private double _minimapResizeStartHeight;
+
+    // #4622: set while a zero-size-canvas retry is queued via RenderMinimap's DispatcherPriority.Loaded
+    // deferral, so a canvas that is still unsized when the retry runs gives up instead of re-queuing
+    // itself forever (which would starve input). Cleared ONLY inside that retry's own posted callback --
+    // CloseMinimapPanel must never clear it too (#4643): a close, then a reopen, both landing before a
+    // pending retry runs, would clear the flag here while that retry is still queued, so its callback
+    // would find the flag false and post a second retry, whose callback would find it false again and
+    // post a third, chaining forever at Loaded priority (above Input) for as long as the canvas stays
+    // unsized. A retry that finds the panel closed, or the canvas sized, by the time it runs just
+    // returns and clears the flag itself, so the next real trigger (open, resize, statement render)
+    // always gets a fresh attempt.
+    private bool _minimapRenderDeferred;
 
     private void MinimapToggle_Click(object sender, RoutedEventArgs e)
     {
@@ -84,7 +97,26 @@ public partial class PlanViewerControl
 
         var canvasW = MinimapCanvas.ActualWidth;
         var canvasH = MinimapCanvas.ActualHeight;
-        if (canvasW <= 0 || canvasH <= 0) return;
+        if (canvasW <= 0 || canvasH <= 0)
+        {
+            // First open: MinimapPanel starts Collapsed, so this first call lands before WPF has
+            // measured MinimapCanvas, and ActualWidth/ActualHeight are still 0 -- a bare return here
+            // left the panel empty until the user dragged the resize grip or closed/reopened it,
+            // because nothing else re-renders it (#4622). Re-post one retry at DispatcherPriority.Loaded,
+            // after the pending layout pass has sized the canvas, matching PerformanceStudio's Avalonia
+            // port. The flag caps it at a single retry: if the canvas is still unsized when that runs
+            // (e.g. the tab is hidden), give up instead of re-queuing forever, which would starve input.
+            if (!_minimapRenderDeferred)
+            {
+                _minimapRenderDeferred = true;
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    RenderMinimap();
+                    _minimapRenderDeferred = false;
+                }), DispatcherPriority.Loaded);
+            }
+            return;
+        }
 
         var scale = MinimapLayout.GetScale(canvasW, canvasH, PlanCanvas.Width, PlanCanvas.Height);
 
@@ -307,8 +339,8 @@ public partial class PlanViewerControl
 
     /// <summary>
     /// Double-click-to-zoom: sets the main canvas' zoom so the node takes about a third of the
-    /// viewport, scrolls to center it, and selects it (same as clicking the node directly on the
-    /// main canvas), matching PerformanceStudio's <c>ZoomToNode</c>.
+    /// viewport, selects it (same as clicking the node directly on the main canvas), then centers
+    /// it, matching PerformanceStudio's <c>ZoomToNode</c>.
     /// </summary>
     private void ZoomToMinimapNode(PlanNode node, double viewportWidth, double viewportHeight)
     {
@@ -316,12 +348,14 @@ public partial class PlanViewerControl
             PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node), viewportWidth, viewportHeight, MinZoom, MaxZoom);
         SetZoom(fitZoom);
 
-        var (offsetX, offsetY) = MinimapLayout.GetNodeCenterOffset(
-            node.X, node.Y, PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node),
-            _zoomLevel, viewportWidth, viewportHeight);
-        PlanScrollViewer.ScrollToHorizontalOffset(offsetX);
-        PlanScrollViewer.ScrollToVerticalOffset(offsetY);
-
+        // Select before centering, not after: SelectNode opens the properties panel when it wasn't
+        // already open, and that panel takes ~400px from the right of PlanScrollViewer. Centering
+        // against viewportWidth/viewportHeight (the size BEFORE that panel opens) put the node 201px
+        // right of center when the panel was closed, and left a smaller residual even when it was
+        // already open, because a zoom change alone can toggle a scrollbar and shift ViewportWidth by
+        // a few more pixels (#4622). Deferring to DispatcherPriority.Loaded and reading
+        // PlanScrollViewer.ViewportWidth/Height there, after SelectNode's layout has settled, centers
+        // on the viewport the user actually ends up looking at either way.
         foreach (var child in PlanCanvas.Children)
         {
             if (child is Border b && b.Tag is PlanNode n && n == node)
@@ -330,6 +364,15 @@ public partial class PlanViewerControl
                 break;
             }
         }
+
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            var (offsetX, offsetY) = MinimapLayout.GetNodeCenterOffset(
+                node.X, node.Y, PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node),
+                _zoomLevel, PlanScrollViewer.ViewportWidth, PlanScrollViewer.ViewportHeight);
+            PlanScrollViewer.ScrollToHorizontalOffset(offsetX);
+            PlanScrollViewer.ScrollToVerticalOffset(offsetY);
+        }), DispatcherPriority.Loaded);
     }
 
     private void PlanScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
