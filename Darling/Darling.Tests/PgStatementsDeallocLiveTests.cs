@@ -78,6 +78,60 @@ public sealed class PgStatementsDeallocLiveTests
         }
     }
 
+    /// <summary>
+    /// <c>collect.pg_server_config</c> holds per-database and per-role override rows beside the server-wide ones. Both
+    /// reads of <c>pg_stat_statements.max</c> (the top-queries disclosure and the eviction finding) must answer with the
+    /// server-wide 5000 even when a role override of 20000 is the NEWER row.
+    /// </summary>
+    [Fact]
+    public async Task TheMaxEntriesReads_IgnoreARoleOverride_EvenWhenItIsNewer()
+    {
+        var baseConnectionString = BaseConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString), "Set DARLING_TEST_PG to run the live #4677 override pin.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var bodySucceeded = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+
+            var serverId = ServerIdHelper.GetDeterministicHashCode(ServerName);
+            await DarlingMcpTestData.RegisterServerAsync(connection, serverId, ServerName, ct);
+            var now = DateTime.UtcNow;
+            await SeedStatsAsync(connection, ct, serverId, now.AddMinutes(-10));
+            await LogAsync(connection, ct, serverId, now.AddMinutes(-20), "statements_dealloc=3");
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.pg_server_config (collection_id, collection_time, server_id, server_name, name, setting) VALUES ($1, $2, $3, $4, 'pg_stat_statements.max', '5000')",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-30)), serverId, ServerName);
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "INSERT INTO collect.pg_server_config (collection_id, collection_time, server_id, server_name, name, setting, role_name) VALUES ($1, $2, $3, $4, 'pg_stat_statements.max', '20000', 'x')",
+                CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(now.AddMinutes(-5)), serverId, ServerName);
+
+            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var evictions = JsonDocument.Parse(await DarlingMcpPgStatementTools.GetPgTopQueries(dataSource, ServerName, 4)).RootElement.GetProperty("evictions");
+            Assert.Equal(5000, evictions.GetProperty("max_entries").GetInt64());
+
+            /* The finding's read. Its snapshot anchor is the newest snapshot at or before the window end, so the two
+               rows sit in ONE snapshot here: the same instant, the override listed second. */
+            await DarlingMcpTestData.ExecAsync(connection, ct,
+                "UPDATE collect.pg_server_config SET collection_time = $1 WHERE server_id = $2", DarlingMcpTestData.Naive(now.AddMinutes(-5)), serverId);
+            await using var cmd = new NpgsqlCommand(PerformanceMonitor.Darling.Analysis.PgTargetFactCollector.StatementsMaxEntriesSql, connection);
+            cmd.Parameters.AddWithValue(serverId);
+            cmd.Parameters.AddWithValue(DarlingMcpTestData.Naive(now));
+            cmd.Parameters.AddWithValue(DarlingMcpTestData.Naive(now.AddDays(-1)));
+            Assert.Equal("5000", await cmd.ExecuteScalarAsync(ct) as string);
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => await Task.CompletedTask);
+            await scratch.DisposeAsync();
+        }
+    }
+
     [Fact]
     public async Task TopQueries_DisclosesTheEvictionPasses_OrUnknownWhenNothingRecordedThem()
     {

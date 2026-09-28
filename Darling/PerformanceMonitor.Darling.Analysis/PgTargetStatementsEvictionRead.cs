@@ -38,17 +38,27 @@ public sealed partial class PgTargetFactCollector
         + "AND   collection_time <= $2::timestamp\n"
         + "GROUP BY 1";
 
-    /// <summary>#4677: the server's latest recorded <c>pg_stat_statements.max</c> (server-wide row). <c>$1</c> server_id, <c>$2</c> window end (naive UTC).</summary>
-    public const string StatementsMaxEntriesSql =
-        "SELECT setting\n"
-        + "FROM pg_server_config\n"
-        + "WHERE server_id = $1\n"
-        + "AND   name = 'pg_stat_statements.max'\n"
-        + "AND   database_name IS NULL\n"
-        + "AND   role_name IS NULL\n"
-        + "AND   collection_time <= $2::timestamp\n"
-        + "ORDER BY collection_time DESC\n"
-        + "LIMIT 1";
+    /// <summary>
+    /// #4677: <c>pg_stat_statements.max</c> out of the newest <c>pg_server_config</c> snapshot at or before the window's
+    /// end, server-wide row only (the per-database and per-role overrides repeat a setting's name under another scope).
+    /// Bounded like the other reads of the table (#3928): the snapshot's <c>MAX(collection_time)</c> and the row scan both
+    /// take the lower bound <see cref="ConfigSnapshotLowerBounds"/> hands it. <c>$1</c> server_id, <c>$2</c> window end
+    /// (naive UTC), <c>$3</c> lower bound.
+    /// </summary>
+    public const string StatementsMaxEntriesSql = @"
+SELECT c.setting
+FROM pg_server_config AS c
+WHERE c.server_id = $1
+AND   c.collection_time >= $3
+AND   c.collection_time = (
+          SELECT MAX(collection_time)
+          FROM pg_server_config
+          WHERE server_id = $1
+          AND   collection_time >= $3
+          AND   collection_time <= $2)
+AND   c.name = 'pg_stat_statements.max'
+AND   c.database_name IS NULL
+AND   c.role_name IS NULL";
 
     /// <summary>
     /// #4677: <c>CONFIG_PG_STAT_STATEMENTS_EVICTION</c>. Reads the six hourly windows, hands them to
@@ -88,12 +98,23 @@ public sealed partial class PgTargetFactCollector
                 ServerId = context.ServerId,
             };
 
-            using var maxCmd = new NpgsqlCommand(StatementsMaxEntriesSql, connection) { CommandTimeout = FactCommandTimeoutSeconds };
-            maxCmd.Parameters.AddWithValue(context.ServerId);
-            maxCmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
-            var setting = await maxCmd.ExecuteScalarAsync(context.CancellationToken) as string;
-            if (long.TryParse(setting, NumberStyles.Integer, CultureInfo.InvariantCulture, out var max))
-                fact.Metadata[EvictionFinding.MaxEntriesKey] = max;
+            /* The day first, every retained snapshot only when the day found no row: the same loop the other reads use. */
+            foreach (var lowerBound in ConfigSnapshotLowerBounds(context.TimeRangeEnd))
+            {
+                string? setting;
+                using (var cmd = new NpgsqlCommand(StatementsMaxEntriesSql, connection) { CommandTimeout = FactCommandTimeoutSeconds })
+                {
+                    cmd.Parameters.AddWithValue(context.ServerId);
+                    cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
+                    cmd.Parameters.AddWithValue(lowerBound);
+                    setting = await cmd.ExecuteScalarAsync(context.CancellationToken) as string;
+                }
+
+                if (setting is null) continue;
+                if (long.TryParse(setting, NumberStyles.Integer, CultureInfo.InvariantCulture, out var max))
+                    fact.Metadata[EvictionFinding.MaxEntriesKey] = max;
+                break;
+            }
 
             facts.Add(fact);
         }

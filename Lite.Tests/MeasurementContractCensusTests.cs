@@ -535,6 +535,9 @@ public sealed class MeasurementContractCensusTests
     {
         ("PerformanceMonitor.Collectors/CpuUtilizationCollector.cs", "ObserveInstance"),
         ("PerformanceMonitor.Collectors/PgStatementStatsCollector.cs", "ObserveStatements"),
+        /* #4677: the eviction count rides the same carrier and the same epoch answer. It forgets nothing (no ClearGroups
+           or ClearServer), so it adds an observer but no forget site. */
+        ("PerformanceMonitor.Collectors/PgStatementStatsCollector.cs", "ObserveStatementsDealloc"),
         ("PerformanceMonitor.Collectors/PgWaitStatsCollector.cs", "ObservePostmaster"),
         ("PerformanceMonitor.Collectors/WaitStatsCollector.cs", "ObserveInstance"),
     };

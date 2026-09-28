@@ -113,11 +113,12 @@ public class PgStatementStatsFlavorTests
         /* The SELECT list is the payload minus the four columns computed on the client (the three deltas
            and, since V128 (#3540), the interval they accrued over) PLUS the three columns read and not
            stored: the statements epoch stats_reset (#3653 A5), and — since #4428 — stats_since and
-           target_now, last, so every stored ordinal is where it was. */
-        Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 4 + 3, aurora.Count);
-        Assert.Equal("statements_stats_reset", aurora[^3]);
-        Assert.Equal("stats_since", aurora[^2]);
-        Assert.Equal("target_now", aurora[^1]);
+           target_now and — since #4677 — the pg_stat_statements eviction counter stats_dealloc, last, so every stored ordinal is where it was. */
+        Assert.Equal(PgStatementStatsCollector.Instance.PayloadColumns.Count - 4 + 4, aurora.Count);
+        Assert.Equal("statements_stats_reset", aurora[^4]);
+        Assert.Equal("stats_since", aurora[^3]);
+        Assert.Equal("target_now", aurora[^2]);
+        Assert.Equal("stats_dealloc", aurora[^1]);
     }
 
     /// <summary>

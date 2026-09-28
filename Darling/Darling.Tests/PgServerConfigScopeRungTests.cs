@@ -303,6 +303,8 @@ public sealed class PgServerConfigScopeRungTests
             ("PgTargetBaselineProvider.Clock.cs", "FROM pg_server_config AS c"),
             ("DarlingPgLoggingAuditReader.cs", "FROM pg_server_config AS c"),
             ("DarlingPgTrendReader.cs", "FROM pg_server_config"),
+            ("PgTargetStatementsEvictionRead.cs", "FROM pg_server_config AS c"),
+            ("DarlingPgStatementReader.cs", "FROM pg_server_config"),
         };
 
         var sources = ProductSources().ToDictionary(p => Path.GetFileName(p.File), p => p.Text, StringComparer.Ordinal);
@@ -403,8 +405,9 @@ public sealed class PgServerConfigScopeRungTests
 
         /* 10 -> 12 (#3937): ScopedConfigChangesSql's `snapshots` subquery and `overrides` CTE, both aliased
            `FROM pg_server_config AS c`, both classified "selects" above. 12 -> 13 (#4348 S1b): the scrub's
-           one candidate read, classified above as the deliberate third answer. */
-        Assert.Equal(13, reads);
+           one candidate read, classified above as the deliberate third answer. 13 -> 15 (#4677): the eviction
+           finding's pg_stat_statements.max read and the top-queries reader's, both server-wide (they exclude the overrides). */
+        Assert.Equal(15, reads);
         Assert.True(undecided.Count == 0,
             "a pg_server_config read carries neither arm of the V138 scope split, so it will see per-database "
           + "and per-role override rows as if they were the server's settings: ["

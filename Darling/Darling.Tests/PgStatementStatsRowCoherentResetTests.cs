@@ -29,7 +29,7 @@ public sealed class PgStatementStatsRowCoherentResetTests
     private const int ServerId = 1;
     private static DateTime T0 => new(2026, 9, 1, 12, 0, 0, DateTimeKind.Unspecified);
 
-    /// <summary>One row, ordinals matching PgStatementStatsCollector's BuildQuery, 0-29.</summary>
+    /// <summary>One row, ordinals matching PgStatementStatsCollector's BuildQuery, 0-30 (30 is the eviction counter, unknown here).</summary>
     private static object[] Row(
         long queryId, long dbid, long userid, bool toplevel, long calls, double totalExecTimeMs,
         long rowsReturned, DateTime? statsReset, DateTime? statsSince, DateTime targetNow)
@@ -44,6 +44,7 @@ public sealed class PgStatementStatsRowCoherentResetTests
             (object?)statsReset ?? DBNull.Value,
             (object?)statsSince ?? DBNull.Value,
             targetNow,
+            DBNull.Value,
         };
 
     private static async Task<System.Collections.Generic.List<PgStatementStatsCollector.Row>> RunReadAsync(

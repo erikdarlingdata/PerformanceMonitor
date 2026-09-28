@@ -897,6 +897,7 @@ public sealed class ServerEpochTests
         statsReset,
         DBNull.Value,
         statsReset is DateTime resetTime ? resetTime : new DateTime(2026, 9, 19, 3, 59, 0, DateTimeKind.Utc),
+        DBNull.Value,
     };
 
     /// <summary>Reaches the protected restart-seed hook, to stage the host-restart case.</summary>
