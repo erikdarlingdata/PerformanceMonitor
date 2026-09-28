@@ -1251,6 +1251,31 @@ public static partial class PlanAnalyzer
                 w.Message = $"Implicit conversion prevented an index seek, forcing a scan instead. Fix the data type mismatch: ensure the parameter or variable type matches the column type exactly. {w.Message}";
             }
         }
+
+        // Rule 35: Expensive Operator — always show operators that take a significant
+        // share of statement time even when no other rule has something to say. Threshold:
+        // self-time >= 20% of statement elapsed. Only emits if no other warning is already
+        // on the node, to avoid doubling up, and only once the statement itself has run long
+        // enough (>= 1,000ms) that a 20% share means something — in a statement of a few ms,
+        // one or two operators always take most of the time just because there's almost
+        // nothing else to divide it among, so the share points at nothing. The benefit % is
+        // just the self-time share.
+        if (node.HasActualStats && node.Warnings.Count == 0
+            && stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs >= 1000)
+        {
+            var selfMs = GetOperatorOwnElapsedMs(node);
+            var pct = (double)selfMs / stmt.QueryTimeStats.ElapsedTimeMs * 100;
+            if (pct >= 20.0)
+            {
+                node.Warnings.Add(new PlanWarning
+                {
+                    WarningType = "Expensive Operator",
+                    Message = $"{node.PhysicalOp} took {selfMs:N0}ms ({pct:N1}% of statement elapsed) but no specific rule identified a fix. Worth investigating: is the row volume necessary? Are upstream estimates driving this operator harder than it should be?",
+                    Severity = pct >= 50 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning,
+                    MaxBenefitPercent = Math.Round(Math.Min(100.0, pct), 1)
+                });
+            }
+        }
     }
 
     /// <summary>
