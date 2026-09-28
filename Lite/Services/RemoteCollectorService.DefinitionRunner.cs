@@ -161,7 +161,7 @@ public partial class RemoteCollectorService
         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
             && DatabaseStateCollector.Instance.AppliesTo(target))
         {
-            await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken);
+            await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(serverId, cancellationToken);
         }
         else if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                  && target.IsAzureSqlDb)
