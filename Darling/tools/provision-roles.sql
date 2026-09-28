@@ -122,6 +122,16 @@ ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';
 ALTER ROLE viewer SET statement_timeout = '60s';
 ALTER ROLE mcp    SET statement_timeout = '60s';
 
+--     temp_file_limit backstop on viewer and mcp (#4605): the on-disk-spill half of the same DoS control --
+--     a runaway aggregation that would spill past this many bytes of on-disk temp files is cancelled by the
+--     store itself (SQLSTATE 53400) rather than writing gigabytes to the store's own volume and starving the
+--     collector's writes. Keep this value in step with ComposeLimits.TempFileLimit in the service.
+--     Superuser-only (PGC_SUSET), like log_min_duration_statement below -- if the OWNER role running this
+--     script is not a superuser and has not been GRANTed SET on this parameter, this statement fails and the
+--     rest of the script does not run; grant it or run the rest by hand, minus this line.
+ALTER ROLE viewer SET temp_file_limit = '1GB';
+ALTER ROLE mcp    SET temp_file_limit = '1GB';
+
 -- 1b. Slow-statement logging on viewer and mcp (#3899): a statement from either that runs past a third of its
 --     statement_timeout, capped at 5s so raising the ceiling never widens the unlogged band (#4442), is written
 --     to the server log with its text, so a slow read can be named instead
