@@ -200,15 +200,96 @@ internal static class DarlingAgReader
         groups.Sort(CompareGroups);
 
         var totalGroupCount = groups.Count;
-        var pagedGroups = groups;
-        var groupsTruncated = false;
-        if (limit is int effectiveLimit && totalGroupCount > effectiveLimit)
+
+        /* #4474: the caller's limit is an UPPER bound, never a promise — the response still has to fit
+           McpResponseBudget.DefaultBytes. A field-measured 42-group/2-replica/6-14-database fleet answered
+           63,333 characters at the old fixed DefaultGroupLimit=11 (about 2x the 32 KB budget), because 11 was
+           sized from a 2.7 KB/group fixture and real groups ran closer to 6 KB. So the cut is now BYTE-FIT:
+           groups are added one at a time, most-severe-first, and the walk stops before the group that would push
+           the running serialized size past the budget — never after. Each candidate group is serialized exactly
+           ONCE (its own bytes are cached, not re-derived by re-serializing the growing array), so this stays
+           O(n) rather than O(n^2) on a large fleet. */
+        var effectiveLimit = limit is int callerLimit ? Math.Max(0, Math.Min(callerLimit, totalGroupCount)) : totalGroupCount;
+        var candidateGroups = groups.Take(effectiveLimit).ToList();
+
+        /* The envelope's own bytes (everything but the availability_groups array contents) — measured ONCE off
+           an empty-page shell of the real result, so the running total below only has to add each group's own
+           bytes plus its separating comma, not re-serialize the whole growing array every step. */
+        var envelopeBytes = SerializedByteCount(BuildResult(nowUtc, groups, Array.Empty<AvailabilityGroupView>(), 0, false, null));
+
+        var pagedGroups = new List<AvailabilityGroupView>();
+        var runningBytes = envelopeBytes;
+        var budgetCut = false;
+
+        for (var i = 0; i < candidateGroups.Count; i++)
         {
-            pagedGroups = groups.Take(Math.Max(0, effectiveLimit)).ToList();
-            groupsTruncated = true;
+            var group = candidateGroups[i];
+            var groupBytes = SerializedByteCount(group);
+            /* Every group after the first pays a comma; the first pays none, so this slightly over-counts a
+               single-group page by one byte rather than under-counting — the safe direction for a budget. */
+            var addedBytes = groupBytes + (pagedGroups.Count == 0 ? 0 : 1);
+
+            if (pagedGroups.Count > 0 && runningBytes + addedBytes > McpResponseBudget.DefaultBytes)
+            {
+                /* Stop BEFORE the group that would cross the budget — but always keep at least 1 group, even
+                   an oversized one, so a single huge AG never reads back as an empty result. */
+                budgetCut = true;
+                break;
+            }
+
+            pagedGroups.Add(group);
+            runningBytes += addedBytes;
         }
 
-        return new AgHealthResult
+        var limitCut = candidateGroups.Count < totalGroupCount;
+        var groupsTruncated = budgetCut || limitCut;
+
+        /* The note names the actual reason: a caller who passed a small explicit limit is not helped by being
+           told to raise it if what actually cut the page was the byte budget (or the other way around) — #4474's
+           whole point is that the two can now disagree. budgetCut wins the wording when both are true, since
+           raising limit alone would not change the outcome. */
+        string? BuildNote(int returnedCount) =>
+            groupsTruncated
+                ? budgetCut
+                    ? $"TRUNCATED: {totalGroupCount} groups were in scope; only {returnedCount} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget (most severe first, then by the largest lag/queue depth). Scope by server_name to see the rest."
+                    : $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {returnedCount} (most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
+                : null;
+
+        var groupsTruncatedNote = BuildNote(pagedGroups.Count);
+        var result = BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+
+        /* The fill loop above measures each candidate group against an envelope with NO note (a null,
+           untruncated shell) — but the note itself (and the groups_truncated flag) are only known once the
+           fill decides whether it truncated, so a note that names actual byte counts can itself push the
+           final result over budget. Re-measure the REAL result — the one actually serialized and returned —
+           and drop the last group (rebuilding the note with the new, smaller count each time, since the note's
+           own text changes with the count) while it's still over budget and more than one group remains. This
+           is a tail correction only: the per-group fill above still serializes each candidate exactly once. */
+        while (SerializedByteCount(result) > McpResponseBudget.DefaultBytes && pagedGroups.Count > 1)
+        {
+            pagedGroups.RemoveAt(pagedGroups.Count - 1);
+            groupsTruncated = true;
+            budgetCut = true;
+            groupsTruncatedNote = BuildNote(pagedGroups.Count);
+            result = BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+        }
+
+        return result;
+    }
+
+    /// <summary>Assembles the <see cref="AgHealthResult"/> envelope around a (possibly paged) group list —
+    /// factored out of <see cref="Build"/> so the byte-budget walk above can call it with an EMPTY page to
+    /// measure the envelope's own bytes exactly once, then again with the real page for the response actually
+    /// returned. <paramref name="allGroups"/> is always the FULL sorted set (for the roll-up counts, which
+    /// describe the whole scope, never just the returned page).</summary>
+    private static AgHealthResult BuildResult(
+        DateTime nowUtc,
+        List<AvailabilityGroupView> allGroups,
+        IReadOnlyList<AvailabilityGroupView> pagedGroups,
+        int totalGroupCount,
+        bool groupsTruncated,
+        string? groupsTruncatedNote) =>
+        new()
         {
             /* Naive UTC, like every other instant the API emits — the browser appends the zone itself (R5). */
             GeneratedAt = DateTime.SpecifyKind(nowUtc, DateTimeKind.Unspecified),
@@ -217,23 +298,26 @@ internal static class DarlingAgReader
                is measured before that tool's own limit cuts. A caller reading distinct_ag_count off a truncated
                page must still get the fleet's real distinct-AG count, not the page's. */
             AvailabilityGroupCount = totalGroupCount,
-            ReportingServerCount = groups.Select(g => g.ServerId).Distinct().Count(),
+            ReportingServerCount = allGroups.Select(g => g.ServerId).Distinct().Count(),
             /* #4475: identity is the AG name plus a CONNECTED COMPONENT over replica-name sets, not the exact
                set — a real AG monitored from its secondary reports only that secondary's own name (the DMV
                returns local information only off the primary), so exact-set identity would double-count it.
                Shares AgTopology's counting helper so the viewer and this read cannot drift back apart. */
             DistinctAgCount = AgTopology.CountDistinctGroups(
-                groups.Select(g => (g.AgName, (IEnumerable<string?>)g.Replicas.Select(r => r.ReplicaServerName), g.GroupId))),
-            WorstSeverity = groups.Count == 0 ? HealthSeverity.Unknown : groups.Max(g => g.Severity),
+                allGroups.Select(g => (g.AgName, (IEnumerable<string?>)g.Replicas.Select(r => r.ReplicaServerName), g.GroupId))),
+            WorstSeverity = allGroups.Count == 0 ? HealthSeverity.Unknown : allGroups.Max(g => g.Severity),
             AvailabilityGroups = pagedGroups,
             GroupsReturned = pagedGroups.Count,
             GroupsTotal = totalGroupCount,
             GroupsTruncated = groupsTruncated,
-            GroupsTruncatedNote = groupsTruncated
-                ? $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {pagedGroups.Count} (most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
-                : null,
+            GroupsTruncatedNote = groupsTruncatedNote,
         };
-    }
+
+    /// <summary>UTF-8 byte count of <paramref name="value"/> serialized with the shared <see cref="JsonOptions"/>
+    /// — the same encoding the tool actually returns, so the byte-budget walk in <see cref="Build"/> measures
+    /// what a caller really receives rather than a char count or a different serializer's shape.</summary>
+    private static int SerializedByteCount<T>(T value) =>
+        System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(value, JsonOptions));
 
     /// <summary>Worst severity first, then the largest lag/queue magnitude (#4471's cap tie-break — see the
     /// group-building loop above), then AG name, then reporting server — so the several perspectives on one AG
