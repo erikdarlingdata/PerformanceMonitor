@@ -656,8 +656,13 @@ public sealed class DarlingMcpTrendTools
                 raw query_store_stats is dropped at four days only once its rollups cover it (the #1680
                 arming gate), so wherever raw is short the rollup is the tier holding the history, and a
                 raw-only route means raw is complete.
+
+                #4611: the bounds come from the coverage this call already caches (ComposeStoreAvailability),
+                not a fresh min/max(bucket) read — the probe below only runs when that coverage carries no
+                ceiling for this view.
             */
-            var route = await QueryStoreTrendRouting.ResolveAsync(postgres, cancellationToken);
+            var (_, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
+            var route = await QueryStoreTrendRouting.ResolveAsync(coverage, postgres, cancellationToken);
             var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
                 postgres, resolved.ServerId, startUtc, now, route, cancellationToken);
             var disclosure = DescribeQueryStoreRoute(route, points, startUtc, now);

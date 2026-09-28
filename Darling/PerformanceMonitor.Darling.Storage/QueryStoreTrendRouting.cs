@@ -135,11 +135,45 @@ public static class QueryStoreTrendRouting
     }
 
     /// <summary>
+    /// #4611: the cached-first route. Both callers already hold a <see cref="RollupCoverage"/> — probed on a
+    /// timer and shared with every other reader of the same store — so this reads its floor and ceiling for
+    /// <c>query_store_stats_corrected_hourly</c> instead of running <see cref="RollupBoundsSql"/> again on
+    /// every trend load. <see cref="RollupCoverage.CeilingOf"/> is already the exact instant
+    /// <see cref="Resolve"/> computes from <c>max(bucket)</c> — the boundary at or above which the rollup
+    /// serves nothing — so it becomes <see cref="QueryStoreTrendRoute.RawStartUtc"/> directly, with no bucket
+    /// adjustment: both name the same exclusive edge, one measured live, one read from the cache.
+    ///
+    /// <para>When the coverage carries no ceiling for this view — the rollup was never probed, does not
+    /// exist, or has materialized nothing (a null floor and a null ceiling arrive together) — this falls back
+    /// to the live probe-and-read below, unchanged, so a cold or unknown coverage is never LESS correct than
+    /// before #4611.</para>
+    /// </summary>
+    public static Task<QueryStoreTrendRoute> ResolveAsync(
+        RollupCoverage coverage, NpgsqlDataSource dataSource, CancellationToken cancellationToken = default)
+    {
+        if (coverage is null)
+        {
+            throw new ArgumentNullException(nameof(coverage));
+        }
+
+        if (coverage.CeilingOf(TimescaleSupport.QueryStoreStatsCorrectedHourlyView) is DateTime ceilingUtc)
+        {
+            return Task.FromResult(new QueryStoreTrendRoute(
+                true, ceilingUtc, coverage.FloorOf(TimescaleSupport.QueryStoreStatsCorrectedHourlyView)));
+        }
+
+        return ResolveAsync(dataSource, cancellationToken);
+    }
+
+    /// <summary>
     /// Probes availability (<see cref="RollupProbeSql"/>) then coverage (<see cref="RollupBoundsSql"/>) and
     /// hands the result to <see cref="Resolve"/>. Two statements by necessity, not laziness: the bounds
     /// statement names the view, so it may only be issued once the probe proved the name resolves.
     /// A probe failure propagates rather than degrading to raw-only — silently falling back would
     /// reintroduce the #2736 timeout wearing a different error.
+    ///
+    /// <para>#4611: this is now the FALLBACK path, kept byte-for-byte for the cold/unknown coverage case —
+    /// see the coverage-taking overload above, which every caller now calls first.</para>
     /// </summary>
     public static async Task<QueryStoreTrendRoute> ResolveAsync(
         NpgsqlDataSource dataSource, CancellationToken cancellationToken = default)
