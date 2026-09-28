@@ -152,6 +152,51 @@ BEGIN
     END LOOP;
 END $$;";
 
+    /// <summary>
+    /// V153 (#4608) — a plain btree on <c>first_execution_time</c> for each per-interval Query Store table
+    /// (<see cref="PerformanceMonitor.Darling.Storage.QueryStoreIntervalLatest"/>'s <c>query_store_interval_latest</c>,
+    /// V143, and <see cref="PerformanceMonitor.Darling.Storage.QueryStoreIntervalWide"/>'s
+    /// <c>query_store_interval_wide</c>, V145) — the column both the daily retention sweep's
+    /// <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.TimeSlicedDeleteSql"/> filters on and the
+    /// read gate's per-server floor (<c>PlainTableFloorSql</c> on both tables) reads.
+    ///
+    /// <para><b>The measured cost (#4608).</b> On a rig seeded with 4M <c>query_store_interval_latest</c> rows
+    /// over 20 days: the purge's cold-cache "nothing to delete" run cost ~4.09 s (a Seq-equivalent full index
+    /// scan of the table's unique index, since neither <c>min()</c> subquery nor the outer DELETE had a
+    /// leading column to seek on) and ~211 ms warm; the same statement with this index costs ~0.56 ms cold and
+    /// ~0.12 ms warm — three to four orders of magnitude down, and it stays flat regardless of table size
+    /// because it seeks straight past the cutoff instead of walking the whole index. A one-day-to-delete run
+    /// (200 k rows) cost ~587 ms without the index and ~0.1-52 ms with it. The read gate's per-server floor
+    /// (<c>MIN(first_execution_time) WHERE server_id = $1</c>) already had an efficient plan off the existing
+    /// unique index (~9 ms) — this rung's index gives it an equally fast plan (~1.4 ms) without displacing
+    /// that path; either index serves it.</para>
+    ///
+    /// <para><b>Why a plain index, not <c>CONCURRENTLY</c>.</b> <c>MigrateAsync</c> wraps every rung in one
+    /// transaction, and <c>CREATE INDEX CONCURRENTLY</c> cannot run inside a transaction block (PostgreSQL
+    /// rejects it, 25001). The lock this takes is <c>ShareLock</c> (a plain <c>CREATE INDEX</c>, not a
+    /// rewrite of an existing index), which blocks writers to the table for the build's duration but not
+    /// readers. At the rig's 4M/2M row sizes the build itself took low single-digit seconds; a field store's
+    /// two tables are kept to 15 and 9 days respectively by the same purge this index speeds up, so neither
+    /// grows unbounded between upgrades.</para>
+    ///
+    /// <para><b>Why not <see cref="UnorderedRowCappedDeleteSql"/> instead (the brief's alternate path).</b>
+    /// That builder exists for the two plain (non-hypertable) tables whose V149 migration deliberately
+    /// dropped their own <c>last_seen</c> btree so an unordered cap could avoid a second sort pass — it does
+    /// not apply here, where V143/V145 never had a <c>first_execution_time</c> index to drop in the first
+    /// place and the read gate needs one whether or not the purge does. Measured, <see cref="UnorderedRowCappedDeleteSql"/>
+    /// without an index still costs ~234 ms per 50 k-row-capped batch on this rig's size (it still walks the
+    /// unique index looking for rows under the cutoff before it can build the <c>ctid</c> list) — slower than
+    /// this rung's indexed <see cref="PerformanceMonitor.Darling.Service.DarlingRetention.TimeSlicedDeleteSql"/>
+    /// and it leaves the read gate's floor scan unindexed too. The index serves both call sites from one
+    /// object, which is why it is the winner here.</para>
+    /// </summary>
+    private const string V153Sql = @"
+CREATE INDEX IF NOT EXISTS idx_query_store_interval_latest_first_exec
+ON collect.query_store_interval_latest (first_execution_time);
+
+CREATE INDEX IF NOT EXISTS idx_query_store_interval_wide_first_exec
+ON collect.query_store_interval_wide (first_execution_time);";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -342,6 +387,7 @@ END $$;";
         new Migration(150, "collection-log-watermark-and-job-history-indexes", V150Sql),
         new Migration(151, "ag-group-id", V151Sql),
         new Migration(152, "drop-unread-cagg-group-indexes", V152Sql),
+        new Migration(153, "interval-tables-first-exec-index", V153Sql),
     };
 
     /// <summary>
