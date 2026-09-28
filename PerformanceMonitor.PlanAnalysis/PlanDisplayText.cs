@@ -1,3 +1,5 @@
+using System;
+
 namespace PerformanceMonitor.PlanAnalysis;
 
 /// <summary>
@@ -14,4 +16,25 @@ public static class PlanDisplayText
     /// </summary>
     public static string? ParseErrorMessage(ParsedPlan plan) =>
         plan.ParseError == null ? null : $"This plan couldn't be parsed: {plan.ParseError}";
+
+    /// <summary>
+    /// The CPU:Elapsed ratio shown in the runtime summary, matching
+    /// erikdarlingdata/PerformanceStudio@28d4c74's row: CPU time with external-wait time
+    /// (<see cref="BenefitScorer.IsExternalWait"/>) subtracted, divided by elapsed time.
+    /// Returns null when elapsed time is not positive, in which case the row isn't shown.
+    /// </summary>
+    public static double? CpuElapsedRatio(PlanStatement statement)
+    {
+        var stats = statement.QueryTimeStats;
+        if (stats == null || stats.ElapsedTimeMs <= 0)
+            return null;
+
+        long externalWaitMs = 0;
+        foreach (var w in statement.WaitStats)
+            if (BenefitScorer.IsExternalWait(w.WaitType))
+                externalWaitMs += w.WaitTimeMs;
+
+        var effectiveCpu = Math.Max(0L, stats.CpuTimeMs - externalWaitMs);
+        return (double)effectiveCpu / stats.ElapsedTimeMs;
+    }
 }
