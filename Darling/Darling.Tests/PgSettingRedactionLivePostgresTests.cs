@@ -45,9 +45,9 @@ public sealed class PgSettingRedactionLivePostgresTests
 
         var ct = TestContext.Current.CancellationToken;
 
-        // Runs on the SAME 100ms production PgSettingRedactor.MatchTimeoutForTest as the collector uses live,
-        // in CI's shared "Darling PG tests" job — a loaded runner's scheduling delay, not real backtracking,
-        // can push ReadAsync's redaction past that budget and mask primary_conninfo WHOLE, which then fails
+        // Without this override, ReadAsync's redaction runs on the redactor's production 100ms match timeout,
+        // as the collector does live. In CI's shared "Darling PG tests" job, a loaded runner's scheduling delay,
+        // not real backtracking, can push that redaction past the budget and mask primary_conninfo WHOLE, which fails
         // the exact-output Contains("password=********")/Contains("host=127.0.0.1") checks below. Same seam as
         // PgSettingRedactorTests.RedactUnderGenerousTimeout (PR #4663); this class does not test the redactor's
         // own timeout path, so the generous override is safe here.
