@@ -495,4 +495,69 @@ public sealed class DarlingSweepSchedulingTests
                 DarlingWorker.ColdStartFirstSweepDue(ColdStart, id));
         }
     }
+
+    private static readonly DateTime GridOrigin = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly TimeSpan OneMinute = TimeSpan.FromSeconds(60);
+
+    [Fact]
+    public void ComputeNextDue_OnTimeRun_AdvancesOneInterval()
+    {
+        Assert.Equal(GridOrigin + OneMinute, DarlingWorker.ComputeNextDue(GridOrigin, GridOrigin, OneMinute));
+    }
+
+    [Fact]
+    public void ComputeNextDue_LateRun_DoesNotCarryTheLateness()
+    {
+        var now = GridOrigin.AddSeconds(14);
+        Assert.Equal(GridOrigin + OneMinute, DarlingWorker.ComputeNextDue(GridOrigin, now, OneMinute));
+    }
+
+    [Fact]
+    public void ComputeNextDue_AfterStall_SkipsMissedSlotsToTheNextGridSlot()
+    {
+        var now = GridOrigin.AddMinutes(5).AddSeconds(20);
+        Assert.Equal(GridOrigin.AddMinutes(6), DarlingWorker.ComputeNextDue(GridOrigin, now, OneMinute));
+    }
+
+    [Fact]
+    public void ComputeNextDue_ExactBoundary_MovesToTheFollowingSlot()
+    {
+        var now = GridOrigin.AddMinutes(3);
+        Assert.Equal(GridOrigin.AddMinutes(4), DarlingWorker.ComputeNextDue(GridOrigin, now, OneMinute));
+    }
+
+    /// <summary>
+    /// Fifteen-second sweep ticks whose body starts 0-12 s late (seeded) drive a 1-minute collector for 60
+    /// simulated minutes. The grid keeps the 60-second cadence; scheduling from the body start (the old rule)
+    /// loses samples.
+    /// </summary>
+    [Fact]
+    public void ComputeNextDue_TickSimulation_KeepsOneMinuteCadence_WhereBodyStartSchedulingDrifts()
+    {
+        var gridRuns = SimulateRuns((due, now) => DarlingWorker.ComputeNextDue(due, now, OneMinute));
+        var oldRuns = SimulateRuns((_, now) => now + OneMinute);
+
+        Assert.InRange(gridRuns, 59, 61);
+        Assert.True(oldRuns < gridRuns, $"old rule {oldRuns} runs should be below grid {gridRuns}");
+    }
+
+    private static int SimulateRuns(Func<DateTime, DateTime, DateTime> advance)
+    {
+        var rng = new Random(4636);
+        var due = GridOrigin;
+        var runs = 0;
+        for (var tick = TimeSpan.Zero; tick < TimeSpan.FromMinutes(60); tick += TimeSpan.FromSeconds(15))
+        {
+            var now = GridOrigin + tick + TimeSpan.FromSeconds(rng.Next(0, 13));
+            if (now < due)
+            {
+                continue;
+            }
+
+            runs++;
+            due = advance(due, now);
+        }
+
+        return runs;
+    }
 }
