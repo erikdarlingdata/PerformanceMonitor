@@ -49,7 +49,6 @@ public static class BenefitScorer
 
             if (stmt.RootNode != null)
                 ScoreNodeTree(stmt.RootNode, stmt, cancellationToken);
-
             if (stmt.WaitStats.Count > 0 && stmt.QueryTimeStats != null)
                 ScoreWaitStats(stmt);
 
