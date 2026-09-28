@@ -966,7 +966,8 @@ ORDER BY event_time";
             var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
                 context.ServerId, context.ServerName,
                 windows.BeforeStart, windows.BeforeEnd,
-                windows.AfterStart, windows.AfterEnd);
+                windows.AfterStart, windows.AfterEnd,
+                context.CancellationToken);
 
             /* Both coverages null is ComparePeriodsAsync's own catch (collection threw); an empty compare
                over OBSERVED windows is the "nothing moved" answer and is banded like any other. */

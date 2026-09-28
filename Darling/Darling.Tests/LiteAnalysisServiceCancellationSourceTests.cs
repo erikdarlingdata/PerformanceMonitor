@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.RegularExpressions;
 using Xunit;
 using static Darling.Tests.RepoFile;
 
@@ -78,5 +81,109 @@ public sealed class LiteAnalysisServiceCancellationSourceTests
 
         Assert.Contains("when", catchLine, StringComparison.Ordinal);
         Assert.Contains("OperationCanceledException", catchLine, StringComparison.Ordinal);
+    }
+
+
+    private static readonly string[] TrackedMethodNames =
+    {
+        "CollectAndScoreFactsAsync",
+        "CollectConfigAuditFactsAsync",
+        "ComparePeriodsAsync",
+        "LookUpDispersionAsync",
+    };
+
+    // Every production call of the four on-demand methods anywhere under Lite/ must pass a CancellationToken
+    // argument. A missed caller (#4203's own gap, at ComparePeriodsAsync's internal call inside
+    // AnalysisService.cs) runs its read to completion after the caller has already given up. This scans
+    // every .cs file under Lite/ (not just AnalysisService.cs) so a caller in Lite/Mcp or elsewhere is
+    // covered the same as an internal caller. Deliberately unsophisticated: a call site is found by name
+    // followed by '(' that is not itself the method's own declaration (no "async Task" immediately before
+    // it on the same textual run), and the call's argument text — from the open paren to its matching
+    // close paren — must contain "ancellationToken" (matches both "cancellationToken" and
+    // "context.CancellationToken").
+    [Fact]
+    public void EveryProductionCallOfTheFourOnDemandMethods_PassesACancellationTokenArgument()
+    {
+        var liteRoot = Path.Combine(RepoFile.Root, "Lite");
+        var files = Directory.GetFiles(liteRoot, "*.cs", SearchOption.AllDirectories);
+
+        var missed = new List<string>();
+
+        foreach (var file in files)
+        {
+            var text = File.ReadAllText(file);
+
+            foreach (var methodName in TrackedMethodNames)
+            {
+                var searchStart = 0;
+
+                while (true)
+                {
+                    var idx = text.IndexOf(methodName + "(", searchStart, StringComparison.Ordinal);
+                    if (idx < 0)
+                    {
+                        break;
+                    }
+
+                    searchStart = idx + methodName.Length;
+
+                    // Skip the method's own declaration: a declaration has "Task<...> " or "Task " right
+                    // before the name, a call site does not (it has '.', a space after '=', 'await ', etc.
+                    // right before it in every one of this file's own call sites, none of which is "> ").
+                    var beforeStart = Math.Max(0, idx - 40);
+                    var before = text[beforeStart..idx];
+                    if (Regex.IsMatch(before, @">\s*$"))
+                    {
+                        continue;
+                    }
+
+                    // The collector's own interface method of the same name takes the whole AnalysisContext
+                    // (which already carries the token inside it, at construction) rather than a separate
+                    // CancellationToken argument — a different method, not a missed caller of the four
+                    // AnalysisService methods this pin tracks.
+                    if (before.EndsWith("_collector.", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var openParen = idx + methodName.Length;
+                    if (text[openParen] != '(')
+                    {
+                        continue;
+                    }
+
+                    var depth = 0;
+                    var closeParen = -1;
+                    for (var i = openParen; i < text.Length; i++)
+                    {
+                        if (text[i] == '(')
+                        {
+                            depth++;
+                        }
+                        else if (text[i] == ')')
+                        {
+                            depth--;
+                            if (depth == 0)
+                            {
+                                closeParen = i;
+                                break;
+                            }
+                        }
+                    }
+
+                    Assert.True(closeParen > openParen, $"{methodName}'s call in {file} at offset {idx} has no matching close paren.");
+
+                    var argsText = text[openParen..(closeParen + 1)];
+
+                    if (!argsText.Contains("ancellationToken", StringComparison.Ordinal))
+                    {
+                        var relative = Path.GetRelativePath(RepoFile.Root, file);
+                        missed.Add($"{relative}: call of {methodName} at offset {idx} has no CancellationToken argument.");
+                    }
+                }
+            }
+        }
+
+        Assert.True(missed.Count == 0, "Missed CancellationToken argument(s):\n" + string.Join("\n", missed));
     }
 }
