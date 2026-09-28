@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Analysis;
@@ -171,6 +172,9 @@ public class CollectionBackgroundService : BackgroundService
         /* Wait a few seconds before first collection to let the app initialize */
         await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
 
+        /* #4640: the logical cycle time sits on a fixed grid (CollectionInterval apart), independent of how long
+           a cycle's work takes, so a collector's due check compares exact grid times. */
+        var cycleStart = DateTime.UtcNow;
         while (!stoppingToken.IsCancellationRequested)
         {
             if (!IsPaused)
@@ -192,7 +196,7 @@ public class CollectionBackgroundService : BackgroundService
                 try
                 {
                     IsCollecting = true;
-                    await _collectorService.RunDueCollectorsAsync(stoppingToken);
+                    await _collectorService.RunDueCollectorsAsync(cycleStart, stoppingToken);
                     LastCollectionTime = DateTime.UtcNow;
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -241,7 +245,14 @@ public class CollectionBackgroundService : BackgroundService
 
             try
             {
-                await Task.Delay(CollectionInterval, stoppingToken);
+                var nextCycle = CollectorCadence.NextDue(cycleStart, DateTime.UtcNow, CollectionInterval);
+                var wait = nextCycle - DateTime.UtcNow;
+                if (wait > TimeSpan.Zero)
+                {
+                    await Task.Delay(wait, stoppingToken);
+                }
+
+                cycleStart = nextCycle;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

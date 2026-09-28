@@ -221,6 +221,11 @@ public class ScheduleManager
     /// unchanged.</para>
     /// </summary>
     public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId)
+        => GetDueCollectorsForServer(serverId, DateTime.UtcNow);
+
+    /// <summary>The collectors due at <paramref name="atUtc"/>: the same rule as the one-argument overload, evaluated
+    /// at the caller's logical cycle time (#4640).</summary>
+    public IReadOnlyList<CollectorSchedule> GetDueCollectorsForServer(string serverId, DateTime atUtc)
     {
         lock (_lock)
         {
@@ -244,7 +249,7 @@ public class ScheduleManager
                     continue;
                 }
 
-                var elapsed = DateTime.UtcNow - lastRun;
+                var elapsed = atUtc - lastRun;
                 if (elapsed.TotalMinutes >= intervalMinutes)
                 {
                     due.Add(s);

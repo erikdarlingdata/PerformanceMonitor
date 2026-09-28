@@ -409,7 +409,12 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Runs all due collectors for all enabled servers.
     /// </summary>
-    public async Task RunDueCollectorsAsync(CancellationToken cancellationToken = default)
+    public Task RunDueCollectorsAsync(CancellationToken cancellationToken = default)
+        => RunDueCollectorsAsync(DateTime.UtcNow, cancellationToken);
+
+    /// <summary>Runs the collectors due at <paramref name="cycleStartUtc"/>, the logical time of this cycle on the
+    /// fixed collection grid (#4640). Each run is recorded at that time, so the next due check compares grid times.</summary>
+    public async Task RunDueCollectorsAsync(DateTime cycleStartUtc, CancellationToken cancellationToken)
     {
         /* Registered for the whole sweep, including the collection_log write at the end of each collector -
            that final write is the one that failed in the field when a reset landed mid-collection (#2594). */
@@ -460,10 +465,10 @@ public partial class RemoteCollectorService
                changed (state-tracked); creates on enable, drops on disable. */
             await ReconcileLongQueryCompletionsXeSessionAsync(server, cancellationToken);
 
-            var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id);
+            var dueCollectors = _scheduleManager.GetDueCollectorsForServer(server.Id, cycleStartUtc);
             foreach (var collector in dueCollectors)
             {
-                await RunCollectorAsync(server, collector.Name, cancellationToken);
+                await RunCollectorAsync(server, collector.Name, scheduledAtUtc: cycleStartUtc, cancellationToken);
             }
         }, cancellationToken));
 
@@ -532,7 +537,12 @@ public partial class RemoteCollectorService
     /// <summary>
     /// Runs a specific collector for a specific server.
     /// </summary>
-    public async Task RunCollectorAsync(ServerConnection server, string collectorName, CancellationToken cancellationToken = default)
+    public Task RunCollectorAsync(ServerConnection server, string collectorName, CancellationToken cancellationToken = default)
+        => RunCollectorAsync(server, collectorName, scheduledAtUtc: null, cancellationToken);
+
+    /// <summary>Runs one collector; <paramref name="scheduledAtUtc"/> is the logical cycle time the run is recorded
+    /// at (#4640), or null to record the time the run started.</summary>
+    public async Task RunCollectorAsync(ServerConnection server, string collectorName, DateTime? scheduledAtUtc, CancellationToken cancellationToken)
     {
         var startTime = DateTime.UtcNow;
         var status = "SUCCESS";
@@ -662,7 +672,7 @@ public partial class RemoteCollectorService
                 _ => throw new ArgumentException($"Unknown collector: {collectorName}")
             };
 
-            _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, startTime);
+            _scheduleManager.MarkCollectorRunForServer(server.Id, collectorName, scheduledAtUtc ?? startTime);
 
             /* #3653 A5: the identity-epoch account, if this run's definition saw one — the twin of the drain
                in DarlingWorker.RunOneAsync, for the same reason: the definition composed the sentence (old

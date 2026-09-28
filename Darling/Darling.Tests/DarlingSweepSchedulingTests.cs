@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -494,5 +495,126 @@ public sealed class DarlingSweepSchedulingTests
                 DarlingWorker.ColdStartFirstSweepDue(ColdStart, id),
                 DarlingWorker.ColdStartFirstSweepDue(ColdStart, id));
         }
+    }
+
+    private static readonly DateTime GridOrigin = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly TimeSpan OneMinute = TimeSpan.FromSeconds(60);
+
+    [Fact]
+    public void NextDue_OnTimeRun_AdvancesOneInterval()
+    {
+        Assert.Equal(GridOrigin + OneMinute, CollectorCadence.NextDue(GridOrigin, GridOrigin, OneMinute));
+    }
+
+    [Fact]
+    public void NextDue_LateRun_DoesNotCarryTheLateness()
+    {
+        var now = GridOrigin.AddSeconds(14);
+        Assert.Equal(GridOrigin + OneMinute, CollectorCadence.NextDue(GridOrigin, now, OneMinute));
+    }
+
+    [Fact]
+    public void NextDue_AfterStall_SkipsMissedSlotsToTheNextGridSlot()
+    {
+        var now = GridOrigin.AddMinutes(5).AddSeconds(20);
+        Assert.Equal(GridOrigin.AddMinutes(6), CollectorCadence.NextDue(GridOrigin, now, OneMinute));
+    }
+
+    [Fact]
+    public void NextDue_ExactBoundary_MovesToTheFollowingSlot()
+    {
+        var now = GridOrigin.AddMinutes(3);
+        Assert.Equal(GridOrigin.AddMinutes(4), CollectorCadence.NextDue(GridOrigin, now, OneMinute));
+    }
+
+    /// <summary>
+    /// Fifteen-second sweep ticks whose body starts 0-12 s late (seeded) drive a 1-minute collector for 60
+    /// simulated minutes. The grid keeps the 60-second cadence; scheduling from the body start (the old rule)
+    /// loses samples.
+    /// </summary>
+    [Fact]
+    public void NextDue_TickSimulation_KeepsOneMinuteCadence_WhereBodyStartSchedulingDrifts()
+    {
+        var gridRuns = SimulateRuns(OneMinute, (due, now) => CollectorCadence.NextDue(due, now, OneMinute));
+        var oldRuns = SimulateRuns(OneMinute, (_, now) => now + OneMinute);
+
+        Assert.InRange(gridRuns, 59, 61);
+        Assert.True(oldRuns < gridRuns, $"old rule {oldRuns} runs should be below grid {gridRuns}");
+    }
+
+    /// <summary>The same tick simulation for a 5-minute collector over 60 minutes: the grid gives exactly 12 runs
+    /// and the body-start rule never more.</summary>
+    [Fact]
+    public void NextDue_TickSimulation_KeepsFiveMinuteCadence_WhereBodyStartSchedulingDrifts()
+    {
+        var five = TimeSpan.FromMinutes(5);
+        var gridRuns = SimulateRuns(five, (due, now) => CollectorCadence.NextDue(due, now, five));
+        var oldRuns = SimulateRuns(five, (_, now) => now + five);
+
+        // A 5-minute slot is 20 sweep ticks wide, so body-start scheduling loses far less here than for the
+        // 1-minute collector; the grid never runs fewer than the interval allows.
+        Assert.Equal(12, gridRuns);
+        Assert.True(oldRuns <= gridRuns, $"old rule {oldRuns} runs should not exceed grid {gridRuns}");
+    }
+
+    /// <summary>A once-a-minute loop whose cycle work takes 0-20 s (seeded), for 60 simulated minutes. Old shape:
+    /// wait a full minute after the work, and a collector is due when a minute has passed since its own start.
+    /// New shape: cycles on the fixed grid, and the due check compares logical cycle times.</summary>
+    [Fact]
+    public void NextDue_LiteShapedLoop_KeepsCadence_WhereWaitAfterWorkDrifts()
+    {
+        var end = GridOrigin.AddMinutes(60);
+        var five = TimeSpan.FromMinutes(5);
+
+        // New: grid loop, due check on logical cycle times.
+        var rng = new Random(4640);
+        var newOne = 0;
+        var newFive = 0;
+        DateTime? lastOne = null, lastFive = null;
+        var cycle = GridOrigin;
+        while (cycle < end)
+        {
+            if (lastOne is null || cycle - lastOne.Value >= OneMinute) { newOne++; lastOne = cycle; }
+            if (lastFive is null || cycle - lastFive.Value >= five) { newFive++; lastFive = cycle; }
+            var now = cycle + TimeSpan.FromSeconds(rng.Next(0, 21));
+            cycle = CollectorCadence.NextDue(cycle, now, OneMinute);
+        }
+
+        // Old: delay a full minute after the work; the due check uses the time the collector itself started.
+        rng = new Random(4640);
+        var oldOne = 0;
+        DateTime? oldLast = null;
+        var t = GridOrigin;
+        while (t < end)
+        {
+            var work = rng.Next(0, 21);
+            var started = t + TimeSpan.FromSeconds(work / 2.0);
+            if (oldLast is null || started - oldLast.Value >= OneMinute) { oldOne++; oldLast = started; }
+            t = t + TimeSpan.FromSeconds(work) + OneMinute;
+        }
+
+        Assert.Equal(60, newOne);
+        Assert.Equal(12, newFive);
+        Assert.True(oldOne < 60, $"old shape {oldOne} runs should be below 60");
+    }
+
+    private static int SimulateRuns(TimeSpan interval, Func<DateTime, DateTime, DateTime> advance)
+    {
+        var rng = new Random(4636);
+        var due = GridOrigin;
+        var runs = 0;
+        for (var tick = TimeSpan.Zero; tick < TimeSpan.FromMinutes(60); tick += TimeSpan.FromSeconds(15))
+        {
+            var now = GridOrigin + tick + TimeSpan.FromSeconds(rng.Next(0, 13));
+            if (now < due)
+            {
+                continue;
+            }
+
+            runs++;
+            due = advance(due, now);
+        }
+
+        return runs;
     }
 }
