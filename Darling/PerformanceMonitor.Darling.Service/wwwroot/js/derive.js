@@ -167,4 +167,3 @@ export function deriveVizConfig(data, viz, palette) {
       return {};
   }
 }
-export const ciProofDeliberateSyntaxError = ;
