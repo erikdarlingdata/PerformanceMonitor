@@ -1243,7 +1243,7 @@ export function buildComposedPanelBody(p, opts) {
     const sel = el("select", { class: "editor-select", "aria-label": "Second measure" });
     sel.appendChild(el("option", { value: "", text: "— none —" }));
     for (const x of sameSource.sort((a, b) => a.displayName.localeCompare(b.displayName))) {
-      sel.appendChild(el("option", { value: x.key, text: x.displayName + (x.kind === "ratio" ? " (ratio)" : "") }));
+      sel.appendChild(el("option", { value: x.key, text: x.displayName + (x.labelSuffix || "") }));
     }
     sel.value = p.overlay && p.overlay.measure ? p.overlay.measure : "";
     sel.addEventListener("change", () => {
@@ -1744,7 +1744,7 @@ function buildComposedMeasureSelect(compose, current, scopeServer, onChange) {
   for (const [cat, ms] of [...byCat.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const group = el("optgroup", { label: cat });
     for (const m of ms.sort((a, b) => a.displayName.localeCompare(b.displayName))) {
-      const suffix = m.kind === "ratio" ? " (ratio)" : "";
+      const suffix = m.labelSuffix || "";
       const caption = measureCaption(m, compose);
       /* D4: when the view is scoped to one concrete server this measure can't collect on, grey (disable) the option
          — but keep an already-CHOSEN measure selectable so re-scoping never silently drops the panel's metric (the
