@@ -161,6 +161,7 @@ public static class McpPlanAnalysisFormatter
                             type = w.WarningType,
                             message = w.Message,
                             source = w.Source.ToString(),
+                            origin_node_ids = w.OriginNodeIds,
                             max_benefit_percent = w.MaxBenefitPercent
                         }),
                     warning_count = allWarnings.Count,

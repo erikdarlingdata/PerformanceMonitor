@@ -423,6 +423,18 @@ public class PlanWarning
     public PlanWarningSource Source { get; set; } = PlanWarningSource.Analyzer;
 
     /// <summary>
+    /// The operators this finding actually came from, so a reader can be taken to them (#4534).
+    ///
+    /// <para>A list rather than a single id, because the honest answers are genuinely different.
+    /// A key lookup came from exactly one operator. A table variable warning came from every
+    /// operator that touched one, which on a big plan is several. And some findings have no
+    /// operator at all — "High Compile CPU" happened before a single row was read, and
+    /// "UDF Execution" is reported by SQL Server at the statement level only. Those keep this
+    /// empty, so a consumer offers no navigation rather than picking somewhere arbitrary.</para>
+    /// </summary>
+    public List<int> OriginNodeIds { get; set; } = new();
+
+    /// <summary>
     /// Maximum percentage of elapsed time that could be saved by addressing this finding.
     /// null = not quantifiable, 0 = calculated as negligible.
     /// </summary>
