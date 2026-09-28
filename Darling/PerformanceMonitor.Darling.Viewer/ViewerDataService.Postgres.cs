@@ -281,6 +281,11 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, int limit = 50, CancellationToken cancellationToken = default) =>
         DarlingPgBlockingReader.GetPgBlockingCyclesAsync(_dataSource, serverId, startUtc, endUtc, limit, cancellationToken);
 
+    /// <summary>Activity tab, panel 4 — the eviction inputs behind <see cref="PgStatementEvictionNote"/>.</summary>
+    public Task<DarlingPgStatementReader.PgEvictionInfo> GetPgStatementEvictionsAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>
+        DarlingPgStatementReader.GetEvictionInfoAsync(_dataSource, serverId, startUtc, endUtc, cancellationToken);
+
     /// <summary>Activity tab, panel 4 — top statement shapes by total execution time.</summary>
     public Task<List<DarlingPgStatementReader.PgStatementRow>> GetPgTopQueriesAsync(
         int serverId, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken = default) =>

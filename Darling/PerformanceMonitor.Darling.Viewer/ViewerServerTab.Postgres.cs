@@ -285,7 +285,7 @@ public partial class ViewerServerTab
     {
         var (startUtc, endUtc) = GetWindowUtc();
 
-        using var readFanOut = ViewerReadFanOut.Of(5);
+        using var readFanOut = ViewerReadFanOut.Of(6);
 
         var countsTask = _dataService.GetPgBlockingCaptureCountsAsync(_server.ServerId, startUtc, endUtc);
         var chainsTask = _dataService.GetPgBlockingChainsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
@@ -301,7 +301,13 @@ public partial class ViewerServerTab
 
         var databasesTask = _dataService.GetPgDatabaseStatsAsync(_server.ServerId, startUtc, endUtc, PgGridRowLimit);
 
-        await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask);
+        /* #4677: the eviction inputs behind the caveat under the statement grid. Not read when the collector is
+           gated off: there are no statements to qualify. */
+        var evictionsTask = statementsGatedOff
+            ? Task.FromResult(new DarlingPgStatementReader.PgEvictionInfo(false, null, null))
+            : _dataService.GetPgStatementEvictionsAsync(_server.ServerId, startUtc, endUtc);
+
+        await Task.WhenAll(countsTask, chainsTask, cyclesTask, statementsTask, databasesTask, evictionsTask);
 
         /* Released here rather than at the closing brace: the four sub-tab loads at the end of this method
            run after these five have finished, so they do not contend with them. */
@@ -331,6 +337,11 @@ public partial class ViewerServerTab
         PgTopQueriesGrid.ItemsSource = statementsTask.Result.Select(PgDisplay.Statement).ToList();
         PgStatementsNote.Text = PanelNote("pg_statement_stats", statementsTask.Result.Count,
             "No statement accumulated execution time in this window.");
+        /* Same wording as get_pg_top_queries' evictions.note: unknown says so, a counter read as 0 says nothing. */
+        if (!statementsGatedOff && PgStatementEvictionNote.Build(evictionsTask.Result) is { } evictionNote)
+        {
+            PgStatementsNote.Text += " " + evictionNote;
+        }
 
         PgDatabaseStatsGrid.ItemsSource = databasesTask.Result.Select(PgDisplay.Database).ToList();
         PgDatabasesNote.Text = PanelNote("pg_database_stats", databasesTask.Result.Count,
