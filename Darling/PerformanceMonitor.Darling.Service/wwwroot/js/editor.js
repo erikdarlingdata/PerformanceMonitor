@@ -33,6 +33,8 @@ import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
 import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
+import { refreshChoiceOf } from "./refresh-policy.js";
+import { buildRefreshControl } from "./refresh-control.js";
 import * as derive from "./derive.js";
 
 /** The FORMATTERS keys the format pickers offer (mirrors util.js FORMATTERS). */
@@ -97,7 +99,7 @@ export async function renderEditor(main, id) {
     loadedVersion = res.data.version;
     model = viewToModel(res.data);
   } else {
-    model = { name: "", description: "", panels: [newPanel()], variables: [], rangeHours: null };
+    model = { name: "", description: "", panels: [newPanel()], variables: [], rangeHours: null, refresh: null };
   }
 
   buildEditor(main, { model, editingId, loadedVersion, catalog, fleet });
@@ -199,6 +201,7 @@ function viewToModel(view) {
     panels: panels.length ? panels : [newPanel()],
     variables: parseVariables(def.variables),
     rangeHours: def.range && typeof def.range.hours === "number" ? def.range.hours : null,
+    refresh: typeof def.refresh === "string" ? def.refresh : null,
   };
 }
 
@@ -372,6 +375,7 @@ function modelToDefinition(model) {
     .map((v) => (v.default ? { name: v.name, dimension: v.dimension, default: v.default } : { name: v.name, dimension: v.dimension }));
   if (variables.length) def.variables = variables;
   if (model.rangeHours) def.range = { hours: model.rangeHours };
+  if (model.refresh) def.refresh = model.refresh;
   return def;
 }
 
@@ -514,6 +518,8 @@ function buildEditor(main, ctx) {
     el("div", { class: "page-head" }, [
       el("a", { href: backHash, text: "← Back" }),
       el("h2", { text: ctx.editingId != null ? "Edit view" : "New view" }),
+      el("div", { class: "spacer" }),
+      buildRefreshControl(refreshChoiceOf(model, false), (choice) => { model.refresh = choice; }).root,
     ]),
     el("div", { class: "editor-meta" }, [field("Name", nameInput), field("Description", descInput)]),
     viewScopeSection,
