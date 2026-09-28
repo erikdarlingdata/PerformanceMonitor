@@ -23,6 +23,15 @@ public static class BenefitScorer
         "Scan Cardinality Misestimate", // Rule 32
     };
 
+    /// <summary>
+    /// #4512 follow-up: measured directly against a depth-999 tree shaped like this walk's own
+    /// recursion (<see cref="ScoreNodeTree"/>), the same way <see cref="PlanAnalyzer.Analyze"/>
+    /// was measured. It survives on a 1 MB caller thread (the plan viewer's WPF UI thread) down
+    /// to roughly 68 KB of stack, and on a 1.5 MB caller (the Darling service's analysis pass,
+    /// the analyze_plan_xml / analyze_query_plan / analyze_query_store_plan MCP tools, and the
+    /// web host that fronts them) with the same margin — well over 2x below either real caller,
+    /// so this walk needs no dedicated thread of its own.
+    /// </summary>
     public static void Score(ParsedPlan plan)
     {
         foreach (var batch in plan.Batches)
