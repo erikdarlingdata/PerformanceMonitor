@@ -112,7 +112,7 @@ public static partial class PlanAnalyzer
             {
                 var text = MaskCommentsAndLiterals(stmt.StatementText); // #4524
                 var hasMaxdop1InText = Regex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase);
-                var isTruncated = text.Length >= 3990;
+                var isTruncated = stmt.IsTextTruncated;
 
                 if (hasMaxdop1InText)
                 {
@@ -158,10 +158,17 @@ public static partial class PlanAnalyzer
                 {
                     var grantMB = grant.GrantedMemoryKB / 1024.0;
                     var usedMB = grant.MaxUsedMemoryKB / 1024.0;
+                    var message = $"Granted {grantMB:N0} MB but only used {usedMB:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.";
+
+                    // Note adaptive joins that chose Nested Loops at runtime — the grant
+                    // was sized for a hash join that never happened.
+                    if (stmt.RootNode != null && HasAdaptiveJoinChoseNestedLoop(stmt.RootNode))
+                        message += " An adaptive join in this plan executed as a Nested Loop at runtime — the memory grant was sized for the hash join alternative that wasn't used.";
+
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
                         WarningType = "Excessive Memory Grant",
-                        Message = $"Granted {grantMB:N0} MB but only used {usedMB:N0} MB ({wasteRatio:F0}x overestimate). The unused memory is reserved and unavailable to other queries.",
+                        Message = message,
                         Severity = PlanWarningSeverity.Warning
                     });
                 }
@@ -422,6 +429,23 @@ public static partial class PlanAnalyzer
                 });
             }
         }
+
+        // Rule 39: the plan's copy of the query text hit SQL Server's showplan cap.
+        // Everything downstream that reads this text — advice, Copy Query Text, Open in Query
+        // Editor — is working from a query that stops mid-statement.
+        if (stmt.IsTextTruncated)
+        {
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "Truncated Query Text",
+                Message =
+                    "SQL Server truncated this query's text at 4,000 characters when it wrote the plan, "
+                    + "so the query shown here stops early and is not valid T-SQL on its own. "
+                    + "Advice, copied text, and Open in Query Editor are all working from the shortened "
+                    + "version. Go back to the original query text to re-run or format it.",
+                Severity = PlanWarningSeverity.Info
+            });
+        }
     }
 
     private static void CheckForTableVariables(PlanNode node, bool isModification,
@@ -572,6 +596,15 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 6: Scalar UDF references (works on estimated plans too)
+        // Suppress when a Serial Plan finding is already on the statement for a UDF-related
+        // reason — that finding already explains the issue, so this would be redundant.
+        var serialPlanCoversUdf =
+            (stmt.NonParallelPlanReason is
+                "TSQLUserDefinedFunctionsNotParallelizable"
+                or "CLRUserDefinedFunctionRequiresDataAccess"
+                or "CouldNotGenerateValidParallelPlan")
+            && stmt.PlanWarnings.Any(w => w.WarningType == "Serial Plan");
+        if (!serialPlanCoversUdf)
         foreach (var udf in node.ScalarUdfs)
         {
             var type = udf.IsClrFunction ? "CLR" : "T-SQL";
@@ -611,7 +644,7 @@ public static partial class PlanAnalyzer
                     if (stmtMs > 0 && operatorMs > 0)
                     {
                         var pct = (double)operatorMs / stmtMs;
-                        w.Message += $" Operator time: {operatorMs:N0}ms ({pct:P0} of statement).";
+                        w.Message += $" Operator time: {operatorMs:N0}ms ({pct * 100:N0}% of statement).";
                     }
                 }
             }
@@ -624,7 +657,7 @@ public static partial class PlanAnalyzer
                 if (stmtMs > 0)
                 {
                     var pct = (double)operatorMs / stmtMs;
-                    w.Message += $" Operator time: {operatorMs:N0}ms ({pct:P0} of statement).";
+                    w.Message += $" Operator time: {operatorMs:N0}ms ({pct * 100:N0}% of statement).";
 
                     if (pct >= 0.5)
                         w.Severity = PlanWarningSeverity.Critical;
@@ -651,7 +684,7 @@ public static partial class PlanAnalyzer
                 var skewThreshold = workerThreads.Count <= 2 ? 0.80 : 0.50;
                 if (skewRatio >= skewThreshold)
                 {
-                    var message = $"Thread {maxThread.ThreadId} processed {skewRatio:P0} of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.";
+                    var message = $"Thread {maxThread.ThreadId} processed {skewRatio * 100:N0}% of rows ({maxThread.ActualRows:N0}/{totalRows:N0}). Work is heavily skewed to one thread, so parallelism isn't helping much.";
                     var severity = PlanWarningSeverity.Warning;
 
                     // Batch mode sorts produce all output on a single thread by design
@@ -1337,6 +1370,23 @@ public static partial class PlanAnalyzer
             return false;
 
         return true;
+    }
+
+    /// <summary>
+    /// Returns true if the plan contains an adaptive join that executed as a Nested Loop.
+    /// Indicates a memory grant was sized for the hash alternative but never needed.
+    /// </summary>
+    private static bool HasAdaptiveJoinChoseNestedLoop(PlanNode node)
+    {
+        if (node.IsAdaptive && node.ActualJoinType != null
+            && node.ActualJoinType.Contains("Nested", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        foreach (var child in node.Children)
+            if (HasAdaptiveJoinChoseNestedLoop(child))
+                return true;
+
+        return false;
     }
 
     /// <summary>
