@@ -54,7 +54,7 @@ public partial class ViewerServerTab
     private async Task OpenPlanTab(string planXml, string label, string? queryText = null)
     {
         HidePlanLoading();
-        var viewer = new PlanViewerControl();
+        var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = ViewerExportSettings.AccuracyRatioDivergenceLimit };
         try
         {
             await viewer.LoadPlan(planXml, label, queryText);

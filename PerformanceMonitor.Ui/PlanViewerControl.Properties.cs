@@ -813,8 +813,7 @@ public partial class PlanViewerControl
                 AddPropertySection("Plan Warnings");
                 foreach (var w in PlanWarningDisplay.OrderByBenefit(s.PlanWarnings))
                 {
-                    var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
-                        : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
                     var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
                     var planWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
                     var planWarnHeaderBlock = new TextBlock
@@ -834,6 +833,18 @@ public partial class PlanViewerControl
                         TextWrapping = TextWrapping.Wrap,
                         Margin = new Thickness(16, 0, 0, 0)
                     });
+                    if (!string.IsNullOrEmpty(w.ActionableFix))
+                    {
+                        warnPanel.Children.Add(new TextBlock
+                        {
+                            Text = w.ActionableFix,
+                            FontSize = 11,
+                            FontStyle = FontStyles.Italic,
+                            Foreground = TooltipFgBrush,
+                            TextWrapping = TextWrapping.Wrap,
+                            Margin = new Thickness(16, 2, 0, 0)
+                        });
+                    }
                     (_currentPropertySection ?? PropertiesContent).Children.Add(warnPanel);
                 }
             }
@@ -857,8 +868,7 @@ public partial class PlanViewerControl
             AddPropertySection("Warnings");
             foreach (var w in PlanWarningDisplay.OrderByBenefit(node.Warnings))
             {
-                var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
-                    : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
                 var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
                 var opWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
                 var opWarnHeaderBlock = new TextBlock
@@ -878,6 +888,18 @@ public partial class PlanViewerControl
                     TextWrapping = TextWrapping.Wrap,
                     Margin = new Thickness(16, 0, 0, 0)
                 });
+                if (!string.IsNullOrEmpty(w.ActionableFix))
+                {
+                    warnPanel.Children.Add(new TextBlock
+                    {
+                        Text = w.ActionableFix,
+                        FontSize = 11,
+                        FontStyle = FontStyles.Italic,
+                        Foreground = TooltipFgBrush,
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(16, 2, 0, 0)
+                    });
+                }
                 PropertiesContent.Children.Add(warnPanel);
             }
         }
