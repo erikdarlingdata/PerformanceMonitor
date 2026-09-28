@@ -152,6 +152,11 @@ public sealed class QueryStoreBackfill
        the two paths at the compile-time 64 MB, which is precisely the drain the knob exists to shorten. */
     private readonly Func<int> _textBudgetMb;
 
+    /* #4659: called with the server id after a batch of BACKDATED rows is written. The alert pass's
+       forced-plan failure read saves its answer keyed on the newest collection, and a backdated row does
+       not move that, so the writer has to say so. */
+    private readonly Action<int>? _onBackdatedBatchWritten;
+
     public QueryStoreBackfill(
         NpgsqlDataSource postgres,
         DarlingCollectorRunner runner,
@@ -159,7 +164,8 @@ public sealed class QueryStoreBackfill
         ILogger? logger,
         Func<bool>? capturePlans = null,
         Func<int>? textBudgetMb = null,
-        Func<bool>? hasContinuousAggregates = null)
+        Func<bool>? hasContinuousAggregates = null,
+        Action<int>? onBackdatedBatchWritten = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runner = runner ?? throw new ArgumentNullException(nameof(runner));
@@ -169,6 +175,7 @@ public sealed class QueryStoreBackfill
         /* Null provider = keep the collector's compile-time budget (tests and any non-Darling host). */
         _textBudgetMb = textBudgetMb ?? (() => 0);
         _hasContinuousAggregates = hasContinuousAggregates ?? (() => true);
+        _onBackdatedBatchWritten = onBackdatedBatchWritten;
     }
 
     /// <summary>
@@ -422,6 +429,10 @@ public sealed class QueryStoreBackfill
         /* Backdated so the rows land beside their own activity — see the class doc's horizon
            contract. The ceiling, not each row's interval, keeps the write one batch. */
         var written = await _runner.WriteBackfillBatchAsync(definition, rows, server, ceilingUtc, context, cancellationToken);
+        if (written > 0)
+        {
+            _onBackdatedBatchWritten?.Invoke(server.ServerId);
+        }
 
         var boundary = context.PerItemShippedBoundary;
         if (isHole)

@@ -102,6 +102,51 @@ public sealed class ForcePlanFailuresMemoLiveTests
         Assert.Equal(await DirectAsync(connection, ct), third.Select(f => (f.PlanId, f.FailureDelta, f.TotalFailures)).ToList());
     }
 
+    [Fact]
+    public async Task ABackdatedCollection_LeavesTheMemoStale_UntilTheBackfillInvalidatesIt()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the #4659 invalidation live test.");
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        if (await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct))
+        {
+            await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        }
+
+        var now = DateTime.UtcNow;
+        var t0 = DateTime.SpecifyKind(new DateTime(now.Ticks - (now.Ticks % 10)), DateTimeKind.Unspecified).AddMinutes(-30);
+        await SeedAsync(connection, t0, 10, 3, 0, ct);
+        await SeedAsync(connection, t0.AddMinutes(10), 10, 5, 0, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var adapter = new DarlingAlertReadAdapter(postgres);
+        var key = ServerId.ToString(CultureInfo.InvariantCulture);
+
+        var first = await adapter.GetForcePlanFailuresAsync(key, ct);
+        Assert.Equal(2L, Assert.Single(first).FailureDelta);
+
+        /* A backdated collection between the two: it becomes the older sighting (4 -> 5 is a delta of 1) and the
+           newest collection does not move, so the probe alone cannot see it. */
+        await SeedAsync(connection, t0.AddMinutes(5), 10, 4, 0, ct);
+        var direct = await DirectAsync(connection, ct);
+        Assert.Equal(1L, Assert.Single(direct).FailureDelta);
+
+        var stale = await adapter.GetForcePlanFailuresAsync(key, ct);
+        Assert.Equal(1, adapter.ForcePlanFailuresFullReads);
+        Assert.NotEqual(direct, stale.Select(f => (f.PlanId, f.FailureDelta, f.TotalFailures)).ToList());
+
+        adapter.InvalidateForcePlanFailures(ServerId);
+        var fresh = await adapter.GetForcePlanFailuresAsync(key, ct);
+        Assert.Equal(2, adapter.ForcePlanFailuresFullReads);
+        Assert.Equal(direct, fresh.Select(f => (f.PlanId, f.FailureDelta, f.TotalFailures)).ToList());
+    }
+
     private static async Task<List<(long PlanId, long FailureDelta, long TotalFailures)>> DirectAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
     {
         var result = new List<(long, long, long)>();

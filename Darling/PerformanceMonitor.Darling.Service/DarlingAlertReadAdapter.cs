@@ -1847,6 +1847,14 @@ AND   qs.collection_time > $2";
 
     private readonly ConcurrentDictionary<int, ForcePlanFailuresMemo> _forcePlanFailuresMemo = new();
 
+    /// <summary>
+    /// Drops one server's saved forced-plan failure answer (#4659). The Query Store backfill writes
+    /// BACKDATED collections, so a batch can change which two collections the failure delta compares
+    /// without moving the newest collection the probe looks at; the backfill calls this after each
+    /// batch it writes so the next pass re-reads.
+    /// </summary>
+    internal void InvalidateForcePlanFailures(int serverId) => _forcePlanFailuresMemo.TryRemove(serverId, out _);
+
     /// <summary>Number of times the full forced-plan failure read has run on this adapter (#4659).</summary>
     internal int ForcePlanFailuresFullReads;
 
