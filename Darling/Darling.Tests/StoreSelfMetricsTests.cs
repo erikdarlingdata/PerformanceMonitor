@@ -263,11 +263,11 @@ public sealed class StoreSelfMetricsTests
     }
 
     /// <summary>
-    /// #3582: the three product-owned plain tables the walk used to lump are named, schema-qualified, sized
-    /// with <c>pg_total_relation_size</c> and row-counted from the planner's estimate — and the census predicate that keeps them OUT
-    /// of the catch-all names the same three by <c>(schema, relation)</c>. The two halves are pinned
-    /// against each other: a table named here and not there would be counted twice, one named there and
-    /// not here would vanish from both.
+    /// #3582, extended #4609: the seven product-owned plain tables the walk used to lump are named,
+    /// schema-qualified, sized with <c>pg_total_relation_size</c> and row-counted from the planner's
+    /// estimate — and the census predicate that keeps them OUT of the catch-all names the same seven by
+    /// <c>(schema, relation)</c>. The two halves are pinned against each other: a table named here and
+    /// not there would be counted twice, one named there and not here would vanish from both.
     /// </summary>
     [Fact]
     public void TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose()
@@ -680,8 +680,8 @@ public sealed class StoreSelfMetricsTests
     ///
     /// <para><b>#3582 extends it to the kinds the inventory was blind to, and to the reconciliation.</b>
     /// The aggregates are created first (<see cref="TimescaleSupport.EnsureContinuousAggregatesAsync"/>), so
-    /// one run must also write one <c>continuous_aggregate</c> row per rollup view, the three named
-    /// <c>table</c> rows, exactly one <c>other</c> and one <c>system</c> row, and the owner's
+    /// one run must also write one <c>continuous_aggregate</c> row per rollup view, one <c>table</c> row per
+    /// name <see cref="StoreSelfMetrics.TableInsertSql"/> carries, exactly one <c>other</c> and one <c>system</c> row, and the owner's
     /// <c>job_history</c> row — and the rows of that one sweep, read back through the real MCP reader and
     /// its real reconciliation, must RECONCILE against the sweep's own <c>pg_database_size</c>: every byte
     /// attributed to some row, residual inside the bar, no object left over from an older sweep. On a rig
@@ -715,6 +715,11 @@ public sealed class StoreSelfMetricsTests
         var written = await StoreSelfMetrics.SweepAsync(
             connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
         Assert.True(written > 0, "the sweep wrote nothing");
+
+        /* One table row per name TableInsertSql carries — the same source the census test
+           (TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose) pins, so this
+           count cannot drift from the product's own named-table list. */
+        var expectedTableRows = StoreSelfMetrics.TableInsertSql.Split("UNION ALL").Length;
 
         await using var kinds = new NpgsqlCommand($@"
 SELECT
@@ -755,7 +760,7 @@ FROM collect.store_metrics", connection);
         Assert.True(aggregatesInCatalog > 0, "EnsureContinuousAggregatesAsync left no aggregates to inventory");
         Assert.Equal(aggregatesInCatalog, reader.GetInt64(5));
         Assert.Equal(aggregatesInCatalog, reader.GetInt64(6));
-        Assert.Equal(3, reader.GetInt64(7));
+        Assert.Equal(expectedTableRows, reader.GetInt64(7));
         Assert.Equal(1, reader.GetInt64(8));
         Assert.Equal(1, reader.GetInt64(9));
         Assert.Equal(1, reader.GetInt64(10));
