@@ -1176,6 +1176,11 @@ public partial class PlanViewerControl
         if (statement.QueryTimeStats != null)
         {
             AddRow("Elapsed", $"{statement.QueryTimeStats.ElapsedTimeMs:N0}ms");
+            // CPU:Elapsed row: matches erikdarlingdata/PerformanceStudio@28d4c74 (position right after
+            // Elapsed, and CPU with external-wait time subtracted via BenefitScorer.IsExternalWait).
+            var cpuElapsedRatio = PlanDisplayText.CpuElapsedRatio(statement);
+            if (cpuElapsedRatio != null)
+                AddRow("CPU:Elapsed", cpuElapsedRatio.Value.ToString("N2"));
             AddRow("CPU", $"{statement.QueryTimeStats.CpuTimeMs:N0}ms");
             if (statement.QueryUdfCpuTimeMs > 0)
                 AddRow("UDF CPU", $"{statement.QueryUdfCpuTimeMs:N0}ms");

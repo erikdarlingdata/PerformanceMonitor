@@ -626,7 +626,7 @@ jobs:
         run: |
           # Pin vpk to the Velopack library version (keep in sync with the Velopack
           # PackageReference in PerformanceMonitorLite.csproj).
-          dotnet tool install -g vpk --version 1.2.0
+          dotnet tool install -g vpk --version 1.2.158
           New-Item -ItemType Directory -Force -Path releases/velopack-lite
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
 

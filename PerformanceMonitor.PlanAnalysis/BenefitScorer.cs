@@ -128,24 +128,6 @@ public static class BenefitScorer
         {
             switch (warning.WarningType)
             {
-                case "Ineffective Parallelism":   // Rule 25
-                case "Parallel Wait Bottleneck":  // Rule 31
-                    // These are meta-findings about parallelism efficiency.
-                    // The benefit is the gap between actual and ideal elapsed time.
-                    if (elapsedMs > 0 && stmt.QueryTimeStats != null)
-                    {
-                        var cpu = stmt.QueryTimeStats.CpuTimeMs;
-                        var dop = stmt.DegreeOfParallelism;
-                        if (dop > 1 && cpu > 0)
-                        {
-                            // Ideal elapsed = CPU / DOP. Benefit = (actual - ideal) / actual
-                            var idealElapsed = (double)cpu / dop;
-                            var benefit = Math.Max(0, (elapsedMs - idealElapsed) / elapsedMs * 100);
-                            warning.MaxBenefitPercent = Math.Min(100, Math.Round(benefit, 1));
-                        }
-                    }
-                    break;
-
                 case "Serial Plan": // Rule 3
                     // Benefit = (cpu * (DOP - 1) / DOP) / elapsed * 100, assuming DOP 4 when
                     // the plan doesn't say otherwise. No benefit for a trivial statement
@@ -237,7 +219,7 @@ public static class BenefitScorer
             // Parallel Skew (Rule 8 — will be integrated per-operator later),
             // Data Type Mismatch (Rule 13),
             // Lazy Spool Ineffective (Rule 14), Join OR Clause (Rule 15),
-            // Many-to-Many Merge Join (Rule 17), CTE Multiple References (Rule 21),
+            // Many-to-Many Merge Join (Rule 17),
             // Table Variable (Rule 22), Table-Valued Function (Rule 23),
             // Top Above Scan (Rule 24), Row Goal (Rule 26),
             // NOT IN with Nullable Column (Rule 28), Implicit Conversion (Rule 29),
