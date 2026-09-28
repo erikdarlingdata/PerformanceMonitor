@@ -307,8 +307,15 @@ public sealed class PgLogEventsPipelineTests
     [Fact]
     public void R4_ABoundaryLengthName_IsRefusedAtTheBoundary_AndKeptOneByteOver()
     {
-        var atBoundary = P + "[4102] LOG: " + new string('x', 62) + " ERROR:  y\n";
-        var overBoundary = P + "[4102] LOG: " + new string('x', 63) + " ERROR:  y\n";
+        /* The rule refuses when matchedLabel.Length + 3 (":  ") + the run's length up to (not including) the
+           next label <= 63 + separator.Length (1, for PrefixWithA's trailing space). "LOG" is 3 bytes, and the
+           label's own ":  " needs its full two spaces (a single space, as an earlier draft used, never matches
+           the label alternation at all, so "LOG" would not be the matched label). The run up to the next label's
+           start (the space before ERROR plus ERROR's own leading run) is boundaryRunLength + 1 bytes, so the
+           boundary is where 3 + 3 + (boundaryRunLength + 1) == 63 + 1. */
+        const int boundaryRunLength = 63 + 1 - 3 /* "LOG".Length */ - 3 /* ":  " */ - 1 /* the space before ERROR */;
+        var atBoundary = P + "[4102] LOG:  " + new string('x', boundaryRunLength) + " ERROR:  y\n";
+        var overBoundary = P + "[4102] LOG:  " + new string('x', boundaryRunLength + 1) + " ERROR:  y\n";
 
         Assert.Empty(PgLogEntryAssembler.Assemble(atBoundary, logTimezoneIsUtc: false, logLinePrefix: PrefixWithA, out _));
 
@@ -2313,11 +2320,16 @@ public sealed class PgLogEventsPipelineTests
     {
         const string plan = "{\"Plan\": {\"Node Type\": \"Result\", \"Total Cost\": 0.01}}";
         var context = TestContext();
+
+        /* #4501's plan-capture SQL added a fourth column, line_prefix (the target's collected
+           log_line_prefix). Null here (not collected) keeps this route's pre-#4501 behaviour of
+           trusting the query id capture unconditionally — this test is about the NULL id/duration
+           guard, not the prefix-aware query id gate. */
         using var reader = new FakeReader(new object?[][]
         {
-            new object?[] { null, 1.0, plan },
-            new object?[] { 43L, null, plan },
-            new object?[] { 42L, 12.345, plan },
+            new object?[] { null, 1.0, plan, null },
+            new object?[] { 43L, null, plan, null },
+            new object?[] { 42L, 12.345, plan, null },
         });
 
         var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
