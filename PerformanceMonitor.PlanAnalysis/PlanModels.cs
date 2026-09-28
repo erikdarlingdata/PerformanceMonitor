@@ -54,7 +54,23 @@ public class PlanBatch
 
 public class PlanStatement
 {
+    /// <summary>
+    /// SQL Server caps StatementText at 4,000 characters when it writes showplan XML, so a
+    /// statement at or near that length is almost certainly missing its tail. The few characters
+    /// of margin absorb the trimming the server does around the boundary.
+    /// </summary>
+    public const int TruncationLengthThreshold = 3990;
+
     public string StatementText { get; set; } = "";
+
+    /// <summary>
+    /// True when <see cref="StatementText"/> looks like it hit the showplan cap. The plan carries
+    /// no marker for this, so length is the only signal there is — and the consequence is not
+    /// cosmetic: a statement cut mid-token is not valid T-SQL, so anything that tries to re-run or
+    /// format it fails for reasons that look unrelated to the plan.
+    /// </summary>
+    public bool IsTextTruncated => StatementText.Length >= TruncationLengthThreshold;
+
     public string StatementType { get; set; } = "";
     public double StatementSubTreeCost { get; set; }
     public double StatementEstRows { get; set; }
@@ -413,6 +429,18 @@ public class PlanWarning
     /// can be wrong about a particular plan in a way the engine's own record cannot be.
     /// </summary>
     public PlanWarningSource Source { get; set; } = PlanWarningSource.Analyzer;
+
+    /// <summary>
+    /// The operators this finding actually came from, so a reader can be taken to them (#4534).
+    ///
+    /// <para>A list rather than a single id, because the honest answers are genuinely different.
+    /// A key lookup came from exactly one operator. A table variable warning came from every
+    /// operator that touched one, which on a big plan is several. And some findings have no
+    /// operator at all — "High Compile CPU" happened before a single row was read, and
+    /// "UDF Execution" is reported by SQL Server at the statement level only. Those keep this
+    /// empty, so a consumer offers no navigation rather than picking somewhere arbitrary.</para>
+    /// </summary>
+    public List<int> OriginNodeIds { get; set; } = new();
 
     /// <summary>
     /// Maximum percentage of elapsed time that could be saved by addressing this finding.

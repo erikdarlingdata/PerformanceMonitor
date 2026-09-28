@@ -34,4 +34,11 @@
          also pins the executor's internal plan-capture seam (IActualPlanResultReader) with a scripted reader. -->
     <InternalsVisibleTo Include="Darling.Tests" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Curated wait-type descriptions read by WaitStatsConfig at runtime (BenefitScorer's
+         "Wait: type" findings). Ships with the assembly so Darling, Lite, and the viewer all
+         read the same copy through their shared ProjectReference, so there is no per-app copy. -->
+    <EmbeddedResource Include="Resources\WaitStats.json" />
+  </ItemGroup>
 </Project>
