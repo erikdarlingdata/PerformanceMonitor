@@ -1953,7 +1953,7 @@ public static class ShowPlanParser
     /// SQL Server internally pads #temp names with underscores to 116 chars, then appends a hex suffix.
     /// e.g. "#comment_sil_vous_plait_______________________________0000000000A86" → "#comment_sil_vous_plait"
     /// </summary>
-    private static string CleanTempTableName(string name)
+    internal static string CleanTempTableName(string name)
     {
         if (name.Length == 0 || name[0] != '#') return name;
 
