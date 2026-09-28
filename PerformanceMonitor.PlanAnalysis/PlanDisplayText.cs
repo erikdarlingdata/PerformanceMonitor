@@ -117,14 +117,12 @@ public static class PlanDisplayText
     /// <summary>
     /// Builds the runtime summary card's rows in erikdarlingdata/PerformanceStudio@40ade29 (E11)'s
     /// order: Elapsed, CPU:Elapsed, DOP (or Serial reason), CPU, UDF CPU, UDF elapsed, Compile,
-    /// Cached plan size, Memory grant (plus any <paramref name="extraMemoryGrantRows"/> — a hook for
-    /// #4569's estimated desired/required grant rows, inserted right after the granted/used row and
-    /// before Grant wait), Branches, Threads, Optimization, Early abort, CE model. A row is omitted
-    /// entirely when its underlying value isn't present, matching the WPF card's own omission rules.
+    /// Cached plan size, Memory grant, Branches, Threads, Optimization, Early abort, CE model. A row
+    /// is omitted entirely when its underlying value isn't present, matching the WPF card's own
+    /// omission rules.
     /// </summary>
     public static IReadOnlyList<RuntimeSummaryRow> BuildRuntimeSummaryRows(
-        PlanStatement statement,
-        IReadOnlyList<RuntimeSummaryRow>? extraMemoryGrantRows = null)
+        PlanStatement statement)
     {
         var rows = new List<RuntimeSummaryRow>();
         var stats = statement.QueryTimeStats;
@@ -186,9 +184,6 @@ public static class PlanDisplayText
                 "Memory grant",
                 $"{FormatMemoryGrantKB(mg.GrantedMemoryKB)} granted, {FormatMemoryGrantKB(mg.MaxUsedMemoryKB)} used ({grantPct:N0}%){spillTag}",
                 grantColorKey));
-
-            if (extraMemoryGrantRows != null)
-                rows.AddRange(extraMemoryGrantRows);
 
             if (mg.GrantWaitTimeMs > 0)
                 rows.Add(new RuntimeSummaryRow("Grant wait", $"{mg.GrantWaitTimeMs:N0}ms", "ErrorBrush"));

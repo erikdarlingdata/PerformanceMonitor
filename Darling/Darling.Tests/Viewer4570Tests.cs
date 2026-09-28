@@ -181,23 +181,6 @@ public sealed class Viewer4570Tests
     }
 
     [Fact]
-    public void BuildRuntimeSummaryRows_ExtraMemoryGrantRows_InsertedAfterGrantedUsedBeforeGrantWait()
-    {
-        var stmt = Statement();
-        stmt.MemoryGrant = new MemoryGrantInfo
-        {
-            GrantedMemoryKB = 1024,
-            MaxUsedMemoryKB = 512,
-            GrantWaitTimeMs = 10
-        };
-
-        var extra = new[] { new RuntimeSummaryRow("Desired", "2,048 KB") };
-        var labels = PlanDisplayText.BuildRuntimeSummaryRows(stmt, extra).Select(r => r.Label).ToArray();
-
-        Assert.Equal(new[] { "Memory grant", "Desired", "Grant wait" }, labels);
-    }
-
-    [Fact]
     public void BuildRuntimeSummaryRows_CompileTime_AlwaysShownRegardlessOfOtherStats()
     {
         var stmt = Statement();
