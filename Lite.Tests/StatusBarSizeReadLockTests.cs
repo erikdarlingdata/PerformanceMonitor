@@ -33,8 +33,8 @@ namespace PerformanceMonitorLite.Tests;
 /// budget. But either proof alone, for the READ under test, is not enough. Asserting only "it took a
 /// lock" would pass a fix that hangs the UI instead of giving up, which is why this test also measures —
 /// with a <c>Stopwatch</c> started INSIDE the read's own task, so thread-pool scheduling delay under load
-/// isn't charged against it — that the read returns well under <see cref="GaveUpCeiling"/>, an order of
-/// magnitude below the ten-second hold it must not have waited for. And a wall clock alone cannot tell
+/// isn't charged against it — that the read returns well under <see cref="GaveUpCeiling"/>, a fifth of
+/// the ten-second hold it must not have waited for. And a wall clock alone cannot tell
 /// "gave up early" from "got lucky and the writer had just released", so this also asserts the one thing
 /// that actually distinguishes them: when <c>GetUsedDataSizeMb()</c> returns, the holder has NOT yet been
 /// released.</para>
@@ -59,7 +59,7 @@ public class StatusBarSizeReadLockTests
     /// fix that hangs the UI instead of giving up — that is why this test also measures the time.
     /// Generous against the 100ms <c>StatusBarReadLockTimeout</c> budget it is checking (a CI machine
     /// under load can overshoot 100ms without the give-up behavior being wrong), but strictly below
-    /// <see cref="WriteLockHold"/> by an order of magnitude, so the distinction it draws is against a wait
+    /// <see cref="WriteLockHold"/>, a fifth of it, so the distinction it draws is against a wait
     /// for the writer's full hold, not against the read's own soft budget.
     /// </summary>
     private static readonly TimeSpan GaveUpCeiling = TimeSpan.FromSeconds(2);
