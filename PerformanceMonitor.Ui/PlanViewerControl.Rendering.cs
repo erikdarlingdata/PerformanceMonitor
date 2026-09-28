@@ -449,5 +449,31 @@ public partial class PlanViewerControl
         return $"{bytes / (1024L * 1024 * 1024):N1} GB";
     }
 
+    /// <summary>
+    /// Turns a warning header into a link to the operator it came from (#4534), when the warning
+    /// knows one. Findings with no operator origin are left as plain text rather than given a link
+    /// that would go somewhere arbitrary, because a reader would believe it.
+    /// </summary>
+    private void AttachOriginNavigation(TextBlock header, string headerText, List<int> originNodeIds)
+    {
+        var nav = PlanWarningDisplay.OriginNavigationText(originNodeIds);
+        if (nav == null)
+            return;
+
+        header.Text = headerText + nav.Value.Suffix;
+        header.Cursor = Cursors.Hand;
+        /* Text with no background only hit-tests the pixels its glyphs drew, so both the hand cursor
+           and the click below would die in the gaps between words. This is a navigation target; it
+           needs the whole line to be clickable. */
+        header.Background = Brushes.Transparent;
+        ToolTipService.SetToolTip(header, nav.Value.Tooltip);
+
+        header.MouseLeftButtonDown += (_, e) =>
+        {
+            if (TryNavigateToNode(originNodeIds[0]))
+                e.Handled = true;
+        };
+    }
+
     #endregion
 }
