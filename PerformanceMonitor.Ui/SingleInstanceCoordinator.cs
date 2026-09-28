@@ -20,6 +20,61 @@ namespace PerformanceMonitor.Ui
     public static class HandoffArgs
     {
         public const string AutoConfirm = "--upgrade-takeover";
+
+        /// <summary>
+        /// The command line for the elevated relaunch, PURE: the first launch's arguments in order, with
+        /// <see cref="AutoConfirm"/> added exactly once, each quoted for the Windows command line.
+        /// </summary>
+        public static string BuildRelaunchArguments(IEnumerable<string> originalArgs)
+        {
+            var args = originalArgs.ToList();
+            if (!args.Any(a => string.Equals(a, AutoConfirm, StringComparison.OrdinalIgnoreCase)))
+                args.Add(AutoConfirm);
+            return QuoteWindowsArgs(args);
+        }
+
+        private static readonly System.Buffers.SearchValues<char> NeedsQuoting = System.Buffers.SearchValues.Create(" \t\"");
+
+        /// <summary>Joins arguments into one Windows command-line string using the standard
+        /// CommandLineToArgvW rules: quote when empty or holding a space, tab or quote; double the
+        /// backslashes that precede a quote or the closing quote; escape embedded quotes.</summary>
+        public static string QuoteWindowsArgs(IEnumerable<string> args)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var arg in args)
+            {
+                if (sb.Length > 0)
+                    sb.Append(' ');
+                if (arg.Length > 0 && arg.AsSpan().IndexOfAny(NeedsQuoting) < 0)
+                {
+                    sb.Append(arg);
+                    continue;
+                }
+
+                sb.Append('"');
+                var backslashes = 0;
+                foreach (var c in arg)
+                {
+                    if (c == '\\')
+                    {
+                        backslashes++;
+                        continue;
+                    }
+
+                    if (c == '"')
+                        sb.Append('\\', backslashes * 2 + 1);
+                    else
+                        sb.Append('\\', backslashes);
+                    backslashes = 0;
+                    sb.Append(c);
+                }
+
+                sb.Append('\\', backslashes * 2);
+                sb.Append('"');
+            }
+
+            return sb.ToString();
+        }
     }
 
     /// <summary>App-supplied dialogs for the handoff. Implemented per app (WPF MessageBox), kept out of
@@ -278,7 +333,7 @@ namespace PerformanceMonitor.Ui
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = exe,
-                    Arguments = HandoffArgs.AutoConfirm,
+                    Arguments = HandoffArgs.BuildRelaunchArguments(Environment.GetCommandLineArgs().Skip(1)),
                     UseShellExecute = true,
                     Verb = "runas",
                 });
