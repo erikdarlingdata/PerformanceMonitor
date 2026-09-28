@@ -209,6 +209,7 @@ public static class McpPlanAnalysisFormatter
                         granted_kb = s.MemoryGrant.GrantedMemoryKB,
                         max_used_kb = s.MemoryGrant.MaxUsedMemoryKB,
                         desired_kb = s.MemoryGrant.DesiredMemoryKB,
+                        serial_required_kb = s.MemoryGrant.SerialRequiredMemoryKB,
                         grant_wait_ms = s.MemoryGrant.GrantWaitTimeMs,
                         feedback = s.MemoryGrant.IsMemoryGrantFeedbackAdjusted
                     },
