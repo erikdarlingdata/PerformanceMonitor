@@ -32,17 +32,22 @@ public sealed class CompressAfterStaggerLiveTests
     [Fact]
     public async Task EndToEnd_ConvergeCompressionSchedule_StaggersHeavyTables_AndSettles_AgainstDevPostgres()
     {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live compress_after stagger converge test.");
 
         var ct = TestContext.Current.CancellationToken;
 
-        using var connection = new NpgsqlConnection(connectionString);
+        /* #1776 own-store: a fresh ScratchPostgres database instead of the shared DARLING_TEST_PG
+           database, which other live classes read the compression jobs of concurrently. */
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        using var connection = new NpgsqlConnection(scratch.ConnectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
-        Assert.True(await TimescaleSupport.TryEnableAsync(connection, null, ct),
-            "the dev fixture is expected to have TimescaleDB installed");
+
+        var timescaleEnabled = await LiveTimescaleProbe.TryEnableAsync(scratch.ConnectionString, ct);
+        Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the compress_after stagger converge test");
+
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
 
         /* Two REAL collector hypertables in TimescaleSupport.HeavyCompressAfterOffsetHours, and a real one
@@ -66,8 +71,6 @@ public sealed class CompressAfterStaggerLiveTests
         await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{HeavyB}"), ct);
         await ExecAsync(connection, TimescaleSupport.EnableCompressionSql($"collect.{NonHeavy}"), ct);
 
-        var bodySucceeded = false;
-        try
         {
             /* (a) THE OLD WAY: every table on the shared, unstaggered day — the pre-#4510 state every
                deployed store is in. */
@@ -112,17 +115,6 @@ public sealed class CompressAfterStaggerLiveTests
             var secondConverged = await TimescaleSupport.ConvergeCompressionScheduleAsync(connection, secondLog, ct);
             Assert.Equal(0, secondConverged);
             Assert.DoesNotContain("eligibility delay (#4510)", secondLog.Joined, StringComparison.Ordinal);
-
-            bodySucceeded = true;
-        }
-        finally
-        {
-            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, async (cleanup, cleanupCt) =>
-            {
-                await ExecAsync(cleanup, $"SELECT add_compression_policy('collect.{HeavyA}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterFor(HeavyA)}', if_not_exists => true)", cleanupCt);
-                await ExecAsync(cleanup, $"SELECT add_compression_policy('collect.{HeavyB}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterFor(HeavyB)}', if_not_exists => true)", cleanupCt);
-                await ExecAsync(cleanup, $"SELECT add_compression_policy('collect.{NonHeavy}', compress_after => INTERVAL '{TimescaleSupport.CompressAfterFor(NonHeavy)}', if_not_exists => true)", cleanupCt);
-            });
         }
     }
 
