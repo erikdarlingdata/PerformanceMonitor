@@ -44,7 +44,7 @@ public sealed class PlanSync4536Tests
             PlanAnalyzer.Analyze(plan);
 
             var resultNode = plan.Batches[0].Statements[0].RootNode!;
-            var warning = Assert.Single(resultNode.Warnings.Where(w => w.WarningType == "Parallel Skew"));
+            var warning = Assert.Single(resultNode.Warnings, w => w.WarningType == "Parallel Skew");
 
             Assert.Contains("100%", warning.Message);
             Assert.DoesNotContain("100 %", warning.Message);

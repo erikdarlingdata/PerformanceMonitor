@@ -52,7 +52,7 @@ public sealed class PlanSync4532Tests
         var plan = Analyze(stmt);
         var result = plan.Batches[0].Statements[0];
 
-        var warning = Assert.Single(result.PlanWarnings.Where(w => w.WarningType == "Truncated Query Text"));
+        var warning = Assert.Single(result.PlanWarnings, w => w.WarningType == "Truncated Query Text");
         Assert.Equal(PlanWarningSeverity.Info, warning.Severity);
         Assert.Contains("4,000 characters", warning.Message);
     }

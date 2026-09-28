@@ -51,7 +51,7 @@ public sealed class PlanSync4531Tests
         var plan = Analyze(StatementWithExcessiveGrant(root));
         var stmt = plan.Batches[0].Statements[0];
 
-        var warning = Assert.Single(stmt.PlanWarnings.Where(w => w.WarningType == "Excessive Memory Grant"));
+        var warning = Assert.Single(stmt.PlanWarnings, w => w.WarningType == "Excessive Memory Grant");
         Assert.Contains("adaptive join", warning.Message);
         Assert.Contains("Nested Loop", warning.Message);
     }
@@ -69,7 +69,7 @@ public sealed class PlanSync4531Tests
         var plan = Analyze(StatementWithExcessiveGrant(root));
         var stmt = plan.Batches[0].Statements[0];
 
-        var warning = Assert.Single(stmt.PlanWarnings.Where(w => w.WarningType == "Excessive Memory Grant"));
+        var warning = Assert.Single(stmt.PlanWarnings, w => w.WarningType == "Excessive Memory Grant");
         Assert.DoesNotContain("adaptive join", warning.Message);
     }
 
@@ -80,7 +80,7 @@ public sealed class PlanSync4531Tests
         var plan = Analyze(StatementWithExcessiveGrant(root));
         var stmt = plan.Batches[0].Statements[0];
 
-        var warning = Assert.Single(stmt.PlanWarnings.Where(w => w.WarningType == "Excessive Memory Grant"));
+        var warning = Assert.Single(stmt.PlanWarnings, w => w.WarningType == "Excessive Memory Grant");
         Assert.DoesNotContain("adaptive join", warning.Message);
     }
 }
