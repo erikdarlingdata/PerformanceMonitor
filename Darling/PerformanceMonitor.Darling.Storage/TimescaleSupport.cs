@@ -366,7 +366,97 @@ public static partial class TimescaleSupport
             ? $", initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '{phase.ToString(CultureInfo.InvariantCulture)} minutes'"
             : string.Empty;
 
-        return $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterDays} days', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true{initialStart})";
+        return $"SELECT add_compression_policy('{table}', compress_after => INTERVAL '{CompressAfterFor(table)}', schedule_interval => INTERVAL '{CompressScheduleInterval}', if_not_exists => true{initialStart})";
+    }
+
+    /// <summary>
+    /// #4510: how many EXTRA hours past <see cref="CompressAfterDays"/> each of the heaviest raw hypertables
+    /// waits before it becomes eligible to compress, keyed by bare table name. Everyone else gets 0 — the
+    /// unchanged one-day delay.
+    ///
+    /// <para><b>Why this exists.</b> Every table shared <see cref="CompressAfterDays"/> exactly, so every
+    /// table's midnight-plus-a-day chunk became eligible at once, and the nightly compression band
+    /// (<see cref="CompressionPhaseMinutes"/>) does not by itself keep two LONG runs from overlapping —
+    /// only the START minute is spread, not the runtime. The heaviest tables run long enough (measured on
+    /// one production store class: <c>query_store_stats</c> 552 s, <c>query_stats</c> 360 s,
+    /// <c>query_snapshots</c> 198 s — <see cref="HeaviestCompressionTables"/>'s own reading) that a shared
+    /// eligibility instant convoyed them into the same post-midnight hour and starved reads for minutes at a
+    /// time (#4510). Staggering WHEN each one becomes eligible, on top of the existing per-minute START
+    /// stagger, spreads the runs across separate hours instead of separate minutes of the same hour.</para>
+    ///
+    /// <para><b>Ordered longest-run first, smallest offset to the biggest cost</b> — the same reasoning
+    /// <see cref="HeaviestCompressionTables"/> already uses for its minute assignment: the table whose
+    /// backlog is most expensive to leave uncompressed carries the smallest extra delay.</para>
+    ///
+    /// <para><b>The cost side, so raising a value here is not free.</b> A table's own hourly chunk stays
+    /// uncompressed for up to N more hours than <see cref="CompressAfterDays"/> alone would leave it — more
+    /// disk, and a slower read of that hour until it compresses. Safe because every dependent that reads
+    /// "raw data this recent must exist" tolerates a LONGER delay, never a shorter one: the hourly
+    /// aggregate refresh's <see cref="HourlyRefreshStartOffset"/> reaches back only one day, the Query Store
+    /// backfill horizon (<c>QueryStoreBackfill.RollupStoreHorizon</c>) is under a day, and
+    /// <see cref="CompressionActivitySql"/> reads each job's OWN <c>compress_after</c> back from its config
+    /// rather than assuming <see cref="CompressAfterDays"/>, so the backlog count stays correct per table.</para>
+    ///
+    /// <para><b>Half-day-aware, not just day-aware.</b> A table narrowed to 12-hour chunks
+    /// (<see cref="RawChunkIntervalPlanner"/>) becomes eligible twice a day, at hours N and N+12 past
+    /// midnight — see <see cref="CompressAfterFor"/>'s remarks for why the offset stays the SAME number
+    /// either way. The nine values below (1–9) keep both {N, N+12} sets disjoint from each other and off
+    /// hour 0, so a 12-hour table never collides with a 24-hour table's slot. A table narrowed to 6-hour
+    /// chunks becomes eligible four times a day (N, N+6, N+12, N+18): the N+6 member can land on another
+    /// heavy table's hour, which <see cref="WarnIfHeavyTableOnNarrowChunksAsync"/> logs rather than silently
+    /// tolerating, since fixing it needs the field's actual chunk widths rather than a compile-time table.</para>
+    ///
+    /// <para>Max value 9, pinned <![CDATA[<=]]> 11 by test — the largest offset must stay well inside a day, or
+    /// it starts to look like a second <see cref="CompressAfterDays"/> rather than a stagger.</para>
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, int> HeavyCompressAfterOffsetHours =
+        new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            ["query_store_stats"] = 1,
+            ["query_stats"] = 2,
+            ["perfmon_stats"] = 3,
+            ["plan_correction"] = 4,
+            ["query_snapshots"] = 5,
+            ["spinlock_stats"] = 6,
+            ["job_history"] = 7,
+            ["latch_stats"] = 8,
+            ["wait_stats"] = 9,
+        };
+
+    /// <summary>
+    /// <c>compress_after</c> for <paramref name="table"/> as an INTERVAL literal: <see cref="CompressAfterDays"/>
+    /// plus this table's <see cref="HeavyCompressAfterOffsetHours"/> entry (0 for every table not in the
+    /// map, which renders byte-identical to the pre-#4510 literal). Accepts a bare or
+    /// <c>collect.</c>-qualified name, the same contract <see cref="TryCompressionPhaseMinutesFor"/> uses,
+    /// since <see cref="AddCompressionPolicySql(string)"/> is reachable with either.
+    ///
+    /// <para>Rendered as <c>'N days M hours'</c> rather than as a hundred-and-something-hour scalar, so an
+    /// operator reading <c>timescaledb_information.jobs.config</c> sees the day and the stagger as two
+    /// separate facts instead of doing the division back in their head. A zero-hour table renders exactly
+    /// <c>'{CompressAfterDays} days'</c>, the literal every pin before #4510 already expects.</para>
+    /// </summary>
+    public static string CompressAfterFor(string table)
+    {
+        var extraHours = HeavyOffsetHoursFor(table);
+
+        if (extraHours != 0)
+        {
+            return $"{CompressAfterDays} days {extraHours.ToString("00", CultureInfo.InvariantCulture)}:00:00";
+        }
+
+        return $"{CompressAfterDays} days";
+    }
+
+    /// <summary>The <see cref="HeavyCompressAfterOffsetHours"/> lookup, shared by <see cref="CompressAfterFor"/>
+    /// (the SQL literal) and <see cref="ConvergeCompressionScheduleAsync(NpgsqlConnection, ILogger, string, CancellationToken)"/>
+    /// (the C# comparison), so the two can never read a different offset for the same table. Accepts a bare
+    /// or <c>collect.</c>-qualified name, the same contract every reader of this map already uses.</summary>
+    public static int HeavyOffsetHoursFor(string table)
+    {
+        var dot = table?.LastIndexOf('.') ?? -1;
+        var bare = dot >= 0 ? table![(dot + 1)..] : table;
+
+        return bare is not null && HeavyCompressAfterOffsetHours.TryGetValue(bare, out var extraHours) ? extraHours : 0;
     }
 
     /* ─────────────────────────── continuous aggregates (query acceleration) ─────────────────────────── */
@@ -9451,7 +9541,8 @@ SELECT
         WHEN j.initial_start IS NULL THEN NULL
         ELSE EXTRACT(MINUTE FROM j.initial_start AT TIME ZONE 'UTC')::int
     END AS phase_minutes,
-    j.hypertable_schema
+    j.hypertable_schema,
+    EXTRACT(EPOCH FROM (j.config->>'compress_after')::interval)::bigint AS compress_after_seconds
 FROM timescaledb_information.jobs AS j
 WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
 
@@ -9538,6 +9629,24 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + ($2::int * INTERVAL '1 minute'))";
 
     /// <summary>
+    /// #4510: retunes one EXISTING raw hypertable's compression policy onto its own
+    /// <see cref="HeavyCompressAfterOffsetHours"/> stagger — the converge's ONLY path to a deployed store,
+    /// the same reason <see cref="SetAggregateCompressionPolicySql"/> exists for the aggregate side
+    /// (<see cref="AddCompressionPolicySql(string)"/>'s <c>if_not_exists =&gt; true</c> is a documented
+    /// no-op against a policy the store already has). <c>$1</c> the job id (<c>::integer</c>, the #1586
+    /// trap), <c>$2</c> the <c>compress_after</c> text this table's <see cref="CompressAfterFor"/> renders.
+    ///
+    /// <para><c>config =&gt; jsonb_set(j.config, ...)</c> against the job's OWN config, not a replacement
+    /// object, so the job's other config keys (and its job id, cadence and phase, none of which this
+    /// statement names) survive untouched — <see cref="SetAggregateCompressionPolicySql"/>'s own template.
+    /// Never <c>remove_compression_policy</c> + <c>add_compression_policy</c>: that loses the job's stats
+    /// history and hands the hypertable a NEW job id, which is the mistake the design this fixes explicitly
+    /// rejects.</para>
+    /// </summary>
+    public static string SetCompressAfterSql =>
+        "SELECT alter_job($1::integer, config => jsonb_set(config, '{compress_after}', to_jsonb($2::text)))";
+
+    /// <summary>
     /// Converges EXISTING compression policies onto <see cref="CompressScheduleInterval"/> (#1778) and onto
     /// the <see cref="CompressionPhaseMinutes"/> grid on a fixed schedule (#3035) — one function owning both
     /// properties, because they are set by the same <c>alter_job</c> and a second sweep would fight this one
@@ -9577,6 +9686,59 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         => ConvergeCompressionScheduleAsync(connection, logger, CompressionPolicyStateSql, cancellationToken);
 
     /// <summary>
+    /// #4510: warns once per converge run when a heavy table (a <see cref="HeavyCompressAfterOffsetHours"/>
+    /// key) is found on 6-hour chunks. <see cref="HeavyCompressAfterOffsetHours"/>' offsets were chosen so
+    /// the {N, N+12} eligibility hours a 24-hour or 12-hour chunked table produces never collide across the
+    /// heavy set — but a table narrowed that far also becomes eligible at N+6 and N+18
+    /// (<see cref="RawChunkIntervalPlanner"/>), and N+6 can land on another heavy table's own hour. Fixing
+    /// that needs the field's actual chunk widths, which this compile-time map cannot see, so this logs
+    /// rather than silently tolerating the possible collision. Failure-isolated the way every other
+    /// converge probe in this class is: a read that fails costs the warning and nothing else.
+    /// </summary>
+    internal static async Task WarnIfHeavyTableOnNarrowChunksAsync(
+        NpgsqlConnection connection, ILogger? logger, CancellationToken cancellationToken)
+    {
+        if (HeavyCompressAfterOffsetHours.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var probe = new NpgsqlCommand(
+                @"
+SELECT d.hypertable_name, (EXTRACT(EPOCH FROM d.time_interval) / 3600.0)::integer AS interval_hours
+FROM timescaledb_information.dimensions AS d
+WHERE d.hypertable_schema = 'collect' AND d.dimension_type = 'Time'",
+                connection)
+            { CommandTimeout = SetupTimeoutSeconds };
+
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (reader.IsDBNull(0) || reader.IsDBNull(1))
+                {
+                    continue;
+                }
+
+                var table = reader.GetString(0);
+                var hours = reader.GetInt32(1);
+
+                if (hours == 6 && HeavyCompressAfterOffsetHours.TryGetValue(table, out var offset))
+                {
+                    logger?.LogWarning(
+                        "TimescaleDB: {Hypertable} is a heavy table (compress_after stagger +{Offset}h, #4510) narrowed to 6-hour chunks — its N+6 eligibility hour can collide with another heavy table's own hour; the compile-time stagger map cannot see this, so review the field's chunk widths.",
+                        table, offset);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger?.LogDebug("Compression-schedule converge: could not read chunk intervals for the #4510 narrow-chunk warning: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
     /// The seam that lets the FALLBACK DIRECTION be tested: <paramref name="phasedStateSql"/> is the wide read
     /// the public entry point supplies, and a test supplies a deliberately-failing one instead.
     ///
@@ -9601,12 +9763,17 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
             throw new ArgumentNullException(nameof(connection));
         }
 
+        await WarnIfHeavyTableOnNarrowChunksAsync(connection, logger, cancellationToken);
+
         var desiredSeconds = (long)CompressScheduleSpan.TotalSeconds;
 
-        var stale = new List<(int JobId, string? Hypertable, string? Interval, bool WasFixed, int? WasPhase, int? Phase)>();
+        var stale = new List<(int JobId, string? Hypertable, string? Interval, bool WasFixed, int? WasPhase, int? Phase, string? DesiredCompressAfter)>();
 
         /* One reader for both statements: the narrow one is the wide one's first four columns in the same
-           order, so withPhase decides which ordinals are READ rather than selecting a different shape. */
+           order, so withPhase decides which ordinals are READ rather than selecting a different shape. The
+           #4510 compress_after column is on the WIDE read only — the stagger is scoped to owned hypertables
+           the same way the phase is, and the narrow fallback exists for a store that lacks even the older
+           phase columns, so it has no business gaining a newer one. */
         async Task ReadStateAsync(string sql, bool withPhase)
         {
             stale.Clear();
@@ -9627,6 +9794,10 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                 var ours = withPhase
                     && !reader.IsDBNull(6)
                     && string.Equals(reader.GetString(6), PgSchemaGenerator.CollectSchema, StringComparison.Ordinal);
+
+                /* #4510: present only on the wide read (ordinal 7), NULL for a policy with no compress_after
+                   key at all (compress_created_before policies, which this product never creates). */
+                var compressAfterSeconds = withPhase && !reader.IsDBNull(7) ? reader.GetInt64(7) : (long?)null;
 
                 /* #3653 LC (Medium security finding): frozen rollups are removed from
                    AggregateCompressionTargets, so without this guard they fall through and get their
@@ -9654,12 +9825,26 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     ? slot
                     : null;
 
+                /* #4510: the desired compress_after, for OWNED hypertables only — CompressAfterFor's
+                   contract is scoped to the collector catalog, the same reach the phase already has, so a
+                   foreign hypertable with a same-named table elsewhere keeps whatever compress_after its
+                   own owner set. NULL means "nothing to converge on this axis", matching phase's own null
+                   contract just above. Computed straight from the offset map rather than parsed back out of
+                   CompressAfterFor's rendered literal — the literal is for the SQL statement, this is for
+                   the C# comparison, and going through text twice would be one more place the two could
+                   disagree. */
+                string? desiredCompressAfter = ours && hypertable is not null ? CompressAfterFor(hypertable) : null;
+                var desiredCompressAfterSeconds = ours && hypertable is not null
+                    ? (long?)(TimeSpan.FromDays(CompressAfterDays) + TimeSpan.FromHours(HeavyOffsetHoursFor(hypertable))).TotalSeconds
+                    : null;
+
                 /* A NULL cadence is the widest wakeup there is, so it counts as stale rather than as
                    "nothing to compare". */
                 var cadenceStale = seconds != desiredSeconds;
                 var phaseStale = phase is int wanted && (!fixedSchedule || wasPhase != wanted);
+                var compressAfterStale = desiredCompressAfterSeconds is long wantedSeconds && compressAfterSeconds != wantedSeconds;
 
-                if (!cadenceStale && !phaseStale)
+                if (!cadenceStale && !phaseStale && !compressAfterStale)
                 {
                     continue;
                 }
@@ -9670,7 +9855,8 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     intervalText,
                     fixedSchedule,
                     wasPhase,
-                    phase));
+                    phase,
+                    compressAfterStale ? desiredCompressAfter : null));
             }
         }
 
@@ -9706,7 +9892,7 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
         }
 
         var converged = 0;
-        foreach (var (jobId, hypertable, interval, wasFixed, wasPhase, phase) in stale)
+        foreach (var (jobId, hypertable, interval, wasFixed, wasPhase, phase, desiredCompressAfter) in stale)
         {
             try
             {
@@ -9732,6 +9918,23 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
                     logger?.LogInformation(
                         "TimescaleDB: retuned {Hypertable}'s compression policy from a {Was} tick to {Now} — that is the longest an already-eligible chunk can now sit uncompressed.",
                         hypertable, interval, CompressScheduleInterval);
+                }
+
+                /* #4510: SEPARATE from the cadence/phase alter above — alter_job accepts only one config
+                   argument per call and this is its own key, so a mismatch here is retuned with its own
+                   statement (SetCompressAfterSql) rather than folded into either branch above. Applied
+                   whichever branch ran, since a store can be stale on compress_after alone (its cadence and
+                   phase already converged) as easily as it can be stale on all three. */
+                if (desiredCompressAfter is not null)
+                {
+                    using var stagger = new NpgsqlCommand(SetCompressAfterSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    stagger.Parameters.AddWithValue(jobId);
+                    stagger.Parameters.AddWithValue(desiredCompressAfter);
+                    await stagger.ExecuteNonQueryAsync(cancellationToken);
+
+                    logger?.LogInformation(
+                        "TimescaleDB: retuned {Hypertable}'s compression policy onto its own {CompressAfter} eligibility delay (#4510) — spreading which hour each heavy table's chunks become eligible keeps the nightly compression burst from landing on all of them at once.",
+                        hypertable, desiredCompressAfter);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
