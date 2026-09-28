@@ -11,7 +11,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Database;
-using PerformanceMonitorLite.Services;
 using Xunit;
 
 namespace PerformanceMonitorLite.Tests;
@@ -27,14 +26,11 @@ namespace PerformanceMonitorLite.Tests;
 public sealed class LiteAnalysisCancellationTests : IClassFixture<SharedDuckDbFixture>
 {
     private readonly DuckDbInitializer _duckDb;
-    private readonly ServerManager _serverManager;
 
     public LiteAnalysisCancellationTests(SharedDuckDbFixture fixture)
     {
         fixture.ResetData();
         _duckDb = fixture.DuckDb;
-        _serverManager = new ServerManager(System.IO.Path.Combine(
-            System.IO.Path.GetTempPath(), "LiteAnalysisCancellationTests_" + Guid.NewGuid().ToString("N")[..8], "config"));
     }
 
     [Fact]
