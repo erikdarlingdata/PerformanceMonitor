@@ -1440,6 +1440,66 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Max per-thread self-CPU for this operator.
+    /// Parallel: for each thread, self_cpu = thread_cpu - Σ same-thread child cpu; take max.
+    /// Serial / single-thread: operator_cpu - Σ effective child cpu.
+    /// Needed for external-wait benefit scoring (Joe's formula).
+    /// </summary>
+    internal static long GetOperatorMaxThreadOwnCpuMs(PlanNode node)
+    {
+        if (!node.HasActualStats || node.ActualCPUMs <= 0) return 0;
+
+        if (node.PerThreadStats.Count > 1)
+        {
+            var parentByThread = new Dictionary<int, long>();
+            foreach (var ts in node.PerThreadStats)
+                parentByThread[ts.ThreadId] = ts.ActualCPUMs;
+
+            var childSumByThread = new Dictionary<int, long>();
+            foreach (var child in node.Children)
+            {
+                var childNode = child;
+                if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+                    childNode = child.Children.OrderByDescending(c => c.ActualCPUMs).First();
+                foreach (var ts in childNode.PerThreadStats)
+                {
+                    childSumByThread.TryGetValue(ts.ThreadId, out var existing);
+                    childSumByThread[ts.ThreadId] = existing + ts.ActualCPUMs;
+                }
+            }
+
+            var maxSelf = 0L;
+            foreach (var (threadId, parentCpu) in parentByThread)
+            {
+                childSumByThread.TryGetValue(threadId, out var childCpu);
+                var self = Math.Max(0, parentCpu - childCpu);
+                if (self > maxSelf) maxSelf = self;
+            }
+            return maxSelf;
+        }
+
+        // Serial: operator_cpu - Σ effective child cpu
+        var totalChildCpu = 0L;
+        foreach (var child in node.Children)
+            totalChildCpu += GetEffectiveChildCpuMs(child);
+        return Math.Max(0, node.ActualCPUMs - totalChildCpu);
+    }
+
+    private static long GetEffectiveChildCpuMs(PlanNode child)
+    {
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+            return child.Children.Max(GetEffectiveChildCpuMs);
+        if (child.ActualCPUMs > 0)
+            return child.ActualCPUMs;
+        if (child.Children.Count == 0)
+            return 0;
+        var sum = 0L;
+        foreach (var grandchild in child.Children)
+            sum += GetEffectiveChildCpuMs(grandchild);
+        return sum;
+    }
+
+    /// <summary>
     /// Serial row mode self-time: subtract all direct children's elapsed.
     /// Exchange children are skipped through to their real child.
     /// </summary>

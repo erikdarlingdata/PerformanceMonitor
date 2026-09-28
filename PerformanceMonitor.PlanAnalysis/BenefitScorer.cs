@@ -520,13 +520,12 @@ public static class BenefitScorer
 
         var isParallel = stmt.DegreeOfParallelism > 1 && stmt.RootNode != null;
 
-        // Collect all operators with per-thread stats for parallel benefit calculation
-        List<OperatorWaitProfile>? operatorProfiles = null;
-        if (isParallel)
-        {
-            operatorProfiles = new List<OperatorWaitProfile>();
-            CollectOperatorWaitProfiles(stmt.RootNode!, operatorProfiles);
-        }
+        // Collect all operators with per-thread stats for parallel benefit calculation.
+        // Collect operator profiles even for serial plans — the external-wait formula
+        // uses sum-of-max-thread-cpu across operators and works for both.
+        var operatorProfiles = new List<OperatorWaitProfile>();
+        if (stmt.RootNode != null)
+            CollectOperatorWaitProfiles(stmt.RootNode, operatorProfiles);
 
         foreach (var wait in stmt.WaitStats)
         {
@@ -535,7 +534,15 @@ public static class BenefitScorer
             var category = ClassifyWaitType(wait.WaitType);
             double benefitPct;
 
-            if (category == "Parallelism" && isParallel)
+            if (IsExternalWait(wait.WaitType) && operatorProfiles.Count > 0)
+            {
+                // External / preemptive waits (MEMORY_ALLOCATION_*, PREEMPTIVE_*): the worker
+                // is CPU-busy in kernel, so operator elapsed ≈ operator cpu and the wait
+                // barely shows in the per-thread (elapsed - cpu) calculation. Joe's formula:
+                //   benefit = (wait_ms / total_cpu_ms) * Σ max_thread_cpu_per_operator / elapsed
+                benefitPct = CalculateExternalWaitBenefit(wait, operatorProfiles, stmt.QueryTimeStats!.CpuTimeMs, elapsedMs);
+            }
+            else if (category == "Parallelism" && isParallel)
             {
                 // CXPACKET/CXCONSUMER/CXSYNC: benefit is the parallelism efficiency gap,
                 // not the raw wait time. Threads waiting for other threads is a symptom
@@ -552,7 +559,7 @@ public static class BenefitScorer
                     benefitPct = (double)wait.WaitTimeMs / elapsedMs * 100;
                 }
             }
-            else if (!isParallel || operatorProfiles == null || operatorProfiles.Count == 0)
+            else if (!isParallel || operatorProfiles.Count == 0)
             {
                 // Serial plan or no operator data: simple ratio
                 benefitPct = (double)wait.WaitTimeMs / elapsedMs * 100;
@@ -613,6 +620,48 @@ public static class BenefitScorer
     }
 
     /// <summary>
+    /// Joe's formula for external/preemptive waits where the worker is CPU-busy in kernel
+    /// (MEMORY_ALLOCATION_*, PREEMPTIVE_*). The standard (elapsed-cpu) per-thread
+    /// wait accounting misses these because elapsed ≈ cpu for those threads. Use the
+    /// wait's share of total CPU, scaled by the plan's critical-path CPU.
+    ///   wait_cpu_share = wait_ms / total_cpu_ms
+    ///   sum_max_cpu = Σ max_thread_cpu across operators
+    ///   benefit_ms  = wait_cpu_share * sum_max_cpu
+    /// Then convert to % of statement elapsed.
+    /// </summary>
+    private static double CalculateExternalWaitBenefit(
+        WaitStatInfo wait, List<OperatorWaitProfile> profiles,
+        long stmtCpuMs, long stmtElapsedMs)
+    {
+        if (stmtCpuMs <= 0 || stmtElapsedMs <= 0)
+            return (double)wait.WaitTimeMs / Math.Max(1, stmtElapsedMs) * 100;
+
+        long sumMaxCpu = 0;
+        foreach (var p in profiles)
+            sumMaxCpu += p.MaxThreadCpuMs;
+
+        if (sumMaxCpu <= 0)
+            return (double)wait.WaitTimeMs / stmtElapsedMs * 100;
+
+        var waitCpuShare = (double)wait.WaitTimeMs / stmtCpuMs;
+        var benefitMs = waitCpuShare * sumMaxCpu;
+        return benefitMs / stmtElapsedMs * 100;
+    }
+
+    /// <summary>
+    /// External / preemptive waits where the worker is CPU-busy in kernel rather than
+    /// descheduled. Their wait time counts toward the query's CPU time, so the usual
+    /// (elapsed - cpu) per-thread wait math misses them entirely.
+    /// </summary>
+    public static bool IsExternalWait(string waitType)
+    {
+        if (string.IsNullOrEmpty(waitType)) return false;
+        var wt = waitType.ToUpperInvariant();
+        return wt.Contains("MEMORY_ALLOCATION", StringComparison.Ordinal)
+            || wt.StartsWith("PREEMPTIVE_", StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// Determines if an operator is relevant for a given wait category.
     /// </summary>
     private static bool IsOperatorRelevantForCategory(OperatorWaitProfile profile, string category)
@@ -651,13 +700,18 @@ public static class BenefitScorer
                     maxThreadWait = threadWait;
             }
 
-            if (totalWait > 0 || maxThreadWait > 0)
+            // Max per-thread SELF CPU (non-cumulative) — critical-path CPU contribution
+            // from this operator. Used by the external-wait formula.
+            var maxThreadCpu = PlanAnalyzer.GetOperatorMaxThreadOwnCpuMs(node);
+
+            if (totalWait > 0 || maxThreadWait > 0 || maxThreadCpu > 0)
             {
                 profiles.Add(new OperatorWaitProfile
                 {
                     Node = node,
                     MaxThreadWaitMs = maxThreadWait,
                     TotalWaitMs = totalWait,
+                    MaxThreadCpuMs = maxThreadCpu,
                     HasPhysicalReads = node.ActualPhysicalReads > 0,
                     HasCpuWork = node.ActualCPUMs > 0,
                     IsExchange = node.PhysicalOp == "Parallelism",
@@ -708,6 +762,8 @@ public static class BenefitScorer
         public PlanNode Node { get; init; } = null!;
         public long MaxThreadWaitMs { get; init; }
         public long TotalWaitMs { get; init; }
+        /// <summary>Max CPU time among this operator's threads (critical-path CPU for external-wait formula).</summary>
+        public long MaxThreadCpuMs { get; init; }
         public bool HasPhysicalReads { get; init; }
         public bool HasCpuWork { get; init; }
         public bool IsExchange { get; init; }
