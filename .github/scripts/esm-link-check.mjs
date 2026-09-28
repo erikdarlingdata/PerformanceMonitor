@@ -8,8 +8,9 @@
 import vm from 'node:vm';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(process.argv[2] || new URL('../../Darling/PerformanceMonitor.Darling.Service/wwwroot', import.meta.url).pathname);
+const root = path.resolve(process.argv[2] || fileURLToPath(new URL('../../Darling/PerformanceMonitor.Darling.Service/wwwroot', import.meta.url)));
 const entry = process.argv[3] || 'js/app.js';
 const cache = new Map();
 const context = vm.createContext({});

@@ -296,6 +296,17 @@ jobs:
             echo "::notice title=Full build::At least one changed file is off the documentation allowlist (${DOCS_COUNT:-0} of ${ALL_COUNT:-0} classified as documentation)."
           fi
 
+      # Every web-dashboard module must parse and link (#4666, #4672). The C# tests only READ the
+      # dashboard's JavaScript, so a syntax error, a missing file or a missing named export passes
+      # every other check and blanks the whole dashboard in the browser. A step INSIDE build, not a
+      # job of its own: a failing job that build `needs:` would SKIP build, and a skipped build reads
+      # as success, so the gate would fail open. It runs on every change the docs fast path does not
+      # engage for (about two seconds), so a docs-only change stays fast.
+      - name: Parse and link every wwwroot/js module
+        if: steps.fastpath.outputs.engaged != 'true'
+        shell: bash
+        run: bash .github/scripts/check-web-js.sh
+
       - name: Setup .NET 10.0
         if: steps.fastpath.outputs.engaged != 'true'
         uses: actions/setup-dotnet@v6
@@ -1677,47 +1688,3 @@ jobs:
               echo "::error title=Lite shards failed::needs.lite-tests.result='${RESULT}' - at least one shard failed or was cancelled. The suite has NOT passed on this commit."
               exit 1 ;;
           esac
-
-  # Every web-dashboard module must parse. The C# tests that touch wwwroot/js only READ the source
-  # text, and no other job runs a JavaScript parser, so a file that is not valid ES-module syntax
-  # (a duplicated function, a top-level `return`) passes every other check and blanks the whole
-  # dashboard in the browser (#4666, #4672). The check is .github/scripts/check-web-js.sh, which
-  # runs the same way locally.
-  #
-  # It has no `needs:` and takes no part in the build job's docs fast path: a docs-only change
-  # leaves the filter false, the parse step is skipped, and the job still reports success, so it
-  # can be a required check and costs a docs PR only a checkout. It parses whenever wwwroot/js or
-  # the script or this workflow changed, and on push/release/merge_group runs, which have no PR
-  # diff to trust (the parse takes about a second). Node comes preinstalled on ubuntu-latest, so
-  # there is no setup-node action to pin.
-  web-js-syntax:
-    name: Web dashboard JS syntax
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Detect changed paths
-        id: filter
-        if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v4
-        with:
-          filters: |
-            webjs:
-              - 'Darling/PerformanceMonitor.Darling.Service/wwwroot/js/**'
-              - '.github/scripts/check-web-js.sh'
-              - '.github/scripts/esm-link-check.mjs'
-              - '.github/workflows/build.yml'
-
-      - name: Parse and link every wwwroot/js module
-        if: ${{ github.event_name != 'pull_request' || steps.filter.outputs.webjs == 'true' }}
-        shell: bash
-        run: bash .github/scripts/check-web-js.sh
-
-      - name: Report a skipped parse
-        if: ${{ github.event_name == 'pull_request' && steps.filter.outputs.webjs != 'true' }}
-        shell: bash
-        run: echo "::notice title=Web JS syntax skipped::No file under wwwroot/js changed in this diff."
