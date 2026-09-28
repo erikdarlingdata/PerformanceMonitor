@@ -13,13 +13,13 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4527 (PerformanceStudio#215 / #562) — Rule 35 "Expensive Operator" surfaces a leaf
+/// #4527 (erikdarlingdata/PerformanceStudio#215 / erikdarlingdata/PerformanceStudio#562) — Rule 35 "Expensive Operator" surfaces a leaf
 /// operator that takes a large share of a statement's elapsed time even when no other rule
 /// has anything specific to say about it, so a large piece of work never silently disappears
 /// just because the tool has no dedicated advice for it. It fires when an operator's own time
 /// is at least 20% of the statement's elapsed time, the operator has no other warning already
 /// on it, and the statement itself ran at least 1,000ms (below that floor, a share of a
-/// few-millisecond statement points at nothing — PS#562). Severity is Critical at 50% or
+/// few-millisecond statement points at nothing — erikdarlingdata/PerformanceStudio#562). Severity is Critical at 50% or
 /// more, Warning otherwise, and the benefit percent is set to the self-time share (the
 /// benefit scorer isn't wired to recompute this warning type, so that value is carried as-is
 /// from the analyzer, same as PerformanceStudio).

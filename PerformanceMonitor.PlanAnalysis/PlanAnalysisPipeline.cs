@@ -7,6 +7,8 @@
  */
 
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -23,16 +25,40 @@ namespace PerformanceMonitor.PlanAnalysis;
 /// </summary>
 public static class PlanAnalysisPipeline
 {
-    public static ParsedPlan Run(ParsedPlan plan)
+    public static ParsedPlan Run(ParsedPlan plan) =>
+        Run(plan, CancellationToken.None);
+
+    /// <summary>
+    /// #4512: the token flows into the analyzer and the scorer, with a check between each stage
+    /// and inside their own per-statement walks, so a caller cancelling mid-run stops the
+    /// pipeline before the next stage rather than finishing analysis and scoring on a plan
+    /// nobody is waiting for.
+    /// </summary>
+    public static ParsedPlan Run(ParsedPlan plan, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (!string.IsNullOrWhiteSpace(plan.ParseError))
             return plan;
 
         if (!plan.Batches.SelectMany(batch => batch.Statements).Any())
             return plan;
 
-        PlanAnalyzer.Analyze(plan);
-        BenefitScorer.Score(plan);
+        PlanAnalyzer.Analyze(plan, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        BenefitScorer.Score(plan, cancellationToken);
         return plan;
+    }
+
+    /// <summary>
+    /// Parses <paramref name="xml"/> on the async path (<see cref="ShowPlanParser.ParseAsync"/>,
+    /// a thin wrapper over the same dedicated-thread parse <see cref="ShowPlanParser.Parse"/>
+    /// uses, with the same up-front <see cref="ShowPlanParser.MaxParseCharacters"/> check), then
+    /// runs the same analyze/score pipeline as <see cref="Run"/>.
+    /// </summary>
+    public static async Task<ParsedPlan> RunAsync(string xml, CancellationToken cancellationToken)
+    {
+        var plan = await ShowPlanParser.ParseAsync(xml, cancellationToken).ConfigureAwait(false);
+        return Run(plan, cancellationToken);
     }
 }

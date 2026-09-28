@@ -633,7 +633,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var summary = PlanAdvisoryAggregator.Summarize(planXmls);
+            var summary = PlanAdvisoryAggregator.SummarizeCancellable(planXmls, context.CancellationToken);
 
             if (summary.MissingIndexCount > 0)
             {

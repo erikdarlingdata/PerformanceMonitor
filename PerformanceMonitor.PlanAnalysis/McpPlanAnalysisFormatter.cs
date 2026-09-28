@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitor.PlanAnalysis;
@@ -92,10 +93,15 @@ public static class McpPlanAnalysisFormatter
     /// <summary>
     /// Parses plan XML, runs the analyzer, and builds a structured JSON result.
     /// </summary>
-    public static string BuildAnalysisResult(string xml, string? serverName, string source, string? identifier)
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        CancellationToken cancellationToken = default)
     {
-        var plan = ShowPlanParser.Parse(xml);
-        PlanAnalysisPipeline.Run(plan);
+        var plan = ShowPlanParser.Parse(xml, cancellationToken);
+        PlanAnalysisPipeline.Run(plan, cancellationToken);
 
         // #4514: includes statements nested inside a stored procedure or UDF body, so the MCP
         // analyze_plan_xml/analyze_query_plan/analyze_query_store_plan tools see the same

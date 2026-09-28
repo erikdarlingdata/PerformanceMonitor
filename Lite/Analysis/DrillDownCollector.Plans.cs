@@ -73,14 +73,14 @@ LIMIT 1";
 
         try
         {
-            var plan = ShowPlanParser.Parse(planXml);
+            var plan = ShowPlanParser.Parse(planXml, context.CancellationToken);
             // #4551: a parse-error plan still carries parser-extracted content (SQL Server's own
             // plan warnings and missing-index suggestions), so it can't be treated as empty; return
             // before that content is read. PlanAnalysisPipeline.Run separately skips analysis on it.
             if (!string.IsNullOrWhiteSpace(plan.ParseError))
                 return;
 
-            PlanAnalysisPipeline.Run(plan);
+            PlanAnalysisPipeline.Run(plan, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
             // finding inside an EXEC <procedure> plan's body reaches the drill-down.
@@ -121,9 +121,10 @@ LIMIT 1";
                 })
             };
         }
-        catch
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, context.CancellationToken))
         {
-            // Plan parsing can fail on malformed XML — skip silently
+            // Plan parsing can fail on malformed XML — skip silently. An abandonment is NOT
+            // swallowed here (#2443).
         }
     }
 
@@ -170,7 +171,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var details = PlanAdvisoryAggregator.Extract(planXmls);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {

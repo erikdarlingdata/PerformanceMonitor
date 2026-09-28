@@ -1,4 +1,6 @@
+using System;
 using System.ComponentModel;
+using System.Threading;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Models;
@@ -24,7 +26,8 @@ public sealed class McpPlanTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("The query_hash value from get_top_queries_by_cpu.")] string query_hash,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -38,9 +41,9 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for query_hash '{query_hash}'. The query may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_query_plan", ex);
         }
@@ -59,7 +62,8 @@ public sealed class McpPlanTools
         LocalDataService dataService,
         ServerManager serverManager,
         [Description("The plan_handle value from get_top_procedures_by_cpu.")] string plan_handle,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -73,9 +77,9 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for plan_handle '{plan_handle}'. The procedure may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_procedure_plan", ex);
         }
@@ -94,7 +98,8 @@ public sealed class McpPlanTools
         ServerManager serverManager,
         [Description("The database_name from get_query_store_top.")] string database_name,
         [Description("The plan_id from get_query_store_top.")] long plan_id,
-        [Description("Server name or display name.")] string? server_name = null)
+        [Description("Server name or display name.")] string? server_name = null,
+        CancellationToken cancellationToken = default)
     {
         var (resolved, error) = ServerResolver.ResolveOrError(serverManager, server_name);
         if (error != null) return error;
@@ -120,9 +125,9 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for plan_id {plan_id} in database '{database_name}'. Query Store may not be enabled or the plan may have been purged.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}");
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_query_store_plan", ex);
         }
@@ -140,16 +145,17 @@ public sealed class McpPlanTools
         "(clipboard, file, another tool). " +
         "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static string AnalyzePlanXml(
-        [Description("Raw showplan XML content.")] string plan_xml)
+        [Description("Raw showplan XML content.")] string plan_xml,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(plan_xml))
             return McpHelpers.Refusal("plan_xml", "No plan XML provided.");
 
         try
         {
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return McpHelpers.FormatError("analyze_plan_xml", ex);
         }
