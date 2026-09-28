@@ -437,30 +437,76 @@ public sealed class PgSettingRedactorTests
     }
 
     /// <summary>
-    /// #4348: a long input with no separator must finish well inside a human-perceptible delay, not spend
-    /// seconds backtracking. Warms up once (first call pays JIT/regex-compile cost, not what this pins),
-    /// then asserts on the second run.
+    /// #4348: a long, no-separator input must stay close to O(n) through <see cref="PgSettingRedactor.Redact"/>
+    /// — not blow up catastrophically (quadratic-or-worse) the way an unguarded lookaround can on a run with no
+    /// separator to anchor on. The previous version of this test asserted a fixed 50ms wall-clock budget at
+    /// 32,000 characters; that is exactly what a loaded CI runner cannot promise even for genuinely linear
+    /// work, and it went red at precisely 50ms during a loaded full-suite run while the class passed alone
+    /// (test-only flake fix, no issue number). This version asserts two things instead, both measured in the
+    /// same run so a loaded runner moves them together:
+    /// <list type="bullet">
+    /// <item>the redacted OUTPUT at each size is exactly what a linear, non-timed-out pass produces. This is
+    /// the primary guard: every lookaround-bearing pattern in <see cref="PgSettingRedactor"/> already runs
+    /// under a 100ms match timeout (<see cref="PgSettingRedactor.TimeBoundPattern"/>), so catastrophic
+    /// backtracking does not hang the process — it makes <see cref="PgSettingRedactor.Redact"/> mask the WHOLE
+    /// value instead of matching correctly, and THAT wrong output is what this assertion catches, independent
+    /// of timing;</item>
+    /// <item>elapsed time at 32,000 characters stays well under quadratic relative to a 2,000-character
+    /// baseline, taking the MINIMUM of several repeats at each size (a min, not a mean, so one GC pause or
+    /// scheduler hiccup can't drag the number up). Linear scaling gives about a 16x ratio (32000 / 2000);
+    /// catastrophic backtracking that stays just under the 100ms timeout at both sizes — where the output
+    /// assertion above would not catch it — pushes the ratio toward 256x (16x squared). The bar sits at 64x:
+    /// comfortably above the ~16x a linear pass measures, comfortably below the ~256x a quadratic one
+    /// would.</item>
+    /// </list>
     /// </summary>
     [Theory]
-    [InlineData(3200, true)]
-    [InlineData(3200, false)]
-    [InlineData(32000, true)]
-    [InlineData(32000, false)]
-    public void LongInputWithNoSeparator_MatchesWellUnderBudget(int repeatLength, bool trailingAssignment)
+    [InlineData(true)]
+    [InlineData(false)]
+    public void LongInputWithNoSeparator_ScalesNearLinearlyNotCatastrophically(bool trailingAssignment)
     {
-        var body = string.Concat(Enumerable.Repeat("pass", repeatLength / 4));
-        var value = trailingAssignment ? body + "=x" : body;
+        const int BaselineLength = 2000;
+        const int LargeLength = 32000; // 16x the baseline.
+        const int Repeats = 5;
 
-        // Warm-up run: pays JIT/regex-compile cost, not measured.
-        _ = PgSettingRedactor.Redact("archive_command", value);
+        var baselineBody = string.Concat(Enumerable.Repeat("pass", BaselineLength / 4));
+        var largeBody = string.Concat(Enumerable.Repeat("pass", LargeLength / 4));
+        var baselineValue = trailingAssignment ? baselineBody + "=x" : baselineBody;
+        var largeValue = trailingAssignment ? largeBody + "=x" : largeBody;
+        var expectedBaseline = trailingAssignment ? baselineBody + "=********" : baselineBody;
+        var expectedLarge = trailingAssignment ? largeBody + "=********" : largeBody;
 
-        var stopwatch = Stopwatch.StartNew();
-        _ = PgSettingRedactor.Redact("archive_command", value);
-        stopwatch.Stop();
+        // Output check first — this also serves as the warm-up run for each size: pays JIT/regex-compile cost
+        // once, outside anything the timing below measures.
+        Assert.Equal(expectedBaseline, PgSettingRedactor.Redact("archive_command", baselineValue));
+        Assert.Equal(expectedLarge, PgSettingRedactor.Redact("archive_command", largeValue));
+
+        var baselineMs = MinElapsedMilliseconds(() => PgSettingRedactor.Redact("archive_command", baselineValue), Repeats);
+        var largeMs = MinElapsedMilliseconds(() => PgSettingRedactor.Redact("archive_command", largeValue), Repeats);
+
+        var ratio = largeMs / Math.Max(baselineMs, 1.0);
 
         Assert.True(
-            stopwatch.ElapsedMilliseconds < 50,
-            $"Expected under 50ms, took {stopwatch.ElapsedMilliseconds}ms for length {value.Length}.");
+            ratio < 64,
+            $"Expected near-linear scaling (~16x, {LargeLength} chars / {BaselineLength} chars) well under " +
+            $"quadratic (256x); got {ratio:F1}x ({largeMs:F3}ms / {baselineMs:F3}ms).");
+    }
+
+    /// <summary>Runs <paramref name="action"/> <paramref name="repeats"/> times and returns the MINIMUM elapsed
+    /// wall-clock time, in milliseconds, across those runs — a min, not a mean, so a single GC pause or
+    /// scheduler hiccup on a loaded runner can't drag the reported number up.</summary>
+    private static double MinElapsedMilliseconds(Func<string?> action, int repeats)
+    {
+        var best = double.MaxValue;
+        for (var i = 0; i < repeats; i++)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            _ = action();
+            stopwatch.Stop();
+            best = Math.Min(best, stopwatch.Elapsed.TotalMilliseconds);
+        }
+
+        return best;
     }
 
     /// <summary>
