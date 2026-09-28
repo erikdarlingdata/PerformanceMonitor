@@ -76,9 +76,12 @@ LIMIT 1";
         try
         {
             var plan = ShowPlanParser.Parse(planXml);
-            // #4551: a refused or exception-terminated plan carries only what parsed before the
-            // failure; PlanAnalysisPipeline.Run skips it exactly like a caught parse exception, so
-            // a partial plan never contributes a partial drill-down.
+            // #4551: a parse-error plan still carries parser-extracted content (SQL Server's own
+            // plan warnings and missing-index suggestions), so it can't be treated as empty; return
+            // before that content is read. PlanAnalysisPipeline.Run separately skips analysis on it.
+            if (!string.IsNullOrWhiteSpace(plan.ParseError))
+                return;
+
             PlanAnalysisPipeline.Run(plan);
 
             var allWarnings = plan.Batches
