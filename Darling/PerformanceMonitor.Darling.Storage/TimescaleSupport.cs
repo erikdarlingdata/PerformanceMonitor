@@ -9602,7 +9602,8 @@ WHERE ca.view_schema = 'collect'
             }
 
             var ceilingsWithoutCache = await MeasureRollupCeilingsAsync(dataSource, floorsWithoutCache.Keys, availability, cancellationToken);
-            return new RollupCoverage(floorsWithoutCache, rawOldest, availability, ceilingsWithoutCache);
+            var provenFromWithoutCache = await RollupProvenContiguity.ReadAsync(dataSource, JobCatalogReadTimeoutSeconds, cancellationToken);
+            return new RollupCoverage(floorsWithoutCache, rawOldest, availability, ceilingsWithoutCache, provenFromWithoutCache);
         }
 
         var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
@@ -9652,7 +9653,8 @@ WHERE ca.view_schema = 'collect'
             }
         }
 
-        return new RollupCoverage(floors, rawOldest, availability, ceilings);
+        var provenFrom = await RollupProvenContiguity.ReadAsync(dataSource, JobCatalogReadTimeoutSeconds, cancellationToken);
+        return new RollupCoverage(floors, rawOldest, availability, ceilings, provenFrom);
     }
 
     /// <summary>
@@ -13283,6 +13285,7 @@ public sealed class RollupCoverage
     private readonly IReadOnlyDictionary<string, DateTime> _oldestByRawTable;
     private readonly RollupAvailability _availability;
     private readonly IReadOnlyDictionary<string, DateTime> _ceilingsByView;
+    private readonly IReadOnlyDictionary<string, DateTime> _provenFromByView;
 
     public RollupCoverage(
         IReadOnlyDictionary<string, DateTime> floorsByView,
@@ -13319,11 +13322,28 @@ public sealed class RollupCoverage
         IReadOnlyDictionary<string, DateTime> oldestByRawTable,
         RollupAvailability availability,
         IReadOnlyDictionary<string, DateTime> ceilingsByView)
+        : this(floorsByView, oldestByRawTable, availability, ceilingsByView, new Dictionary<string, DateTime>(StringComparer.Ordinal))
+    {
+    }
+
+    /// <summary>
+    /// #4605 part 2: adds the per-view PROVEN-CONTIGUOUS-FROM instant (<see cref="ProvenContiguousFromOf"/>),
+    /// read by <see cref="RollupProvenContiguity.ReadAsync"/> in the same probe cycle as the floor and ceiling.
+    /// A view absent from <paramref name="provenFromByView"/> answers null — the safe reading for a rollup
+    /// whose refresh job could not be proved to cover its whole window on its last successful run.
+    /// </summary>
+    public RollupCoverage(
+        IReadOnlyDictionary<string, DateTime> floorsByView,
+        IReadOnlyDictionary<string, DateTime> oldestByRawTable,
+        RollupAvailability availability,
+        IReadOnlyDictionary<string, DateTime> ceilingsByView,
+        IReadOnlyDictionary<string, DateTime> provenFromByView)
     {
         _floorsByView = floorsByView ?? throw new ArgumentNullException(nameof(floorsByView));
         _oldestByRawTable = oldestByRawTable ?? throw new ArgumentNullException(nameof(oldestByRawTable));
         _availability = availability;
         _ceilingsByView = ceilingsByView ?? throw new ArgumentNullException(nameof(ceilingsByView));
+        _provenFromByView = provenFromByView ?? throw new ArgumentNullException(nameof(provenFromByView));
     }
 
     /// <summary>
@@ -13349,6 +13369,16 @@ public sealed class RollupCoverage
     /// </summary>
     public DateTime? CeilingOf(string caggView) =>
         _ceilingsByView.TryGetValue(caggView, out var ceiling) ? ceiling : null;
+
+    /// <summary>
+    /// #4605 part 2: how far back <paramref name="caggView"/>'s rollup is PROVED hole-free, computed from
+    /// <paramref name="provenFromByView"/> (populated by <see cref="RollupProvenContiguity.ReadAsync"/> in the
+    /// same probe cycle as the floor and ceiling). Null when the view was never probed, its refresh job is
+    /// missing, paused, or its last run did not succeed, or its batching config cannot guarantee a whole-window
+    /// refresh per successful run (<see cref="RollupProvenContiguity"/> states which).
+    /// </summary>
+    public DateTime? ProvenContiguousFromOf(string caggView) =>
+        _provenFromByView.TryGetValue(caggView, out var provenFrom) ? provenFrom : null;
 
     /// <summary>
     /// THE HOURLY-TIER RELATION for a read whose window starts at <paramref name="windowStartUtc"/> (#3653, Q12):
@@ -13843,5 +13873,131 @@ FROM (SELECT _timescaledb_functions.to_timestamp_without_timezone(_timescaledb_f
         }
 
         return null;
+    }
+}
+
+/// <summary>
+/// #4605 part 2: THE PROVEN-CONTIGUOUS-FROM READ — a cheap catalog-only signal that an hourly rollup's
+/// refresh policy has re-materialized its ENTIRE window on its last successful run, so
+/// <c>[last_successful_finish - start_offset, W)</c> (<c>W</c> the <see cref="RollupCoverage.CeilingOf"/>
+/// watermark) is hole-free FROM RAW, without scanning either relation.
+///
+/// <para><b>Why a per-run catalog read can prove this at all.</b> An hourly refresh policy re-materializes
+/// <c>[run_time - start_offset, run_time - end_offset]</c> from the CURRENT raw every time it runs
+/// (<see cref="TimescaleSupport.HourlyRefreshStartOffset"/>); <c>query_stats</c>/<c>procedure_stats</c> rows
+/// are only ever APPENDED at collection time (the only backdating writer, <c>QueryStoreBackfill</c>, touches a
+/// different table family). So a run that reports <c>last_run_status = 'Success'</c> did re-read every raw row
+/// that existed for its window AT THAT MOMENT — the only way it could still be incomplete is if the SAME run
+/// left part of its own window unprocessed, which is exactly what an unlimited batch count rules out.</para>
+///
+/// <para><b>The batching trap this read has to close (#4605).</b> TimescaleDB's incremental refresh
+/// (<c>buckets_per_batch</c>/<c>max_batches_per_execution</c>, added alongside #3745's daily fix) commits each
+/// batch as ITS OWN transaction and reports <c>Success</c> the moment the CURRENT execution's batch cap is
+/// reached, even when buckets remain queued for the NEXT run — measured live: a policy configured
+/// <c>buckets_per_batch => 1, max_batches_per_execution => 1</c> over a 30-hour backlog materializes exactly
+/// one bucket per run and reports Success every time, while <c>cagg_watermark</c> stays parked at the run's
+/// OWN horizon. Reading only <c>last_successful_finish - start_offset</c> against that config would claim the
+/// whole window on the strength of one bucket. So this read answers null unless the job's
+/// <c>max_batches_per_execution</c> is absent or <c>0</c> ("no limit", TimescaleDB's own default and the
+/// product's own hourly policies today, <see cref="TimescaleSupport.AddHourlyRefreshPolicySql"/> names
+/// neither) — the only configuration under which a Success run is guaranteed to have covered every batch its
+/// window needed, not merely the first one.</para>
+///
+/// <para><b>Rows written after the run finished, inside the proven window.</b> The candidate span's upper
+/// bound is <c>W</c>, not <c>now</c>; a <c>query_stats</c>/<c>procedure_stats</c> collection sweep writes
+/// <c>collection_time = now()</c>-ish, strictly newer than <c>W</c> once the policy's <c>end_offset</c>
+/// (one hour, the same as the sweep cadence) has passed, so a row landing after the run but still inside
+/// <c>[ProvenFrom, W)</c> is not possible for these two tables — it would require a collector backdating a row
+/// more than an hour, which only <c>QueryStoreBackfill</c> does, and that touches Query Store's own tables,
+/// never these.</para>
+///
+/// <para>Only the OUTAGE shape (#4301) is left for a caller to reason about separately: a job PAUSED across an
+/// outage answers null here (see below), and once it resumes its first run's <c>ProvenFrom</c> starts at that
+/// run's OWN <c>start_offset</c> back — never earlier, so raw rows written during the outage in an hour that
+/// falls BEFORE the resumed run's <c>ProvenFrom</c> are correctly left unclaimed; a caller needing that older
+/// span still falls back to raw.</para>
+/// </summary>
+public static class RollupProvenContiguity
+{
+    /// <summary>
+    /// One row per hourly refresh job on this store's <c>collect</c> aggregates: the view name, whether the
+    /// job is <c>scheduled</c> (a paused job never runs again on its own), the last run's status, its
+    /// <c>last_successful_finish</c>, its <c>start_offset</c> in seconds, and its <c>max_batches_per_execution</c>
+    /// (NULL when the key is absent from <c>config</c> — TimescaleDB's own "no limit" default, read the same
+    /// way <see cref="TimescaleSupport.ContinuousAggregateBatchingStateSql"/> reads the sibling
+    /// <c>buckets_per_batch</c> key). One JOIN, one JOIN, both catalog-only (no chunk or row scan): the same
+    /// pair <see cref="TimescaleSupport.ContinuousAggregateRefreshStateSql"/> already uses to resolve a job
+    /// back to its view.
+    /// </summary>
+    public const string ProvenContiguityStateSql = @"
+SELECT
+    ca.view_name,
+    j.scheduled,
+    js.last_run_status,
+    js.last_successful_finish,
+    EXTRACT(EPOCH FROM (j.config->>'start_offset')::interval)::bigint AS start_offset_seconds,
+    (j.config->>'max_batches_per_execution')::int AS max_batches_per_execution
+FROM timescaledb_information.jobs AS j
+JOIN timescaledb_information.continuous_aggregates AS ca
+  ON  (ca.view_schema = j.hypertable_schema AND ca.view_name = j.hypertable_name)
+  OR  (ca.materialization_hypertable_schema = j.hypertable_schema AND ca.materialization_hypertable_name = j.hypertable_name)
+LEFT JOIN timescaledb_information.job_stats AS js USING (job_id)
+WHERE j.proc_name = 'policy_refresh_continuous_aggregate'
+AND   ca.view_schema = 'collect'";
+
+    /// <summary>
+    /// Reads <see cref="ProvenContiguityStateSql"/> and answers one <c>ProvenFrom</c> instant per view — null
+    /// for a view whose job is missing, unscheduled (paused), whose last run did not succeed, or whose
+    /// <c>max_batches_per_execution</c> is a positive number (a run can report Success without having
+    /// processed its whole window). A Postgres or cast failure (a plain store, or a TimescaleDB too old to
+    /// carry this config key) is swallowed the same way the #3012 window-and-phase read swallows it — nothing
+    /// to prove either way.
+    /// </summary>
+    public static async Task<IReadOnlyDictionary<string, DateTime>> ReadAsync(
+        NpgsqlDataSource dataSource, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataSource);
+
+        var provenFrom = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        try
+        {
+            await using var probe = dataSource.CreateCommand(ProvenContiguityStateSql);
+            probe.CommandTimeout = commandTimeoutSeconds;
+            await using var reader = await probe.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var view = reader.GetString(0);
+                var scheduled = !await reader.IsDBNullAsync(1, cancellationToken) && reader.GetBoolean(1);
+                var status = await reader.IsDBNullAsync(2, cancellationToken) ? null : reader.GetString(2);
+                if (!scheduled || !string.Equals(status, "Success", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (await reader.IsDBNullAsync(3, cancellationToken) || await reader.IsDBNullAsync(4, cancellationToken))
+                {
+                    continue;
+                }
+
+                var maxBatches = await reader.IsDBNullAsync(5, cancellationToken) ? 0 : reader.GetInt32(5);
+                if (maxBatches != 0)
+                {
+                    /* A positive cap: a Success run may have processed only the first N batches of a larger
+                       backlog and left the rest queued for next time (the #4605 batching trap this read
+                       exists to close) — the window is not proved whole. */
+                    continue;
+                }
+
+                var lastSuccessfulFinish = DateTime.SpecifyKind(reader.GetDateTime(3), DateTimeKind.Utc);
+                var startOffsetSeconds = reader.GetInt64(4);
+                provenFrom[view] = lastSuccessfulFinish - TimeSpan.FromSeconds(startOffsetSeconds);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _ = ex;
+        }
+
+        return provenFrom;
     }
 }

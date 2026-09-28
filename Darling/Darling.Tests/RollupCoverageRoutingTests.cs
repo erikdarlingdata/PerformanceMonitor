@@ -730,6 +730,49 @@ public sealed class RollupCoverageRoutingTests
         return Regex.Replace(withoutBlocks, @"//[^\r\n]*", m => new string(' ', m.Value.Length));
     }
 
+    /* ─────────────────────── #4605 part 2: proven-contiguous-from ─────────────────────── */
+
+    /// <summary>A view named in the proven-from dictionary answers it; an absent view answers null, the same
+    /// safe-unknown shape <see cref="RollupCoverage.CeilingOf"/> already uses.</summary>
+    [Fact]
+    public void ProvenContiguousFromOf_ReadsTheNamedViewAndAnswersNullForEveryOtherOne()
+    {
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.None,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            new Dictionary<string, DateTime>(StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStatsIntervalHourlyView] = DaysAgo(1),
+            });
+
+        Assert.Equal(DaysAgo(1), coverage.ProvenContiguousFromOf(TimescaleSupport.QueryStatsIntervalHourlyView));
+        Assert.Null(coverage.ProvenContiguousFromOf(TimescaleSupport.ProcedureStatsIntervalHourlyView));
+        Assert.Null(RollupCoverage.Unknown.ProvenContiguousFromOf(TimescaleSupport.QueryStatsIntervalHourlyView));
+    }
+
+    /// <summary>
+    /// The catalog read answers null (no entry at all) for a job that is a positive
+    /// <c>max_batches_per_execution</c> away from proving its window whole — the batched-refresh trap: a
+    /// Success run can close only the first batch of a larger backlog and still report Success. Read directly
+    /// against <see cref="RollupProvenContiguity.ReadAsync"/> on a rig-independent in-memory shape is not
+    /// possible (it is a live catalog read), so this pins the SQL's own column list instead — the columns
+    /// <see cref="RollupProvenContiguity.ReadAsync"/> depends on positionally must stay in this order.
+    /// </summary>
+    [Fact]
+    public void ProvenContiguityStateSql_NamesTheColumnsTheReaderIndexesPositionally()
+    {
+        var sql = RollupProvenContiguity.ProvenContiguityStateSql;
+        Assert.Contains("ca.view_name", sql, StringComparison.Ordinal);
+        Assert.Contains("j.scheduled", sql, StringComparison.Ordinal);
+        Assert.Contains("js.last_run_status", sql, StringComparison.Ordinal);
+        Assert.Contains("js.last_successful_finish", sql, StringComparison.Ordinal);
+        Assert.Contains("start_offset_seconds", sql, StringComparison.Ordinal);
+        Assert.Contains("max_batches_per_execution", sql, StringComparison.Ordinal);
+        Assert.Contains("proc_name = 'policy_refresh_continuous_aggregate'", sql, StringComparison.Ordinal);
+    }
+
     /// <summary>Walks up from the test output directory to the repo root — the directory holding
     /// <c>PerformanceMonitor.sln</c>. Same walk-up idiom as <c>DocCommentHygieneTests.FindRepoRoot</c>.</summary>
     private static string? FindRepoRoot()
