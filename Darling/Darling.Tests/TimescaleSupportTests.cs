@@ -119,8 +119,12 @@ public sealed class TimescaleSupportTests
            grid itself is pinned literally, and wait_stats' own minute too, by the #3035 tests below —
            so a moved grid is loud there rather than silently agreed with here. */
         Assert.True(TimescaleSupport.TryCompressionPhaseMinutesFor("wait_stats", out var waitStatsPhase));
+        /* #4510: wait_stats is one of the heavy tables staggered by HeavyCompressAfterOffsetHours, so its
+           compress_after literal carries that table's own extra hours rather than the plain day every
+           other pin in this file still expects. CompressAfterFor is the single source both the statement
+           and this assertion read, so they cannot disagree. */
         Assert.Equal(
-            "SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '1 days', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
+            $"SELECT add_compression_policy('wait_stats', compress_after => INTERVAL '{TimescaleSupport.CompressAfterFor("wait_stats")}', schedule_interval => INTERVAL '1 hour', if_not_exists => true, "
             + "initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' + INTERVAL '1 hour' + INTERVAL '"
             + waitStatsPhase.ToString(CultureInfo.InvariantCulture) + " minutes')",
             TimescaleSupport.AddCompressionPolicySql(byName["wait_stats"]));
@@ -3451,18 +3455,20 @@ LIMIT 1", connection))
            be filtered out before the caller ever saw it. */
         Assert.DoesNotContain("IS DISTINCT FROM", read, StringComparison.Ordinal);
 
-        /* THE ORDINAL CONTRACT. The reader positions its columns by index, and hypertable_schema was
-           APPENDED rather than inserted precisely so no existing index moved — an ordinal shift in a column
-           list is a defect only a live store can see, and it would silently read a phase out of a boolean.
-           So the schema is asserted to be the LAST of exactly seven selected columns, which is the property
-           the C# index depends on. */
+        /* THE ORDINAL CONTRACT. The reader positions its columns by index, and hypertable_schema and
+           #4510's compress_after_seconds were APPENDED rather than inserted precisely so no existing index
+           moved — an ordinal shift in a column list is a defect only a live store can see, and it would
+           silently read a phase out of a boolean. So hypertable_schema is asserted second-to-last and
+           compress_after_seconds last, of exactly eight selected columns, which is the property the C#
+           index depends on. */
         var selected = SelectedColumns(read);
 
-        /* Control on the split itself: a CASE expression carries no top-level comma, so seven parts is the
+        /* Control on the split itself: a CASE expression carries no top-level comma, so eight parts is the
            column count and not an artifact of splitting inside one. */
-        Assert.Equal(7, selected.Length);
+        Assert.Equal(8, selected.Length);
         Assert.StartsWith("j.job_id", selected[0], StringComparison.Ordinal);
         Assert.Equal("j.hypertable_schema", selected[6]);
+        Assert.Contains("compress_after", selected[7], StringComparison.Ordinal);
 
         /* And the phase is gated on it: CompressionPhaseOrder holds BARE names, so a foreign hypertable
            called like one of ours must not inherit its minute. The cadence converge stays unscoped on
@@ -3676,9 +3682,14 @@ LIMIT 1", connection))
 
         Assert.Equal(TimescaleSupport.HypertableCount, statements.Length);
 
-        foreach (var sql in statements)
+        for (var i = 0; i < statements.Length; i++)
         {
-            Assert.Contains($"compress_after => INTERVAL '{TimescaleSupport.CompressAfterDays} days'", sql, StringComparison.Ordinal);
+            var sql = statements[i];
+
+            /* #4510: the heaviest tables now render compress_after with an extra per-table offset
+               (CompressAfterFor), so this checks the compress_after literal matches THAT table's own
+               value rather than assuming every table shares the plain day literal. */
+            Assert.Contains($"compress_after => INTERVAL '{TimescaleSupport.CompressAfterFor(TimescaleSupport.CompressionPhaseOrder[i])}'", sql, StringComparison.Ordinal);
             Assert.Contains($"schedule_interval => INTERVAL '{TimescaleSupport.CompressScheduleInterval}'", sql, StringComparison.Ordinal);
             Assert.Contains("if_not_exists => true", sql, StringComparison.Ordinal);
             Assert.Contains("initial_start => date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' " + Anchor, sql, StringComparison.Ordinal);

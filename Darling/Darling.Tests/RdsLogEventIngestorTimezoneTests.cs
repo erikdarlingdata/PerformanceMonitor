@@ -114,4 +114,61 @@ public sealed class RdsLogEventIngestorTimezoneTests
 
         Assert.IsNotType<RdsLogUnavailableException>(failure);
     }
+
+    /// <summary>
+    /// #4501 round 2: a K1-shaped line — a client field quoting <c>ERROR:  </c> in text it sends — must
+    /// still reach the write over this transport. Before this fix the ingestor called the 3-arg
+    /// <c>Classify</c> overload, which applies the forgery rule with NO separator check — the fallback for a
+    /// prefix that was "not yet collected" — and refused this exact shape even though RDS's prefix is fixed
+    /// and known (<see cref="RdsLogEventIngestor.DefaultLogLinePrefix"/>).
+    ///
+    /// <para>The line is at WARNING, not LOG: a bare LOG-severity statement line is classified into an entry
+    /// either way, but no family parser recognises it (<see cref="PgErrorEventParser"/> only claims WARNING
+    /// or worse), so it produces zero events and reaches no write on EITHER prefix path — that shape cannot
+    /// distinguish the fix. WARNING is the lowest severity the error family parser claims, so this is the
+    /// smallest change that still proves the write is reached only when the fixed prefix is passed.</para>
+    ///
+    /// <para>Proven through <see cref="RdsLogEventIngestor.IngestAsync"/> itself, the product's own call
+    /// path, the same way the happy-path test above proves "reaches the write": the dead store turns a
+    /// non-empty batch into a throw that is not <see cref="RdsLogUnavailableException"/>.</para>
+    /// </summary>
+    [Fact]
+    public async Task AK1ShapedStatementLine_StillReachesTheWrite()
+    {
+        var k1 = "2026-08-26 22:25:24.100 UTC:192.0.2.10(52345):app_rw@app_db:[1549]:WARNING:  statement: SELECT 'ERROR:  x'\n";
+
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var logs = new RdsLogSource(_ => new FakeRds { FirstBody = k1 });
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+    }
+
+    /// <summary>
+    /// #4501 round 2: a real server message carrying a libpq error inside it (a logical-replication worker's
+    /// own line) must still reach the write over this transport. RDS/Aurora's prefix is fixed and known
+    /// (<see cref="RdsLogEventIngestor.DefaultLogLinePrefix"/>), so passing it — rather than falling back to
+    /// the no-separator-check overload the 3-arg <c>Classify</c> call used before this fix — keeps this line
+    /// as ERROR (ERROR and FATAL agree) instead of refusing it as a forgery. Proven through
+    /// <see cref="RdsLogEventIngestor.IngestAsync"/> itself, the product's own call path, the same way the
+    /// happy-path test above proves "reaches the write": the dead store turns a non-empty batch into a throw
+    /// that is not <see cref="RdsLogUnavailableException"/>.
+    /// </summary>
+    [Fact]
+    public async Task AnErrorCarryingAFatal_StillReachesTheWrite()
+    {
+        var line = "2026-08-26 22:25:24.100 UTC:192.0.2.10(52345):app_rw@app_db:[1549]:ERROR:  could not connect to the publisher: FATAL:  password authentication failed\n";
+
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var logs = new RdsLogSource(_ => new FakeRds { FirstBody = line });
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+    }
 }

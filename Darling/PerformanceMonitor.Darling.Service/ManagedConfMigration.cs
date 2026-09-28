@@ -132,6 +132,7 @@ internal static class ManagedConfMigration
         DarlingManagedPostgres.ConfMarkerV14,
         DarlingManagedPostgres.ConfMarkerV15,
         DarlingManagedPostgres.ConfMarkerV16,
+        DarlingManagedPostgres.ConfMarkerV17,
     ];
 
     /// <summary>
@@ -293,6 +294,8 @@ internal static class ManagedConfMigration
                 key, text, "wal_compression", "wal_compression = lz4"),
             _ when span.Marker == DarlingManagedPostgres.ConfMarkerV16 => ClassifyFixedLine(
                 key, text, "checkpoint_timeout", "checkpoint_timeout = 15min"),
+            _ when span.Marker == DarlingManagedPostgres.ConfMarkerV17 => ClassifyFixedLine(
+                key, text, "log_line_prefix", "log_line_prefix = '%m [%p] %a '"),
             _ => (false, HandEditReason.FormMismatch),
         };
 

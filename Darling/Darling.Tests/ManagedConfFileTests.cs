@@ -368,6 +368,17 @@ public sealed class ManagedConfFileTests
         Assert.Contains("checkpoint_timeout = '15min'", body, StringComparison.Ordinal);
     }
 
+    /// <summary>v17's <c>log_line_prefix</c> is one of the builders <see cref="ManagedConfFile.RenderBody"/>
+    /// calls, so the managed body itself carries it — not just the legacy v1-v17 appenders
+    /// <c>EnsureConfAppended</c> runs against a self-hosted conf.</summary>
+    [Fact]
+    public void RenderBody_ContainsLogLinePrefix()
+    {
+        var body = ManagedConfFile.RenderBody(SampleInputs());
+
+        Assert.Contains("log_line_prefix = '%m [%p] %a '", body, StringComparison.Ordinal);
+    }
+
     /// <summary>Pin: <see cref="ManagedConfFile.RenderBody"/> always renders <c>listen_addresses</c> as
     /// exactly loopback (<c>DarlingManagedPostgres.BuildConfAppend</c>'s v1 line) — never the network
     /// address an exposed store's command line adds. Every verification path that reads this rendered text
@@ -519,6 +530,11 @@ public sealed class ManagedConfFileTests
         if (marker == DarlingManagedPostgres.ConfMarkerV16)
         {
             return DarlingManagedPostgres.BuildCheckpointIntervalConfAppend();
+        }
+
+        if (marker == DarlingManagedPostgres.ConfMarkerV17)
+        {
+            return DarlingManagedPostgres.BuildLogLinePrefixConfAppend();
         }
 
         throw new InvalidOperationException(
