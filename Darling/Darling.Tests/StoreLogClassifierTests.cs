@@ -1524,6 +1524,23 @@ public class StoreLogClassifierTests
         var k8Group = Assert.Single(k8.Groups);
         Assert.Equal("LOG", k8Group.Severity);
         Assert.Equal(1, k8.EntriesRead);
+
+        /* K9 (#4501 round 2): a real server message carrying a libpq error inside it - a logical-replication
+           worker's own PRIMARY line, not a forgery. ERROR and FATAL are both in the error class, so they
+           agree and the line is kept as ERROR rather than refused. RED at 61ed5bfb; record it. */
+        var k9 = StoreLogClassifier.Classify(
+            DefaultPrefix + "ERROR:  could not connect to the publisher: FATAL:  password authentication failed\n");
+        var k9Group = Assert.Single(k9.Groups);
+        Assert.Equal("ERROR", k9Group.Severity);
+        Assert.Equal(1, k9.EntriesRead);
+
+        /* K10 (#4501 round 2): a forged application_name spelling ERROR ahead of a real FATAL line - still
+           in the error class, still kept, this time as FATAL. */
+        var k10 = StoreLogClassifier.Classify(
+            DefaultPrefix + "x ERROR:  FATAL:  password authentication failed\n");
+        var k10Group = Assert.Single(k10.Groups);
+        Assert.Equal("FATAL", k10Group.Severity);
+        Assert.Equal(1, k10.EntriesRead);
     }
 
     /// <summary>
@@ -1570,6 +1587,20 @@ public class StoreLogClassifierTests
             DefaultPrefix + "ERROR:  " + pastBoundaryPadding + " LOG:  past the pid\n");
         var r4PastGroup = Assert.Single(r4PastBoundary.Groups);
         Assert.Equal("ERROR", r4PastGroup.Severity);
+
+        /* R5 (#4501 round 2): the error class widens agreement, but an error-class label paired with a
+           non-error severity still disagrees and is refused. */
+        var r5 = StoreLogClassifier.Classify(
+            DefaultPrefix + "x LOG:  ERROR:  x\n");
+        Assert.Empty(r5.Groups);
+        Assert.Equal(0, r5.EntriesRead);
+
+        /* R6 (#4501 round 2): a companion field (DETAIL) as M2 carries no severity of its own, so it never
+           agrees, and the FATAL line ahead of it is refused rather than kept. */
+        var r6 = StoreLogClassifier.Classify(
+            DefaultPrefix + "FATAL:  DETAIL:  x\n");
+        Assert.Empty(r6.Groups);
+        Assert.Equal(0, r6.EntriesRead);
     }
 
     /// <summary>Class + severity + occurrences, order-independent — a comparison that survives a change to

@@ -130,7 +130,7 @@ public static class PgLogEntryAssembler
     /// alternation <see cref="s_prefixLine"/>'s own label group uses. Shared with <see cref="IsForgedLabel"/>
     /// so the "is this a label" shape is written once.</summary>
     private const string LabelAlternation =
-        "LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION";
+        "LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC|DEBUG[1-5]?|DETAIL|HINT|STATEMENT|CONTEXT|QUERY|LOCATION|BACKTRACE";
 
     private static readonly Regex s_prefixLine = new(
         @"^(?<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?) "
@@ -171,9 +171,14 @@ public static class PgLogEntryAssembler
     /// <item>(only when <paramref name="separator"/> is not null) the window ends with it — the literal text
     /// the collected <c>log_line_prefix</c> renders right before the label, so a client field's own value
     /// cannot masquerade as the prefix's punctuation;</item>
-    /// <item><paramref name="matchedLabel"/> and M2's label are DIFFERENT strings — same-severity pairs (a
-    /// genuine <c>RAISE EXCEPTION 'ERROR:  x'</c> rendering <c>ERROR:  ERROR:  x</c>) read the same either
-    /// way, so nothing is lost by keeping them (#4501).</item>
+    /// <item><paramref name="matchedLabel"/> and M2's label do not AGREE — they are not the same string, and
+    /// they are not BOTH members of the error class (<c>ERROR</c>, <c>FATAL</c>, <c>PANIC</c>). Same-severity
+    /// pairs (a genuine <c>RAISE EXCEPTION 'ERROR:  x'</c> rendering <c>ERROR:  ERROR:  x</c>) read the same
+    /// either way, so nothing is lost by keeping them. The error class is widened past plain equality
+    /// because a real server message can carry a libpq error inside it — a logical-replication worker's
+    /// <c>ERROR:  could not connect to the publisher: FATAL:  password authentication failed</c> is the
+    /// PRIMARY line's own text, not a forgery, and every member of that class is still an error whichever
+    /// of the two names the line keeps (#4501 round 2).</item>
     /// </list>
     ///
     /// <para><paramref name="applyCheck"/> false skips the whole rule (never refuses): the collected prefix
@@ -181,8 +186,17 @@ public static class PgLogEntryAssembler
     /// the RDS default <c>%t:%r:%u@%d:[%p]:</c> and a bare <c>%m [%p] </c> both land here).</para>
     ///
     /// <para>A refused match is treated exactly as a line the prefix regex never matched at all: dropped,
-    /// ending the open entry, never opening a new one.</para>
+    /// ending the open entry, never opening a new one. Still refused: a companion field (<c>DETAIL</c>,
+    /// <c>STATEMENT</c> and the like) as M2 never agrees — it carries no severity of its own to agree
+    /// with — and an error-class label paired with a non-error severity (<c>LOG</c>, <c>WARNING</c>, …)
+    /// still disagrees.</para>
     /// </summary>
+    private static readonly HashSet<string> s_errorClass = new(StringComparer.Ordinal) { "ERROR", "FATAL", "PANIC" };
+
+    private static bool LabelsAgree(string label1, string label2) =>
+        string.Equals(label1, label2, StringComparison.Ordinal)
+        || (s_errorClass.Contains(label1) && s_errorClass.Contains(label2));
+
     private static bool IsForgedLabel(string matchedLabel, string text, bool applyCheck, string? separator)
     {
         if (!applyCheck)
@@ -223,7 +237,7 @@ public static class PgLogEntryAssembler
             }
         }
 
-        return !string.Equals(matchedLabel, m2.Groups["label"].Value, StringComparison.Ordinal);
+        return !LabelsAgree(matchedLabel, m2.Groups["label"].Value);
     }
 
 
@@ -287,13 +301,22 @@ public static class PgLogEntryAssembler
     /// <item><paramref name="logLinePrefix"/> is null (not collected): apply the rule with NO separator
     /// check — the fallback shrinks what it keeps rather than what it refuses, since an unknown prefix could
     /// put anything before the label.</item>
-    /// <item>the prefix has no client-controlled field (<c>%a</c>, <c>%u</c> or <c>%d</c>) between <c>%p</c>
-    /// and the label: the rule does not apply at all (there is no forgery surface), matching how a bare
-    /// <c>%m [%p] </c> read before #4501.</item>
+    /// <item>the prefix has no client-controlled field (<c>%a</c>, <c>%u</c> or <c>%d</c>, padded or not —
+    /// <c>%-20a</c> and <c>%20a</c> both count, <c>%%a</c> never does) between <c>%p</c> and the label: the
+    /// rule does not apply at all (there is no forgery surface), matching how a bare <c>%m [%p] </c> read
+    /// before #4501.</item>
     /// <item>otherwise: apply the rule, with the separator being the prefix's own literal text between that
     /// field and where the label starts — the prefix's tail after its last escape (a space for
     /// <c>'%m [%p] %a '</c>, empty for a field glued straight onto the label).</item>
     /// </list>
+    ///
+    /// <para><b>Two costs this does not correct for.</b> A padded field wider than
+    /// <see cref="IsForgedLabel"/>'s 63-byte allowance (a prefix nobody sane writes) widens the window that
+    /// rule bounds to that padding, since the width itself becomes part of what a forged name can hide
+    /// behind — rare, and not guarded here. And any field the prefix renders BETWEEN the client field and
+    /// the label (<c>'%m [%p] %a %e '</c>, or <c>%a %u@%d </c>) is not counted in the window at all: the
+    /// separator is only the literal text after the LAST escape, so a forged name has that whole middle
+    /// span, not just the immediate separator, to hide in before the real label.</para>
     /// </summary>
     internal static (bool ApplyCheck, string? Separator) ForgeryCheckFor(string? logLinePrefix)
     {
@@ -303,15 +326,17 @@ public static class PgLogEntryAssembler
         }
 
         /* %p is required for this reader to have a pid to anchor on at all; a prefix with no %p is not one
-           this reader can reason about, so it is treated the same as "no client field after %p". */
-        var pidIndex = logLinePrefix.IndexOf("%p", StringComparison.Ordinal);
+           this reader can reason about, so it is treated the same as "no client field after %p". The
+           lookbehind keeps a literal %%p (an escaped percent followed by a literal 'p') from mis-anchoring
+           here the way a plain IndexOf("%p") would. */
+        var pidMatch = s_pidEscape.Match(logLinePrefix);
 
-        if (pidIndex < 0)
+        if (!pidMatch.Success)
         {
             return (false, null);
         }
 
-        var afterPid = logLinePrefix[(pidIndex + 2)..];
+        var afterPid = logLinePrefix[(pidMatch.Index + pidMatch.Length)..];
         var fieldMatch = s_clientFieldEscape.Match(afterPid);
 
         if (!fieldMatch.Success)
@@ -329,12 +354,21 @@ public static class PgLogEntryAssembler
         return (true, tail);
     }
 
-    /* %a, %u, %d: the three client-controlled fields (#4501). */
-    private static readonly Regex s_clientFieldEscape = new("%[aud]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    /* %p itself, %% excluded so a literal percent immediately before a literal 'p' is never read as the
+       pid escape (#4501 round 2). */
+    private static readonly Regex s_pidEscape = new("(?<!%)%(?!%)p", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /* %a, %u, %d: the three client-controlled fields (#4501), PostgreSQL's own padded/unpadded forms
+       allowed (%-10a, %10a) — a fixed width is a legitimate log_line_prefix escape, not a literal, and
+       reading '%m [%p] %-20a ' as having no client field would turn this rule off on exactly the shape it
+       exists to guard. %% (a literal percent) is excluded so it is never read as an escape of its own. */
+    private static readonly Regex s_clientFieldEscape = new("(?<!%)%(?!%)-?\\d*[aud]", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /* Every log_line_prefix escape (%-something), used to find the LAST one so the separator is only the
-       prefix's own trailing literal, not a literal that sits between two escapes earlier in the string. */
-    private static readonly Regex s_anyEscape = new("%.", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+       prefix's own trailing literal, not a literal that sits between two escapes earlier in the string.
+       Padding allowed for the same reason s_clientFieldEscape allows it, and %% excluded so a literal
+       percent is never mistaken for (and never anchors as) the prefix's last escape. */
+    private static readonly Regex s_anyEscape = new("(?<!%)%(?!%)-?\\d*.", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// Every complete entry in the slab, in log order, for a caller that read the target's own <c>log_timezone</c>

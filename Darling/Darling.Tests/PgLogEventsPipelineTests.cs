@@ -357,6 +357,54 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal("ERROR", entry.Severity);
     }
 
+    /// <summary>#4501 round 2: a real server message carrying a libpq error inside it — a logical-replication
+    /// worker's own PRIMARY line, not a forgery. ERROR and FATAL both being in the error class, they agree,
+    /// and the line is kept as ERROR. RED at 61ed5bfb (the plain-equality check refused it); record it.</summary>
+    [Fact]
+    public void Assemble_AnErrorLineCarryingAFatalInsideIt_IsKeptAsError()
+    {
+        var line = P + "[4102] ERROR:  could not connect to the publisher: FATAL:  password authentication failed\n";
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] %a ", out _));
+        Assert.Equal("ERROR", entry.Severity);
+    }
+
+    /// <summary>#4501 round 2: a forged application_name spelling ERROR ahead of a real FATAL line — still in
+    /// the error class, still kept, as FATAL.</summary>
+    [Fact]
+    public void Assemble_AForgedErrorAheadOfARealFatalLine_IsKeptAsFatal()
+    {
+        var line = P + "[4102] x ERROR:  FATAL:  password authentication failed\n";
+        var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] %a ", out _));
+        Assert.Equal("FATAL", entry.Severity);
+    }
+
+    /// <summary>#4501 round 2: R1 still refuses — LOG and the real ERROR do not agree (LOG is not in the
+    /// error class).</summary>
+    [Fact]
+    public void Assemble_R1StillRefuses_LogAndErrorDoNotAgree()
+    {
+        var r1 = P + "[4102] ERROR:  LOG:  checkpoint starting: time\n";
+        Assert.Empty(PgLogEntryAssembler.Assemble(r1, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] %a ", out _));
+    }
+
+    /// <summary>#4501 round 2: a forged LOG ahead of a real ERROR line — still refused, LOG is not in the
+    /// error class.</summary>
+    [Fact]
+    public void Assemble_AForgedLogAheadOfARealErrorLine_IsRefused()
+    {
+        var line = P + "[4102] x LOG:  ERROR:  x\n";
+        Assert.Empty(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] %a ", out _));
+    }
+
+    /// <summary>#4501 round 2: DETAIL is a companion field, not a severity — it never agrees, so the FATAL
+    /// line ahead of it is refused rather than kept.</summary>
+    [Fact]
+    public void Assemble_ADetailCompanionAfterFatal_IsRefused_CompanionsNeverAgree()
+    {
+        var line = P + "[4102] FATAL:  DETAIL:  x\n";
+        Assert.Empty(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] %a ", out _));
+    }
+
     /// <summary>Prefix known, <c>%a</c> after the pid (<c>'%m [%p] %a '</c>, the v17 marker): the rule applies with a one-space separator, and R1's shape is refused.</summary>
     [Fact]
     public void ForgeryCheckFor_AAfterPid_AppliesWithASpaceSeparator()
@@ -400,6 +448,31 @@ public sealed class PgLogEventsPipelineTests
         var k7 = P + "[4102] ERROR:  ERROR:  x\n";
         var entry = Assert.Single(PgLogEntryAssembler.Assemble(k7, logTimezoneIsUtc: false, logLinePrefix: null, out _));
         Assert.Equal("ERROR", entry.Severity);
+    }
+
+    /// <summary>Padded client-field escapes (#4501 round 2): PostgreSQL accepts <c>%-10a</c> and <c>%10a</c>
+    /// as well as bare <c>%a</c>, so a prefix like <c>'%m [%p] %-20a '</c> must still turn the rule on, with
+    /// the same one-space separator a bare <c>%a</c> would give it.</summary>
+    [Fact]
+    public void ForgeryCheckFor_APaddedClientField_StillAppliesWithTheSameSeparator()
+    {
+        foreach (var prefix in new[] { "%m [%p] %-20a ", "%m [%p] %20a " })
+        {
+            var (applyCheck, separator) = PgLogEntryAssembler.ForgeryCheckFor(prefix);
+            Assert.True(applyCheck);
+            Assert.Equal(" ", separator);
+        }
+    }
+
+    /// <summary>A literal <c>%%</c> is never an escape (#4501 round 2): <c>'%m [%p] %%a '</c> has no real
+    /// client field at all, so the rule must not apply — <c>s_clientFieldEscape</c> reading <c>%%a</c> as a
+    /// padded <c>%a</c> would turn the rule on for a prefix with no forgery surface.</summary>
+    [Fact]
+    public void ForgeryCheckFor_ALiteralPercentPercent_IsNeverReadAsAClientField()
+    {
+        var (applyCheck, separator) = PgLogEntryAssembler.ForgeryCheckFor("%m [%p] %%a ");
+        Assert.False(applyCheck);
+        Assert.Null(separator);
     }
 
     /// <summary>
@@ -1582,10 +1655,12 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal("real [9] FATAL:  forged", bound.Message);
 
         /* Prefix UNKNOWN (the bare overload): #4501's fallback runs the rule with no separator check, and
-           this line's own trailing text carries a second known label (FATAL) of a DIFFERENT severity than
-           the matched one (ERROR) within the bound, all printable ASCII — so the fallback refuses it. That
-           is the fallback's accepted cost: a missed line is preferred to guessing the prefix. */
-        Assert.Empty(PgLogEntryAssembler.Assemble(line));
+           this line's own trailing text carries a second known label (FATAL) within the bound, all printable
+           ASCII — but ERROR and FATAL are both members of the error class (#4501 round 2), so they AGREE and
+           the line is kept as ERROR rather than refused: a real message can carry a libpq error inside it. */
+        var kept = Assert.Single(PgLogEntryAssembler.Assemble(line));
+        Assert.Equal("ERROR", kept.Severity);
+        Assert.Equal("real [9] FATAL:  forged", kept.Message);
     }
 
     /// <summary>

@@ -114,4 +114,28 @@ public sealed class RdsLogEventIngestorTimezoneTests
 
         Assert.IsNotType<RdsLogUnavailableException>(failure);
     }
+
+    /// <summary>
+    /// #4501 round 2: a K1-shaped statement line (a client quoting <c>ERROR:  </c> in text it sends) must
+    /// still reach the write over this transport. Before this fix the ingestor called the 3-arg
+    /// <c>Classify</c> overload, which applies the forgery rule with NO separator check — the fallback for a
+    /// prefix that was "not yet collected" — and refused this exact shape even though RDS's prefix is fixed
+    /// and known. Proven through <see cref="RdsLogEventIngestor.IngestAsync"/> itself, the product's own call
+    /// path, the same way the happy-path test above proves "reaches the write": the dead store turns a
+    /// non-empty batch into a throw that is not <see cref="RdsLogUnavailableException"/>.
+    /// </summary>
+    [Fact]
+    public async Task AK1ShapedStatementLine_StillReachesTheWrite()
+    {
+        var k1 = "2026-08-26 22:25:24.100 UTC:192.0.2.10(52345):app_rw@app_db:[1549]:LOG:  statement: SELECT 'ERROR:  x'\n";
+
+        await using var store = NpgsqlDataSource.Create(DeadStore);
+        var logs = new RdsLogSource(_ => new FakeRds { FirstBody = k1 });
+        var ingestor = new RdsLogEventIngestor(store, TestLogHashKeys.Fixed, logs);
+
+        var failure = await Assert.ThrowsAnyAsync<Exception>(
+            () => ingestor.IngestAsync(1, "target-a", Host, logTimezoneIsUtc: true));
+
+        Assert.IsNotType<RdsLogUnavailableException>(failure);
+    }
 }

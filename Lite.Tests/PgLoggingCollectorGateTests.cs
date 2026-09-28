@@ -207,6 +207,47 @@ public sealed class PgLoggingCollectorGateTests
     }
 
     /// <summary>
+    /// The column-3 <c>line_prefix</c> read (#4501), through <c>ReadAsync</c> itself — no pin of its own
+    /// existed for it. Under <c>'%a'</c> (no <c>%Q</c>) the captured digits are application_name, not a
+    /// query id, so they must NOT be trusted: query id 0.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_APrefixWithNoQ_DoesNotTrustTheCapturedQueryId()
+    {
+        var reader = new FakeCollectorDataReader(new object[]
+        {
+            42L,
+            12.5,
+            "{ \"Plan\": { \"Node Type\": \"Seq Scan\", \"Relation Name\": \"dl\" } }",
+            "%a",
+        });
+
+        var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(0L, row.QueryId);
+    }
+
+    /// <summary>The same column-3 read (#4501) under a prefix that DOES carry <c>%Q</c>: the captured digits
+    /// are the real query id and must be kept.</summary>
+    [Fact]
+    public async Task ReadAsync_APrefixWithQ_KeepsTheCapturedQueryId()
+    {
+        var reader = new FakeCollectorDataReader(new object[]
+        {
+            42L,
+            12.5,
+            "{ \"Plan\": { \"Node Type\": \"Seq Scan\", \"Relation Name\": \"dl\" } }",
+            "%Q",
+        });
+
+        var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(42L, row.QueryId);
+    }
+
+    /// <summary>
     /// The refusal's message is the sentence the runner stores and the precondition read quotes back, so
     /// it has to carry the whole answer itself: the setting by name, the restart the fix costs (the
     /// setting is postmaster-context — a reload does not apply it), the explicit denial that this is

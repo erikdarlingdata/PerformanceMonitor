@@ -809,8 +809,8 @@ public static class StoreLogClassifier
     /// for the separator the prefix renders after it.</summary>
     private const int MaxApplicationNameBytes = 63;
 
-    /// <summary>Every label <see cref="FindNextKnownLabel"/> looks for as M2 (the reviewer's bounded refusal
-    /// rule): the severities, the DEBUG levels <see cref="PrimarySeverities"/> collapses to one name, and the
+    /// <summary>Every label <see cref="FindNextKnownLabel"/> looks for as M2 (the bounded refusal rule below):
+    /// the severities, the DEBUG levels <see cref="PrimarySeverities"/> collapses to one name, and the
     /// continuation fields — the same alternation <see cref="PgLogEntryAssembler"/>'s own label group uses.</summary>
     private static readonly string[] RefusalLabels =
         [.. PrimarySeverities, "DEBUG1", "DEBUG2", "DEBUG3", "DEBUG4", "DEBUG5", .. ContinuationFields];
@@ -835,9 +835,26 @@ public static class StoreLogClassifier
     /// <para><b>Unless the two labels agree.</b> When L1 and M2 name the SAME severity (<c>psql ERROR:  ERROR:  x</c>
     /// from <c>RAISE EXCEPTION 'ERROR:  x'</c>, or a forged name that happens to repeat the line's real severity),
     /// the line reads the same severity either way, so there is nothing to refuse: kept, with L1's severity and
-    /// the message starting right after L1 as <see cref="FindField"/> already does. Forgery only matters when a
-    /// name makes a line read as a DIFFERENT severity than the one PostgreSQL wrote.</para>
+    /// the message starting right after L1 as <see cref="FindField"/> already does.</para>
+    ///
+    /// <para><b>Agreement is widened to the error class.</b> <c>ERROR</c>, <c>FATAL</c> and <c>PANIC</c> also
+    /// agree with EACH OTHER, not only with themselves: a real server message can carry a libpq error inside
+    /// it — a logical-replication worker writing
+    /// <c>ERROR:  could not connect to the publisher: FATAL:  password authentication failed</c> is
+    /// PostgreSQL's own PRIMARY line, not a forgery, and it is still an error under either name. A companion
+    /// field (<c>DETAIL</c>, <c>STATEMENT</c>, …) as M2 never agrees — it carries no severity to agree
+    /// with — and pairing an error-class label with a non-error one (<c>LOG</c>, <c>WARNING</c>, …) still
+    /// disagrees and is refused. Forgery only matters when a name makes a line read as a genuinely different
+    /// severity than the one PostgreSQL wrote.</para>
     /// </summary>
+    private static bool LabelsAgree(string name1, string name2) =>
+        string.Equals(name1, name2, StringComparison.Ordinal)
+        || (ErrorClass.Contains(name1) && ErrorClass.Contains(name2));
+
+    /// <summary>The severities that agree with each other as well as with themselves (#4501 round 2): a
+    /// server message can carry a libpq error inside it, and every member here is still an error.</summary>
+    private static readonly HashSet<string> ErrorClass = new(StringComparer.Ordinal) { "ERROR", "FATAL", "PANIC" };
+
     private static bool IsRefusedBySecondLabel(ReadOnlySpan<char> line, int nameStart, string name, int colon)
     {
         var second = FindNextKnownLabel(line, colon + 3);
@@ -864,14 +881,14 @@ public static class StoreLogClassifier
             return false;
         }
 
-        return !string.Equals(name, secondName, StringComparison.Ordinal);
+        return !LabelsAgree(name, secondName);
     }
 
     /// <summary>The next label <see cref="RefusalLabels"/> knows, starting at or after <paramref name="from"/>: an
     /// exact <c>&lt;LABEL&gt;:  </c> whose name is not itself the tail of a longer all-caps token, the same
     /// boundary <see cref="ContinuesAnUpperCaseToken"/> guards for the line's own field. Unlike
     /// <see cref="IsLabelColon"/> this knows nothing of unpadded translated labels or a <c>%Q</c> pid gluing: the
-    /// reviewer's rule is stated against the plain English alternation, the same one both readers share.</summary>
+    /// rule is stated against the plain English alternation, the same one both readers share.</summary>
     private static (int Start, string Name)? FindNextKnownLabel(ReadOnlySpan<char> line, int from)
     {
         var pos = from;
