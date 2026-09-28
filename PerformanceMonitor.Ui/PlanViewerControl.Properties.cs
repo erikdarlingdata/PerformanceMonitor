@@ -333,20 +333,9 @@ public partial class PlanViewerControl
         {
             AddPropertySection("Actual Statistics");
             AddPropertyRow("Actual Rows", $"{node.ActualRows:N0}");
-            if (node.PerThreadStats.Count > 1)
-                foreach (var t in node.PerThreadStats)
-                    AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualRows:N0}", indent: true);
             if (node.ActualRowsRead > 0)
-            {
                 AddPropertyRow("Actual Rows Read", $"{node.ActualRowsRead:N0}");
-                if (node.PerThreadStats.Count > 1)
-                    foreach (var t in node.PerThreadStats.Where(t => t.ActualRowsRead > 0))
-                        AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualRowsRead:N0}", indent: true);
-            }
             AddPropertyRow("Actual Executions", $"{node.ActualExecutions:N0}");
-            if (node.PerThreadStats.Count > 1)
-                foreach (var t in node.PerThreadStats)
-                    AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualExecutions:N0}", indent: true);
             if (node.ActualRebinds > 0)
                 AddPropertyRow("Actual Rebinds", $"{node.ActualRebinds:N0}");
             if (node.ActualRewinds > 0)
@@ -360,29 +349,30 @@ public partial class PlanViewerControl
                     AddPropertyRow("Partition Ranges", node.PartitionRanges);
             }
 
+            // Rows and executions list every thread, idle ones included: a thread sitting at
+            // zero while its siblings work is the whole point of looking at the breakdown.
+            AddPerThreadBreakdown(node,
+                ("Rows", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualRows), true, ""),
+                ("Rows Read", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualRowsRead), false, ""),
+                ("Executions", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualExecutions), true, ""));
+
             // Timing
             if (node.ActualElapsedMs > 0 || node.ActualCPUMs > 0
                 || node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0)
             {
                 AddPropertySection("Actual Timing");
                 if (node.ActualElapsedMs > 0)
-                {
                     AddPropertyRow("Elapsed Time", $"{node.ActualElapsedMs:N0} ms");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualElapsedMs > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualElapsedMs:N0} ms", indent: true);
-                }
                 if (node.ActualCPUMs > 0)
-                {
                     AddPropertyRow("CPU Time", $"{node.ActualCPUMs:N0} ms");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualCPUMs > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualCPUMs:N0} ms", indent: true);
-                }
                 if (node.UdfElapsedTimeMs > 0)
                     AddPropertyRow("UDF Elapsed", $"{node.UdfElapsedTimeMs:N0} ms");
                 if (node.UdfCpuTimeMs > 0)
                     AddPropertyRow("UDF CPU", $"{node.UdfCpuTimeMs:N0} ms");
+
+                AddPerThreadBreakdown(node,
+                    ("Elapsed", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualElapsedMs), false, " ms"),
+                    ("CPU", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualCPUMs), false, " ms"));
             }
 
             // I/O
@@ -393,34 +383,22 @@ public partial class PlanViewerControl
             {
                 AddPropertySection("Actual I/O");
                 AddPropertyRow("Logical Reads", $"{node.ActualLogicalReads:N0}");
-                if (node.PerThreadStats.Count > 1)
-                    foreach (var t in node.PerThreadStats.Where(t => t.ActualLogicalReads > 0))
-                        AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualLogicalReads:N0}", indent: true);
                 if (node.ActualPhysicalReads > 0)
-                {
                     AddPropertyRow("Physical Reads", $"{node.ActualPhysicalReads:N0}");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualPhysicalReads > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualPhysicalReads:N0}", indent: true);
-                }
                 if (node.ActualScans > 0)
-                {
                     AddPropertyRow("Scans", $"{node.ActualScans:N0}");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualScans > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualScans:N0}", indent: true);
-                }
                 if (node.ActualReadAheads > 0)
-                {
                     AddPropertyRow("Read-Ahead Reads", $"{node.ActualReadAheads:N0}");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualReadAheads > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualReadAheads:N0}", indent: true);
-                }
                 if (node.ActualSegmentReads > 0)
                     AddPropertyRow("Segment Reads", $"{node.ActualSegmentReads:N0}");
                 if (node.ActualSegmentSkips > 0)
                     AddPropertyRow("Segment Skips", $"{node.ActualSegmentSkips:N0}");
+
+                AddPerThreadBreakdown(node,
+                    ("Logical Reads", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualLogicalReads), false, ""),
+                    ("Physical Reads", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualPhysicalReads), false, ""),
+                    ("Scans", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualScans), false, ""),
+                    ("Read-Ahead Reads", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualReadAheads), false, ""));
             }
 
             // LOB I/O
@@ -886,6 +864,111 @@ public partial class PlanViewerControl
         PropertiesColumn.Width = new GridLength(320);
         PropertiesSplitter.Visibility = Visibility.Visible;
         PropertiesPanel.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>
+    /// Moves a section's per-thread numbers out of the flat row list and into one collapsed
+    /// sub-expander, grouped under a small header per metric. Ported from PerformanceStudio's
+    /// Avalonia viewer (dev @ ff7f1d9). The shaping (which metrics to show, in what order, and
+    /// whether the header carries a skew suffix) lives in <see cref="ThreadBreakdown"/> so this
+    /// method only renders what that helper returns.
+    /// </summary>
+    private void AddPerThreadBreakdown(
+        PlanNode node,
+        params (string Metric, Func<PerThreadRuntimeInfo, long> Value, bool IncludeIdleThreads, string Unit)[] metrics)
+    {
+        var breakdown = ThreadBreakdown.Build(node, metrics);
+        if (breakdown == null)
+            return;
+
+        var panel = new StackPanel { Margin = new Thickness(10, 2, 6, 4) };
+        var groupCount = 0;
+
+        foreach (var group in breakdown.Groups)
+        {
+            groupCount++;
+            panel.Children.Add(new TextBlock
+            {
+                Text = group.Metric,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = SectionHeaderBrush,
+                Margin = new Thickness(0, groupCount == 1 ? 0 : 5, 0, 1)
+            });
+
+            var threadGrid = new Grid { Margin = new Thickness(8, 0, 0, 0) };
+            threadGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(72) });
+            threadGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            var rowIndex = 0;
+            foreach (var t in group.Threads)
+            {
+                threadGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+                var threadLabelBlock = new TextBlock
+                {
+                    Text = $"Thread {t.ThreadId}",
+                    FontSize = 10,
+                    Foreground = MutedBrush
+                };
+                Grid.SetRow(threadLabelBlock, rowIndex);
+                Grid.SetColumn(threadLabelBlock, 0);
+                threadGrid.Children.Add(threadLabelBlock);
+
+                var threadValueBlock = new TextBlock
+                {
+                    Text = $"{t.Value:N0}{group.Unit}",
+                    FontSize = 10,
+                    Foreground = TooltipFgBrush,
+                    TextWrapping = TextWrapping.Wrap
+                };
+                Grid.SetRow(threadValueBlock, rowIndex);
+                Grid.SetColumn(threadValueBlock, 1);
+                threadGrid.Children.Add(threadValueBlock);
+
+                rowIndex++;
+            }
+
+            panel.Children.Add(threadGrid);
+        }
+
+        var header = new StackPanel { Orientation = Orientation.Horizontal };
+        header.Children.Add(new TextBlock
+        {
+            Text = breakdown.HeaderText,
+            FontWeight = FontWeights.SemiBold,
+            FontSize = 11,
+            Foreground = SectionHeaderBrush,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        if (breakdown.IsSkewed)
+        {
+            header.Children.Add(new TextBlock
+            {
+                Text = breakdown.SkewSuffix,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11,
+                Foreground = OrangeBrush,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 0, 0, 0)
+            });
+        }
+
+        var expander = new Expander
+        {
+            IsExpanded = false,
+            Header = header,
+            Content = panel,
+            Margin = new Thickness(0, 2, 0, 2),
+            Padding = new Thickness(0),
+            Foreground = SectionHeaderBrush,
+            BorderThickness = new Thickness(0),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch
+        };
+
+        var target = _currentPropertySection ?? PropertiesContent;
+        target.Children.Add(expander);
     }
 
     private void AddPropertySection(string title)
