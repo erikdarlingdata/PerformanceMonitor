@@ -1120,17 +1120,15 @@ public sealed class DarlingComposeTests
 
         foreach (var m in MeasureCatalog.Measures)
         {
-            var suffix = nodes[m.Key]["labelSuffix"]!.GetValue<string>();
-            Assert.Equal(MeasureCatalog.LabelSuffix(m), suffix);
             if (m.Kind != MeasureKind.Ratio || m.RatioMode == MeasureRatioMode.WeightedSum)
-                Assert.Equal("", suffix);
+                Assert.False(nodes[m.Key].ContainsKey("labelSuffix"));
             else
-                Assert.Equal(" (ratio)", suffix);
+                Assert.Equal(" (ratio)", nodes[m.Key]["labelSuffix"]!.GetValue<string>());
         }
 
         Assert.Contains(MeasureCatalog.Measures, m => m.RatioMode == MeasureRatioMode.WeightedSum && m.Kind == MeasureKind.Ratio);
-        Assert.Equal("", nodes["qs_total_duration_us"]["labelSuffix"]!.GetValue<string>());
-        Assert.Equal("", nodes["qs_total_cpu_us"]["labelSuffix"]!.GetValue<string>());
+        Assert.False(nodes["qs_total_duration_us"].ContainsKey("labelSuffix"));
+        Assert.False(nodes["qs_total_cpu_us"].ContainsKey("labelSuffix"));
     }
 
     /* ─────────────────────────── DoS backstop + loopback scrub (provisioning) ─────────────────────────── */
