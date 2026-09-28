@@ -1517,35 +1517,39 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Threads that actually did work. In a parallel plan thread 0 is the
+    /// coordinator: it carries no rows, and its ActualElapsedMs is the wall clock
+    /// of the whole parallel branch. Including it in a per-thread self-time
+    /// calculation hands the operator the branch's entire duration.
+    /// A serial plan has a single thread numbered 0, which IS a worker, so only
+    /// exclude thread 0 when other threads exist.
+    /// </summary>
+    private static List<PerThreadRuntimeInfo> WorkThreads(PlanNode node)
+    {
+        var workers = node.PerThreadStats.Where(t => t.ThreadId > 0).ToList();
+        return workers.Count > 0 ? workers : node.PerThreadStats;
+    }
+
+    /// <summary>
     /// Per-thread self-time calculation for parallel row mode operators.
-    /// For each thread: self = parent_elapsed[t] - sum(children_elapsed[t]).
-    /// Returns max across threads.
+    /// For each worker thread: self = parent[t] - sum(effective children[t]).
+    /// Returns max across worker threads. Thread 0 (the coordinator) is excluded
+    /// from the parent side by WorkThreads, and the child side looks through
+    /// batch subtrees and pass-throughs the same way the serial path does.
     /// </summary>
     private static long GetPerThreadOwnElapsed(PlanNode node)
     {
-        // Build lookup: threadId -> parent elapsed for this node
+        // Build lookup: threadId -> parent elapsed for this node (worker threads only)
         var parentByThread = new Dictionary<int, long>();
-        foreach (var ts in node.PerThreadStats)
+        foreach (var ts in WorkThreads(node))
             parentByThread[ts.ThreadId] = ts.ActualElapsedMs;
 
-        // Build lookup: threadId -> sum of all direct children's elapsed
+        // Build lookup: threadId -> sum of effective children's elapsed
         var childSumByThread = new Dictionary<int, long>();
         foreach (var child in node.Children)
-        {
-            var childNode = child;
+            AddEffectiveChildElapsedByThread(child, childSumByThread);
 
-            // Exchange operators have unreliable times — look through to their child
-            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
-                childNode = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
-
-            foreach (var ts in childNode.PerThreadStats)
-            {
-                childSumByThread.TryGetValue(ts.ThreadId, out var existing);
-                childSumByThread[ts.ThreadId] = existing + ts.ActualElapsedMs;
-            }
-        }
-
-        // Self-time per thread = parent - children, take max across threads
+        // Self-time per thread = parent - children, take max across worker threads
         var maxSelf = 0L;
         foreach (var (threadId, parentMs) in parentByThread)
         {
@@ -1558,24 +1562,148 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
-    /// Serial row mode self-time: subtract all direct children's elapsed.
-    /// Exchange children are skipped through to their real child.
+    /// What a child contributes to its parent's per-thread elapsed total. The
+    /// per-thread mirror of the serial path's child look-through, and it must
+    /// look through the same two shapes or the parent absorbs the subtree
+    /// beneath them:
+    ///
+    ///   - A batch-mode child reports STANDALONE time, so only its own value
+    ///     would come off and the rest of the batch zone would stay in the
+    ///     parent.
+    ///   - A pass-through child (Compute Scalar) carries no runtime stats at
+    ///     all, so zero would come off.
+    ///
+    /// Together these can crown a row-mode operator above a batch subtree as
+    /// the hottest operator in its plan, with the subtree's time double-counted.
+    /// </summary>
+    private static void AddEffectiveChildElapsedByThread(PlanNode child, Dictionary<int, long> acc)
+    {
+        // Exchange operators have unreliable times — look through to their child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+        {
+            var dominant = child.Children.OrderByDescending(c => c.ActualElapsedMs).First();
+            AddEffectiveChildElapsedByThread(dominant, acc);
+            return;
+        }
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+        {
+            AddBatchSubtreeElapsedByThread(child, acc);
+            return;
+        }
+
+        if (child.HasActualStats && child.ActualElapsedMs > 0)
+        {
+            foreach (var ts in WorkThreads(child))
+            {
+                acc.TryGetValue(ts.ThreadId, out var existing);
+                acc[ts.ThreadId] = existing + ts.ActualElapsedMs;
+            }
+            return;
+        }
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        foreach (var grandchild in child.Children)
+            AddEffectiveChildElapsedByThread(grandchild, acc);
+    }
+
+    /// <summary>
+    /// Per-thread sum across a contiguous batch-mode zone, stopping at exchanges.
+    /// Batch operators pipeline, so their times add rather than nest.
+    /// </summary>
+    private static void AddBatchSubtreeElapsedByThread(PlanNode node, Dictionary<int, long> acc)
+    {
+        foreach (var ts in WorkThreads(node))
+        {
+            acc.TryGetValue(ts.ThreadId, out var existing);
+            acc[ts.ThreadId] = existing + ts.ActualElapsedMs;
+        }
+
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                AddBatchSubtreeElapsedByThread(child, acc);
+            else
+                AddEffectiveChildElapsedByThread(child, acc);
+        }
+    }
+
+    /// <summary>
+    /// Serial row mode self-time: subtract all direct children's effective
+    /// elapsed. The child side looks through the same two shapes as the
+    /// per-thread path above — a pass-through child (Compute Scalar) with no
+    /// runtime stats, and a batch-mode child's whole contiguous subtree —
+    /// or the parent absorbs the subtree beneath them as its own self-time.
     /// </summary>
     private static long GetSerialOwnElapsed(PlanNode node)
     {
         var totalChildElapsed = 0L;
         foreach (var child in node.Children)
-        {
-            var childElapsed = child.ActualElapsedMs;
-
-            // Exchange operators have unreliable times — skip to their child
-            if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
-                childElapsed = child.Children.Max(c => c.ActualElapsedMs);
-
-            totalChildElapsed += childElapsed;
-        }
+            totalChildElapsed += GetEffectiveChildElapsedMs(child);
 
         return Math.Max(0, node.ActualElapsedMs - totalChildElapsed);
+    }
+
+    /// <summary>
+    /// What a child contributes to its parent's serial self-time. Exchange
+    /// operators have unreliable times, so this looks through to their
+    /// dominant child. A batch-mode child reports STANDALONE time, so this
+    /// sums the whole contiguous batch zone rather than just the direct
+    /// child. A child with no runtime stats at all (a Compute Scalar
+    /// pass-through) contributes zero directly, so this looks through to the
+    /// descendants that do have stats.
+    /// </summary>
+    private static long GetEffectiveChildElapsedMs(PlanNode child)
+    {
+        // Exchange operators: unreliable times, use max child
+        if (child.PhysicalOp == "Parallelism" && child.Children.Count > 0)
+            return child.Children.Max(GetEffectiveChildElapsedMs);
+
+        var mode = child.ActualExecutionMode ?? child.ExecutionMode;
+        if (mode == "Batch" && child.HasActualStats)
+            return SumBatchSubtreeElapsedMs(child);
+
+        if (child.ActualElapsedMs > 0)
+            return child.ActualElapsedMs;
+
+        // No runtime stats (e.g. a Compute Scalar pass-through): look through
+        // to the descendants that have them.
+        if (child.Children.Count == 0)
+            return 0;
+
+        var sum = 0L;
+        foreach (var grandchild in child.Children)
+            sum += GetEffectiveChildElapsedMs(grandchild);
+        return sum;
+    }
+
+    /// <summary>
+    /// Sums ActualElapsedMs across a contiguous batch-mode zone, stopping at
+    /// exchange boundaries. Batch operators pipeline — elapsed times are
+    /// standalone, not cumulative — so summing gives the total work the zone
+    /// did, which is what a row-mode parent above the zone should subtract
+    /// to get its own self-time.
+    /// </summary>
+    private static long SumBatchSubtreeElapsedMs(PlanNode node)
+    {
+        var sum = node.ActualElapsedMs;
+        foreach (var child in node.Children)
+        {
+            if (child.PhysicalOp == "Parallelism") continue; // zone boundary
+
+            var childMode = child.ActualExecutionMode ?? child.ExecutionMode;
+            if (childMode == "Batch" && child.HasActualStats)
+                sum += SumBatchSubtreeElapsedMs(child);
+            else
+                sum += GetEffectiveChildElapsedMs(child);
+        }
+
+        return sum;
     }
 
     /// <summary>
