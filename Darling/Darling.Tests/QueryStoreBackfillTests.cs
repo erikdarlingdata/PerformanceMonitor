@@ -277,6 +277,42 @@ public sealed class QueryStoreBackfillTests
         Assert.Contains("SELECT MIN(last_execution_time) FROM query_store_stats WHERE server_id = $1 AND database_name = $2 AND collection_time > $3", source, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4662's shape pin for <see cref="QueryStoreBackfill.CandidateSql"/>: the split form is exact for ANY split
+    /// point only because BOTH halves carry the floor predicate, use the strict <c>&gt;</c> the old statement did,
+    /// filter on <c>server_id</c>, dedup with <c>UNION</c> (not <c>ALL</c>) and sort once, uncollated, on the outside.
+    /// Each clause below is one way a rewrite silently changes the answer; the live test
+    /// (<c>QueryStoreBackfillCandidateLiveTests</c>) proves the answers, this fails the text first.
+    /// </summary>
+    [Fact]
+    public void Sql_CandidateSql_IsTheExactSplitShape()
+    {
+        var sql = QueryStoreBackfill.CandidateSql;
+
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"WHERE server_id = \$1 AND ").Count);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"AND collection_time > \$2\b").Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time <= \$3\b"));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, @"collection_time > \$3\b"));
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, @"SELECT DISTINCT database_name FROM query_store_stats").Count);
+        Assert.Contains(" UNION SELECT DISTINCT ", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNION ALL", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.EndsWith(") AS c ORDER BY database_name", sql, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(sql, "ORDER BY"));
+
+        /* No operator or function that changes membership or order: the old statement had the strict > and the
+           column's own collation. */
+        Assert.DoesNotContain(">=", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COLLATE", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("lower(", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("LIMIT", sql, StringComparison.OrdinalIgnoreCase);
+
+        /* The method binds the third parameter after the floor, and the default split point derives from the
+           compression policy's own constant, so a change to compress_after moves the split with it. */
+        var source = global::Darling.Tests.RepoFile.ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/QueryStoreBackfill.cs");
+        Assert.Contains("command.Parameters.AddWithValue(DateTime.SpecifyKind(hotSince ?? DefaultCandidateHotSince(), DateTimeKind.Unspecified));", source, StringComparison.Ordinal);
+        Assert.Contains("DateTime.UtcNow.Date.AddDays(-TimescaleSupport.CompressAfterDays)", source, StringComparison.Ordinal);
+    }
+
     /// <summary>Lite parity for the pin above — the twin file must carry the same bound shapes.</summary>
     [Fact]
     public void Sql_LiteTwinCarriesTheSameBoundShapes()

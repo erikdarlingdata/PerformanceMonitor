@@ -459,9 +459,45 @@ public sealed class QueryStoreBackfill
 
     /// <summary>The candidate read's SQL text — a shared constant so the shape pin and the live plan
     /// test assert the exact statement <see cref="GetCandidateDatabasesAsync"/> runs, not a copy that
-    /// can drift from it.</summary>
+    /// can drift from it.
+    ///
+    /// <para>#4662: the same set as the old single
+    /// <c>SELECT DISTINCT database_name … WHERE server_id = $1 AND collection_time &gt; $2</c>, read as two
+    /// halves split at <c>$3</c> so each half can take its cheap plan. The old form aggregated the whole
+    /// window in one pass, so the uncompressed day-chunks paid a full Index Only Scan over every row the
+    /// server wrote (hundreds of thousands of index entries, ~5,200 buffers on the rig) just to learn
+    /// about a dozen database names. Split at the compression boundary, the hot half (the newest
+    /// uncompressed chunks) is a TimescaleDB SkipScan down the
+    /// <c>(server_id, database_name, …)</c> index — about one probe per database, ~150 buffers — while
+    /// the cold half (the compressed chunks, where <c>database_name</c> is a compressed column with no
+    /// index) is the same decompress-and-hash it always was. Measured on the rig: ~88 ms → ~53 ms,
+    /// 5,248 → 1,726 buffers; the PR body has the table and the rejected forms (GROUP BY, GROUP BY with
+    /// a count, a recursive loose index scan, DISTINCT ON over the whole window).</para>
+    ///
+    /// <para><b>Exact for ANY <c>$3</c>, by construction.</b> Both halves carry <c>collection_time &gt; $2</c>
+    /// themselves, so the first is <c>($2, $3]</c> and the second is <c>$2 &lt; collection_time</c> AND
+    /// <c>$3 &lt; collection_time</c>. When <c>$3 &gt;= $2</c> the two halves tile <c>collection_time &gt; $2</c>
+    /// exactly (up to and including <c>$3</c>, then strictly after it); when <c>$3 &lt; $2</c> the first is
+    /// empty and the second is <c>collection_time &gt; $2</c>. Either way the union is exactly the old
+    /// predicate, so a wrong <c>$3</c> can only cost speed, never a missing or extra database. <c>UNION</c> (not <c>ALL</c>) and
+    /// the one outer <c>ORDER BY database_name</c> keep the dedup and the collation order the old
+    /// statement had — no <c>COLLATE</c>, no <c>lower()</c>.</para></summary>
     internal const string CandidateSql =
-        "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name";
+        "SELECT database_name FROM ("
+        + "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 AND collection_time <= $3 "
+        + "UNION "
+        + "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 AND collection_time > $3"
+        + ") AS c ORDER BY database_name";
+
+    /// <summary>#4662: where the candidate read splits its window — the start of the UTC day
+    /// <see cref="TimescaleSupport.CompressAfterDays"/> back. Day-chunks
+    /// (<see cref="TimescaleSupport.ChunkIntervalDays"/> = 1) compress only once their END is older than
+    /// <c>compress_after</c>, so every chunk from that day's start onward is still uncompressed in steady
+    /// state (the heavy tables' extra offset hours only make it later still) and reads by SkipScan; anything
+    /// older is compressed and reads by decompress-and-hash. The split never changes the result (see
+    /// <see cref="CandidateSql"/>), only which plan each half gets.</summary>
+    internal static DateTime DefaultCandidateHotSince()
+        => DateTime.UtcNow.Date.AddDays(-TimescaleSupport.CompressAfterDays);
 
     /// <summary>Databases that shipped query_store rows since <paramref name="floorLimit"/>, unioned
     /// with every database a hole key already names — the backfill universe.
@@ -477,9 +513,14 @@ public sealed class QueryStoreBackfill
     /// <paramref name="state"/> the caller already loaded. A database with no hole key and nothing
     /// newer than <paramref name="floorLimit"/> is either done or has never made first contact, and
     /// either way this tick has nothing to do for it.</para>
+    ///
+    /// <para>#4662: <paramref name="hotSince"/> is where <see cref="CandidateSql"/> splits its two halves
+    /// (default <see cref="DefaultCandidateHotSince"/>); it is a plan-cost knob only — the returned list is
+    /// the same for every value, and tests pass one to put the split inside their seeded chunks.</para>
     /// </summary>
     internal async Task<List<string>> GetCandidateDatabasesAsync(
-        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
+        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken,
+        DateTime? hotSince = null)
     {
         var databases = new List<string>();
         try
@@ -491,6 +532,7 @@ public sealed class QueryStoreBackfill
             command.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(hotSince ?? DefaultCandidateHotSince(), DateTimeKind.Unspecified));
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {

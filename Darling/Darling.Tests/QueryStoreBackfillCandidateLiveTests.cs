@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -152,9 +153,13 @@ public sealed class QueryStoreBackfillCandidateLiveTests
         await SeedScenarioAsync(connection, ct);
         var compressedChunkName = await CompressedChunkNameAsync(connection, ct);
 
+        /* #4662: the split point ($3) sits between the seeded old chunk and FloorLimit, so the cold half
+           (floor, split] is empty and the hot half is the same (floor, infinity) window this pin always
+           read — the new statement must still exclude the compressed old chunk entirely. */
         var literalSql = QueryStoreBackfill.CandidateSql
             .Replace("$1", TestServerId.ToString(CultureInfo.InvariantCulture))
-            .Replace("$2", Literal(FloorLimit));
+            .Replace("$2", Literal(FloorLimit))
+            .Replace("$3", Literal(new DateTime(2026, 6, 14, 0, 0, 0, DateTimeKind.Unspecified)));
 
         var plan = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + literalSql, ct);
 
@@ -199,6 +204,179 @@ public sealed class QueryStoreBackfillCandidateLiveTests
         Console.Error.WriteLine(plan);
 
         Assert.Contains(compressedChunkName, plan);
+    }
+
+    /* ───────────── #4662: the split candidate read returns EXACTLY the old set ───────────── */
+
+    private const int Server1 = 4662001;
+    private const int Server2 = 4662002;
+
+    /// <summary>The old statement, verbatim — the oracle the split form must equal row for row. Not a shared
+    /// constant because production no longer runs it.</summary>
+    private const string OldCandidateSql =
+        "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name";
+
+    /// <summary>Well before <see cref="SplitHotSince"/>, so the compressed chunks between the two hold rows that
+    /// are newer than the floor (the cold half's work).</summary>
+    private static readonly DateTime SplitFloor = new(2026, 6, 11, 9, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>A day-chunk boundary: the 06-14 and 06-15 chunks stay uncompressed (the hot half), everything
+    /// before is compressed (the cold half).</summary>
+    private static readonly DateTime SplitHotSince = new(2026, 6, 14, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>Every split point the result must be independent of: the seeded boundary, the production default
+    /// (<c>null</c>: yesterday's real UTC date, long after every seeded row), a point before the floor, exactly at
+    /// the floor, a point after every row, and a point exactly on the newest row.</summary>
+    private static readonly DateTime?[] SplitPoints =
+    {
+        SplitHotSince,
+        null,
+        SplitFloor.AddDays(-30),
+        SplitFloor,
+        new DateTime(2100, 1, 1, 0, 0, 0, DateTimeKind.Unspecified),
+        new DateTime(2026, 6, 15, 14, 0, 0, DateTimeKind.Unspecified),
+    };
+
+    /// <summary>
+    /// #4662, ruling 1: <see cref="QueryStoreBackfill.GetCandidateDatabasesAsync"/> returns the same list, in the
+    /// same order, as the single-pass statement it replaced, for every server. Two servers share database names;
+    /// server 1 carries an active database (newest, uncompressed chunk), a database whose only rows past the floor
+    /// are in COMPRESSED chunks, one with rows in both halves, rows exactly on the split (inclusive in the cold half)
+    /// and one microsecond past it (the hot half), a database wholly older than the floor, one whose only row is
+    /// EXACTLY at the floor (excluded: the operator is <c>&gt;</c>), a NULL database_name row, and a database known
+    /// only through a hole key. Asserted three ways: against a hard-coded list per server, against the old SQL
+    /// followed by the untouched <see cref="QueryStoreBackfillState.MergeHoleDatabases"/>, and — because that merge
+    /// re-sorts ordinally and so hides the statement's own ORDER BY — against the old SQL's RAW row sequence, which
+    /// is the only place the collation order shows.
+    /// </summary>
+    [Fact]
+    public async Task CandidateDatabases_SplitRead_ReturnsExactlyTheOldList_ForEveryServerAndEverySplitPoint()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4662 split candidate-read exactness test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        var setup = await CreateMigratedScratchAsync(baseConnectionString!, ct);
+        await using var scratch = setup.Scratch;
+        await using var connection = setup.Connection;
+
+        var states = await SeedSplitScenarioAsync(connection, ct);
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var runner = new DarlingCollectorRunner(postgres, new CollectorDeltaCalculator());
+        var backfill = new QueryStoreBackfill(postgres, runner, new CollectorDeltaCalculator(), logger: null);
+
+        /* Hard-coded, ordinal (MergeHoleDatabases sorts StringComparer.Ordinal: upper case, then '_', then lower
+           case). zeta and s2_hole are named by their hole key alone. old_db / floor_db (server 1) and Beta (server 2:
+           its only row there is older than the floor) must be absent; NULL is skipped by the reader. */
+        var expected = new Dictionary<int, string[]>
+        {
+            [Server1] = new[] { "Beta", "Gamma", "_x", "alpha", "delta", "zeta" },
+            [Server2] = new[] { "alpha", "s2_compressed", "s2_hole" },
+        };
+
+        foreach (var (serverId, state) in states)
+        {
+            var oldRows = await RawRowsAsync(connection, OldCandidateSql, serverId, SplitFloor, hotSince: null, ct);
+            var oldPlusMerge = QueryStoreBackfillState.MergeHoleDatabases(oldRows.OfType<string>(), state);
+            Assert.Equal(expected[serverId], oldPlusMerge);
+
+            foreach (var hotSince in SplitPoints)
+            {
+                var actual = await backfill.GetCandidateDatabasesAsync(serverId, SplitFloor, state, ct, hotSince);
+                Assert.Equal(expected[serverId], actual);
+                Assert.Equal(oldPlusMerge, actual);
+            }
+
+            /* The raw statement, NULL row and collation order included, must equal the old one row for row. */
+            Assert.Equal(oldRows, await RawRowsAsync(connection, QueryStoreBackfill.CandidateSql, serverId, SplitFloor, SplitHotSince, ct));
+        }
+    }
+
+    /// <summary>Seeds both servers, compresses every chunk older than <see cref="SplitHotSince"/> (and only those),
+    /// proves both compression states, and returns each server's hole-key state.</summary>
+    private static async Task<Dictionary<int, Dictionary<string, string>>> SeedSplitScenarioAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        long id = 4662000;
+        /* Server 1. */
+        await SeedSplitRowAsync(connection, ++id, Server1, new DateTime(2026, 6, 15, 12, 0, 0), "alpha", ct);      // active: newest, uncompressed chunk
+        await SeedSplitRowAsync(connection, ++id, Server1, new DateTime(2026, 6, 12, 10, 0, 0), "Beta", ct);       // only newer-than-floor rows are COMPRESSED
+        await SeedSplitRowAsync(connection, ++id, Server1, SplitHotSince, "Gamma", ct);                             // exactly on the split: the cold half's inclusive edge
+        await SeedSplitRowAsync(connection, ++id, Server1, SplitHotSince.AddTicks(10), "delta", ct);                // one microsecond past the split: the hot half
+        await SeedSplitRowAsync(connection, ++id, Server1, new DateTime(2026, 6, 13, 8, 0, 0), "_x", ct);          // cold half (compressed) ...
+        await SeedSplitRowAsync(connection, ++id, Server1, new DateTime(2026, 6, 15, 13, 0, 0), "_x", ct);         // ... and hot half: one row in the answer, not two
+        await SeedSplitRowAsync(connection, ++id, Server1, new DateTime(2026, 6, 10, 9, 0, 0), "old_db", ct);      // wholly older than the floor
+        await SeedSplitRowAsync(connection, ++id, Server1, SplitFloor, "floor_db", ct);                             // EXACTLY at the floor: excluded, the operator is >
+        await SeedSplitRowAsync(connection, ++id, Server1, new DateTime(2026, 6, 15, 14, 0, 0), null, ct);         // NULL database_name
+        /* Server 2 shares names with server 1. */
+        await SeedSplitRowAsync(connection, ++id, Server2, new DateTime(2026, 6, 15, 12, 30, 0), "alpha", ct);
+        await SeedSplitRowAsync(connection, ++id, Server2, new DateTime(2026, 6, 10, 8, 30, 0), "Beta", ct);       // older than the floor HERE (server 1's Beta is not)
+        await SeedSplitRowAsync(connection, ++id, Server2, SplitHotSince.AddTicks(-10), "s2_compressed", ct);      // last microsecond before the split: compressed, cold half
+
+        await ExecAsync(connection,
+            "ALTER TABLE collect.query_store_stats SET (timescaledb.compress, timescaledb.compress_segmentby = 'server_id')", ct);
+        await ExecAsync(connection,
+            "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('collect.query_store_stats', older_than => TIMESTAMP '2026-06-14 00:00:00') c", ct);
+
+        Assert.Equal(4L, await ScalarAsync(connection, @"
+SELECT count(*) FROM timescaledb_information.chunks
+WHERE hypertable_name = 'query_store_stats' AND is_compressed", ct));
+        Assert.Equal(2L, await ScalarAsync(connection, @"
+SELECT count(*) FROM timescaledb_information.chunks
+WHERE hypertable_name = 'query_store_stats' AND NOT is_compressed", ct));
+
+        string HoleKey(string database) => QueryStoreBackfillState.HoleKeyPrefix + database;
+        var hole = QueryStoreBackfillState.EncodeHole(SplitFloor.AddDays(-1), SplitFloor.AddDays(1));
+        return new Dictionary<int, Dictionary<string, string>>
+        {
+            [Server1] = new(StringComparer.Ordinal) { [HoleKey("zeta")] = hole },
+            [Server2] = new(StringComparer.Ordinal) { [HoleKey("s2_hole")] = hole },
+        };
+    }
+
+    private static async Task SeedSplitRowAsync(
+        NpgsqlConnection connection, long collectionId, int serverId, DateTime collectionTime, string? databaseName, CancellationToken ct)
+    {
+        const string sql = @"
+INSERT INTO collect.query_store_stats
+    (collection_id, collection_time, server_id, server_name, database_name, module_name, query_hash,
+     query_id, plan_id, execution_type_desc, replica_role,
+     runtime_stats_interval_id, interval_start_time_utc, first_execution_time, last_execution_time,
+     execution_count, avg_duration_us, avg_cpu_time_us, min_duration_us, max_duration_us)
+VALUES
+    ($1, $2, $3, 'SQL01', $4, 'dbo.GetOrders', '0xABCD', 91, 111, 'Regular', 'Primary',
+     1, $2, $2, $2, 1, 100, 100, 100, 100)";
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue(collectionId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.Add(new NpgsqlParameter { Value = (object?)databaseName ?? DBNull.Value, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text });
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Runs a candidate statement with its positional parameters and returns the rows in the order the
+    /// server produced them (NULL kept, as <c>null</c>) — the raw sequence, before any C# skips or re-sorts it.</summary>
+    private static async Task<List<string?>> RawRowsAsync(
+        NpgsqlConnection connection, string sql, int serverId, DateTime floor, DateTime? hotSince, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue(serverId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(floor, DateTimeKind.Unspecified));
+        if (hotSince is not null)
+        {
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(hotSince.Value, DateTimeKind.Unspecified));
+        }
+
+        var rows = new List<string?>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(reader.IsDBNull(0) ? null : reader.GetString(0));
+        }
+
+        return rows;
     }
 
     /* ─────────────────────────── helpers ─────────────────────────── */
