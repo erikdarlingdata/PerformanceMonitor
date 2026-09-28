@@ -2625,6 +2625,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 ["category"] = m.Category,
                 ["source"] = m.SourceTable,
                 ["kind"] = m.Kind == MeasureKind.Ratio ? "ratio" : "scalar",
+                ["labelSuffix"] = MeasureCatalog.LabelSuffix(m),
                 ["archetype"] = m.Archetype.ToString(),
                 ["nativeUnit"] = m.NativeUnit,
                 ["defaultUnit"] = m.DefaultUnit,

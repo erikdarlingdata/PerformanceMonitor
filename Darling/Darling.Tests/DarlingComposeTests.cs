@@ -1111,6 +1111,28 @@ public sealed class DarlingComposeTests
         Assert.Null(compose["compact"]);
     }
 
+    [Fact]
+    public void CatalogNode_LabelSuffix_MatchesTheHelper_AndSkipsWindowTotalsAndScalars()
+    {
+        var compose = Assert.IsType<JsonObject>(DarlingWebEndpoints.BuildCatalogNode()["compose"]);
+        var nodes = Assert.IsType<JsonArray>(compose["measures"]).Select(n => Assert.IsType<JsonObject>(n))
+            .ToDictionary(n => n["key"]!.GetValue<string>(), StringComparer.Ordinal);
+
+        foreach (var m in MeasureCatalog.Measures)
+        {
+            var suffix = nodes[m.Key]["labelSuffix"]!.GetValue<string>();
+            Assert.Equal(MeasureCatalog.LabelSuffix(m), suffix);
+            if (m.Kind != MeasureKind.Ratio || m.RatioMode == MeasureRatioMode.WeightedSum)
+                Assert.Equal("", suffix);
+            else
+                Assert.Equal(" (ratio)", suffix);
+        }
+
+        Assert.Contains(MeasureCatalog.Measures, m => m.RatioMode == MeasureRatioMode.WeightedSum && m.Kind == MeasureKind.Ratio);
+        Assert.Equal("", nodes["qs_total_duration_us"]["labelSuffix"]!.GetValue<string>());
+        Assert.Equal("", nodes["qs_total_cpu_us"]["labelSuffix"]!.GetValue<string>());
+    }
+
     /* ─────────────────────────── DoS backstop + loopback scrub (provisioning) ─────────────────────────── */
 
     [Fact]
