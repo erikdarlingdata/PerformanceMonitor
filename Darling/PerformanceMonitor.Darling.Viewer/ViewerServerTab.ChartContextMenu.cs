@@ -198,7 +198,7 @@ public partial class ViewerServerTab
             bitmap.UriSource = new Uri(tempFile);
             bitmap.EndInit();
             bitmap.Freeze();
-            Clipboard.SetDataObject(new DataObject(DataFormats.Bitmap, bitmap), false);
+            ClipboardText.TrySetDataObject(new DataObject(DataFormats.Bitmap, bitmap));
         }
         finally
         {

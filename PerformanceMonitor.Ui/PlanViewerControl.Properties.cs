@@ -1202,22 +1202,11 @@ public partial class PlanViewerControl
             PropertiesHeader.Text, PropertiesSubHeader.Text, _propertySections.ConvertAll(s => s.Model));
 
     /// <summary>
-    /// Guarded clipboard write for the copy menu: a bare <see cref="Clipboard.SetText(string)"/>
-    /// throws when another process momentarily holds the clipboard (the same transient
-    /// CLIPBRD_E_CANT_OPEN condition <see cref="ClipboardText"/> guards on the read side).
+    /// Guarded clipboard write for the copy menu, routed through <see cref="ClipboardText.TrySetText"/>
+    /// (the shared bounded-retry guard against transient CLIPBRD_E_CANT_OPEN - see #4582/#4600) instead
+    /// of a bare <see cref="Clipboard.SetText(string)"/>.
     /// </summary>
-    private static void TrySetClipboardText(string text)
-    {
-        try
-        {
-            Clipboard.SetText(text ?? "");
-        }
-        catch (System.Runtime.InteropServices.ExternalException)
-        {
-            // Transient CLIPBRD_E_CANT_OPEN: another process holds the clipboard. No-op; the
-            // user can retry the copy.
-        }
-    }
+    private static void TrySetClipboardText(string text) => ClipboardText.TrySetText(text ?? "");
 
     private void CloseProperties_Click(object sender, RoutedEventArgs e)
     {

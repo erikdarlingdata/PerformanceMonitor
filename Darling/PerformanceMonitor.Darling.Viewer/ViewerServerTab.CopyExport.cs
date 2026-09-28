@@ -92,7 +92,7 @@ public partial class ViewerServerTab
         if (string.IsNullOrEmpty(script)) return;
 
         /* SetDataObject(copy=false) avoids WPF's problematic Clipboard.Flush(); see dotnet/wpf#9901. */
-        Clipboard.SetDataObject(script, false);
+        ClipboardText.TrySetDataObject(script);
     }
 
     /// <summary>
