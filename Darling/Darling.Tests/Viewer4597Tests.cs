@@ -130,4 +130,28 @@ public class Viewer4597Tests
         Assert.Contains(new ServerContextRow("MAXDOP", "0"), rows);
         Assert.Contains(new ServerContextRow("Cost threshold", "0"), rows);
     }
+
+    [Fact]
+    public void Rows_DatabaseSet_AddsDatabaseRowLast()
+    {
+        var metadata = FullMetadata();
+        metadata.Database = new DatabaseMetadata { Name = "AdventureWorks", CompatibilityLevel = 160 };
+
+        var rows = ServerContextCard.Rows(metadata);
+
+        Assert.Equal(6, rows.Count);
+        Assert.Equal(new ServerContextRow("Database", "AdventureWorks (compat 160)"), rows[^1]);
+    }
+
+    [Fact]
+    public void Rows_DatabaseNull_OmitsDatabaseRow()
+    {
+        var metadata = FullMetadata();
+        metadata.Database = null;
+
+        var rows = ServerContextCard.Rows(metadata);
+
+        Assert.DoesNotContain(rows, r => r.Label == "Database");
+        Assert.Equal(5, rows.Count);
+    }
 }

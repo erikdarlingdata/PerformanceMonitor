@@ -16,9 +16,7 @@ namespace PerformanceMonitor.PlanAnalysis;
 /// <c>ShowServerContext</c> (erikdarlingdata/PerformanceStudio@85492a1,
 /// <c>src/PlanViewer.App/Controls/PlanViewerControl.RuntimeSummary.cs:203-278</c>) into a pure function
 /// this project's test suite can pin directly, since the viewer control itself is Windows-only and
-/// can't run in a unit test on macOS. PS's <c>Database</c> row is not ported here: PM's
-/// <see cref="ServerMetadata"/> has no <c>Database</c> property yet (see that type's remarks), so the
-/// row has nothing to read. It can be added once that field lands.
+/// can't run in a unit test on macOS.
 /// </summary>
 public static class ServerContextCard
 {
@@ -45,7 +43,7 @@ public static class ServerContextCard
         var edition = metadata.Edition;
         if (edition != null)
         {
-            var idx = edition.IndexOf(" (64-bit)");
+            var idx = edition.IndexOf(" (64-bit)", System.StringComparison.Ordinal);
             if (idx > 0)
                 edition = edition[..idx];
         }
@@ -65,6 +63,10 @@ public static class ServerContextCard
         rows.Add(new ServerContextRow("MAXDOP", metadata.MaxDop.ToString()));
         rows.Add(new ServerContextRow("Cost threshold", metadata.CostThresholdForParallelism.ToString()));
         rows.Add(new ServerContextRow("Max memory", $"{metadata.MaxServerMemoryMB:N0} MB"));
+
+        // Database — the plan's database and its compatibility level, when the reader found one.
+        if (metadata.Database != null)
+            rows.Add(new ServerContextRow("Database", $"{metadata.Database.Name} (compat {metadata.Database.CompatibilityLevel})"));
 
         return rows;
     }
