@@ -55,6 +55,7 @@ public partial class ViewerServerTab
     {
         HidePlanLoading();
         var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = ViewerExportSettings.AccuracyRatioDivergenceLimit };
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_server.ServerId, databaseName);

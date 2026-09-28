@@ -807,7 +807,7 @@ public sealed class DarlingWebHostService : BackgroundService
             /* #4214 part 2 / round-1 review Low 3: trimmed copy, not config.Postgres itself — see the
                matching comment at DarlingMcpHostService.cs's AddSingleton(PostgresConfig) registration. */
             var storeHostPostgresConfig = new PostgresConfig { Managed = config.Postgres.Managed, DataDirectory = config.Postgres.DataDirectory };
-            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig);
+            ConfigurePipeline(_app, postgres, networkMode, networkListenIp, allowedCidr, accessToken, oidcClient, publicBaseUrlHost, storeHostPostgresConfig, config.Analyzer);
 
             /* #2389: name the authority for each half of what is being started — enabled/port from whichever
                plane the supervisor resolved, listen/allowFrom/token always from darling.json. */
@@ -1012,7 +1012,8 @@ public sealed class DarlingWebHostService : BackgroundService
         string accessToken,
         DarlingWebOidcClient? oidcClient,
         string? publicBaseUrlHost = null,
-        PostgresConfig? postgresConfig = null)
+        PostgresConfig? postgresConfig = null,
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         /* #2479 item 5: the gates below used to refuse silently. Rate-limited per (gate, source),
            because this port is LAN-exposed on purpose - see DarlingHttpRefusalLog. Created per
@@ -1291,7 +1292,7 @@ public sealed class DarlingWebHostService : BackgroundService
             await next(context);
         });
 
-        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency);
+        DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig);
         app.UseDefaultFiles();
 
         /* Static assets carry an ETag/Last-Modified already (the framework default); no-cache (#4188) makes

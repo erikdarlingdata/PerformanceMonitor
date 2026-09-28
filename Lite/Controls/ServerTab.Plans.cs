@@ -24,6 +24,7 @@ using static PerformanceMonitor.Ui.FileSaveHelper;
 using static PerformanceMonitor.Ui.DataGridHelpers;
 using PerformanceMonitor.PlanAnalysis;
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Controls;
 
 public partial class ServerTab : UserControl
@@ -253,6 +254,7 @@ public partial class ServerTab : UserControl
     {
         HidePlanLoading();
         var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = App.AccuracyRatioDivergenceLimit };
+        viewer.AnalyzerConfig = App.AnalyzerConfig;
         try
         {
             /* #4530: the server's edition/MAXDOP for rule 38, best-effort (null on a missing row or a

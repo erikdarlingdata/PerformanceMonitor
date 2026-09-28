@@ -276,6 +276,7 @@ public partial class QueryStoreHistoryWindow : Window
 
         var label = $"Est Plan - QS {_queryId}/{planId}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);

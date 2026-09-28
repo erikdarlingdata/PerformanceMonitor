@@ -9,6 +9,7 @@ using PerformanceMonitor.Common;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Mcp;
 
 [McpServerToolType]
@@ -43,7 +44,7 @@ public sealed class McpPlanTools
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, metadata, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -81,7 +82,7 @@ public sealed class McpPlanTools
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle, metadata, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle, App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -131,7 +132,7 @@ public sealed class McpPlanTools
 
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", metadata, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", App.AnalyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -159,7 +160,7 @@ public sealed class McpPlanTools
 
         try
         {
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, App.AnalyzerConfig, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -107,6 +107,7 @@ public static class ViewerActualPlanFlow
         string? databaseName = null)
     {
         var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = ViewerExportSettings.AccuracyRatioDivergenceLimit };
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
             /* #4530/#4597: best-effort — a failed metadata read leaves ServerMetadata null, same as the

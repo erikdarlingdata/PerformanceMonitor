@@ -57,6 +57,7 @@ public sealed class DarlingMcpPlanTools
         [Description("The query_hash value from get_top_queries_by_cpu.")] string query_hash,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Optional database name to disambiguate the same query_hash across databases. Omit for the most recently captured plan.")] string? database_name = null,
+        AnalyzerConfig? analyzerConfig = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -76,7 +77,7 @@ public sealed class DarlingMcpPlanTools
             // Server Context card can see cost threshold/max memory/database. Non-fatal (null on a miss or a
             // read failure) — the analyzer then falls back to its Info branch.
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, metadata, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -97,6 +98,7 @@ public sealed class DarlingMcpPlanTools
         NpgsqlDataSource postgres,
         [Description("The sql_handle value from get_top_procedures_by_cpu.")] string sql_handle,
         [Description("Server name or display name.")] string? server_name = null,
+        AnalyzerConfig? analyzerConfig = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -115,7 +117,7 @@ public sealed class DarlingMcpPlanTools
             // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP. No database
             // name is available for a procedure looked up by sql_handle alone, so Database stays null (#4597).
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, cancellationToken: cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle, metadata, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -133,6 +135,7 @@ public sealed class DarlingMcpPlanTools
         [Description("The query_id from get_query_store_top.")] long query_id,
         [Description("Server name or display name.")] string? server_name = null,
         [Description("Optional plan_id to pin one specific compiled plan. Omit for the most recently captured plan for the query.")] long? plan_id = null,
+        AnalyzerConfig? analyzerConfig = null,
         CancellationToken cancellationToken = default)
     {
         var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name, cancellationToken);
@@ -152,7 +155,7 @@ public sealed class DarlingMcpPlanTools
             // #4530/#4597: one store read per call so rule 38 can see the server's edition/MAXDOP, and the
             // Server Context card can see cost threshold/max memory/database.
             var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, database_name, cancellationToken);
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier, metadata, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier, analyzerConfig, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -173,6 +176,7 @@ public sealed class DarlingMcpPlanTools
         "Returns warnings, missing indexes (column lists, the optimizer's statement-scoped impact estimate labelled impact_basis, and create_statement — the optimizer's suggested CREATE INDEX for this statement: corroboration for a statement already measured slow, never a diagnosis, and every row carries the fixed caveat — the estimate is per-statement, an index is a per-table commitment with write cost and regression risk for other plans, so test it), parameters, memory grants, and top_operators — a stated cut of the operators_cap most expensive operators per statement, with operators_returned / total_operators / truncated, ranked by operators_ranked_by: measured actual_elapsed_ms when the plan has runtime statistics, otherwise the optimizer's cost_percent estimate.")]
     public static string AnalyzePlanXml(
         [Description("Raw showplan XML content.")] string plan_xml,
+        AnalyzerConfig? analyzerConfig = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(plan_xml))
@@ -180,7 +184,7 @@ public sealed class DarlingMcpPlanTools
 
         try
         {
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(plan_xml, null, "xml", null, analyzerConfig, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

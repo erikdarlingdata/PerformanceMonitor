@@ -115,6 +115,17 @@ public sealed class ViewerConfigLocation
 /// </summary>
 public sealed class ViewerSettings
 {
+    /// <summary>
+    /// #4535: the last successfully loaded darling.json's <see cref="AnalyzerConfig"/>, so every
+    /// window that constructs its own <c>PlanViewerControl</c> (the main window's tabs, and the
+    /// procedure/query-stats/query-store/wait history popouts) can set the control's
+    /// <c>AnalyzerConfig</c> property without threading a settings reference through each call site.
+    /// <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/> until the first load
+    /// completes (matches <c>MainWindow</c>'s own pre-load state: no analyzer section applies yet).
+    /// </summary>
+    public static PerformanceMonitor.PlanAnalysis.AnalyzerConfig CurrentAnalyzerConfig { get; private set; } =
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
+
     private static readonly JsonSerializerOptions s_jsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -199,12 +210,22 @@ public sealed class ViewerSettings
     /// parse branch can produce settings whose certificate still hangs off the process working directory.
     /// Null (the string-only <see cref="Parse(string)"/> overload) leaves the string alone.
     /// </param>
-    private ViewerSettings(string connectionString, bool managed, string? configDirectory)
+    private ViewerSettings(string connectionString, bool managed, string? configDirectory, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         ConfiguredConnectionString = connectionString;
         ConnectionString = ViewerCertificateAnchor.Anchor(connectionString, configDirectory);
         Managed = managed;
+        AnalyzerConfig = analyzerConfig ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
+        CurrentAnalyzerConfig = AnalyzerConfig;
     }
+
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule config, read from darling.json's optional "analyzer"
+    /// section — the same section the service reads (<see cref="PerformanceMonitor.Darling.Service.DarlingConfig.Analyzer"/>,
+    /// via <see cref="PerformanceMonitor.PlanAnalysis.ConfigLoader.Parse"/>). Never <c>null</c>; a missing
+    /// or malformed section is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>.
+    /// </summary>
+    public PerformanceMonitor.PlanAnalysis.AnalyzerConfig AnalyzerConfig { get; }
 
     /// <param name="explicitPath">A path handed on the command line; wins outright.</param>
     /// <param name="baseDirectory">The viewer binary's directory; null means AppContext.BaseDirectory (tests pass a temp directory).</param>
@@ -289,10 +310,11 @@ public sealed class ViewerSettings
     public static ViewerSettings Parse(string json, string? configDirectory)
     {
         var config = JsonSerializer.Deserialize<ConfigDto>(json, s_jsonOptions);
+        var analyzerConfig = config?.Analyzer ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
 
         if (config?.Postgres?.Managed == true)
         {
-            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres), managed: true, configDirectory);
+            return new ViewerSettings(DeriveManagedConnectionString(config.Postgres), managed: true, configDirectory, analyzerConfig);
         }
 
         var connectionString = config?.Postgres?.ConnectionString;
@@ -301,7 +323,7 @@ public sealed class ViewerSettings
             throw new InvalidDataException("darling.json has no postgres.connectionString (and postgres.managed is not true).");
         }
 
-        return new ViewerSettings(connectionString, managed: false, configDirectory);
+        return new ViewerSettings(connectionString, managed: false, configDirectory, analyzerConfig);
     }
 
     /// <summary>
@@ -448,6 +470,10 @@ public sealed class ViewerSettings
     {
         [JsonPropertyName("postgres")]
         public PostgresDto? Postgres { get; set; }
+
+        /// <summary>#4535: the same "analyzer" section shape the service reads (darling.json).</summary>
+        [JsonPropertyName("analyzer")]
+        public PerformanceMonitor.PlanAnalysis.AnalyzerConfig? Analyzer { get; set; }
     }
 
     private sealed class PostgresDto
