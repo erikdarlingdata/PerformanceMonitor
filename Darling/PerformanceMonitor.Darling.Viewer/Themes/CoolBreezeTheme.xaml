@@ -1412,6 +1412,7 @@
          identity carried by a 3px accent edge plus the header in that colour. -->
     <SolidColorBrush x:Key="InsightIndexBrush" Color="#BF4700"/>
     <SolidColorBrush x:Key="InsightWaitsBrush" Color="#0D47A1"/>
+    <SolidColorBrush x:Key="InsightParamsBrush" Color="#2E7D32"/>
 
 </ResourceDictionary>
 

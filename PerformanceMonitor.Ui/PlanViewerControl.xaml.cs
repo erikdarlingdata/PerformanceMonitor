@@ -75,6 +75,16 @@ public partial class PlanViewerControl : UserControl
         (TryFindResource("InsightIndexBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xFF, 0xB3, 0x47));
     private SolidColorBrush WaitsAccentBrush =>
         (TryFindResource("InsightWaitsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x4F, 0xA3, 0xFF));
+    private SolidColorBrush ParamsAccentBrush =>
+        (TryFindResource("InsightParamsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x7B, 0xCF, 0x7B));
+
+    // Parameters card value brushes: theme tokens shared with the rest of the viewer's alert colours.
+    private SolidColorBrush WarningBrush =>
+        (TryFindResource("WarningBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xFF, 0xD5, 0x4F));
+    private SolidColorBrush ErrorBrush =>
+        (TryFindResource("ErrorBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xE5, 0x73, 0x73));
+    private SolidColorBrush AccentBrush =>
+        (TryFindResource("AccentBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x2E, 0xAE, 0xF1));
 
     /// <summary>
     /// Flips one Plan Insights card between its normal and its quiet state. A card with nothing to

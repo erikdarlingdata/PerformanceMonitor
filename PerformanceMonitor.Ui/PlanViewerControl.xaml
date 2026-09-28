@@ -58,6 +58,7 @@
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" MinWidth="180"/>
                         <ColumnDefinition Width="Auto" MinWidth="200"/>
+                        <ColumnDefinition Width="Auto" MinWidth="200"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
@@ -117,8 +118,34 @@
                         </DockPanel>
                     </Border>
 
-                    <!-- Wait Stats (right, fills remaining space; last card in the strip, no separator) -->
+                    <!-- Parameters -->
                     <Border Grid.Column="2"
+                            Background="{DynamicResource BackgroundLightBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+                        <DockPanel>
+                            <Border x:Name="ParametersAccent" DockPanel.Dock="Left" Width="3"
+                                    Background="{DynamicResource InsightParamsBrush}"/>
+                            <ScrollViewer Margin="10,4,10,8"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel>
+                                    <TextBlock x:Name="ParametersHeader"
+                                               Text="Parameters"
+                                               FontSize="13"
+                                               FontWeight="SemiBold" Foreground="{DynamicResource InsightParamsBrush}"
+                                               Margin="0,0,0,6"/>
+                                    <StackPanel x:Name="ParametersContent"/>
+                                    <TextBlock x:Name="ParametersEmpty"
+                                               Text="No parameters"
+                                               FontSize="12" Visibility="Collapsed"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Wait Stats (right, fills remaining space; last card in the strip, no separator) -->
+                    <Border Grid.Column="3"
                             Background="{DynamicResource BackgroundLightBrush}">
                         <DockPanel>
                             <Border x:Name="WaitStatsAccent" DockPanel.Dock="Left" Width="3"
