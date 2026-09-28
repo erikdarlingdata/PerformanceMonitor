@@ -47,12 +47,14 @@ public partial class PlanViewerControl
         // Update banners
         ShowMissingIndexes(statement.MissingIndexes);
         ShowParameters(statement);
-        ShowWaitStats(statement.WaitStats, statement.QueryTimeStats != null);
+        ShowWaitStats(statement.WaitStats, statement.PlanWarnings, statement.QueryTimeStats != null);
         ShowRuntimeSummary(statement);
         UpdateInsightsHeader();
 
         // Update cost text
         CostText.Text = $"Statement Cost: {statement.StatementSubTreeCost:F4}";
+
+        RenderMinimap();
     }
 
     #region Node Rendering

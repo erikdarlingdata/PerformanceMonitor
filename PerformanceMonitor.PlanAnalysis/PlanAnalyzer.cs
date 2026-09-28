@@ -93,8 +93,24 @@ public static partial class PlanAnalyzer
     /// down to roughly 110 KB — both with well over 2x margin below the smallest real caller, so
     /// unlike the parser, this walk needs no dedicated thread of its own.
     /// </summary>
-    public static void Analyze(ParsedPlan plan, CancellationToken cancellationToken = default)
+    public static void Analyze(ParsedPlan plan, CancellationToken cancellationToken = default) =>
+        Analyze(plan, null, null, cancellationToken);
+
+    /// <summary>
+    /// #4535: the config/serverMetadata overload, mirroring erikdarlingdata/PerformanceStudio dev
+    /// (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.cs:93-102</c>. A null
+    /// <paramref name="config"/> means <see cref="AnalyzerConfig.Default"/>, as in PS. This step
+    /// threads both parameters down to <see cref="AnalyzeStatement"/>, <see cref="AnalyzeNodeTree"/>
+    /// and <see cref="AnalyzeNode"/> unused; no rule reads them yet.
+    /// </summary>
+    public static void Analyze(
+        ParsedPlan plan,
+        AnalyzerConfig? config,
+        ServerMetadata? serverMetadata,
+        CancellationToken cancellationToken)
     {
+        var cfg = config ?? AnalyzerConfig.Default;
+
         /* #4514: every statement, including the ones inside a stored procedure or UDF body.
            This used to walk batch.Statements alone, so an EXEC <procedure> plan analyzed as a
            single statement with nothing to say about the statements actually doing the work.
@@ -104,20 +120,139 @@ public static partial class PlanAnalyzer
         foreach (var stmt in PlanStatements.EnumerateAll(plan))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            AnalyzeStatement(stmt);
+            AnalyzeStatement(stmt, cfg, serverMetadata);
 
             if (stmt.RootNode != null)
-                AnalyzeNodeTree(stmt.RootNode, stmt, cancellationToken);
+                AnalyzeNodeTree(stmt.RootNode, stmt, cfg, cancellationToken);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            MarkLegacyWarnings(stmt);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (cfg.Rules?.SeverityOverrides?.Count > 0)
+            ApplySeverityOverrides(plan, cfg);
+    }
+
+    /// <summary>
+    /// #4535, mirroring erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db
+    /// <c>src/PlanViewer.Core/Services/PlanAnalyzer.Helpers.cs</c>: walks
+    /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> — proc and UDF bodies included, the
+    /// same walk <see cref="Analyze"/> just ran — so an override applies to a warning inside an
+    /// EXEC &lt;procedure&gt; body the same as one on the outer batch.
+    /// </summary>
+    private static void ApplySeverityOverrides(ParsedPlan plan, AnalyzerConfig cfg)
+    {
+        foreach (var stmt in PlanStatements.EnumerateAll(plan))
+        {
+            foreach (var w in stmt.PlanWarnings)
+                TryOverrideSeverity(w, cfg);
+
+            if (stmt.RootNode != null)
+                ApplyOverridesToTree(stmt.RootNode, cfg);
         }
     }
 
-    private static void AnalyzeStatement(PlanStatement stmt)
+    private static void ApplyOverridesToTree(PlanNode node, AnalyzerConfig cfg)
+    {
+        foreach (var w in node.Warnings)
+            TryOverrideSeverity(w, cfg);
+        foreach (var child in node.Children)
+            ApplyOverridesToTree(child, cfg);
+    }
+
+    /// <summary>
+    /// #4535: keyed on <see cref="PlanWarning.RuleNumber"/>, the rule that emitted the finding,
+    /// mirroring erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db (PS#575). The
+    /// engine's own warnings (<see cref="PlanWarningSource.SqlServer"/>) carry no rule number
+    /// because no rule of ours produced them, and are never overridden.
+    /// </summary>
+    private static void TryOverrideSeverity(PlanWarning warning, AnalyzerConfig cfg)
+    {
+        if (warning.Source == PlanWarningSource.SqlServer)
+            return;
+
+        if (warning.RuleNumber is not int ruleNumber)
+            return;
+
+        var overrideSeverity = cfg.GetSeverityOverride(ruleNumber);
+        if (overrideSeverity == null)
+            return;
+
+        if (Enum.TryParse<PlanWarningSeverity>(overrideSeverity, ignoreCase: true, out var severity))
+            warning.Severity = severity;
+    }
+
+    /// <summary>
+    /// Rule types that predate the benefit-scoring framework and haven't been folded into A/B/C/D
+    /// categorization yet. Tagged so reviewers can hold new-framework items to a higher bar vs
+    /// known-legacy items that will be reworked later. Ported verbatim from
+    /// erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.cs:132-153</c>.
+    /// Kept exactly as PS has it, including entries for rule types PM does not have removed here
+    /// (see #4566): none of the 21 entries are missing from PM's rule set.
+    /// </summary>
+    private static readonly HashSet<string> LegacyWarningTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Excessive Memory Grant",
+        "Large Memory Grant",
+        "Compile Memory Exceeded",
+        "Local Variables",
+        "Optimize For Unknown",
+        "Low Impact Index",
+        "Wide Index Suggestion",
+        "Duplicate Index Suggestions",
+        "Table Variable",
+        "Scalar UDF",
+        "Parallel Skew",
+        "Estimated Plan CE Guess",
+        "Data Type Mismatch",
+        "Lazy Spool Ineffective",
+        "Join OR Clause",
+        "Many-to-Many Merge Join",
+        "Table-Valued Function",
+        "Top Above Scan",
+        "Row Goal",
+        "NOT IN with Nullable Column",
+        "Implicit Conversion",
+    };
+
+    /* MarkLegacyWarnings matches on WarningType alone, and a type name is not unique to the analyzer:
+       "Implicit Conversion" is rule 29's legacy-listed type AND what the parser stamps on the
+       engine's own PlanAffectingConvert element (Source = SqlServer). Matching by name only would
+       therefore brand the ENGINE's record "[SQL Server] [legacy]" -- a badge that exists to flag
+       un-migrated analyzer rules on a warning that is not the analyzer's at all. Legacy status is a
+       fact about the analyzer's own rules, so anything the engine said is skipped. Ported from
+       erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.Helpers.cs:11-40</c>. */
+    private static void MarkLegacyWarnings(PlanStatement stmt)
+    {
+        foreach (var w in stmt.PlanWarnings)
+        {
+            if (w.Source != PlanWarningSource.SqlServer && LegacyWarningTypes.Contains(w.WarningType))
+                w.IsLegacy = true;
+        }
+        if (stmt.RootNode != null)
+            MarkLegacyWarningsOnTree(stmt.RootNode);
+    }
+
+    private static void MarkLegacyWarningsOnTree(PlanNode node)
+    {
+        foreach (var w in node.Warnings)
+        {
+            if (w.Source != PlanWarningSource.SqlServer && LegacyWarningTypes.Contains(w.WarningType))
+                w.IsLegacy = true;
+        }
+        foreach (var child in node.Children)
+            MarkLegacyWarningsOnTree(child);
+    }
+
+    private static void AnalyzeStatement(PlanStatement stmt, AnalyzerConfig cfg, ServerMetadata? serverMetadata)
     {
         // Rule 3: Serial plan with reason
         // Skip: cost < 1 (CTFP is an integer so cost < 1 can never go parallel),
         // TRIVIAL optimization (can't go parallel anyway),
         // and 0ms actual elapsed time (not worth flagging).
-        if (!string.IsNullOrEmpty(stmt.NonParallelPlanReason)
+        if (!cfg.IsRuleDisabled(3)
+            && !string.IsNullOrEmpty(stmt.NonParallelPlanReason)
             && stmt.StatementSubTreeCost >= 1.0
             && stmt.StatementOptmLevel != "TRIVIAL"
             && !(stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs == 0))
@@ -195,6 +330,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 3,
                         WarningType = "Serial Plan",
                         Message = $"Query running serially: {reason}.",
                         Severity = PlanWarningSeverity.Warning
@@ -204,6 +340,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 3,
                         WarningType = "Serial Plan",
                         Message = $"Query running serially: {reason}. MAXDOP 1 may be set at the server, database, resource governor, or query level (query text was truncated).",
                         Severity = PlanWarningSeverity.Info
@@ -215,6 +352,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 3,
                     WarningType = "Serial Plan",
                     Message = $"Query running serially: {reason}.",
                     Severity = isActionable ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info
@@ -223,7 +361,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 9: Memory grant issues (statement-level)
-        if (stmt.MemoryGrant != null)
+        if (!cfg.IsRuleDisabled(9) && stmt.MemoryGrant != null)
         {
             var grant = stmt.MemoryGrant;
 
@@ -244,6 +382,7 @@ public static partial class PlanAnalyzer
 
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 9,
                         WarningType = "Excessive Memory Grant",
                         Message = message,
                         Severity = PlanWarningSeverity.Warning
@@ -256,6 +395,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 9,
                     WarningType = "Memory Grant Wait",
                     Message = $"Query waited {grant.GrantWaitTimeMs:N0}ms for a memory grant before it could start running. Other queries were using all available workspace memory.",
                     Severity = grant.GrantWaitTimeMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -283,6 +423,7 @@ public static partial class PlanAnalyzer
 
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 9,
                     WarningType = "Large Memory Grant",
                     Message = $"Query granted {grantMB:F0} MB of memory.{guidance}",
                     Severity = grantMB >= 4096 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -291,10 +432,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 18: Compile memory exceeded (early abort)
-        if (stmt.StatementOptmEarlyAbortReason == "MemoryLimitExceeded")
+        if (!cfg.IsRuleDisabled(18) && stmt.StatementOptmEarlyAbortReason == "MemoryLimitExceeded")
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 18,
                 WarningType = "Compile Memory Exceeded",
                 Message = "Optimization was aborted early because the compile memory limit was exceeded. The plan is likely suboptimal. Simplify the query by breaking it into smaller steps using #temp tables.",
                 Severity = PlanWarningSeverity.Critical
@@ -302,10 +444,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 19: High compile CPU
-        if (stmt.CompileCPUMs >= 1000)
+        if (!cfg.IsRuleDisabled(19) && stmt.CompileCPUMs >= 1000)
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 19,
                 WarningType = "High Compile CPU",
                 Message = $"Query took {stmt.CompileCPUMs:N0}ms of CPU just to compile a plan (before any data was read). Simplify the query by breaking it into smaller steps using #temp tables.",
                 Severity = stmt.CompileCPUMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -314,10 +457,11 @@ public static partial class PlanAnalyzer
 
         // Rule 4 (statement-level): UDF execution timing from QueryTimeStats
         // Some plans report UDF timing only at the statement level, not per-node.
-        if (stmt.QueryUdfCpuTimeMs > 0 || stmt.QueryUdfElapsedTimeMs > 0)
+        if (!cfg.IsRuleDisabled(4) && (stmt.QueryUdfCpuTimeMs > 0 || stmt.QueryUdfElapsedTimeMs > 0))
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 4,
                 WarningType = "UDF Execution",
                 Message = $"Scalar UDF cost in this statement: {stmt.QueryUdfElapsedTimeMs:N0}ms elapsed, {stmt.QueryUdfCpuTimeMs:N0}ms CPU. Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = stmt.QueryUdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -328,7 +472,7 @@ public static partial class PlanAnalyzer
         // Parameters with no CompiledValue are likely local variables — the optimizer
         // cannot sniff their values and uses density-based ("unknown") estimates.
         // Skip statements with cost < 1 (can't go parallel, estimate quality rarely matters).
-        if (stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
+        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
         {
             var unsnifffedParams = stmt.Parameters
                 .Where(p => string.IsNullOrEmpty(p.CompiledValue))
@@ -343,6 +487,7 @@ public static partial class PlanAnalyzer
                     var names = string.Join(", ", unsnifffedParams.Select(p => p.Name));
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 20,
                         WarningType = "Local Variables",
                         Message = $"Local variables detected: {names}. SQL Server cannot sniff local variable values at compile time, so it uses average density estimates instead of your actual values. Test with OPTION (RECOMPILE) to see if the plan improves. For a permanent fix, use dynamic SQL or a stored procedure to pass the values as parameters instead of local variables.",
                         Severity = PlanWarningSeverity.Warning
@@ -356,11 +501,12 @@ public static partial class PlanAnalyzer
         // warning about CTE reuse is guessing.
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
-        if (!string.IsNullOrEmpty(stmt.StatementText) &&
+        if (!cfg.IsRuleDisabled(27) && !string.IsNullOrEmpty(stmt.StatementText) &&
             OptimizeForUnknownRegExp().IsMatch(MaskCommentsAndLiterals(stmt.StatementText))) // #4524
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 27,
                 WarningType = "Optimize For Unknown",
                 Message = "OPTIMIZE FOR UNKNOWN uses average density estimates instead of sniffed parameter values. This can help when parameter sniffing causes plan instability, but may produce suboptimal plans for skewed data distributions.",
                 Severity = PlanWarningSeverity.Warning
@@ -372,6 +518,7 @@ public static partial class PlanAnalyzer
         // for themselves — no need for meta-warnings guessing at causes.
 
         // Rule 30: Missing index quality evaluation
+        if (!cfg.IsRuleDisabled(30))
         {
             // Detect duplicate suggestions for the same table
             var tableSuggestionCount = stmt.MissingIndexes
@@ -390,6 +537,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Low Impact Index",
                         Message = $"Missing index suggestion for {mi.Table} has only {mi.Impact:F0}% estimated impact. Low-impact indexes add maintenance overhead (insert/update/delete cost) that may not justify the modest query improvement.",
                         Severity = PlanWarningSeverity.Info
@@ -401,6 +549,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Wide Index Suggestion",
                         Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index — SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
                         Severity = PlanWarningSeverity.Warning
@@ -411,6 +560,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Wide Index Suggestion",
                         Message = $"Missing index suggestion for {mi.Table} has {keyCount} key columns ({mi.EqualityColumns.Count} equality + {mi.InequalityColumns.Count} inequality). Wide key columns increase index size and maintenance cost. Evaluate whether all key columns are needed for seek predicates.",
                         Severity = PlanWarningSeverity.Warning
@@ -422,6 +572,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Duplicate Index Suggestions",
                         Message = $"{count} missing index suggestions target {mi.Table}. Multiple suggestions for the same table often overlap — consolidate into fewer, broader indexes rather than creating all of them.",
                         Severity = PlanWarningSeverity.Warning
@@ -433,7 +584,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 22 (statement-level): Table variable warnings
-        if (stmt.RootNode != null)
+        if (!cfg.IsRuleDisabled(22) && stmt.RootNode != null)
         {
             var hasTableVar = false;
             var isModification = stmt.StatementType is "INSERT" or "UPDATE" or "DELETE" or "MERGE";
@@ -447,6 +598,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 22,
                     WarningType = "Table Variable",
                     Message = "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
                     Severity = PlanWarningSeverity.Warning,
@@ -458,6 +610,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 22,
                     WarningType = "Table Variable",
                     Message = "This query modifies a table variable, which forces the entire plan to run single-threaded. SQL Server cannot use parallelism for modifications to table variables. Replace with a #temp table to allow parallel execution.",
                     Severity = PlanWarningSeverity.Critical,
@@ -470,11 +623,12 @@ public static partial class PlanAnalyzer
         // because they must tolerate underlying data changes between fetches, forcing
         // scans and extra work per fetch. Switching to FAST_FORWARD, STATIC, or KEYSET
         // often delivers a dramatic improvement.
-        if (string.Equals(stmt.CursorActualType, "Dynamic", StringComparison.OrdinalIgnoreCase))
+        if (!cfg.IsRuleDisabled(36) && string.Equals(stmt.CursorActualType, "Dynamic", StringComparison.OrdinalIgnoreCase))
         {
             var cursorLabel = string.IsNullOrEmpty(stmt.CursorName) ? "Cursor" : $"Cursor \"{stmt.CursorName}\"";
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 36,
                 WarningType = "Dynamic Cursor",
                 Message = $"{cursorLabel} is a dynamic cursor. Dynamic cursors tolerate underlying data changes between fetches, which prevents many index uses and forces extra work per fetch. If you don't need that semantic, switching to FAST_FORWARD (or STATIC / KEYSET, depending on requirements) typically gives a large performance improvement.",
                 Severity = PlanWarningSeverity.Warning
@@ -485,7 +639,7 @@ public static partial class PlanAnalyzer
         // is GLOBAL in SQL Server, which puts cursors in a shared namespace and can
         // bloat the plan cache (Erik's writeup:
         // https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/).
-        if (!string.IsNullOrEmpty(stmt.StatementText))
+        if (!cfg.IsRuleDisabled(37) && !string.IsNullOrEmpty(stmt.StatementText))
         {
             var maskedText = MaskCommentsAndLiterals(stmt.StatementText); // #4524
 
@@ -506,6 +660,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 37,
                         WarningType = "Cursor Missing LOCAL",
                         Message = "CURSOR declaration is missing the LOCAL keyword. Default cursor scope is GLOBAL, which puts the cursor in a shared namespace and can bloat the plan cache (see https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/). Adding LOCAL is cheap and usually right.",
                         Severity = PlanWarningSeverity.Warning
@@ -514,13 +669,57 @@ public static partial class PlanAnalyzer
             }
         }
 
+        // Rule 38: Standard Edition DOP 2 limitation with batch mode. SQL Server Standard Edition
+        // limits DOP to 2 when batch mode operators are present, ported from
+        // erikdarlingdata/PerformanceStudio dev (85492a1) src/PlanViewer.Core/Services/PlanAnalyzer.Statement.cs:411-445.
+        if (!cfg.IsRuleDisabled(38) && stmt.DegreeOfParallelism == 2 && stmt.RootNode != null
+            && HasBatchModeNode(stmt.RootNode))
+        {
+            // Suppress when the user explicitly set MAXDOP 2 as a query hint — the DOP
+            // cap is intentional, not the Standard Edition batch-mode limitation.
+            var hasMaxdop2Hint = !string.IsNullOrEmpty(stmt.StatementText)
+                && Regex.IsMatch(MaskCommentsAndLiterals(stmt.StatementText), @"MAXDOP\s+2\b", RegexOptions.IgnoreCase); // #4524
+
+            if (!hasMaxdop2Hint)
+            {
+                var editionKnown = !string.IsNullOrEmpty(serverMetadata?.Edition);
+                if (editionKnown
+                    && serverMetadata!.Edition!.Contains("Standard", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Server context confirms Standard Edition — check MAXDOP
+                    if (serverMetadata.MaxDop > 2)
+                    {
+                        stmt.PlanWarnings.Add(new PlanWarning
+                        {
+                            RuleNumber = 38,
+                            WarningType = "Standard Edition DOP Limitation",
+                            Message = $"DOP is limited to 2 because SQL Server Standard Edition caps parallelism at 2 when batch mode operators are present, even though MAXDOP is set to {serverMetadata.MaxDop}. Developer or Enterprise Edition would allow higher DOP in the same conditions.",
+                            Severity = PlanWarningSeverity.Warning
+                        });
+                    }
+                }
+                else if (!editionKnown)
+                {
+                    // No server context, or edition unknown (e.g. collection failure) — suspect the limitation
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        RuleNumber = 38,
+                        WarningType = "Standard Edition DOP Limitation",
+                        Message = "DOP is limited to 2 and the plan uses batch mode operators. This may be caused by the SQL Server Standard Edition limitation, which caps parallelism at 2 when batch mode is in use. If this server runs Standard Edition, Developer or Enterprise Edition would allow higher DOP.",
+                        Severity = PlanWarningSeverity.Info
+                    });
+                }
+            }
+        }
+
         // Rule 39: the plan's copy of the query text hit SQL Server's showplan cap.
         // Everything downstream that reads this text — advice, Copy Query Text, Open in Query
         // Editor — is working from a query that stops mid-statement.
-        if (stmt.IsTextTruncated)
+        if (!cfg.IsRuleDisabled(39) && stmt.IsTextTruncated)
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 39,
                 WarningType = "Truncated Query Text",
                 Message =
                     "SQL Server truncated this query's text at 4,000 characters when it wrote the plan, "
@@ -558,21 +757,21 @@ public static partial class PlanAnalyzer
                 referencingNodeIds, modifyingNodeIds);
     }
 
-    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt, CancellationToken cancellationToken)
+    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt, AnalyzerConfig cfg, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        AnalyzeNode(node, stmt);
+        AnalyzeNode(node, stmt, cfg);
 
         foreach (var child in node.Children)
-            AnalyzeNodeTree(child, stmt, cancellationToken);
+            AnalyzeNodeTree(child, stmt, cfg, cancellationToken);
     }
 
-    private static void AnalyzeNode(PlanNode node, PlanStatement stmt)
+    private static void AnalyzeNode(PlanNode node, PlanStatement stmt, AnalyzerConfig cfg)
     {
         // Rule 1: Filter operators — rows survived the tree just to be discarded
         // Quantify the impact by summing child subtree cost (reads, CPU, time).
         // Suppress when the filter's child subtree is trivial (low I/O, fast, cheap).
-        if (node.PhysicalOp == "Filter" && !string.IsNullOrEmpty(node.Predicate)
+        if (!cfg.IsRuleDisabled(1) && node.PhysicalOp == "Filter" && !string.IsNullOrEmpty(node.Predicate)
             && node.Children.Count > 0)
         {
             // Gate: skip trivial filters based on actual stats or estimated cost
@@ -602,6 +801,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 1,
                     WarningType = "Filter Operator",
                     Message = message,
                     Severity = PlanWarningSeverity.Warning
@@ -610,7 +810,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 2: Eager Index Spools — optimizer building temporary indexes on the fly
-        if (node.LogicalOp == "Eager Spool" &&
+        if (!cfg.IsRuleDisabled(2) && node.LogicalOp == "Eager Spool" &&
             node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
         {
             var message = "SQL Server is building a temporary index in TempDB at runtime because no suitable permanent index exists. This is expensive — it builds the index from scratch on every execution. Create a permanent index on the underlying table to eliminate this operator entirely.";
@@ -619,6 +819,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 2,
                 WarningType = "Eager Index Spool",
                 Message = message,
                 Severity = PlanWarningSeverity.Critical
@@ -626,10 +827,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 4: UDF timing — any node spending time in UDFs (actual plans)
-        if (node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0)
+        if (!cfg.IsRuleDisabled(4) && (node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0))
         {
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 4,
                 WarningType = "UDF Execution",
                 Message = $"Scalar UDF executing on this operator ({node.UdfElapsedTimeMs:N0}ms elapsed, {node.UdfCpuTimeMs:N0}ms CPU). Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = node.UdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -644,7 +846,7 @@ public static partial class PlanAnalyzer
         // - Nodes whose only parents are Parallelism/Top/Sort (no spill) are skipped
         // An operator that never executed returned zero rows because it never ran, so its
         // zero is no evidence that the estimate was wrong.
-        if (node.HasActualStats && node.EstimateRows > 0
+        if (!cfg.IsRuleDisabled(5) && node.HasActualStats && node.EstimateRows > 0
             && node.ActualExecutions > 0
             && !node.Lookup) // Key lookups are point lookups (1 row per execution) — per-execution estimate is misleading
         {
@@ -658,6 +860,7 @@ public static partial class PlanAnalyzer
                 {
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 5,
                         WarningType = "Row Estimate Mismatch",
                         Message = $"Estimated {node.EstimateRows:N0} rows but actual 0 rows returned. SQL Server allocated resources for rows that never materialized.",
                         Severity = PlanWarningSeverity.Warning
@@ -682,6 +885,7 @@ public static partial class PlanAnalyzer
                             : $"Actual {node.ActualRows:N0}";
                         node.Warnings.Add(new PlanWarning
                         {
+                            RuleNumber = 5,
                             WarningType = "Row Estimate Mismatch",
                             Message = $"Estimated {node.EstimateRows:N0} vs {actualDisplay} — {factor:F0}x {direction}. {harm}",
                             Severity = factor >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -700,12 +904,13 @@ public static partial class PlanAnalyzer
                 or "CLRUserDefinedFunctionRequiresDataAccess"
                 or "CouldNotGenerateValidParallelPlan")
             && stmt.PlanWarnings.Any(w => w.WarningType == "Serial Plan");
-        if (!serialPlanCoversUdf)
+        if (!cfg.IsRuleDisabled(6) && !serialPlanCoversUdf)
         foreach (var udf in node.ScalarUdfs)
         {
             var type = udf.IsClrFunction ? "CLR" : "T-SQL";
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 6,
                 WarningType = "Scalar UDF",
                 Message = $"Scalar {type} UDF: {udf.FunctionName}. Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = PlanWarningSeverity.Warning
@@ -716,6 +921,9 @@ public static partial class PlanAnalyzer
         // based on what percentage of statement elapsed time the spill accounts for.
         // Exchange spills on Parallelism operators get special handling since their
         // timing is unreliable but the write count tells the story.
+        // Guard only: this rule changes the severity of SQL Server's own spill warnings
+        // rather than adding a new PlanWarning, so it carries no RuleNumber stamp.
+        if (!cfg.IsRuleDisabled(7))
         foreach (var w in node.Warnings.ToList())
         {
             if (w.SpillDetails == null)
@@ -766,7 +974,7 @@ public static partial class PlanAnalyzer
         // Rule 8: Parallel thread skew (actual plans with per-thread stats)
         // Only warn when there are enough rows to meaningfully distribute across threads
         // Filter out thread 0 (coordinator) which typically does 0 rows in parallel operators
-        if (node.PerThreadStats.Count > 1)
+        if (!cfg.IsRuleDisabled(8) && node.PerThreadStats.Count > 1)
         {
             var workerThreads = node.PerThreadStats.Where(t => t.ThreadId > 0).ToList();
             if (workerThreads.Count < 2) workerThreads = node.PerThreadStats; // fallback
@@ -800,6 +1008,7 @@ public static partial class PlanAnalyzer
 
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 8,
                         WarningType = "Parallel Skew",
                         Message = message,
                         Severity = severity
@@ -810,7 +1019,7 @@ public static partial class PlanAnalyzer
 
         // Rule 10: Key Lookup / RID Lookup with residual predicate
         // Check RID Lookup first — it's more specific (PhysicalOp) and also has Lookup=true
-        if (node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
+        if (!cfg.IsRuleDisabled(10) && node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
         {
             var message = "RID Lookup — this table is a heap (no clustered index). SQL Server found rows via a nonclustered index but had to follow row identifiers back to unordered heap pages. Heap lookups are more expensive than key lookups because pages are not sorted and may have forwarding pointers. Add a clustered index to the table.";
             if (!string.IsNullOrEmpty(node.Predicate))
@@ -818,12 +1027,13 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 10,
                 WarningType = "RID Lookup",
                 Message = message,
                 Severity = PlanWarningSeverity.Warning
             });
         }
-        else if (node.Lookup)
+        else if (!cfg.IsRuleDisabled(10) && node.Lookup)
         {
             var lookupMsg = "Key Lookup — SQL Server found rows via a nonclustered index but had to go back to the clustered index for additional columns.";
 
@@ -844,6 +1054,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 10,
                 WarningType = "Key Lookup",
                 Message = lookupMsg,
                 Severity = PlanWarningSeverity.Critical
@@ -852,8 +1063,7 @@ public static partial class PlanAnalyzer
 
         // Rule 12: Non-SARGable predicate on scan
         // Skip for 0-execution nodes — the operator never ran, so the warning is academic
-        var nonSargableReason = (node.HasActualStats && node.ActualExecutions == 0)
-            ? null : DetectNonSargablePredicate(node);
+        var nonSargableReason = GetNonSargableReason(node, cfg);
         if (nonSargableReason != null)
         {
             var nonSargableAdvice = nonSargableReason switch
@@ -874,6 +1084,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 12,
                 WarningType = "Non-SARGable Predicate",
                 Message = $"{nonSargableAdvice}\nPredicate: {Truncate(node.Predicate!, 200)}",
                 Severity = PlanWarningSeverity.Warning
@@ -883,7 +1094,7 @@ public static partial class PlanAnalyzer
         // Rule 11: Scan with residual predicate (skip if non-SARGable already flagged)
         // A PROBE() alone is just a bitmap filter — not a real residual predicate.
         // Skip for 0-execution nodes — the operator never ran
-        if (nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
+        if (!cfg.IsRuleDisabled(11) && nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
             !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0))
         {
             var displayPredicate = StripProbeExpressions(node.Predicate);
@@ -917,6 +1128,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 11,
                 WarningType = "Scan With Predicate",
                 Message = message,
                 Severity = severity
@@ -927,7 +1139,7 @@ public static partial class PlanAnalyzer
         // When a scan dominates the plan AND the estimate is vastly higher than actual rows,
         // the optimizer chose a scan because it thought it needed most of the table.
         // With accurate estimates, it would likely seek instead.
-        if (node.HasActualStats && IsRowstoreScan(node)
+        if (!cfg.IsRuleDisabled(32) && node.HasActualStats && IsRowstoreScan(node)
             && node.EstimateRows > 0 && node.ActualRows >= 0 && node.ActualRowsRead > 0)
         {
             var impact = BuildScanImpactDetails(node, stmt);
@@ -941,6 +1153,7 @@ public static partial class PlanAnalyzer
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 32,
                     WarningType = "Scan Cardinality Misestimate",
                     Message = $"Estimated {node.EstimateRows:N0} rows but only {node.ActualRows:N0} returned ({selectivity * 100:N3}% of {node.ActualRowsRead:N0} rows read). " +
                               $"The {overestimateRatio:N0}x overestimate likely caused the optimizer to choose a scan instead of a seek. " +
@@ -959,7 +1172,7 @@ public static partial class PlanAnalyzer
             && !node.Lookup
             && string.IsNullOrEmpty(node.Predicate)
             && !string.IsNullOrEmpty(node.OutputColumns);
-        if (isBareScanCandidate)
+        if (!cfg.IsRuleDisabled(34) && isBareScanCandidate)
         {
             var colCount = node.OutputColumns!.Split(',').Length;
             var isSignificant = node.HasActualStats
@@ -981,6 +1194,7 @@ public static partial class PlanAnalyzer
 
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 34,
                         WarningType = "Bare Scan",
                         Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} column(s): {Truncate(node.OutputColumns, 200)}. {indexAdvice} For analytical workloads, a columnstore index may be a better fit.",
                         Severity = PlanWarningSeverity.Warning
@@ -993,6 +1207,7 @@ public static partial class PlanAnalyzer
                     // count. Suggest it for analytical / aggregate-style workloads.
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 34,
                         WarningType = "Bare Scan",
                         Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} columns. A nonclustered rowstore index isn't a great fit for wide outputs, but if this is an analytical or aggregate-style query, a columnstore index (CCI or NCCI) can scan the same data far more cheaply — column count doesn't penalize columnstore the way it does rowstore indexes.",
                         Severity = PlanWarningSeverity.Warning
@@ -1005,7 +1220,7 @@ public static partial class PlanAnalyzer
         // When the optimizer uses a local variable or can't sniff, it falls back to density-based
         // guesses: 30% (equality), 10% (inequality), 9% (LIKE/between), ~16.43% (sqrt(30%)),
         // 1% (multi-inequality). On large tables, these guesses can hide the need for an index.
-        if (!node.HasActualStats && IsRowstoreScan(node)
+        if (!cfg.IsRuleDisabled(33) && !node.HasActualStats && IsRowstoreScan(node)
             && node.TableCardinality >= 100_000 && node.EstimateRows > 0
             && !string.IsNullOrEmpty(node.Predicate))
         {
@@ -1017,6 +1232,7 @@ public static partial class PlanAnalyzer
                 {
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 33,
                         WarningType = "Estimated Plan CE Guess",
                         Message = $"Estimated {node.EstimateRows:N0} rows from {node.TableCardinality:N0} row table — {guessDesc}. " +
                                   $"The optimizer may be using a default guess instead of accurate statistics. " +
@@ -1028,7 +1244,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 13: Mismatched data types (GetRangeWithMismatchedTypes / GetRangeThroughConvert)
-        if (node.PhysicalOp == "Compute Scalar" && !string.IsNullOrEmpty(node.DefinedValues))
+        if (!cfg.IsRuleDisabled(13) && node.PhysicalOp == "Compute Scalar" && !string.IsNullOrEmpty(node.DefinedValues))
         {
             var hasMismatch = node.DefinedValues.Contains("GetRangeWithMismatchedTypes", StringComparison.OrdinalIgnoreCase);
             var hasConvert = node.DefinedValues.Contains("GetRangeThroughConvert", StringComparison.OrdinalIgnoreCase);
@@ -1041,6 +1257,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 13,
                     WarningType = "Data Type Mismatch",
                     Message = reason,
                     Severity = PlanWarningSeverity.Warning
@@ -1050,7 +1267,7 @@ public static partial class PlanAnalyzer
 
         // Rule 14: Lazy Table Spool unfavorable rebind/rewind ratio
         // Rebinds = cache misses (child re-executes), rewinds = cache hits (reuse cached result)
-        if (node.LogicalOp == "Lazy Spool"
+        if (!cfg.IsRuleDisabled(14) && node.LogicalOp == "Lazy Spool"
             && !node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
         {
             var rebinds = node.HasActualStats ? (double)node.ActualRebinds : node.EstimateRebinds;
@@ -1069,6 +1286,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 14,
                     WarningType = "Lazy Spool Ineffective",
                     Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits) — {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
                     Severity = severity
@@ -1078,7 +1296,7 @@ public static partial class PlanAnalyzer
 
         // Rule 15: Join OR clause
         // Pattern: Nested Loops → Merge Interval → TopN Sort → [Compute Scalar] → Concatenation → [Compute Scalar] → 2+ Constant Scans
-        if (node.PhysicalOp == "Concatenation")
+        if (!cfg.IsRuleDisabled(15) && node.PhysicalOp == "Concatenation")
         {
             var constantScanBranches = node.Children
                 .Where(c => c.PhysicalOp == "Constant Scan" ||
@@ -1094,6 +1312,7 @@ public static partial class PlanAnalyzer
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 15,
                     WarningType = "Join OR Clause",
                     Message = $"OR in a join predicate. SQL Server rewrote the OR as {constantScanBranches.Count} separate lookups, each evaluated independently — this multiplies the work on the inner side. Rewrite as separate queries joined with UNION ALL. For example, change \"FROM a JOIN b ON a.x = b.x OR a.y = b.y\" to \"FROM a JOIN b ON a.x = b.x UNION ALL FROM a JOIN b ON a.y = b.y\".",
                     Severity = PlanWarningSeverity.Warning
@@ -1103,7 +1322,7 @@ public static partial class PlanAnalyzer
 
         // Rule 16: Nested Loops high inner-side execution count
         // Deep analysis: combine execution count + outer estimate mismatch + inner cost
-        if (node.PhysicalOp == "Nested Loops" &&
+        if (!cfg.IsRuleDisabled(16) && node.PhysicalOp == "Nested Loops" &&
             node.LogicalOp.Contains("Join", StringComparison.OrdinalIgnoreCase) &&
             !node.IsAdaptive &&
             node.Children.Count >= 2)
@@ -1159,6 +1378,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 16,
                     WarningType = "Nested Loops High Executions",
                     Message = string.Join(" ", details),
                     Severity = innerChild.ActualExecutions > 1000000
@@ -1173,11 +1393,12 @@ public static partial class PlanAnalyzer
         // Rule 17: Many-to-many Merge Join
         // In actual plans, the Merge Join operator reports logical reads when the worktable is used.
         // When ActualLogicalReads is 0, the worktable wasn't hit and the warning is noise.
-        if (node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase) &&
+        if (!cfg.IsRuleDisabled(17) && node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase) &&
             (!node.HasActualStats || node.ActualLogicalReads > 0))
         {
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 17,
                 WarningType = "Many-to-Many Merge Join",
                 Message = node.HasActualStats
                     ? $"Many-to-many Merge Join — SQL Server created a worktable in TempDB ({node.ActualLogicalReads:N0} logical reads) because both sides have duplicate values in the join columns."
@@ -1187,7 +1408,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 22: Table variables (Object name starts with @)
-        if (!string.IsNullOrEmpty(node.ObjectName) &&
+        if (!cfg.IsRuleDisabled(22) && !string.IsNullOrEmpty(node.ObjectName) &&
             node.ObjectName.StartsWith('@'))
         {
             var isModificationOp = node.PhysicalOp.Contains("Insert", StringComparison.OrdinalIgnoreCase)
@@ -1196,6 +1417,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 22,
                 WarningType = "Table Variable",
                 Message = isModificationOp
                     ? "Modifying a table variable forces the entire plan to run single-threaded. Replace with a #temp table to allow parallel execution."
@@ -1210,11 +1432,12 @@ public static partial class PlanAnalyzer
         // and a function a user wrote always has both. The advice below is about code the
         // user can rewrite, so the engine's own functions are skipped.
         var isEngineFunction = string.IsNullOrEmpty(node.DatabaseName) && string.IsNullOrEmpty(node.SchemaName);
-        if (node.LogicalOp == "Table-valued function" && !isEngineFunction)
+        if (!cfg.IsRuleDisabled(23) && node.LogicalOp == "Table-valued function" && !isEngineFunction)
         {
             var funcName = node.ObjectName ?? node.PhysicalOp;
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 23,
                 WarningType = "Table-Valued Function",
                 Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (pre-2017) or 100 rows (2017+) regardless of actual size. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
                 Severity = PlanWarningSeverity.Warning
@@ -1225,6 +1448,7 @@ public static partial class PlanAnalyzer
         // Detects Top or Top N Sort operators feeding from a scan. This often means the
         // query is scanning the entire table/index and sorting just to return a few rows,
         // when an appropriate index could satisfy the request directly.
+        if (!cfg.IsRuleDisabled(24))
         {
             var isTop = node.PhysicalOp == "Top";
             var isTopNSort = node.LogicalOp == "Top N Sort";
@@ -1250,6 +1474,7 @@ public static partial class PlanAnalyzer
                         : "";
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 24,
                         WarningType = "Top Above Scan",
                         Message = $"{topLabel} reads from {FormatNodeRef(scanCandidate)}.{innerNote}{predInfo} An index on the ORDER BY columns could eliminate the scan and sort entirely.",
                         Severity = onInner ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -1262,7 +1487,7 @@ public static partial class PlanAnalyzer
         // Only surface on data access operators (seeks/scans) where the row goal actually matters
         var isDataAccess = node.PhysicalOp != null &&
             (node.PhysicalOp.Contains("Scan") || node.PhysicalOp.Contains("Seek"));
-        if (isDataAccess && node.EstimateRowsWithoutRowGoal > 0 && node.EstimateRows > 0 &&
+        if (!cfg.IsRuleDisabled(26) && isDataAccess && node.EstimateRowsWithoutRowGoal > 0 && node.EstimateRows > 0 &&
             node.EstimateRowsWithoutRowGoal > node.EstimateRows)
         {
             var reduction = node.EstimateRowsWithoutRowGoal / node.EstimateRows;
@@ -1287,6 +1512,7 @@ public static partial class PlanAnalyzer
 
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 26,
                         WarningType = "Row Goal",
                         Message = $"Row goal active: estimate reduced from {node.EstimateRowsWithoutRowGoal:N0} to {node.EstimateRows:N0} ({reduction:N0}x reduction) due to {cause}. The optimizer chose this plan shape expecting to stop reading early. If the query reads all rows anyway, the plan choice may be suboptimal.",
                         Severity = PlanWarningSeverity.Info
@@ -1298,13 +1524,14 @@ public static partial class PlanAnalyzer
         // Rule 28: Row Count Spool — NOT IN with nullable column
         // Pattern: Row Count Spool with high rewinds, child scan has IS NULL predicate,
         // and statement text contains NOT IN
-        if ((node.PhysicalOp ?? "").Contains("Row Count Spool", StringComparison.Ordinal))
+        if (!cfg.IsRuleDisabled(28) && (node.PhysicalOp ?? "").Contains("Row Count Spool", StringComparison.Ordinal))
         {
             var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
             if (rewinds > 10000 && HasNotInPattern(node, stmt))
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 28,
                     WarningType = "NOT IN with Nullable Column",
                     Message = $"Row Count Spool with {rewinds:N0} rewinds. This pattern occurs when NOT IN is used with a nullable column — SQL Server cannot use an efficient Anti Semi Join because it must check for NULL values on every outer row. Rewrite as NOT EXISTS, or add WHERE column IS NOT NULL to the subquery.",
                     Severity = rewinds > 1_000_000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -1314,7 +1541,7 @@ public static partial class PlanAnalyzer
 
         // Rule 29: Enhance implicit conversion warnings — Seek Plan is more severe
         // Skip for 0-execution nodes — the operator never ran
-        if (!(node.HasActualStats && node.ActualExecutions == 0))
+        if (!cfg.IsRuleDisabled(29) && !(node.HasActualStats && node.ActualExecutions == 0))
         foreach (var w in node.Warnings.ToList())
         {
             if (w.WarningType == "Implicit Conversion" && w.Message.StartsWith("Seek Plan", StringComparison.Ordinal))
@@ -1332,7 +1559,7 @@ public static partial class PlanAnalyzer
         // one or two operators always take most of the time just because there's almost
         // nothing else to divide it among, so the share points at nothing. The benefit % is
         // just the self-time share.
-        if (node.HasActualStats && node.Warnings.Count == 0
+        if (!cfg.IsRuleDisabled(35) && node.HasActualStats && node.Warnings.Count == 0
             && stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs >= 1000)
         {
             var selfMs = GetOperatorOwnElapsedMs(node);
@@ -1341,6 +1568,7 @@ public static partial class PlanAnalyzer
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 35,
                     WarningType = "Expensive Operator",
                     Message = $"{node.PhysicalOp} took {selfMs:N0}ms ({pct:N1}% of statement elapsed) but no specific rule identified a fix. Worth investigating: is the row volume necessary? Are upstream estimates driving this operator harder than it should be?",
                     Severity = pct >= 50 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning,
@@ -1460,12 +1688,39 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// True when a node, or any of its descendants, ran in batch execution mode. Ported from
+    /// erikdarlingdata/PerformanceStudio dev (85492a1) src/PlanViewer.Core/Services/PlanAnalyzer.Detection.cs:38-49,
+    /// for rule 38 (Standard Edition DOP 2 limitation).
+    /// </summary>
+    private static bool HasBatchModeNode(PlanNode node)
+    {
+        var mode = node.ActualExecutionMode ?? node.ExecutionMode;
+        if (string.Equals(mode, "Batch", StringComparison.OrdinalIgnoreCase))
+            return true;
+        foreach (var child in node.Children)
+        {
+            if (HasBatchModeNode(child))
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// True when a node scans or modifies a table variable rather than a real table. The scan's
     /// Object element renders a table variable's name as "[@tv]", where a real table always has a
     /// schema: "[db].[dbo].[t]" — so the leading @ alone tells them apart.
     /// </summary>
     private static bool IsTableVariable(PlanNode node) =>
         !string.IsNullOrEmpty(node.ObjectName) && node.ObjectName.StartsWith('@');
+
+    /// <summary>
+    /// Shared by Rule 12 (emits the warning) and Rule 11 (which suppresses its residual-
+    /// predicate warning when a non-SARGable predicate was already flagged). Pure function
+    /// of node + cfg, so both rules can compute it independently.
+    /// </summary>
+    private static string? GetNonSargableReason(PlanNode node, AnalyzerConfig cfg) =>
+        cfg.IsRuleDisabled(12) || (node.HasActualStats && node.ActualExecutions == 0)
+            ? null : DetectNonSargablePredicate(node);
 
     /// <summary>
     /// Detects non-SARGable patterns in scan predicates.

@@ -21,18 +21,20 @@ namespace PerformanceMonitor.PlanAnalysis;
 public static class PlanWarningDisplay
 {
     /// <summary>
-    /// The warning's display header: "⚠ {type}{source tag} — up to {N}% benefit" when
-    /// <see cref="PlanWarning.MaxBenefitPercent"/> has a value, or just "⚠ {type}{source tag}"
+    /// The warning's display header: "⚠ {type}{source tag}{legacy tag} — up to {N}% benefit" when
+    /// <see cref="PlanWarning.MaxBenefitPercent"/> has a value, or just "⚠ {type}{source tag}{legacy tag}"
     /// when it's null (not quantifiable). Matches PerformanceStudio's plan-warning and
-    /// node-warning header text exactly, minus PerformanceStudio's legacy tag (PM has no
-    /// equivalent notion of a legacy warning).
+    /// node-warning header text exactly, including the " [legacy]" tag (#4566), ported from
+    /// erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.App/Controls/PlanViewerControl.Properties.cs:862,948,1024</c>:
+    /// source tag, then legacy tag, then the benefit suffix.
     /// </summary>
     public static string PlanWarningHeader(PlanWarning warning)
     {
         var sourceTag = WarningSourceTag(warning);
+        var legacyTag = warning.IsLegacy ? " [legacy]" : "";
         return warning.MaxBenefitPercent.HasValue
-            ? $"\u26A0 {warning.WarningType}{sourceTag} \u2014 up to {FormatBenefitPercent(warning.MaxBenefitPercent.Value)}% benefit"
-            : $"\u26A0 {warning.WarningType}{sourceTag}";
+            ? $"\u26A0 {warning.WarningType}{sourceTag}{legacyTag} \u2014 up to {FormatBenefitPercent(warning.MaxBenefitPercent.Value)}% benefit"
+            : $"\u26A0 {warning.WarningType}{sourceTag}{legacyTag}";
     }
 
     /// <summary>
@@ -51,6 +53,11 @@ public static class PlanWarningDisplay
     private static string WarningSourceTag(PlanWarning warning) =>
         warning.Source == PlanWarningSource.SqlServer ? " [SQL Server]" : "";
 
+    /// <summary>
+    /// Formats a benefit percentage the way this warning header does: a bare number, whole once it
+    /// reaches 100 and one decimal below that. <see cref="WaitRowText"/>'s wait-row benefit text uses
+    /// its own whole-number format instead, matching PerformanceStudio's wait-row display.
+    /// </summary>
     private static string FormatBenefitPercent(double pct) =>
         pct >= 100 ? $"{pct:N0}" : $"{pct:N1}";
 

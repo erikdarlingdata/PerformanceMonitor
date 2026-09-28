@@ -33,6 +33,10 @@
                     <Button x:Name="StatementsButton" Content="Statements" Click="ToggleStatements_Click"
                             Height="28" Padding="8,0" Visibility="Collapsed"
                             ToolTip="Show/hide statement list"/>
+                    <Separator Margin="12,4"/>
+                    <Button x:Name="MinimapToggleButton" Content="Minimap" Click="MinimapToggle_Click"
+                            Height="28" Padding="8,0" Margin="4,0,0,0"
+                            ToolTip="Show/hide plan minimap"/>
                 </StackPanel>
                 <TextBlock x:Name="CostText" DockPanel.Dock="Right" VerticalAlignment="Center"
                            HorizontalAlignment="Right"
@@ -255,21 +259,36 @@
                           Visibility="Collapsed"/>
 
             <!-- Plan Canvas -->
-            <ScrollViewer Grid.Column="2" x:Name="PlanScrollViewer"
-                          HorizontalScrollBarVisibility="Auto"
-                          VerticalScrollBarVisibility="Auto"
-                          Background="{DynamicResource BackgroundBrush}"
-                          PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel"
-                          PreviewMouseLeftButtonDown="PlanScrollViewer_PreviewMouseLeftButtonDown"
-                          PreviewMouseMove="PlanScrollViewer_PreviewMouseMove"
-                          PreviewMouseLeftButtonUp="PlanScrollViewer_PreviewMouseLeftButtonUp">
-                <Canvas x:Name="PlanCanvas" ClipToBounds="False"
-                        HorizontalAlignment="Left" VerticalAlignment="Top">
-                    <Canvas.LayoutTransform>
-                        <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
-                    </Canvas.LayoutTransform>
-                </Canvas>
-            </ScrollViewer>
+            <Grid Grid.Column="2">
+                <ScrollViewer x:Name="PlanScrollViewer"
+                              HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Auto"
+                              Background="{DynamicResource BackgroundBrush}"
+                              PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel"
+                              PreviewMouseLeftButtonDown="PlanScrollViewer_PreviewMouseLeftButtonDown"
+                              PreviewMouseMove="PlanScrollViewer_PreviewMouseMove"
+                              PreviewMouseLeftButtonUp="PlanScrollViewer_PreviewMouseLeftButtonUp"
+                              ScrollChanged="PlanScrollViewer_ScrollChanged">
+                    <Canvas x:Name="PlanCanvas" ClipToBounds="False"
+                            HorizontalAlignment="Left" VerticalAlignment="Top">
+                        <Canvas.LayoutTransform>
+                            <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
+                        </Canvas.LayoutTransform>
+                    </Canvas>
+                </ScrollViewer>
+
+                <!-- Minimap: a corner overlay panel with a scaled-down view of the whole plan -->
+                <Border x:Name="MinimapPanel" Visibility="Collapsed"
+                        HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                        Margin="0,0,12,12" Width="220" Height="220"
+                        Background="{DynamicResource BackgroundDarkBrush}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                        CornerRadius="4" Panel.ZIndex="100">
+                    <Canvas x:Name="MinimapCanvas" ClipToBounds="True"
+                            Background="Transparent"
+                            MouseLeftButtonDown="MinimapCanvas_MouseLeftButtonDown"/>
+                </Border>
+            </Grid>
 
             <!-- Empty State -->
             <StackPanel x:Name="EmptyState" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center">
@@ -311,6 +330,18 @@
                                            Margin="0,2,0,0"/>
                             </StackPanel>
                         </DockPanel>
+                    </Border>
+
+                    <!-- Filter. Sticky across node selections; Esc clears it. -->
+                    <Border DockPanel.Dock="Top" Padding="8,5"
+                            Background="{DynamicResource BackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <TextBox x:Name="PropertiesFilterBox"
+                                 FontSize="11" Height="24" MinHeight="0" Padding="6,1"
+                                 VerticalContentAlignment="Center"
+                                 TextChanged="PropertiesFilter_TextChanged"
+                                 KeyDown="PropertiesFilter_KeyDown"
+                                 ToolTip="Filter properties..."/>
                     </Border>
 
                     <!-- Properties Content -->
