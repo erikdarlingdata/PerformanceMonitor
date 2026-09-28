@@ -573,7 +573,8 @@ public class BlockingDeadlockContextBuilderTests
     /// <see cref="Lite.Tests.ParitySource"/> for the reason the poison pin above gives.
     ///
     /// <para>Also pins the #3579 column: the newer sighting's <c>collection_time</c> travels as
-    /// <c>observed_at</c>, LAST, so the seven ordinals both readers already bind do not move.</para>
+    /// <c>observed_at</c>, second to last, so the seven ordinals both readers already bind do not move;
+    /// <c>prior_observed_at</c> (#4659) follows it, and Lite does not read it.</para>
     /// </summary>
     [Fact]
     public void ForcePlanFailuresSql_IsTheDarlingText_ReadingTheDedupView()
@@ -589,9 +590,9 @@ public class BlockingDeadlockContextBuilderTests
             darlingSql.ReplaceLineEndings("\n"),
             lite.Replace("FROM v_query_store_stats AS qs", "FROM query_store_stats AS qs", StringComparison.Ordinal).ReplaceLineEndings("\n"));
 
-        /* #3579: the observation stamp, last. */
+        /* #3579: the observation stamp, second to last; #4659: prior_observed_at follows it. */
         Assert.EndsWith(
-            "n.failures AS total_failures,\n    n.collection_time AS observed_at\nFROM ranked AS n",
+            "n.failures AS total_failures,\n    n.collection_time AS observed_at,\n    p.collection_time AS prior_observed_at\nFROM ranked AS n",
             lite[..(lite.IndexOf("FROM ranked AS n", StringComparison.Ordinal) + "FROM ranked AS n".Length)].ReplaceLineEndings("\n"),
             StringComparison.Ordinal);
     }
