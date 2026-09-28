@@ -46,8 +46,14 @@ public partial class PlanViewerControl
 
     // #4622: set while a zero-size-canvas retry is queued via RenderMinimap's DispatcherPriority.Loaded
     // deferral, so a canvas that is still unsized when the retry runs gives up instead of re-queuing
-    // itself forever (which would starve input). Cleared once the retry runs, and on close, so the
-    // next real trigger (open, resize, statement render) always gets a fresh attempt.
+    // itself forever (which would starve input). Cleared ONLY inside that retry's own posted callback --
+    // CloseMinimapPanel must never clear it too (#4643): a close, then a reopen, both landing before a
+    // pending retry runs, would clear the flag here while that retry is still queued, so its callback
+    // would find the flag false and post a second retry, whose callback would find it false again and
+    // post a third, chaining forever at Loaded priority (above Input) for as long as the canvas stays
+    // unsized. A retry that finds the panel closed, or the canvas sized, by the time it runs just
+    // returns and clears the flag itself, so the next real trigger (open, resize, statement render)
+    // always gets a fresh attempt.
     private bool _minimapRenderDeferred;
 
     private void MinimapToggle_Click(object sender, RoutedEventArgs e)
@@ -76,7 +82,6 @@ public partial class PlanViewerControl
     {
         _minimapVisible = false;
         _minimapResizing = false;
-        _minimapRenderDeferred = false;
         MinimapPanel.Visibility = Visibility.Collapsed;
     }
 

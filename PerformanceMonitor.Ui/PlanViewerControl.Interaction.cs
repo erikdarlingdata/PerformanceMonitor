@@ -11,6 +11,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using PerformanceMonitor.PlanAnalysis;
 
 namespace PerformanceMonitor.Ui;
@@ -68,7 +69,12 @@ public partial class PlanViewerControl
                 continue;
 
             SelectNode(border, node);
-            ScrollNodeIntoView(node);
+            // Defer the scroll to Loaded priority, same as ZoomToMinimapNode (#4622): SelectNode opens
+            // the properties panel when it wasn't already open, narrowing PlanScrollViewer by roughly
+            // 400px, so scrolling right here would center against the pre-panel viewport and land the
+            // node off to one side instead (#4641). ScrollNodeIntoView reads the viewport itself, so
+            // deferring the call is the only change needed.
+            Dispatcher.BeginInvoke(new Action(() => ScrollNodeIntoView(node)), DispatcherPriority.Loaded);
             return true;
         }
 

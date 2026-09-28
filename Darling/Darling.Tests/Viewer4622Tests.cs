@@ -15,7 +15,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins the two #4622 fixes in the shared plan viewer's minimap (<c>PerformanceMonitor.Ui</c>, used by
+/// Pins the #4622 fixes in the shared plan viewer's minimap (<c>PerformanceMonitor.Ui</c>, used by
 /// both Lite and the Darling viewer): the minimap staying empty on a plan tab's first open, and a
 /// double-click zoom leaving the node off-center once the properties panel narrows the viewport. Both
 /// root causes are WPF layout-timing races -- reading <c>ActualWidth</c>/<c>ViewportWidth</c> before a
@@ -24,17 +24,31 @@ namespace Darling.Tests;
 /// <c>PlanViewerControl.Minimap.cs</c> for the ordering/deferral the fix depends on (fails on the old
 /// code, the same technique <see cref="PlanViewerCapabilityPinTests"/> uses for paste-path ordering),
 /// plus a pure-math reproduction of the issue's own measured pixel numbers against
-/// <see cref="MinimapLayout.GetNodeCenterOffset"/>, which needs no WPF at all.
+/// <see cref="MinimapLayout.GetNodeCenterOffset"/>, which needs no WPF at all. Also pins two follow-on
+/// fixes from #4643: a latent re-queue loop in the #4622 zero-size-canvas retry (<c>CloseMinimapPanel</c>
+/// clearing the retry flag out from under a still-pending retry), and #4641, the same
+/// select-then-stale-viewport shape mirrored onto <c>PlanViewerControl.Interaction.cs</c>'s
+/// warning-header "jump to operator" link.
 /// </summary>
 public class Viewer4622Tests
 {
     private static string MinimapCs([CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "..", "PerformanceMonitor.Ui", "PlanViewerControl.Minimap.cs"));
 
+    private static string InteractionCs([CallerFilePath] string thisFile = "") =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "..", "PerformanceMonitor.Ui", "PlanViewerControl.Interaction.cs"));
+
     private static string Source()
     {
         var path = MinimapCs();
         Assert.True(File.Exists(path), $"PlanViewerControl.Minimap.cs not found at {path} -- the scan is broken, fix the path.");
+        return File.ReadAllText(path);
+    }
+
+    private static string InteractionSource()
+    {
+        var path = InteractionCs();
+        Assert.True(File.Exists(path), $"PlanViewerControl.Interaction.cs not found at {path} -- the scan is broken, fix the path.");
         return File.ReadAllText(path);
     }
 
@@ -159,5 +173,88 @@ public class Viewer4622Tests
 
         Assert.True(Math.Abs(correctResidual) < 1, $"the correct-width offset should center within 1px, was off by {correctResidual}px");
         Assert.Equal(expectedResidualPixels, staleResidual, 1);
+    }
+
+    // ---- #4643 follow-up: a latent re-queue loop in the #4622 zero-size-canvas retry ----
+
+    [Fact]
+    public void CloseMinimapPanel_DoesNotClearTheRenderDeferredFlag()
+    {
+        var source = Source();
+        const string open = "private void CloseMinimapPanel()";
+        const string close = "/// <summary>Re-renders";
+
+        var start = source.IndexOf(open, StringComparison.Ordinal);
+        Assert.True(start >= 0, "CloseMinimapPanel's signature changed or is gone -- the scan is broken.");
+        var end = source.IndexOf(close, start, StringComparison.Ordinal);
+        Assert.True(end > start, "couldn't find the end of CloseMinimapPanel -- the scan is broken.");
+
+        var body = source.Substring(start, end - start);
+        Assert.False(body.Contains("_minimapRenderDeferred", StringComparison.Ordinal),
+            "CloseMinimapPanel must not touch _minimapRenderDeferred. A close, then a reopen, both landing " +
+            "before a pending zero-size-canvas retry runs, would clear the flag here while that retry is still " +
+            "queued -- so the retry's own posted callback would find the flag false and post a second retry, " +
+            "which would post a third, chaining forever at DispatcherPriority.Loaded (above Input) for as long " +
+            "as the canvas stays unsized (#4643). The retry's own callback is the only place that should ever " +
+            "clear the flag: a retry that finds the panel closed, or the canvas sized, by the time it runs " +
+            "just returns and clears the flag itself.");
+    }
+
+    [Fact]
+    public void MinimapRenderDeferred_IsClearedExactlyOnce_InsideTheRetryCallback()
+    {
+        var source = Source();
+
+        var clearCount = 0;
+        var scanFrom = 0;
+        while (true)
+        {
+            var idx = source.IndexOf("_minimapRenderDeferred = false;", scanFrom, StringComparison.Ordinal);
+            if (idx < 0) break;
+            clearCount++;
+            scanFrom = idx + 1;
+        }
+        Assert.Equal(1, clearCount);
+
+        // The one clear site must sit inside RenderMinimap's zero-size-canvas retry block -- the same
+        // anchors RenderMinimap_DefersOnZeroSizeCanvas_InsteadOfGivingUp uses above.
+        const string open = "if (canvasW <= 0 || canvasH <= 0)";
+        const string close = "var scale = MinimapLayout.GetScale(canvasW, canvasH, PlanCanvas.Width, PlanCanvas.Height);";
+        var blockStart = source.IndexOf(open, StringComparison.Ordinal);
+        var blockEnd = source.IndexOf(close, blockStart, StringComparison.Ordinal);
+        Assert.True(blockStart >= 0 && blockEnd > blockStart, "the zero-size-canvas retry block is gone -- the scan is broken.");
+
+        var clearIdx = source.IndexOf("_minimapRenderDeferred = false;", StringComparison.Ordinal);
+        Assert.InRange(clearIdx, blockStart, blockEnd);
+    }
+
+    // ---- #4641: the same select-then-stale-viewport shape, mirrored onto the warning-header jump link ----
+
+    [Fact]
+    public void TryNavigateToNode_DefersTheScrollAfterSelectingTheNode()
+    {
+        var source = InteractionSource();
+        const string methodStart = "private bool TryNavigateToNode(int nodeId)";
+        var methodIdx = source.IndexOf(methodStart, StringComparison.Ordinal);
+        Assert.True(methodIdx >= 0, "TryNavigateToNode's signature changed or is gone -- the scan is broken.");
+
+        var nextMethodIdx = source.IndexOf("private void ScrollNodeIntoView(PlanNode node)", methodIdx, StringComparison.Ordinal);
+        Assert.True(nextMethodIdx > methodIdx, "couldn't find the end of TryNavigateToNode -- the scan is broken.");
+        var body = source.Substring(methodIdx, nextMethodIdx - methodIdx);
+
+        // Anchored on "Dispatcher.BeginInvoke(" rather than "DispatcherPriority.Loaded", same reasoning as
+        // ZoomToMinimapNode_SelectsBeforeDeferringTheCenterOffset above: an explanatory comment ahead of the
+        // real call could otherwise satisfy a "DispatcherPriority.Loaded" token check on its own.
+        var selectIdx = body.IndexOf("SelectNode(border, node)", StringComparison.Ordinal);
+        var deferIdx = body.IndexOf("Dispatcher.BeginInvoke(", StringComparison.Ordinal);
+
+        Assert.True(selectIdx >= 0 && deferIdx >= 0 && body.Contains("DispatcherPriority.Loaded", StringComparison.Ordinal),
+            "TryNavigateToNode should call SelectNode, then defer the scroll via Dispatcher.BeginInvoke at " +
+            "DispatcherPriority.Loaded -- one of those is missing.");
+        Assert.True(selectIdx < deferIdx,
+            "SelectNode must run BEFORE the scroll is queued: SelectNode opens the properties panel (when it " +
+            "wasn't already open) and narrows PlanScrollViewer by roughly 400px, the same #4622 shape mirrored " +
+            "onto the warning-header jump link (#4641) -- scrolling synchronously right after SelectNode centers " +
+            "against the pre-panel viewport width instead of the one the user actually ends up looking at.");
     }
 }
