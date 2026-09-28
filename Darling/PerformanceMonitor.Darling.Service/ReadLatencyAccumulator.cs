@@ -31,13 +31,16 @@ public enum ReadSurface
 /// <summary>How a read finished (#4442 scope 2), read by <see cref="ReadOutcomeClassifier"/>. <c>Ok</c> is
 /// success; <c>Timeout</c> is a caught 57014 whose message names the store's own statement_timeout;
 /// <c>Cancelled</c> is the caller's own token going away, or a 57014 this process cannot attribute to the
-/// store's timeout (a user cancel); <c>Error</c> is everything else.</summary>
+/// store's timeout (a user cancel); <c>Limit</c> (#4605) is a caught 53400 <c>configuration_limit_exceeded</c>
+/// — the viewer/mcp role's <c>temp_file_limit</c> refusing a read's on-disk spill, a distinct "the store
+/// refused this on purpose" outcome from a wall-clock <c>Timeout</c>; <c>Error</c> is everything else.</summary>
 public enum ReadOutcome
 {
     Ok,
     Timeout,
     Cancelled,
     Error,
+    Limit,
 }
 
 /// <summary>

@@ -46,8 +46,10 @@ public partial class PlanViewerControl
 
         // Update banners
         ShowMissingIndexes(statement.MissingIndexes);
+        ShowParameters(statement);
         ShowWaitStats(statement.WaitStats, statement.PlanWarnings, statement.QueryTimeStats != null);
         ShowRuntimeSummary(statement);
+        ShowServerContext();
         UpdateInsightsHeader();
 
         // Update cost text

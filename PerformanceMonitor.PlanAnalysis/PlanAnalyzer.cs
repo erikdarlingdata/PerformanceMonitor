@@ -2562,7 +2562,7 @@ public static partial class PlanAnalyzer
     /// identifiers (<c>[...]</c> and <c>"..."</c>) are stepped over unchanged, so a quote or
     /// a dash inside one does not start a string or a comment.
     /// </summary>
-    private static string MaskCommentsAndLiterals(string? text)
+    public static string MaskCommentsAndLiterals(string? text)
     {
         if (string.IsNullOrEmpty(text))
             return "";

@@ -246,6 +246,7 @@ public partial class ProcedureHistoryWindow : Window
         var viewer = new PlanViewerControl();
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);
             await viewer.LoadPlan(planXml, label, queryText: null);
         }
         catch (Exception ex)
@@ -308,6 +309,7 @@ public partial class ProcedureHistoryWindow : Window
         var viewer = new PlanViewerControl();
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);
             await viewer.LoadPlan(result.PlanXml, label, queryText);
         }
         catch (Exception ex)

@@ -603,4 +603,67 @@ public sealed class DarlingAlertReadAdapterTests
             $"DELETE FROM server_properties WHERE server_id = {TestServerId};", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
+
+    /* ---------------- #4606 database-state maintenance deadlock retry ---------------- */
+
+    private static PostgresException Deadlock() =>
+        new("deadlock detected", "ERROR", "ERROR", PostgresErrorCodes.DeadlockDetected);
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_OneDeadlock_RetriesOnce_AndSucceeds()
+    {
+        /* The field case (#4606): a drop_chunks holding or waiting for an AccessExclusiveLock picks the
+           seed's AccessShareLock as the deadlock victim — the retry completes the maintenance sequence
+           instead of surfacing the failure to the alert pass. Same shape as DarlingRetentionTests'
+           DropChunksRetry_OneDeadlock_RetriesOnce_AndSucceeds. */
+        var calls = 0;
+        await DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+            () => { calls++; if (calls == 1) throw Deadlock(); return Task.CompletedTask; },
+            TestServerId, logger: null);
+
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_TwoDeadlocks_GivesUpAndSurfaces()
+    {
+        /* A second deadlock in a row is STANDING contention — the same posture as the purge's retry:
+           exactly two attempts, then the failure propagates to the caller (this method has no
+           DELETE-fallback path to fall back to; the read fails and the caller's existing catch arm
+           records it). */
+        var calls = 0;
+        await Assert.ThrowsAsync<PostgresException>(() =>
+            DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+                () => { calls++; throw Deadlock(); },
+                TestServerId, logger: null));
+
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_NonDeadlockPostgresException_DoesNotRetry()
+    {
+        /* Only 40P01 earns a retry — any other PostgresException (a missing relation, a permission
+           error) keeps the original single-shot posture, exactly like DarlingRetentionTests'
+           DropChunksRetry_NonDeadlockFailure_DoesNotRetry. */
+        var calls = 0;
+        var notADeadlock = new PostgresException("relation does not exist", "ERROR", "ERROR", "42P01");
+        await Assert.ThrowsAsync<PostgresException>(() =>
+            DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+                () => { calls++; throw notADeadlock; },
+                TestServerId, logger: null));
+
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task DatabaseStateMaintenanceRetry_CleanRun_IsSingleShot()
+    {
+        var calls = 0;
+        await DarlingAlertReadAdapter.ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+            () => { calls++; return Task.CompletedTask; },
+            TestServerId, logger: null);
+
+        Assert.Equal(1, calls);
+    }
 }
