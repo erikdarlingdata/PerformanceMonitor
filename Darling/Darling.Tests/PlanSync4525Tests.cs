@@ -82,7 +82,6 @@ public sealed class PlanSync4525Tests
         var node = FindTvfNode(plan);
 
         Assert.Null(node.DatabaseName);
-        Assert.Null(node.SchemaName);
         Assert.DoesNotContain(node.Warnings, w => w.WarningType == "Table-Valued Function");
     }
 
@@ -93,7 +92,20 @@ public sealed class PlanSync4525Tests
         var node = FindTvfNode(plan);
 
         Assert.Equal("db", node.DatabaseName);
-        Assert.Equal("dbo", node.SchemaName);
         Assert.Contains(node.Warnings, w => w.WarningType == "Table-Valued Function");
+    }
+
+    // Compile-only on dev: PlanNode.SchemaName is a new member (#4525 / PS#584); the parser
+    // now sets it next to DatabaseName from the same <Object> element.
+    [Fact]
+    public void Parser_SetsSchemaName_NextToDatabaseName()
+    {
+        var enginePlan = ParseAndAnalyze(EngineFunctionXml);
+        var engineNode = FindTvfNode(enginePlan);
+        Assert.Null(engineNode.SchemaName);
+
+        var userPlan = ParseAndAnalyze(UserFunctionXml);
+        var userNode = FindTvfNode(userPlan);
+        Assert.Equal("dbo", userNode.SchemaName);
     }
 }
