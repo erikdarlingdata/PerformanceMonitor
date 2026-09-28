@@ -1069,7 +1069,7 @@ public static partial class PlanAnalyzer
         // When a scan dominates the plan AND the estimate is vastly higher than actual rows,
         // the optimizer chose a scan because it thought it needed most of the table.
         // With accurate estimates, it would likely seek instead.
-        if (node.HasActualStats && IsRowstoreScan(node)
+        if (!cfg.IsRuleDisabled(32) && node.HasActualStats && IsRowstoreScan(node)
             && node.EstimateRows > 0 && node.ActualRows >= 0 && node.ActualRowsRead > 0)
         {
             var impact = BuildScanImpactDetails(node, stmt);
@@ -1083,6 +1083,7 @@ public static partial class PlanAnalyzer
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 32,
                     WarningType = "Scan Cardinality Misestimate",
                     Message = $"Estimated {node.EstimateRows:N0} rows but only {node.ActualRows:N0} returned ({selectivity * 100:N3}% of {node.ActualRowsRead:N0} rows read). " +
                               $"The {overestimateRatio:N0}x overestimate likely caused the optimizer to choose a scan instead of a seek. " +
@@ -1101,7 +1102,7 @@ public static partial class PlanAnalyzer
             && !node.Lookup
             && string.IsNullOrEmpty(node.Predicate)
             && !string.IsNullOrEmpty(node.OutputColumns);
-        if (isBareScanCandidate)
+        if (!cfg.IsRuleDisabled(34) && isBareScanCandidate)
         {
             var colCount = node.OutputColumns!.Split(',').Length;
             var isSignificant = node.HasActualStats
@@ -1123,6 +1124,7 @@ public static partial class PlanAnalyzer
 
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 34,
                         WarningType = "Bare Scan",
                         Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} column(s): {Truncate(node.OutputColumns, 200)}. {indexAdvice} For analytical workloads, a columnstore index may be a better fit.",
                         Severity = PlanWarningSeverity.Warning
@@ -1135,6 +1137,7 @@ public static partial class PlanAnalyzer
                     // count. Suggest it for analytical / aggregate-style workloads.
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 34,
                         WarningType = "Bare Scan",
                         Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} columns. A nonclustered rowstore index isn't a great fit for wide outputs, but if this is an analytical or aggregate-style query, a columnstore index (CCI or NCCI) can scan the same data far more cheaply — column count doesn't penalize columnstore the way it does rowstore indexes.",
                         Severity = PlanWarningSeverity.Warning
@@ -1147,7 +1150,7 @@ public static partial class PlanAnalyzer
         // When the optimizer uses a local variable or can't sniff, it falls back to density-based
         // guesses: 30% (equality), 10% (inequality), 9% (LIKE/between), ~16.43% (sqrt(30%)),
         // 1% (multi-inequality). On large tables, these guesses can hide the need for an index.
-        if (!node.HasActualStats && IsRowstoreScan(node)
+        if (!cfg.IsRuleDisabled(33) && !node.HasActualStats && IsRowstoreScan(node)
             && node.TableCardinality >= 100_000 && node.EstimateRows > 0
             && !string.IsNullOrEmpty(node.Predicate))
         {
@@ -1159,6 +1162,7 @@ public static partial class PlanAnalyzer
                 {
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 33,
                         WarningType = "Estimated Plan CE Guess",
                         Message = $"Estimated {node.EstimateRows:N0} rows from {node.TableCardinality:N0} row table — {guessDesc}. " +
                                   $"The optimizer may be using a default guess instead of accurate statistics. " +
@@ -1170,7 +1174,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 13: Mismatched data types (GetRangeWithMismatchedTypes / GetRangeThroughConvert)
-        if (node.PhysicalOp == "Compute Scalar" && !string.IsNullOrEmpty(node.DefinedValues))
+        if (!cfg.IsRuleDisabled(13) && node.PhysicalOp == "Compute Scalar" && !string.IsNullOrEmpty(node.DefinedValues))
         {
             var hasMismatch = node.DefinedValues.Contains("GetRangeWithMismatchedTypes", StringComparison.OrdinalIgnoreCase);
             var hasConvert = node.DefinedValues.Contains("GetRangeThroughConvert", StringComparison.OrdinalIgnoreCase);
@@ -1183,6 +1187,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 13,
                     WarningType = "Data Type Mismatch",
                     Message = reason,
                     Severity = PlanWarningSeverity.Warning
@@ -1192,7 +1197,7 @@ public static partial class PlanAnalyzer
 
         // Rule 14: Lazy Table Spool unfavorable rebind/rewind ratio
         // Rebinds = cache misses (child re-executes), rewinds = cache hits (reuse cached result)
-        if (node.LogicalOp == "Lazy Spool"
+        if (!cfg.IsRuleDisabled(14) && node.LogicalOp == "Lazy Spool"
             && !node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
         {
             var rebinds = node.HasActualStats ? (double)node.ActualRebinds : node.EstimateRebinds;
@@ -1211,6 +1216,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 14,
                     WarningType = "Lazy Spool Ineffective",
                     Message = $"Lazy spool has low cache hit ratio ({source}): {rebinds:N0} rebinds (cache misses), {rewinds:N0} rewinds (cache hits) — {ratio}. The spool is caching results but rarely reusing them, adding overhead for no benefit.",
                     Severity = severity
@@ -1220,7 +1226,7 @@ public static partial class PlanAnalyzer
 
         // Rule 15: Join OR clause
         // Pattern: Nested Loops → Merge Interval → TopN Sort → [Compute Scalar] → Concatenation → [Compute Scalar] → 2+ Constant Scans
-        if (node.PhysicalOp == "Concatenation")
+        if (!cfg.IsRuleDisabled(15) && node.PhysicalOp == "Concatenation")
         {
             var constantScanBranches = node.Children
                 .Where(c => c.PhysicalOp == "Constant Scan" ||
@@ -1236,6 +1242,7 @@ public static partial class PlanAnalyzer
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 15,
                     WarningType = "Join OR Clause",
                     Message = $"OR in a join predicate. SQL Server rewrote the OR as {constantScanBranches.Count} separate lookups, each evaluated independently — this multiplies the work on the inner side. Rewrite as separate queries joined with UNION ALL. For example, change \"FROM a JOIN b ON a.x = b.x OR a.y = b.y\" to \"FROM a JOIN b ON a.x = b.x UNION ALL FROM a JOIN b ON a.y = b.y\".",
                     Severity = PlanWarningSeverity.Warning
@@ -1245,7 +1252,7 @@ public static partial class PlanAnalyzer
 
         // Rule 16: Nested Loops high inner-side execution count
         // Deep analysis: combine execution count + outer estimate mismatch + inner cost
-        if (node.PhysicalOp == "Nested Loops" &&
+        if (!cfg.IsRuleDisabled(16) && node.PhysicalOp == "Nested Loops" &&
             node.LogicalOp.Contains("Join", StringComparison.OrdinalIgnoreCase) &&
             !node.IsAdaptive &&
             node.Children.Count >= 2)
@@ -1301,6 +1308,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 16,
                     WarningType = "Nested Loops High Executions",
                     Message = string.Join(" ", details),
                     Severity = innerChild.ActualExecutions > 1000000
@@ -1315,11 +1323,12 @@ public static partial class PlanAnalyzer
         // Rule 17: Many-to-many Merge Join
         // In actual plans, the Merge Join operator reports logical reads when the worktable is used.
         // When ActualLogicalReads is 0, the worktable wasn't hit and the warning is noise.
-        if (node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase) &&
+        if (!cfg.IsRuleDisabled(17) && node.ManyToMany && node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase) &&
             (!node.HasActualStats || node.ActualLogicalReads > 0))
         {
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 17,
                 WarningType = "Many-to-Many Merge Join",
                 Message = node.HasActualStats
                     ? $"Many-to-many Merge Join — SQL Server created a worktable in TempDB ({node.ActualLogicalReads:N0} logical reads) because both sides have duplicate values in the join columns."
@@ -1329,7 +1338,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 22: Table variables (Object name starts with @)
-        if (!string.IsNullOrEmpty(node.ObjectName) &&
+        if (!cfg.IsRuleDisabled(22) && !string.IsNullOrEmpty(node.ObjectName) &&
             node.ObjectName.StartsWith('@'))
         {
             var isModificationOp = node.PhysicalOp.Contains("Insert", StringComparison.OrdinalIgnoreCase)
@@ -1338,6 +1347,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 22,
                 WarningType = "Table Variable",
                 Message = isModificationOp
                     ? "Modifying a table variable forces the entire plan to run single-threaded. Replace with a #temp table to allow parallel execution."
@@ -1352,11 +1362,12 @@ public static partial class PlanAnalyzer
         // and a function a user wrote always has both. The advice below is about code the
         // user can rewrite, so the engine's own functions are skipped.
         var isEngineFunction = string.IsNullOrEmpty(node.DatabaseName) && string.IsNullOrEmpty(node.SchemaName);
-        if (node.LogicalOp == "Table-valued function" && !isEngineFunction)
+        if (!cfg.IsRuleDisabled(23) && node.LogicalOp == "Table-valued function" && !isEngineFunction)
         {
             var funcName = node.ObjectName ?? node.PhysicalOp;
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 23,
                 WarningType = "Table-Valued Function",
                 Message = $"Table-valued function: {funcName}. Multi-statement TVFs have no statistics — SQL Server guesses 1 row (pre-2017) or 100 rows (2017+) regardless of actual size. Rewrite as an inline table-valued function if possible, or dump the function results into a #temp table and join to that instead.",
                 Severity = PlanWarningSeverity.Warning
@@ -1367,6 +1378,7 @@ public static partial class PlanAnalyzer
         // Detects Top or Top N Sort operators feeding from a scan. This often means the
         // query is scanning the entire table/index and sorting just to return a few rows,
         // when an appropriate index could satisfy the request directly.
+        if (!cfg.IsRuleDisabled(24))
         {
             var isTop = node.PhysicalOp == "Top";
             var isTopNSort = node.LogicalOp == "Top N Sort";
@@ -1392,6 +1404,7 @@ public static partial class PlanAnalyzer
                         : "";
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 24,
                         WarningType = "Top Above Scan",
                         Message = $"{topLabel} reads from {FormatNodeRef(scanCandidate)}.{innerNote}{predInfo} An index on the ORDER BY columns could eliminate the scan and sort entirely.",
                         Severity = onInner ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -1404,7 +1417,7 @@ public static partial class PlanAnalyzer
         // Only surface on data access operators (seeks/scans) where the row goal actually matters
         var isDataAccess = node.PhysicalOp != null &&
             (node.PhysicalOp.Contains("Scan") || node.PhysicalOp.Contains("Seek"));
-        if (isDataAccess && node.EstimateRowsWithoutRowGoal > 0 && node.EstimateRows > 0 &&
+        if (!cfg.IsRuleDisabled(26) && isDataAccess && node.EstimateRowsWithoutRowGoal > 0 && node.EstimateRows > 0 &&
             node.EstimateRowsWithoutRowGoal > node.EstimateRows)
         {
             var reduction = node.EstimateRowsWithoutRowGoal / node.EstimateRows;
@@ -1429,6 +1442,7 @@ public static partial class PlanAnalyzer
 
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 26,
                         WarningType = "Row Goal",
                         Message = $"Row goal active: estimate reduced from {node.EstimateRowsWithoutRowGoal:N0} to {node.EstimateRows:N0} ({reduction:N0}x reduction) due to {cause}. The optimizer chose this plan shape expecting to stop reading early. If the query reads all rows anyway, the plan choice may be suboptimal.",
                         Severity = PlanWarningSeverity.Info
@@ -1440,13 +1454,14 @@ public static partial class PlanAnalyzer
         // Rule 28: Row Count Spool — NOT IN with nullable column
         // Pattern: Row Count Spool with high rewinds, child scan has IS NULL predicate,
         // and statement text contains NOT IN
-        if ((node.PhysicalOp ?? "").Contains("Row Count Spool", StringComparison.Ordinal))
+        if (!cfg.IsRuleDisabled(28) && (node.PhysicalOp ?? "").Contains("Row Count Spool", StringComparison.Ordinal))
         {
             var rewinds = node.HasActualStats ? (double)node.ActualRewinds : node.EstimateRewinds;
             if (rewinds > 10000 && HasNotInPattern(node, stmt))
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 28,
                     WarningType = "NOT IN with Nullable Column",
                     Message = $"Row Count Spool with {rewinds:N0} rewinds. This pattern occurs when NOT IN is used with a nullable column — SQL Server cannot use an efficient Anti Semi Join because it must check for NULL values on every outer row. Rewrite as NOT EXISTS, or add WHERE column IS NOT NULL to the subquery.",
                     Severity = rewinds > 1_000_000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -1456,7 +1471,7 @@ public static partial class PlanAnalyzer
 
         // Rule 29: Enhance implicit conversion warnings — Seek Plan is more severe
         // Skip for 0-execution nodes — the operator never ran
-        if (!(node.HasActualStats && node.ActualExecutions == 0))
+        if (!cfg.IsRuleDisabled(29) && !(node.HasActualStats && node.ActualExecutions == 0))
         foreach (var w in node.Warnings.ToList())
         {
             if (w.WarningType == "Implicit Conversion" && w.Message.StartsWith("Seek Plan", StringComparison.Ordinal))
@@ -1474,7 +1489,7 @@ public static partial class PlanAnalyzer
         // one or two operators always take most of the time just because there's almost
         // nothing else to divide it among, so the share points at nothing. The benefit % is
         // just the self-time share.
-        if (node.HasActualStats && node.Warnings.Count == 0
+        if (!cfg.IsRuleDisabled(35) && node.HasActualStats && node.Warnings.Count == 0
             && stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs >= 1000)
         {
             var selfMs = GetOperatorOwnElapsedMs(node);
@@ -1483,6 +1498,7 @@ public static partial class PlanAnalyzer
             {
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 35,
                     WarningType = "Expensive Operator",
                     Message = $"{node.PhysicalOp} took {selfMs:N0}ms ({pct:N1}% of statement elapsed) but no specific rule identified a fix. Worth investigating: is the row volume necessary? Are upstream estimates driving this operator harder than it should be?",
                     Severity = pct >= 50 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning,
