@@ -61,59 +61,85 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <!-- Runtime Summary (left) -->
-                    <Border Grid.Column="0" Padding="10,4,10,8"
-                            Background="{DynamicResource BackgroundDarkBrush}"
+                    <!--
+                        Plan Insights cards: one visual system for all three panels, ported from
+                        PerformanceStudio dev (erikdarlingdata/PerformanceStudio@87bad14). Every card
+                        sits on the same neutral surface (BackgroundLightBrush); identity comes from
+                        a 3px accent edge plus the header in that accent, never a full-bleed tint,
+                        since a tinted slab shouts just as loudly when the panel has nothing to say
+                        ("No missing index suggestions" on a full colour block reads as an alert).
+                        A card with nothing to report goes quiet instead: muted header, dimmed edge
+                        (SetInsightQuiet in the code-behind). Runtime Summary keeps a blank edge, no
+                        accent, since it is the neutral centre.
+                    -->
+
+                    <!-- Runtime Summary (left, neutral centre: no accent, just the alignment gutter) -->
+                    <Border Grid.Column="0"
+                            Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
-                        <StackPanel>
-                            <TextBlock Text="Runtime Summary"
-                                       FontSize="13"
-                                       FontWeight="SemiBold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Margin="0,0,0,4"/>
-                            <StackPanel x:Name="RuntimeSummaryContent"/>
-                        </StackPanel>
+                        <DockPanel>
+                            <Border x:Name="RuntimeSummaryAccent" DockPanel.Dock="Left" Width="3"/>
+                            <StackPanel Margin="10,4,10,8">
+                                <TextBlock x:Name="RuntimeSummaryTitle"
+                                           Text="Runtime Summary"
+                                           FontSize="13"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Margin="0,0,0,4"/>
+                                <StackPanel x:Name="RuntimeSummaryContent"/>
+                            </StackPanel>
+                        </DockPanel>
                     </Border>
 
                     <!-- Missing Indexes (center) -->
-                    <Border Grid.Column="1" Padding="10,4,10,8"
-                            Background="{DynamicResource PlanMissingIndexBgBrush}"
-                            BorderBrush="{DynamicResource PlanMissingIndexBorderBrush}" BorderThickness="0,0,1,0">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                      HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel>
-                                <TextBlock x:Name="MissingIndexHeader"
-                                           Text="Missing Index Suggestions"
-                                           FontSize="13"
-                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanMissingIndexHeaderBrush}"
-                                           Margin="0,0,0,6"/>
-                                <StackPanel x:Name="MissingIndexContent"/>
-                                <TextBlock x:Name="MissingIndexEmpty"
-                                           Text="No missing index suggestions"
-                                           FontSize="12" Visibility="Collapsed"
-                                           Foreground="{DynamicResource ForegroundBrush}"/>
-                            </StackPanel>
-                        </ScrollViewer>
+                    <Border Grid.Column="1"
+                            Background="{DynamicResource BackgroundLightBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+                        <DockPanel>
+                            <Border x:Name="MissingIndexAccent" DockPanel.Dock="Left" Width="3"
+                                    Background="{DynamicResource InsightIndexBrush}"/>
+                            <ScrollViewer Margin="10,4,10,8"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel>
+                                    <TextBlock x:Name="MissingIndexHeader"
+                                               Text="Missing Index Suggestions"
+                                               FontSize="13"
+                                               FontWeight="SemiBold" Foreground="{DynamicResource InsightIndexBrush}"
+                                               Margin="0,0,0,6"/>
+                                    <StackPanel x:Name="MissingIndexContent"/>
+                                    <TextBlock x:Name="MissingIndexEmpty"
+                                               Text="No missing index suggestions"
+                                               FontSize="12" Visibility="Collapsed"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </DockPanel>
                     </Border>
 
-                    <!-- Wait Stats (right, fills remaining space) -->
-                    <Border Grid.Column="2" Padding="10,4,10,8"
-                            Background="{DynamicResource PlanWaitStatsBgBrush}">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                      HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel>
-                                <TextBlock x:Name="WaitStatsHeader"
-                                           Text="Wait Stats"
-                                           FontSize="13"
-                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanWaitStatsHeaderBrush}"
-                                           Margin="0,0,0,6"/>
-                                <StackPanel x:Name="WaitStatsContent"/>
-                                <TextBlock x:Name="WaitStatsEmpty"
-                                           Text="No wait stats (estimated plan)"
-                                           FontSize="12" Visibility="Collapsed"
-                                           Foreground="{DynamicResource ForegroundBrush}"/>
-                            </StackPanel>
-                        </ScrollViewer>
+                    <!-- Wait Stats (right, fills remaining space; last card in the strip, no separator) -->
+                    <Border Grid.Column="2"
+                            Background="{DynamicResource BackgroundLightBrush}">
+                        <DockPanel>
+                            <Border x:Name="WaitStatsAccent" DockPanel.Dock="Left" Width="3"
+                                    Background="{DynamicResource InsightWaitsBrush}"/>
+                            <ScrollViewer Margin="10,4,10,8"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel>
+                                    <TextBlock x:Name="WaitStatsHeader"
+                                               Text="Wait Stats"
+                                               FontSize="13"
+                                               FontWeight="SemiBold" Foreground="{DynamicResource InsightWaitsBrush}"
+                                               Margin="0,0,0,6"/>
+                                    <StackPanel x:Name="WaitStatsContent"/>
+                                    <TextBlock x:Name="WaitStatsEmpty"
+                                               Text="No wait stats (estimated plan)"
+                                               FontSize="12" Visibility="Collapsed"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </DockPanel>
                     </Border>
                 </Grid>
             </Expander>

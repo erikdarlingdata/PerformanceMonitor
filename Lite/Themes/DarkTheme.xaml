@@ -1390,10 +1390,10 @@
     <SolidColorBrush x:Key="PlanPanelMutedBrush" Color="#E4E6EB"/>
     <SolidColorBrush x:Key="PlanSectionHeaderBrush" Color="#4FA3FF"/>
     <SolidColorBrush x:Key="PlanPropSeparatorBrush" Color="#2A2D35"/>
-    <SolidColorBrush x:Key="PlanMissingIndexBgBrush" Color="#3D2A0E"/>
-    <SolidColorBrush x:Key="PlanMissingIndexBorderBrush" Color="#7A5A1E"/>
-    <SolidColorBrush x:Key="PlanMissingIndexHeaderBrush" Color="#FFB347"/>
-    <SolidColorBrush x:Key="PlanWaitStatsBgBrush" Color="#1A2A3D"/>
-    <SolidColorBrush x:Key="PlanWaitStatsHeaderBrush" Color="#4FA3FF"/>
+    <!-- Plan Insights card accents: one neutral surface (BackgroundLightBrush) for every card,
+         identity carried by a 3px accent edge plus the header in that colour. Ported from
+         PerformanceStudio (erikdarlingdata/PerformanceStudio@87bad14), same values. -->
+    <SolidColorBrush x:Key="InsightIndexBrush" Color="#FFB347"/>
+    <SolidColorBrush x:Key="InsightWaitsBrush" Color="#4FA3FF"/>
 
 </ResourceDictionary>
