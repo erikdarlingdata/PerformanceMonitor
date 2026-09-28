@@ -21,10 +21,32 @@ public partial class PlanViewerControl
 {
     #region Properties Panel
 
+    /// <summary>
+    /// One row of the properties panel in WPF terms: the pure <see cref="PropertyRow"/> the
+    /// filter and copy menu work from, plus every control the row occupies (so the filter can
+    /// hide them) and the shared copy menu.
+    /// </summary>
+    private sealed class PropertyPanelRow
+    {
+        public PropertyRow Model { get; init; } = new();
+        public List<FrameworkElement> Controls { get; } = new();
+        public ContextMenu? Menu { get; set; }
+    }
+
+    private sealed class PropertyPanelSection
+    {
+        public string Title { get; init; } = "";
+        public Expander Expander { get; init; } = null!;
+        public List<PropertyPanelRow> Rows { get; } = new();
+        public PropertySection Model { get; init; } = null!;
+    }
+
     private void ShowPropertiesPanel(PlanNode node)
     {
         PropertiesContent.Children.Clear();
         _currentPropertySection = null;
+        _propertySections.Clear();
+        _currentSection = null;
 
         // Header
         var headerText = node.PhysicalOp;
@@ -307,10 +329,10 @@ public partial class PlanViewerControl
 
         // === Estimated Costs Section ===
         AddPropertySection("Estimated Costs");
-        AddPropertyRow("Operator Cost", $"{node.EstimatedOperatorCost:F6} ({node.CostPercent}%)");
-        AddPropertyRow("Subtree Cost", $"{node.EstimatedTotalSubtreeCost:F6}");
-        AddPropertyRow("I/O Cost", $"{node.EstimateIO:F6}");
-        AddPropertyRow("CPU Cost", $"{node.EstimateCPU:F6}");
+        AddPropertyRow("Operator Cost", $"{MetricFormatter.FormatCost(node.EstimatedOperatorCost)} ({node.CostPercent}%)");
+        AddPropertyRow("Subtree Cost", MetricFormatter.FormatCost(node.EstimatedTotalSubtreeCost));
+        AddPropertyRow("I/O Cost", MetricFormatter.FormatCost(node.EstimateIO));
+        AddPropertyRow("CPU Cost", MetricFormatter.FormatCost(node.EstimateCPU));
 
         // === Estimated Rows Section ===
         AddPropertySection("Estimated Rows");
@@ -333,20 +355,9 @@ public partial class PlanViewerControl
         {
             AddPropertySection("Actual Statistics");
             AddPropertyRow("Actual Rows", $"{node.ActualRows:N0}");
-            if (node.PerThreadStats.Count > 1)
-                foreach (var t in node.PerThreadStats)
-                    AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualRows:N0}", indent: true);
             if (node.ActualRowsRead > 0)
-            {
                 AddPropertyRow("Actual Rows Read", $"{node.ActualRowsRead:N0}");
-                if (node.PerThreadStats.Count > 1)
-                    foreach (var t in node.PerThreadStats.Where(t => t.ActualRowsRead > 0))
-                        AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualRowsRead:N0}", indent: true);
-            }
             AddPropertyRow("Actual Executions", $"{node.ActualExecutions:N0}");
-            if (node.PerThreadStats.Count > 1)
-                foreach (var t in node.PerThreadStats)
-                    AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualExecutions:N0}", indent: true);
             if (node.ActualRebinds > 0)
                 AddPropertyRow("Actual Rebinds", $"{node.ActualRebinds:N0}");
             if (node.ActualRewinds > 0)
@@ -360,29 +371,30 @@ public partial class PlanViewerControl
                     AddPropertyRow("Partition Ranges", node.PartitionRanges);
             }
 
+            // Rows and executions list every thread, idle ones included: a thread sitting at
+            // zero while its siblings work is the whole point of looking at the breakdown.
+            AddPerThreadBreakdown(node,
+                ("Rows", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualRows), true, ""),
+                ("Rows Read", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualRowsRead), false, ""),
+                ("Executions", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualExecutions), true, ""));
+
             // Timing
             if (node.ActualElapsedMs > 0 || node.ActualCPUMs > 0
                 || node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0)
             {
                 AddPropertySection("Actual Timing");
                 if (node.ActualElapsedMs > 0)
-                {
                     AddPropertyRow("Elapsed Time", $"{node.ActualElapsedMs:N0} ms");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualElapsedMs > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualElapsedMs:N0} ms", indent: true);
-                }
                 if (node.ActualCPUMs > 0)
-                {
                     AddPropertyRow("CPU Time", $"{node.ActualCPUMs:N0} ms");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualCPUMs > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualCPUMs:N0} ms", indent: true);
-                }
                 if (node.UdfElapsedTimeMs > 0)
                     AddPropertyRow("UDF Elapsed", $"{node.UdfElapsedTimeMs:N0} ms");
                 if (node.UdfCpuTimeMs > 0)
                     AddPropertyRow("UDF CPU", $"{node.UdfCpuTimeMs:N0} ms");
+
+                AddPerThreadBreakdown(node,
+                    ("Elapsed", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualElapsedMs), false, " ms"),
+                    ("CPU", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualCPUMs), false, " ms"));
             }
 
             // I/O
@@ -393,34 +405,22 @@ public partial class PlanViewerControl
             {
                 AddPropertySection("Actual I/O");
                 AddPropertyRow("Logical Reads", $"{node.ActualLogicalReads:N0}");
-                if (node.PerThreadStats.Count > 1)
-                    foreach (var t in node.PerThreadStats.Where(t => t.ActualLogicalReads > 0))
-                        AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualLogicalReads:N0}", indent: true);
                 if (node.ActualPhysicalReads > 0)
-                {
                     AddPropertyRow("Physical Reads", $"{node.ActualPhysicalReads:N0}");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualPhysicalReads > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualPhysicalReads:N0}", indent: true);
-                }
                 if (node.ActualScans > 0)
-                {
                     AddPropertyRow("Scans", $"{node.ActualScans:N0}");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualScans > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualScans:N0}", indent: true);
-                }
                 if (node.ActualReadAheads > 0)
-                {
                     AddPropertyRow("Read-Ahead Reads", $"{node.ActualReadAheads:N0}");
-                    if (node.PerThreadStats.Count > 1)
-                        foreach (var t in node.PerThreadStats.Where(t => t.ActualReadAheads > 0))
-                            AddPropertyRow($"  Thread {t.ThreadId}", $"{t.ActualReadAheads:N0}", indent: true);
-                }
                 if (node.ActualSegmentReads > 0)
                     AddPropertyRow("Segment Reads", $"{node.ActualSegmentReads:N0}");
                 if (node.ActualSegmentSkips > 0)
                     AddPropertyRow("Segment Skips", $"{node.ActualSegmentSkips:N0}");
+
+                AddPerThreadBreakdown(node,
+                    ("Logical Reads", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualLogicalReads), false, ""),
+                    ("Physical Reads", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualPhysicalReads), false, ""),
+                    ("Scans", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualScans), false, ""),
+                    ("Read-Ahead Reads", (Func<PerThreadRuntimeInfo, long>)(t => t.ActualReadAheads), false, ""));
             }
 
             // LOB I/O
@@ -846,6 +846,7 @@ public partial class PlanViewerControl
                         });
                     }
                     (_currentPropertySection ?? PropertiesContent).Children.Add(warnPanel);
+                    RegisterBuiltWarningRow(planWarnHeaderText, w.Message, warnPanel);
                 }
             }
 
@@ -901,13 +902,166 @@ public partial class PlanViewerControl
                     });
                 }
                 PropertiesContent.Children.Add(warnPanel);
+                RegisterBuiltWarningRow(opWarnHeaderText, w.Message, warnPanel);
             }
         }
 
-        // Show the panel
-        PropertiesColumn.Width = new GridLength(320);
-        PropertiesSplitter.Visibility = Visibility.Visible;
-        PropertiesPanel.Visibility = Visibility.Visible;
+        // The filter box keeps its text across selections, so a rebuilt panel has to re-apply it.
+        ApplyPropertiesFilter();
+
+        // Show the panel. The width is set only when the panel is opening: setting it on every
+        // selection would throw away whatever width the user had dragged out, on every click.
+        if (PropertiesPanel.Visibility != Visibility.Visible)
+        {
+            PropertiesColumn.MinWidth = MinPropertiesWidth;
+            PropertiesColumn.MaxWidth = MaxPropertiesWidth;
+            PropertiesColumn.Width = new GridLength(
+                PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth));
+            PropertiesSplitter.Visibility = Visibility.Visible;
+            PropertiesPanel.Visibility = Visibility.Visible;
+        }
+    }
+
+    private void PropertiesFilter_TextChanged(object sender, TextChangedEventArgs e)
+        => ApplyPropertiesFilter();
+
+    private void PropertiesFilter_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != System.Windows.Input.Key.Escape) return;
+        PropertiesFilterBox.Text = "";
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Hides every row whose label and value miss the filter text, and hides a section outright
+    /// once nothing in it is left showing. A section whose own title matches the filter keeps
+    /// all of its rows, so typing a section name jumps to that section rather than emptying it.
+    /// </summary>
+    private void ApplyPropertiesFilter()
+    {
+        var filter = PropertiesFilterBox.Text?.Trim() ?? "";
+
+        foreach (var section in _propertySections)
+        {
+            var sectionMatches = PerformanceMonitor.PlanAnalysis.PropertyRows.SectionTitleMatches(section.Title, filter);
+
+            var visibleCount = 0;
+            foreach (var row in section.Rows)
+            {
+                var visible = PerformanceMonitor.PlanAnalysis.PropertyRows.RowMatches(row.Model, filter, sectionMatches);
+                foreach (var control in row.Controls)
+                    control.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+                if (visible) visibleCount++;
+            }
+
+            section.Expander.Visibility = PerformanceMonitor.PlanAnalysis.PropertyRows.SectionVisible(visibleCount)
+                ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    /// <summary>
+    /// Moves a section's per-thread numbers out of the flat row list and into one collapsed
+    /// sub-expander, grouped under a small header per metric. Ported from PerformanceStudio's
+    /// Avalonia viewer (dev @ ff7f1d9). The shaping (which metrics to show, in what order, and
+    /// whether the header carries a skew suffix) lives in <see cref="ThreadBreakdown"/> so this
+    /// method only renders what that helper returns.
+    /// </summary>
+    private void AddPerThreadBreakdown(
+        PlanNode node,
+        params (string Metric, Func<PerThreadRuntimeInfo, long> Value, bool IncludeIdleThreads, string Unit)[] metrics)
+    {
+        var breakdown = ThreadBreakdown.Build(node, metrics);
+        if (breakdown == null)
+            return;
+
+        var panel = new StackPanel { Margin = new Thickness(10, 2, 6, 4) };
+        var groupCount = 0;
+
+        foreach (var group in breakdown.Groups)
+        {
+            groupCount++;
+            panel.Children.Add(new TextBlock
+            {
+                Text = group.Metric,
+                FontSize = 10,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = SectionHeaderBrush,
+                Margin = new Thickness(0, groupCount == 1 ? 0 : 5, 0, 1)
+            });
+
+            var threadGrid = new Grid { Margin = new Thickness(8, 0, 0, 0) };
+            threadGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(72) });
+            threadGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            var rowIndex = 0;
+            foreach (var t in group.Threads)
+            {
+                threadGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+                var threadLabelBlock = new TextBlock
+                {
+                    Text = $"Thread {t.ThreadId}",
+                    FontSize = 10,
+                    Foreground = MutedBrush
+                };
+                Grid.SetRow(threadLabelBlock, rowIndex);
+                Grid.SetColumn(threadLabelBlock, 0);
+                threadGrid.Children.Add(threadLabelBlock);
+
+                var threadValueBlock = new TextBlock
+                {
+                    Text = $"{t.Value:N0}{group.Unit}",
+                    FontSize = 10,
+                    Foreground = TooltipFgBrush,
+                    TextWrapping = TextWrapping.Wrap
+                };
+                Grid.SetRow(threadValueBlock, rowIndex);
+                Grid.SetColumn(threadValueBlock, 1);
+                threadGrid.Children.Add(threadValueBlock);
+
+                rowIndex++;
+            }
+
+            panel.Children.Add(threadGrid);
+        }
+
+        var header = new StackPanel { Orientation = Orientation.Horizontal };
+        header.Children.Add(new TextBlock
+        {
+            Text = breakdown.HeaderText,
+            FontWeight = FontWeights.SemiBold,
+            FontSize = 11,
+            Foreground = SectionHeaderBrush,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        if (breakdown.IsSkewed)
+        {
+            header.Children.Add(new TextBlock
+            {
+                Text = breakdown.SkewSuffix,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 11,
+                Foreground = OrangeBrush,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 0, 0, 0)
+            });
+        }
+
+        var expander = new Expander
+        {
+            IsExpanded = false,
+            Header = header,
+            Content = panel,
+            Margin = new Thickness(0, 2, 0, 2),
+            Padding = new Thickness(0),
+            Foreground = SectionHeaderBrush,
+            BorderThickness = new Thickness(0),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch
+        };
+
+        var target = _currentPropertySection ?? PropertiesContent;
+        target.Children.Add(expander);
     }
 
     private void AddPropertySection(string title)
@@ -933,6 +1087,8 @@ public partial class PlanViewerControl
         };
         PropertiesContent.Children.Add(expander);
         _currentPropertySection = contentPanel;
+        _currentSection = new PropertyPanelSection { Title = title, Expander = expander, Model = new PropertySection { Title = title } };
+        _propertySections.Add(_currentSection);
     }
 
     private void AddPropertyRow(string label, string value, bool isCode = false, bool indent = false)
@@ -971,6 +1127,96 @@ public partial class PlanViewerControl
 
         var target = _currentPropertySection ?? PropertiesContent;
         target.Children.Add(grid);
+
+        if (_currentSection != null)
+        {
+            var entry = new PropertyPanelRow
+            {
+                Model = new PropertyRow { Label = label, Value = value, IsCode = isCode, SearchText = $"{label} {value}" }
+            };
+            entry.Controls.Add(grid);
+            AttachPropertyRowMenu(valueBox, entry);
+            _currentSection.Rows.Add(entry);
+            _currentSection.Model.Rows.Add(entry.Model);
+        }
+    }
+
+    /// <summary>
+    /// Wraps a warning panel built directly under <see cref="PropertiesContent"/> (the plan-level
+    /// and per-operator warning lists, which are prose panels rather than label/value grids) as a
+    /// filterable, copyable row on the section most recently opened by <see cref="AddPropertySection"/>.
+    /// </summary>
+    private void RegisterBuiltWarningRow(string header, string body, FrameworkElement panel)
+    {
+        if (_currentSection == null) return;
+
+        var text = $"  {header}\n    {body}".TrimEnd();
+        var entry = new PropertyPanelRow
+        {
+            Model = new PropertyRow { Label = header, Value = body, BlockText = text, SearchText = $"{header} {body}" }
+        };
+        entry.Controls.Add(panel);
+        AttachPropertyRowMenu(panel, entry);
+        _currentSection.Rows.Add(entry);
+        _currentSection.Model.Rows.Add(entry.Model);
+    }
+
+    /// <summary>
+    /// Gives a control the row's copy menu ('Copy value' / 'Copy name and value' / 'Copy all
+    /// properties'), replacing the stock read-only TextBox menu (greyed-out Cut/Copy, live Paste
+    /// on data nobody can edit).
+    /// </summary>
+    private void AttachPropertyRowMenu(FrameworkElement control, PropertyPanelRow entry)
+    {
+        control.ContextMenu = entry.Menu ??= BuildPropertyRowMenu(entry);
+    }
+
+    private ContextMenu BuildPropertyRowMenu(PropertyPanelRow entry)
+    {
+        var menu = new ContextMenu();
+
+        var copyValueItem = new MenuItem { Header = "Copy value" };
+        copyValueItem.Click += (_, _) => TrySetClipboardText(entry.Model.CopyValue);
+        menu.Items.Add(copyValueItem);
+
+        var copyRowItem = new MenuItem { Header = "Copy name and value" };
+        copyRowItem.Click += (_, _) => TrySetClipboardText(entry.Model.CopyLabelAndValue);
+        menu.Items.Add(copyRowItem);
+
+        menu.Items.Add(new Separator());
+
+        var copyAllItem = new MenuItem { Header = "Copy all properties" };
+        copyAllItem.Click += (_, _) => TrySetClipboardText(BuildPropertiesText());
+        menu.Items.Add(copyAllItem);
+
+        return menu;
+    }
+
+    /// <summary>
+    /// The whole panel as plain text, for "Copy all properties": rendered from the row model
+    /// (<see cref="PerformanceMonitor.PlanAnalysis.PropertyRows.BuildPropertiesText"/>), not the
+    /// visual tree, so a code value pastes back out verbatim.
+    /// </summary>
+    private string BuildPropertiesText() =>
+        PerformanceMonitor.PlanAnalysis.PropertyRows.BuildPropertiesText(
+            PropertiesHeader.Text, PropertiesSubHeader.Text, _propertySections.ConvertAll(s => s.Model));
+
+    /// <summary>
+    /// Guarded clipboard write for the copy menu: a bare <see cref="Clipboard.SetText(string)"/>
+    /// throws when another process momentarily holds the clipboard (the same transient
+    /// CLIPBRD_E_CANT_OPEN condition <see cref="ClipboardText"/> guards on the read side).
+    /// </summary>
+    private static void TrySetClipboardText(string text)
+    {
+        try
+        {
+            Clipboard.SetText(text ?? "");
+        }
+        catch (System.Runtime.InteropServices.ExternalException)
+        {
+            // Transient CLIPBRD_E_CANT_OPEN: another process holds the clipboard. No-op; the
+            // user can retry the copy.
+        }
     }
 
     private void CloseProperties_Click(object sender, RoutedEventArgs e)
@@ -982,6 +1228,10 @@ public partial class PlanViewerControl
     {
         PropertiesPanel.Visibility = Visibility.Collapsed;
         PropertiesSplitter.Visibility = Visibility.Collapsed;
+        // Clear the open-state bounds first: MinWidth clamps the column whatever its Width says,
+        // so leaving it set would hold a strip open on a closed panel.
+        PropertiesColumn.MinWidth = 0;
+        PropertiesColumn.MaxWidth = double.PositiveInfinity;
         PropertiesColumn.Width = new GridLength(0);
 
         // Deselect node
@@ -1212,13 +1462,17 @@ public partial class PlanViewerControl
         });
     }
 
-    private void ShowWaitStats(List<WaitStatInfo> waits, bool isActualPlan)
+    private void ShowWaitStats(List<WaitStatInfo> waits, List<PlanWarning> statementWarnings, bool isActualPlan)
     {
         WaitStatsContent.Children.Clear();
 
         if (waits.Count == 0)
         {
             WaitStatsHeader.Text = "Wait Stats";
+            // The populated branch below hangs the previous statement's total on this tooltip;
+            // without clearing it here, an empty statement would still answer a hover with a stale count.
+            // PlanDisplayText.WaitStatsHeaderTooltip returns null for a zero wait count, so this clears it.
+            WaitStatsHeader.ToolTip = PlanDisplayText.WaitStatsHeaderTooltip(0, 0);
             WaitStatsEmpty.Text = isActualPlan
                 ? "No wait stats recorded"
                 : "No wait stats (estimated plan)";
@@ -1234,16 +1488,22 @@ public partial class PlanViewerControl
         var maxWait = sorted[0].WaitTimeMs;
         var totalWait = sorted.Sum(w => w.WaitTimeMs);
 
+        // The header ellipsizes in a narrow card, so the total it carries goes on a tooltip too.
         WaitStatsHeader.Text = $"  Wait Stats \u2014 {totalWait:N0}ms total";
+        WaitStatsHeader.ToolTip = PlanDisplayText.WaitStatsHeaderTooltip(sorted.Count, totalWait);
 
-        var longestName = sorted.Max(w => w.WaitType.Length);
-        var nameColWidth = longestName * 6.5 + 10;
-
-        var maxBarWidth = 300;
-
+        /* Ported from PerformanceStudio (erikdarlingdata/PerformanceStudio@78a3370, refined @80de6fc):
+           the wait type and the duration are both star columns; the bar and the trailing "up to N%"
+           benefit are Auto. Star columns take whatever is left after the Auto ones and shrink to zero
+           if they must, so the two text columns ellipsize (each with its full value on a tooltip) and
+           nothing overflows the card — this control's ScrollViewer has horizontal scrolling disabled,
+           so an Auto column that wants more than it's given would otherwise clip mid-word or force a
+           sideways scrollbar back on. Star-sizing the name also left-aligns every bar into a column,
+           which is what makes them comparable at a glance. */
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(nameColWidth) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(maxBarWidth + 16) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         for (int i = 0; i < sorted.Count; i++)
@@ -1253,23 +1513,31 @@ public partial class PlanViewerControl
         {
             var w = sorted[i];
             var barFraction = maxWait > 0 ? (double)w.WaitTimeMs / maxWait : 0;
-            var color = GetWaitCategoryColor(GetWaitCategory(w.WaitType));
+            var category = GetWaitCategory(w.WaitType);
+            var color = GetWaitCategoryColor(category);
 
+            // Wait type name, colored by category, capped at 150px with an ellipsis so one long
+            // type cannot widen (or clip) the row; the full name is always on the tooltip.
             var nameText = new TextBlock
             {
                 Text = w.WaitType,
                 FontSize = 12,
                 Foreground = TooltipFgBrush,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                MaxWidth = 150,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 2, 10, 2)
+                Margin = new Thickness(0, 2, 10, 2),
+                Background = Brushes.Transparent
             };
+            nameText.ToolTip = $"{w.WaitType} \u2014 {category} wait";
             Grid.SetRow(nameText, i);
             Grid.SetColumn(nameText, 0);
             grid.Children.Add(nameText);
 
+            // Bar: the category color at a fixed width, a compact proportional indicator.
             var colorBar = new Border
             {
-                Width = Math.Max(4, barFraction * maxBarWidth),
+                Width = Math.Max(4, barFraction * 60),
                 Height = 14,
                 Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)),
                 CornerRadius = new CornerRadius(2),
@@ -1281,17 +1549,42 @@ public partial class PlanViewerControl
             Grid.SetColumn(colorBar, 1);
             grid.Children.Add(colorBar);
 
+            // Duration text: the other flexible column, so this is what gives when the strip is narrow.
             var durationText = new TextBlock
             {
                 Text = $"{w.WaitTimeMs:N0}ms ({w.WaitCount:N0} waits)",
                 FontSize = 12,
                 Foreground = TooltipFgBrush,
+                TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 2, 0, 2)
+                Margin = new Thickness(0, 2, 8, 2),
+                Background = Brushes.Transparent
             };
+            durationText.ToolTip = $"{w.WaitTimeMs:N0} ms across {w.WaitCount:N0} waits";
             Grid.SetRow(durationText, i);
             Grid.SetColumn(durationText, 2);
             grid.Children.Add(durationText);
+
+            // Benefit % (if the analyzer scored one for this wait type) — Auto so it is never the
+            // thing that gets clipped.
+            var benefitText = WaitRowText.Benefit(w.WaitType, statementWarnings);
+            if (benefitText != null)
+            {
+                var benefitBlock = new TextBlock
+                {
+                    Text = benefitText,
+                    FontSize = 11,
+                    Foreground = MutedBrush,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 2, 0, 2),
+                    Background = Brushes.Transparent
+                };
+                benefitBlock.ToolTip =
+                    $"{benefitText.Replace("up to", "Up to", StringComparison.Ordinal)} of this statement's runtime could be recovered by removing {w.WaitType} waits";
+                Grid.SetRow(benefitBlock, i);
+                Grid.SetColumn(benefitBlock, 3);
+                grid.Children.Add(benefitBlock);
+            }
         }
 
         WaitStatsContent.Children.Add(grid);
@@ -1311,6 +1604,12 @@ public partial class PlanViewerControl
     {
         RuntimeSummaryContent.Children.Clear();
 
+        // #4570: title, row order, memory-grant colors/spill flag match
+        // erikdarlingdata/PerformanceStudio@40ade29 and @5731ae9; the row list itself is built by
+        // the shared, pure PlanDisplayText.BuildRuntimeSummaryRows so it can be pinned on macOS
+        // (this control is net10.0-windows-only and can't run a unit test there).
+        RuntimeSummaryTitle.Text = PlanDisplayText.RuntimeSummaryTitle(statement);
+
         var labelBrush = MutedBrush;
         var valueBrush = TooltipFgBrush;
 
@@ -1319,7 +1618,7 @@ public partial class PlanViewerControl
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         int rowIndex = 0;
 
-        void AddRow(string label, string value)
+        void AddRow(string label, string value, string? colorKey)
         {
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
@@ -1339,7 +1638,7 @@ public partial class PlanViewerControl
             {
                 Text = value,
                 FontSize = 11,
-                Foreground = valueBrush,
+                Foreground = colorKey == null ? valueBrush : (Brush)FindResource(colorKey),
                 Margin = new Thickness(0, 1, 0, 1)
             };
             Grid.SetRow(valueText, rowIndex);
@@ -1349,64 +1648,8 @@ public partial class PlanViewerControl
             rowIndex++;
         }
 
-        if (statement.QueryTimeStats != null)
-        {
-            AddRow("Elapsed", $"{statement.QueryTimeStats.ElapsedTimeMs:N0}ms");
-            // CPU:Elapsed row: matches erikdarlingdata/PerformanceStudio@28d4c74 (position right after
-            // Elapsed, and CPU with external-wait time subtracted via BenefitScorer.IsExternalWait).
-            var cpuElapsedRatio = PlanDisplayText.CpuElapsedRatio(statement);
-            if (cpuElapsedRatio != null)
-                AddRow("CPU:Elapsed", cpuElapsedRatio.Value.ToString("N2"));
-            AddRow("CPU", $"{statement.QueryTimeStats.CpuTimeMs:N0}ms");
-            if (statement.QueryUdfCpuTimeMs > 0)
-                AddRow("UDF CPU", $"{statement.QueryUdfCpuTimeMs:N0}ms");
-            if (statement.QueryUdfElapsedTimeMs > 0)
-                AddRow("UDF elapsed", $"{statement.QueryUdfElapsedTimeMs:N0}ms");
-        }
-
-        if (statement.MemoryGrant != null)
-        {
-            var mg = statement.MemoryGrant;
-            AddRow("Memory grant", $"{FormatMemoryGrantKB(mg.GrantedMemoryKB)} granted, {FormatMemoryGrantKB(mg.MaxUsedMemoryKB)} used");
-            if (mg.GrantWaitTimeMs > 0)
-                AddRow("Grant wait", $"{mg.GrantWaitTimeMs:N0}ms");
-        }
-
-        if (statement.DegreeOfParallelism > 0)
-            AddRow("DOP", statement.DegreeOfParallelism.ToString());
-        else if (statement.NonParallelPlanReason != null)
-            AddRow("Serial", statement.NonParallelPlanReason);
-
-        if (statement.ThreadStats != null)
-        {
-            var ts = statement.ThreadStats;
-            AddRow("Branches", ts.Branches.ToString());
-            var totalReserved = ts.Reservations.Sum(r => r.ReservedThreads);
-            if (totalReserved > 0)
-            {
-                var threadText = ts.UsedThreads == totalReserved
-                    ? $"{ts.UsedThreads} used ({totalReserved} reserved)"
-                    : $"{ts.UsedThreads} used of {totalReserved} reserved ({totalReserved - ts.UsedThreads} inactive)";
-                AddRow("Threads", threadText);
-            }
-            else
-            {
-                AddRow("Threads", $"{ts.UsedThreads} used");
-            }
-        }
-
-        if (statement.CardinalityEstimationModelVersion > 0)
-            AddRow("CE model", statement.CardinalityEstimationModelVersion.ToString());
-
-        if (statement.CompileTimeMs > 0)
-            AddRow("Compile time", $"{statement.CompileTimeMs:N0}ms");
-        if (statement.CachedPlanSizeKB > 0)
-            AddRow("Cached plan size", $"{statement.CachedPlanSizeKB:N0} KB");
-
-        if (!string.IsNullOrEmpty(statement.StatementOptmLevel))
-            AddRow("Optimization", statement.StatementOptmLevel);
-        if (!string.IsNullOrEmpty(statement.StatementOptmEarlyAbortReason))
-            AddRow("Early abort", statement.StatementOptmEarlyAbortReason);
+        foreach (var row in PlanDisplayText.BuildRuntimeSummaryRows(statement))
+            AddRow(row.Label, row.Value, row.ColorKey);
 
         RuntimeSummaryContent.Children.Add(grid);
         SetInsightQuiet(RuntimeSummaryTitle, TooltipFgBrush, RuntimeSummaryAccent, isEmpty: false);
