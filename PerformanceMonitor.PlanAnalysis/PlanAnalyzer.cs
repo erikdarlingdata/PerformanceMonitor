@@ -821,6 +821,57 @@ public static partial class PlanAnalyzer
             }
         }
 
+        // Rule 34: Bare scan with no predicate — NC index or columnstore candidate.
+        // When a Clustered Index Scan or heap Table Scan reads the full table with no
+        // predicate but only outputs a few columns, a narrower nonclustered index could
+        // cover the query with far less I/O. For analytical workloads, columnstore may
+        // be a better fit regardless of column count.
+        var isBareScanCandidate = (node.PhysicalOp == "Clustered Index Scan" || node.PhysicalOp == "Table Scan")
+            && !node.Lookup
+            && string.IsNullOrEmpty(node.Predicate)
+            && !string.IsNullOrEmpty(node.OutputColumns);
+        if (isBareScanCandidate)
+        {
+            var colCount = node.OutputColumns!.Split(',').Length;
+            var isSignificant = node.HasActualStats
+                ? GetOperatorOwnElapsedMs(node) > 0
+                : node.CostPercent >= 20;
+
+            if (isSignificant)
+            {
+                var scanKind = node.PhysicalOp == "Clustered Index Scan"
+                    ? "Clustered index scan"
+                    : "Heap table scan";
+
+                if (colCount <= 3)
+                {
+                    // Narrow output: a nonclustered rowstore index can cover this cheaply.
+                    var indexAdvice = node.PhysicalOp == "Clustered Index Scan"
+                        ? "Consider a nonclustered index on the output columns (as key or INCLUDE) so SQL Server can read a narrower structure."
+                        : "Consider a clustered or nonclustered index on the output columns so SQL Server can read a narrower structure.";
+
+                    node.Warnings.Add(new PlanWarning
+                    {
+                        WarningType = "Bare Scan",
+                        Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} column(s): {Truncate(node.OutputColumns, 200)}. {indexAdvice} For analytical workloads, a columnstore index may be a better fit.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+                else
+                {
+                    // Wider output: rowstore NC index isn't a great fit (would have to
+                    // carry too many columns), but columnstore doesn't care about column
+                    // count. Suggest it for analytical / aggregate-style workloads.
+                    node.Warnings.Add(new PlanWarning
+                    {
+                        WarningType = "Bare Scan",
+                        Message = $"{scanKind} reads the full table with no predicate, outputting {colCount} columns. A nonclustered rowstore index isn't a great fit for wide outputs, but if this is an analytical or aggregate-style query, a columnstore index (CCI or NCCI) can scan the same data far more cheaply — column count doesn't penalize columnstore the way it does rowstore indexes.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+            }
+        }
+
         // Rule 33: Estimated plan CE guess detection — scans with telltale default selectivity
         // When the optimizer uses a local variable or can't sniff, it falls back to density-based
         // guesses: 30% (equality), 10% (inequality), 9% (LIKE/between), ~16.43% (sqrt(30%)),
