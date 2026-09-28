@@ -52,6 +52,8 @@ public partial class PlanViewerControl
 
         // Update cost text
         CostText.Text = $"Statement Cost: {statement.StatementSubTreeCost:F4}";
+
+        RenderMinimap();
     }
 
     #region Node Rendering
