@@ -2253,8 +2253,23 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
         await ClearTestDataAsync();
         await SeedTestServerAsync();
 
-        // Healthy: 50% CPU, 75% buffer pool ratio, no idle databases
+        // Healthy: 50% CPU, 75% buffer pool ratio, no idle databases.
+        //
+        // GetUtilizationEfficiencyAsync (the CPU right-sizing check's data source) reads
+        // collection_time >= DateTime.UtcNow.AddHours(-24) -- a fixed 24h window measured from
+        // "now", not from TestPeriodEnd. TestPeriodStart/End is anchored to the most recent
+        // UTC-midnight-plus-4h boundary (#4385), which can land up to ~28h before "now" (worst
+        // case: 03:59 UTC, one minute before the anchor rolls forward a day). At that worst
+        // hour, SeedCpuUtilizationAsync's 16 points (TestPeriodStart .. TestPeriodStart+3h45m)
+        // fall entirely outside a naive 24h-from-now lookback, so the CPU check would read zero
+        // samples and could compute a false P95 -- so seed a second, always-in-window copy of
+        // the same healthy CPU signal anchored to "now" instead of TestPeriodStart, the same
+        // fix shape as #4558 but on the seed side (no hoursBack parameter exists on this read
+        // path to move to the test side instead).
         await SeedCpuUtilizationAsync(50, 5);
+        await SeedCpuUtilizationInRangeAsync(
+            DateTime.UtcNow.AddHours(-3), DateTime.UtcNow.AddMinutes(-5),
+            avgCpu: 50, variance: 5, samples: 16);
         await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 49_152, targetMb: 57_344);
         await SeedServerPropertiesAsync(cpuCount: 8, htRatio: 2, physicalMemMb: 65_536,
             edition: "Developer Edition");
