@@ -12,6 +12,7 @@ using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Analysis;
 
 public partial class DrillDownCollector
@@ -82,7 +83,7 @@ LIMIT 1";
 
             // #4530: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.CancellationToken);
-            PlanAnalysisPipeline.Run(plan, null, metadata, context.CancellationToken);
+            PlanAnalysisPipeline.Run(plan, App.AnalyzerConfig, metadata, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
             // finding inside an EXEC <procedure> plan's body reaches the drill-down.
@@ -222,7 +223,7 @@ LIMIT 10";
 
             // #4530: one store read per collector call so rule 38 can see the server's edition/MAXDOP.
             var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.CancellationToken);
-            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, metadata, context.CancellationToken);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, App.AnalyzerConfig, metadata, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {

@@ -254,6 +254,87 @@ public sealed class RollupFloorCacheTests
         Assert.DoesNotContain(view, newEntries.Keys);
     }
 
+    /* ─────────────────────────── #4605: the ceiling ─────────────────────────── */
+
+    [Fact]
+    public void CeilingOf_UnknownView_IsNull()
+    {
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal));
+
+        Assert.Null(coverage.CeilingOf(TimescaleSupport.QueryStoreStatsHourlyView));
+    }
+
+    [Fact]
+    public void MergeRollupFloors_SixArgument_ReMeasuredView_ReplacesTheCachedCeiling()
+    {
+        var view = TimescaleSupport.QueryStoreStatsHourlyView;
+        var freshFloor = SomeFloor.AddDays(1);
+        var staleCeiling = SomeFloor.AddHours(1);
+        var freshCeiling = freshFloor.AddHours(1);
+        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal) { [view] = freshFloor };
+        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
+        {
+            [view] = new TimescaleSupport.RollupFloorCacheEntry("_hyper_1_1_chunk", SomeHypertable, SomeFloor, Now, staleCeiling),
+        };
+        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
+        {
+            [view] = new("_hyper_1_2_chunk", SomeHypertable),
+        };
+        var ceilingsMeasuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal) { [view] = freshCeiling };
+
+        var (_, newEntries) = TimescaleSupport.MergeRollupFloors(
+            measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now, ceilingsMeasuredThisCycle);
+
+        Assert.Equal(freshCeiling, newEntries[view].Ceiling);
+    }
+
+    [Fact]
+    public void MergeRollupFloors_SixArgument_NotMeasuredThisCycle_KeepsTheCachedCeiling()
+    {
+        var view = TimescaleSupport.QueryStoreStatsHourlyView;
+        var cachedCeiling = SomeFloor.AddHours(1);
+        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
+        {
+            [view] = new TimescaleSupport.RollupFloorCacheEntry("_hyper_1_1_chunk", SomeHypertable, SomeFloor, Now, cachedCeiling),
+        };
+        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
+        {
+            [view] = new("_hyper_1_1_chunk", SomeHypertable),
+        };
+        var ceilingsMeasuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+
+        var (_, newEntries) = TimescaleSupport.MergeRollupFloors(
+            measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now, ceilingsMeasuredThisCycle);
+
+        Assert.Equal(cachedCeiling, newEntries[view].Ceiling);
+    }
+
+    [Fact]
+    public void MergeRollupFloors_FiveArgument_BehavesExactlyAsBefore_LeavingTheCeilingUnset()
+    {
+        var view = TimescaleSupport.QueryStoreStatsHourlyView;
+        var freshFloor = SomeFloor.AddDays(1);
+        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal) { [view] = freshFloor };
+        var cached = new Dictionary<string, TimescaleSupport.RollupFloorCacheEntry>(StringComparer.Ordinal)
+        {
+            [view] = Entry("_hyper_1_1_chunk", SomeFloor),
+        };
+        var oldestNow = new Dictionary<string, TimescaleSupport.RollupChunkIdentity>(StringComparer.Ordinal)
+        {
+            [view] = new("_hyper_1_2_chunk", SomeHypertable),
+        };
+
+        var (floors, newEntries) = TimescaleSupport.MergeRollupFloors(measuredThisCycle, cached, oldestNow, RollupAvailability.All, Now);
+
+        Assert.Equal(freshFloor, floors[view]);
+        Assert.Null(newEntries[view].Ceiling);
+    }
+
     /* ─────────────────────────── the two-argument SQL overload ─────────────────────────── */
 
     [Fact]

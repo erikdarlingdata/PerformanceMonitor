@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 
@@ -155,6 +156,7 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     private readonly Func<int, int>? _blockingSnapshotCadenceMinutes;
     private readonly AlertReadFailureCounter? _readFailures;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
+    private readonly ILogger? _logger;
 
     /// <param name="runningJobsCadenceMinutes">
     /// Resolves a server's EFFECTIVE running_jobs collection cadence (minutes) for the #1812
@@ -181,13 +183,15 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
         Func<int, int>? runningJobsCadenceMinutes = null,
         Func<int, int>? blockingSnapshotCadenceMinutes = null,
         AlertReadFailureCounter? readFailures = null,
-        Func<TimeSpan, CancellationToken, Task>? delay = null)
+        Func<TimeSpan, CancellationToken, Task>? delay = null,
+        ILogger? logger = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
         _blockingSnapshotCadenceMinutes = blockingSnapshotCadenceMinutes;
         _readFailures = readFailures;
         _delay = delay ?? Task.Delay;
+        _logger = logger;
     }
 
     /* ---------------- the retry seam (#3848) ---------------- */
@@ -1628,37 +1632,50 @@ ORDER BY l.database_name";
         var items = new List<DatabaseStateInfo>();
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
-        using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+        /* #4606: the seed/heal/prune/clear-recovered maintenance run ahead of the deviation read is wrapped
+           in its OWN deadlock retry — the narrowest seam that covers the victim statement — rather than
+           widened inside ExecuteWithOneRetryAsync above, because that seam's other eleven callers include
+           reads with no such idempotence argument and PostgresException is excluded there on purpose
+           ("an identical second attempt gets an identical answer"). This sequence is the one exception:
+           every statement in it is safe to repeat whole, the same property #2143's drop_chunks retry
+           (ExecuteDropChunksWithDeadlockRetryAsync in DarlingRetention.cs) relies on for the chunk-drop side
+           of this exact deadlock. Repeat-safety here: the seed is INSERT ... ON CONFLICT DO NOTHING; the
+           heal and prune are an UPDATE/DELETE keyed off the newest snapshot, each idempotent against its own
+           output; clear-recovered is an UPDATE to a fixed NULL. */
+        await ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(async () =>
         {
-            seed.Parameters.AddWithValue(serverId);
-            await seed.ExecuteNonQueryAsync(cancellationToken);
-        }
+            using (var seed = new NpgsqlCommand(SeedDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            {
+                seed.Parameters.AddWithValue(serverId);
+                await seed.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-        /* Beside the seed because it is the same job from the other end (#2189): the seed learns a baseline
-           for a database that has none, this un-learns one the database has since outgrown. Both run before
-           the read, so a poisoned expectation is corrected on the cycle that notices it rather than firing
-           once more first. */
-        using (var heal = new NpgsqlCommand(HealDatabaseStateBaselineToOnlineSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
-        {
-            heal.Parameters.AddWithValue(serverId);
-            await heal.ExecuteNonQueryAsync(cancellationToken);
-        }
+            /* Beside the seed because it is the same job from the other end (#2189): the seed learns a
+               baseline for a database that has none, this un-learns one the database has since outgrown.
+               Both run before the read, so a poisoned expectation is corrected on the cycle that notices it
+               rather than firing once more first. */
+            using (var heal = new NpgsqlCommand(HealDatabaseStateBaselineToOnlineSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            {
+                heal.Parameters.AddWithValue(serverId);
+                await heal.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-        using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
-        {
-            prune.Parameters.AddWithValue(serverId);
-            await prune.ExecuteNonQueryAsync(cancellationToken);
-        }
+            using (var prune = new NpgsqlCommand(PruneDatabaseStateExpectedSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            {
+                prune.Parameters.AddWithValue(serverId);
+                await prune.ExecuteNonQueryAsync(cancellationToken);
+            }
 
-        /* Before the read, so this cycle judges against a memory the store has already healed rather than
-           one carried over from a restart (#2166). A database cleared here is one that is back at its
-           expected state, so it cannot appear in the deviation read below either way — the ordering matters
-           for the NEXT deviation, not this one. */
-        using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
-        {
-            clearRecovered.Parameters.AddWithValue(serverId);
-            await clearRecovered.ExecuteNonQueryAsync(cancellationToken);
-        }
+            /* Before the read, so this cycle judges against a memory the store has already healed rather
+               than one carried over from a restart (#2166). A database cleared here is one that is back at
+               its expected state, so it cannot appear in the deviation read below either way — the
+               ordering matters for the NEXT deviation, not this one. */
+            using (var clearRecovered = new NpgsqlCommand(ClearRecoveredDatabaseStateAlertsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+            {
+                clearRecovered.Parameters.AddWithValue(serverId);
+                await clearRecovered.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }, serverId, _logger);
 
         using (var command = new NpgsqlCommand(DatabaseStateDeviationsSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
         {
@@ -1677,6 +1694,43 @@ ORDER BY l.database_name";
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Runs the database-state seed/heal/prune/clear-recovered sequence with a SINGLE immediate retry on
+    /// <see cref="PostgresErrorCodes.DeadlockDetected"/> (40P01) — #4606, the same shape as
+    /// <see cref="DarlingRetention.ExecuteDropChunksWithDeadlockRetryAsync"/>. A <c>drop_chunks</c> holding
+    /// or waiting for an AccessExclusiveLock can pick this sequence's AccessShareLock as its deadlock victim
+    /// (measured on a production store, #4606); the partner clears within milliseconds, so one immediate
+    /// retry converts a wasted alert-pass cycle into a completed one. Exactly ONE retry, for the same reason
+    /// the purge takes exactly one: a second deadlock in a row is standing contention, and surfacing the
+    /// failure — propagating, this method's only other exit — is the right posture rather than camping a
+    /// retry loop on a lock queue. Any non-deadlock <see cref="PostgresException"/>, and any other
+    /// exception, propagates unchanged on the first attempt. The caller's own
+    /// <see cref="ExecuteWithOneRetryAsync{T}"/> command-timeout retry is untouched — this method sits
+    /// entirely inside the read that seam wraps, so a deadlock retried here never also counts there.
+    /// Internal, delegate-seamed like the purge's, so the retry/give-up/no-retry arms pin without a store.
+    /// </summary>
+    internal static async Task ExecuteDatabaseStateMaintenanceWithDeadlockRetryAsync(
+        Func<Task> maintenance, int serverId, ILogger? logger)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                await maintenance();
+                return;
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected && attempt == 1)
+            {
+                /* Logged once, at Information — this is the expected transient the retry exists to absorb,
+                   not a fault: the naming (SQLSTATE + statement family) matches DarlingRetention's own
+                   deadlock-retry log so the two halves of this deadlock read the same way in a log search. */
+                logger?.LogInformation(
+                    "Alert pass database-state maintenance deadlocked ({SqlState}) for server {ServerId} — retrying once (the partner clears in milliseconds)",
+                    ex.SqlState, serverId);
+            }
+        }
     }
 
     /// <summary>How far back <see cref="ForcePlanFailuresSql"/> looks for a plan's two most recent

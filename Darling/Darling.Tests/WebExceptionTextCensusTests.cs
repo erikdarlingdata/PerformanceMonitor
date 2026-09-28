@@ -688,6 +688,15 @@ public sealed class WebExceptionTextCensusTests
         Assert.Equal(0, logger.CountAtLevel(LogLevel.Warning));
     }
 
+    /// <summary>#4605: 53400 (configuration_limit_exceeded) is author-actionable too -- the viewer/mcp
+    /// role's temp_file_limit refusing the panel's own spill is a case the author fixes by narrowing the
+    /// panel, the same as a 57014 statement_timeout cancel.</summary>
+    [Fact]
+    public void IsComposeRunAuthorActionable_ConfigurationLimitExceeded53400_IsTrue()
+    {
+        Assert.True(DarlingWebEndpoints.IsComposeRunAuthorActionable("53400"));
+    }
+
     /// <summary>42501 (insufficient_privilege) is the one class-42 SQLSTATE the ruling carves OUT of
     /// author-actionable: a STORE role problem, not the panel.</summary>
     [Fact]
@@ -815,6 +824,21 @@ public sealed class WebExceptionTextCensusTests
             Assert.Equal(sqlState, outcome.AuthorSqlState);
             Assert.Equal($"Query failed: {message}", outcome.Error);
         }
+    }
+
+    /// <summary>#4605: a 53400 gets its OWN caller-facing text -- not "Query failed: {MessageText}" -- because
+    /// the store's own wording names an internal setting (temp_file_limit) the panel author has no way to
+    /// change; the composer names the actions they CAN take instead.</summary>
+    [Fact]
+    public void FromPostgresException_ConfigurationLimitExceeded53400_CarriesTheSpillMessage_NoFault()
+    {
+        var ex = new PostgresException("temporary file size exceeds temp_file_limit", "ERROR", "ERROR", "53400");
+        var outcome = DarlingWebEndpoints.FromPostgresException(ex);
+
+        Assert.False(outcome.IsServerError);
+        Assert.Null(outcome.Fault);
+        Assert.Equal("53400", outcome.AuthorSqlState);
+        Assert.Equal(DarlingWebEndpoints.TempFileLimitExceededMessage, outcome.Error);
     }
 
     /// <summary>Source pin (R2-L1, R2-L2): the PostgresException catch inside RunComposedPanelAsync must call

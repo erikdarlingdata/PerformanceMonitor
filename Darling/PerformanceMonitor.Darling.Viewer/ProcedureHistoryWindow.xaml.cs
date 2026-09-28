@@ -244,9 +244,10 @@ public partial class ProcedureHistoryWindow : Window
 
         var label = $"Est Plan - {fullName}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
-            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId);
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);
             await viewer.LoadPlan(planXml, label, queryText: null);
         }
         catch (Exception ex)
@@ -307,9 +308,10 @@ public partial class ProcedureHistoryWindow : Window
         }
 
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
-            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId);
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);
             await viewer.LoadPlan(result.PlanXml, label, queryText);
         }
         catch (Exception ex)

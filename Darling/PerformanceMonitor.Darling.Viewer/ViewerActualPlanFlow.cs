@@ -103,14 +103,16 @@ public static class ViewerActualPlanFlow
     /// Plan Viewer tab). The Top Queries surface opens into its tab instead, so it does not call this.
     /// </summary>
     public static async Task OpenFloatingPlanAsync(
-        Window owner, ViewerDataService dataService, int serverId, string planXml, string label, string? queryText)
+        Window owner, ViewerDataService dataService, int serverId, string planXml, string label, string? queryText,
+        string? databaseName = null)
     {
         var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = ViewerExportSettings.AccuracyRatioDivergenceLimit };
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
-            /* #4530: best-effort — a failed metadata read leaves ServerMetadata null, same as the pre-#4530
-               behaviour, so a viewer with no store row for this server still opens the plan. */
-            viewer.ServerMetadata = await dataService.GetPlanAnalysisServerMetadataAsync(serverId);
+            /* #4530/#4597: best-effort — a failed metadata read leaves ServerMetadata null, same as the
+               pre-#4530 behaviour, so a viewer with no store row for this server still opens the plan. */
+            viewer.ServerMetadata = await dataService.GetPlanAnalysisServerMetadataAsync(serverId, databaseName);
             await viewer.LoadPlan(planXml, label, queryText);
         }
         catch (Exception ex)

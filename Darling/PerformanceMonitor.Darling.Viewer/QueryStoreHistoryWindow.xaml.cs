@@ -276,9 +276,10 @@ public partial class QueryStoreHistoryWindow : Window
 
         var label = $"Est Plan - QS {_queryId}/{planId}";
         var viewer = new PlanViewerControl();
+        viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
-            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId);
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId, _databaseName);
             await viewer.LoadPlan(planXml, label, _queryText);
         }
         catch (Exception ex)
@@ -319,7 +320,7 @@ public partial class QueryStoreHistoryWindow : Window
             _actualPlanCts.Token);
 
         if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText);
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText, _databaseName);
     }
 
     // ── Column Filter Popup (mirrors WaitDrillDownWindow / ViewerServerTab.Filters.cs) ──

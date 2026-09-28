@@ -26,6 +26,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -288,7 +289,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         /* #4442 scope 2: RunComposedPanelAsync is a static method shared with the MCP run_custom_view_panel
            tool (Mcp/DarlingMcpCustomViewTools.cs) and carries no instance state, so it cannot take the
@@ -315,7 +316,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            persisted-finding read — need only the store; the optional plan fetcher is for the excluded
            analyze/drill path, but the logger is also the analysis service's own logger (#4316)). Shared across
            requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache);
+        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache, analyzerConfig: analyzerConfig);
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
@@ -1035,22 +1036,35 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#4283 review round 1 (M1): the PostgresException SQLSTATEs a Custom Views panel author can act
     /// on by editing their own panel — a statement_timeout cancel, or a class-22/class-42 error other than
-    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel). Everything else (28P01
-    /// auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000 unknown database, ...) is a STORE
-    /// fault the author cannot fix.</summary>
+    /// 42501 (insufficient_privilege, which names a STORE role problem, not the panel), or (#4605) a 53400
+    /// <c>configuration_limit_exceeded</c> — the viewer/mcp role's <c>temp_file_limit</c> refusing the panel's
+    /// own on-disk spill, which the author fixes the same way they fix a statement_timeout cancel: narrow the
+    /// panel. Everything else (28P01 auth failure, 53300 too-many-connections, 57P01 admin shutdown, 3D000
+    /// unknown database, ...) is a STORE fault the author cannot fix.</summary>
     internal static bool IsComposeRunAuthorActionable(string? sqlState) =>
         sqlState == "57014"
+        || sqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded
         || (sqlState is { Length: 5 } && sqlState.StartsWith("22", StringComparison.Ordinal))
         || (sqlState is { Length: 5 } && sqlState.StartsWith("42", StringComparison.Ordinal) && sqlState != "42501");
+
+    /// <summary>#4605: the caller-facing text for a composed read the viewer/mcp role's <c>temp_file_limit</c>
+    /// refused (SQLSTATE 53400) — named separately from the generic "Query failed: {MessageText}" text
+    /// (#4283) because the store's own wording ("temporary file size exceeds temp_file_limit") names an
+    /// internal setting the panel author has no way to change; this names the ACTIONS they can take
+    /// instead.</summary>
+    internal const string TempFileLimitExceededMessage =
+        "This panel needed more temporary disk space than a dashboard read may use. Narrow the time window, choose an hourly or daily grain, or add a filter.";
 
     /// <summary>#4293 round 2 (R2-L1, R2-L2): the compose runner's PostgresException decision, pulled out of the
     /// catch so a test runs it. <see cref="IsComposeRunAuthorActionable"/>'s SQLSTATEs count only at ERROR
     /// severity: a FATAL or PANIC is a connection-level store fault whatever its class (a startup parameter the
     /// server rejects answers FATAL 22023 or 42704, which names the configured setting and its value).</summary>
     internal static ComposeRunOutcome FromPostgresException(PostgresException ex) =>
-        IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
-            ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
-            : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
+        ex.SqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+            ? ComposeRunOutcome.AuthorQueryError(TempFileLimitExceededMessage, ex.SqlState)
+            : IsComposeRunAuthorActionable(ex.SqlState) && ex.InvariantSeverity is not ("FATAL" or "PANIC")
+                ? ComposeRunOutcome.AuthorQueryError($"Query failed: {ex.MessageText}", ex.SqlState)
+                : ComposeRunOutcome.BadRequest($"Query failed: {ex.MessageText}", ex);
 
     /// <summary>
     /// Compile-and-run a single composed panel spec (Custom Views v2, #1563) against <paramref name="postgres"/>
@@ -1114,19 +1128,22 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                author could not have caused -- classified the same way the web loop classifies any exception.
                outcome.AuthorSqlState is set only for an author-actionable PostgresException (#4283 M1/#4293
                R2), and that allow-list includes 57014 -- a panel query hitting the store's own
-               statement_timeout is a Timeout sample even though it answers the caller at 400, not 500.
-               Anything else that did not produce a payload (a validation BadRequest with no exception at
-               all, or the generic-Exception ServerError arm) is Error, unless the caller's own token already
-               explains it. */
+               statement_timeout is a Timeout sample even though it answers the caller at 400, not 500 -- and
+               (#4605) 53400, the viewer/mcp role's temp_file_limit refusing the panel's own spill, which is a
+               Limit sample for the same reason. Anything else that did not produce a payload (a validation
+               BadRequest with no exception at all, or the generic-Exception ServerError arm) is Error, unless
+               the caller's own token already explains it. */
             var readOutcome = outcome.Payload is not null
                 ? ReadOutcome.Ok
                 : outcome.AuthorSqlState == CollectorFaultCancelOrigin.QueryCanceled
                     ? ReadOutcome.Timeout
-                    : outcome.Fault is not null
-                        ? ReadOutcomeClassifier.Classify(outcome.Fault, cancellationToken)
-                        : cancellationToken.IsCancellationRequested
-                            ? ReadOutcome.Cancelled
-                            : ReadOutcome.Error;
+                    : outcome.AuthorSqlState == ReadOutcomeClassifier.ConfigurationLimitExceeded
+                        ? ReadOutcome.Limit
+                        : outcome.Fault is not null
+                            ? ReadOutcomeClassifier.Classify(outcome.Fault, cancellationToken)
+                            : cancellationToken.IsCancellationRequested
+                                ? ReadOutcome.Cancelled
+                                : ReadOutcome.Error;
 
             s_readLatency?.Record(ReadSurface.Compose, measureKey, readOutcome, elapsedMs);
         }
@@ -1231,7 +1248,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            relation. Probed lazily, cached per data source. */
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage);
+        /* #4605: Query Store never takes the recent-window rollup route (it can't be exact,
+           even on the corrected hourly), so its own bounded fast path is the wide table (V145) — decided
+           HERE, in the runner, before compiling, because ComposeCompiler.Compile stays pure and never opens
+           a connection. Only checked for a panel that actually reads query_store_stats; every other panel
+           pays nothing extra. */
+        var queryStoreWideEligible = plan!.Measure.SourceTable == "query_store_stats"
+            && await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken);
+
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -1286,6 +1311,102 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
+        }
+    }
+
+    /// <summary>The #4605 minimum window: below this, the wide table's own gate round trips
+    /// (one per server, each a fixed handful of small reads) cost more than the read they would save, so a
+    /// composed Query Store panel stays raw regardless of coverage — the same pattern
+    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> already applies to the grid. A composed panel
+    /// may span the WHOLE FLEET rather than one server, so this site keeps its own constant rather than
+    /// sharing the grid's; it starts at the grid's own measured 12h pending a composer-specific measurement.</summary>
+    internal static readonly TimeSpan ComposeQueryStoreWideMinWindow = QueryStoreIntervalWide.GridWideMinWindow;
+
+    /// <summary>#4617: named so the MCP read census (<see cref="Darling.Tests.McpReadCommandTimeoutTests"/>)
+    /// recognises the <c>NpgsqlCommand(string, connection)</c> construction below as a store read rather
+    /// than an unrecognised receiver.</summary>
+    private const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
+
+    /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
+    private const string QueryStoreWideServerIdsSql =
+        "SELECT server_id FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
+
+    /// <summary>
+    /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
+    /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
+    /// runner, BEFORE <see cref="ComposeCompiler.Compile"/> runs, because the compiler stays pure and never
+    /// opens a connection. Reuses the pure <see cref="QueryStoreIntervalWide.UseTable"/> decision (through
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>, which also runs clause 6 — no legacy row in the
+    /// window — and the literal-end-before-applied_through refusal) for EVERY server in scope: a fleet panel
+    /// (null/empty <paramref name="serverScope"/>) must pass for every server the store has rows for, or the
+    /// hybrid would silently under-read a server whose table coverage lags. Any fault, a schema below V145, or
+    /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
+    /// the same rule #3953 already applies to the single-server reads.
+    /// </summary>
+    private static async Task<bool> ResolveQueryStoreWideEligibleAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
+        DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken)
+    {
+        if (end - start < ComposeQueryStoreWideMinWindow)
+        {
+            return false;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+
+            int schemaVersion;
+            await using (var probe = new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                schemaVersion = (int)(await probe.ExecuteScalarAsync(cancellationToken))!;
+            }
+
+            if (schemaVersion < 145)
+            {
+                return false;
+            }
+
+            var serverIds = new List<int>();
+            await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                servers.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
+                    Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
+                });
+                await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    serverIds.Add(reader.GetInt32(0));
+                }
+            }
+
+            if (serverIds.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var serverId in serverIds)
+            {
+                var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+                    connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
+                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
+                if (!useTable)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* #4508/#4283 census: never carry ex.Message into a web-surface trace; the exception's type name
+               alone is enough to distinguish a fault here (this check never answers an HTTP response either
+               way, but the census sweeps every ex.Message in this file regardless of destination). */
+            System.Diagnostics.Trace.TraceWarning($"#4605 compose Query Store wide-table eligibility check failed; reading raw: {ex.GetType().Name}");
+            return false;
         }
     }
 

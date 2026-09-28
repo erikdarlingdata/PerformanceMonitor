@@ -569,16 +569,24 @@ FROM pg_stat_bgwriter AS b";
     public const string AlertLogTable = "config.config_alert_log";
 
     /// <summary>
-    /// The named plain-table rows (#3582) — every store shape, like the dimension rows, and in the same
-    /// shape: <c>pg_total_relation_size</c> (heap + indexes + TOAST) and the exact row count. Three
-    /// product-owned tables that are neither hypertables nor payload dimensions and were therefore
+    /// The named plain-table rows (#3582, extended #4609) — every store shape, like the dimension rows,
+    /// and in the same shape: <c>pg_total_relation_size</c> (heap + indexes + TOAST) and the exact row
+    /// count. Product-owned tables that are neither hypertables nor payload dimensions and were therefore
     /// invisible to the inventory: <c>collect.query_store_text</c>, which V74 made an INLINE text store by
     /// design (Query Store already de-duplicates statement text one row per statement per database, so
     /// there was nothing for a digest dimension to squeeze) and which was 15 GiB on the largest production
-    /// store; <c>collect.query_store_plan_map</c>, the V72 plan-id-to-digest map; and
-    /// <c>config.config_alert_log</c>, the alert history and dismissals. They are stable, named, and the
-    /// product knows them, so the inventory knows them by name instead of lumping them into
-    /// <see cref="OtherObjectKind"/>.
+    /// store; <c>collect.query_store_plan_map</c>, the V72 plan-id-to-digest map; <c>config.config_alert_log</c>,
+    /// the alert history and dismissals; and the four V143/V145 per-interval Query Store tables (#3953,
+    /// #4382) — <c>collect.query_store_interval_latest</c>, <c>collect.query_store_interval_latest_pending</c>,
+    /// <c>collect.query_store_interval_wide</c> and <c>collect.query_store_interval_wide_pending</c>. Those
+    /// four accounted for most of a +19.4 GB rise in <see cref="OtherObjectKind"/> on one production store
+    /// (#4609): expected first-fill growth the daily series could not show while they were un-enumerated,
+    /// exactly the shape a stalled purge would also take. They are stable, named, and the product knows
+    /// them, so the inventory knows them by name instead of lumping them into <see cref="OtherObjectKind"/>.
+    ///
+    /// <para><b>The two <c>_coverage</c> tables are deliberately NOT named here.</b> Each holds one row per
+    /// server — bytes too small to matter for capacity, and the pair is already visible through their
+    /// owning tables' health, not their size.</para>
     ///
     /// <para><b>Schema-qualified <c>object_name</c>, unlike every other kind.</b> The hypertable,
     /// aggregate and dimension rows are bare because their catalogs name them bare and every one lives in
@@ -619,7 +627,35 @@ SELECT
     '{AlertLogTable}',
     '{TableObjectKind}',
     pg_total_relation_size('{AlertLogTable}'),
-    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{AlertLogTable}'::regclass)";
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = '{AlertLogTable}'::regclass)
+UNION ALL
+SELECT
+    $1,
+    'collect.{QueryStoreIntervalLatest.TableName}',
+    '{TableObjectKind}',
+    pg_total_relation_size('collect.{QueryStoreIntervalLatest.TableName}'),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalLatest.TableName}'::regclass)
+UNION ALL
+SELECT
+    $1,
+    'collect.{QueryStoreIntervalLatest.PendingTableName}',
+    '{TableObjectKind}',
+    pg_total_relation_size('collect.{QueryStoreIntervalLatest.PendingTableName}'),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalLatest.PendingTableName}'::regclass)
+UNION ALL
+SELECT
+    $1,
+    'collect.{QueryStoreIntervalWide.TableName}',
+    '{TableObjectKind}',
+    pg_total_relation_size('collect.{QueryStoreIntervalWide.TableName}'),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.TableName}'::regclass)
+UNION ALL
+SELECT
+    $1,
+    'collect.{QueryStoreIntervalWide.PendingTableName}',
+    '{TableObjectKind}',
+    pg_total_relation_size('collect.{QueryStoreIntervalWide.PendingTableName}'),
+    (SELECT CASE WHEN c.reltuples >= 0 THEN c.reltuples::bigint END FROM pg_class c WHERE c.oid = 'collect.{QueryStoreIntervalWide.PendingTableName}'::regclass)";
 
     /// <summary>The <c>object_kind</c> of the user-schema catch-all row (#3582): every relation in a
     /// non-system schema that no named row accounts for. See <see cref="HypertableObjectKind"/> for why
@@ -673,8 +709,8 @@ AND   NOT c.relisshared";
        OR starts_with(n.nspname, '_timescaledb_'))";
 
     /// <summary>
-    /// The relations some NAMED row already sizes, every store shape (#3582): the two payload dimensions
-    /// and the three named plain tables. A relation matched here is never in a catch-all row, or the
+    /// The relations some NAMED row already sizes, every store shape (#3582, extended #4609): the two
+    /// payload dimensions and the seven named plain tables. A relation matched here is never in a catch-all row, or the
     /// reconciliation would count it twice. Every name is the SAME compile-time constant the INSERT arm
     /// interpolates — the dims through <see cref="PayloadDimensions"/>, the tables through their
     /// schema-qualified owners' constants — so the census and the rows it excludes cannot drift apart. That
@@ -690,7 +726,11 @@ AND   NOT c.relisshared";
         'collect.{PayloadDimensions.QueryPlanDimTable}',
         '{QueryStoreTextStore.TableName}',
         '{QueryStorePlanMap.TableName}',
-        '{AlertLogTable}')";
+        '{AlertLogTable}',
+        'collect.{QueryStoreIntervalLatest.TableName}',
+        'collect.{QueryStoreIntervalLatest.PendingTableName}',
+        'collect.{QueryStoreIntervalWide.TableName}',
+        'collect.{QueryStoreIntervalWide.PendingTableName}')";
 
     /// <summary>
     /// The relations the TimescaleDB rows already size, as a fragment (#3582, reshaped by #3918): every

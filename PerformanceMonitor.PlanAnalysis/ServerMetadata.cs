@@ -9,11 +9,11 @@
 namespace PerformanceMonitor.PlanAnalysis;
 
 /// <summary>
-/// Server-level facts an analyzer rule can use alongside a parsed plan (#4530/#4535). Ported from
-/// erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.Core/Models/ServerMetadata.cs:5-37</c>,
-/// the top-level properties and the two computed flags only. PS's <c>Database</c>/<c>DatabaseMetadata</c>/
-/// <c>ScopedConfigItem</c> are left out: only PS's App UI reads those, and no analyzer rule does.
-/// This step ports the model only; nothing in the analyzer reads it yet.
+/// Server-level facts an analyzer rule can use alongside a parsed plan (#4530/#4535/#4597). Ported from
+/// erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.Core/Models/ServerMetadata.cs:5-37</c>.
+/// <see cref="Database"/> is PS's <c>DatabaseMetadata</c> shape verbatim; PM's readers (#4597) fill the
+/// members the store already carries for a database (name, compat level, collation, RCSI, stats options,
+/// parameterization) and leave the rest at PS's defaults — see <see cref="DatabaseMetadata"/>.
 /// </summary>
 public class ServerMetadata
 {
@@ -33,6 +33,10 @@ public class ServerMetadata
     public int CostThresholdForParallelism { get; set; }
     public long MaxServerMemoryMB { get; set; }
 
+    // Database-level (#4597): the plan's database when the entry point knows it. Null when the caller has
+    // no database name (a pasted plan XML) or the store has no database_config row for it.
+    public DatabaseMetadata? Database { get; set; }
+
     /// <summary>
     /// Whether sys.database_scoped_configurations is available (SQL 2016+ or Azure).
     /// </summary>
@@ -44,4 +48,51 @@ public class ServerMetadata
     /// </summary>
     public bool SupportsQueryStoreWaitStats =>
         IsAzure || (int.TryParse(ProductVersion?.Split('.')[0], out var major) && major >= 14);
+}
+
+/// <summary>
+/// The plan's database. Ported from PS's <c>DatabaseMetadata</c> verbatim (names, members, defaults).
+/// PM's readers (#4597) fill <c>Name</c>, <c>CompatibilityLevel</c>, <c>CollationName</c>,
+/// <c>IsReadCommittedSnapshotOn</c>, <c>IsAutoCreateStatsOn</c>, <c>IsAutoUpdateStatsOn</c>,
+/// <c>IsAutoUpdateStatsAsyncOn</c> and <c>IsParameterizationForced</c> from <c>database_config</c>, which
+/// carries all of them with matching types. <c>SnapshotIsolationState</c> stays at PS's default 0: PS reads
+/// it as the raw <c>sys.databases</c> tinyint, but PM's collector stores it as the engine's text
+/// description (<c>OFF</c>/<c>ON</c>/<c>SNAPSHOT</c>), so filling it needs a name-to-code mapping this port
+/// doesn't add. <c>NonDefaultScopedConfigs</c> stays empty: PM has no per-database
+/// <c>database_scoped_configurations</c> store table today.
+/// </summary>
+public class DatabaseMetadata
+{
+    public string Name { get; set; } = "";
+    public int CompatibilityLevel { get; set; }
+    public string CollationName { get; set; } = "";
+
+    // Isolation — notable if on
+    public int SnapshotIsolationState { get; set; }
+    public bool IsReadCommittedSnapshotOn { get; set; }
+
+    // Stats — notable if off
+    public bool IsAutoCreateStatsOn { get; set; }
+    public bool IsAutoUpdateStatsOn { get; set; }
+
+    // Stats async — notable if on
+    public bool IsAutoUpdateStatsAsyncOn { get; set; }
+
+    // Parameterization — notable if on
+    public bool IsParameterizationForced { get; set; }
+
+    // Database-scoped configs (2016+/Azure) — always empty in PM today (no store table).
+    public System.Collections.Generic.List<ScopedConfigItem> NonDefaultScopedConfigs { get; set; } = new();
+}
+
+/// <summary>
+/// One non-default <c>sys.database_scoped_configurations</c> row. Ported from PS verbatim; PM has no
+/// store reader that fills this today (#4597), so <see cref="DatabaseMetadata.NonDefaultScopedConfigs"/>
+/// is always empty.
+/// </summary>
+public class ScopedConfigItem
+{
+    public string Name { get; set; } = "";
+    public string Value { get; set; } = "";
+    public string? ValueForSecondary { get; set; }
 }

@@ -62,11 +62,24 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
     private readonly ILogger? _logger;
     private const int TextLimit = 500;
 
-    public PgDrillDownCollector(NpgsqlDataSource postgres, IPlanFetcher? planFetcher = null, ILogger? logger = null)
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule config (darling.json's optional "analyzer" section).
+    /// Same optional-and-defaulted pattern as <see cref="_planFetcher"/>/<see cref="_logger"/>: a
+    /// caller that constructs this collector without one gets <c>AnalyzerConfig.Default</c> —
+    /// today's behavior, byte-for-byte.
+    /// </summary>
+    private readonly PerformanceMonitor.PlanAnalysis.AnalyzerConfig _analyzerConfig;
+
+    public PgDrillDownCollector(
+        NpgsqlDataSource postgres,
+        IPlanFetcher? planFetcher = null,
+        ILogger? logger = null,
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _planFetcher = planFetcher;
         _logger = logger;
+        _analyzerConfig = analyzerConfig ?? PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
     }
 
     /// <summary>
