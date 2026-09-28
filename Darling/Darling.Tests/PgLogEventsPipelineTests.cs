@@ -368,11 +368,13 @@ public sealed class PgLogEventsPipelineTests
         Assert.Equal("ERROR", entry.Severity);
     }
 
-    /// <summary>#4501 round 2: a forged application_name spelling ERROR ahead of a real FATAL line — still in
-    /// the error class, still kept — as ERROR, the matched (outer) label, the same way K9/the line above is
-    /// kept under the label the reader actually matched rather than the label found inside the text.</summary>
+    /// <summary>#4501 round 2: a forged <c>application_name</c> spelling ERROR ahead of a real FATAL line is
+    /// kept — but under ERROR, the matched (outer) label, not FATAL, the label actually found inside the
+    /// text. That is an accepted cost: a client field carrying a forged <c>ERROR:  </c> ahead of a genuine
+    /// FATAL line is stored one severity step lower than the server's own label. Refusing the line instead
+    /// would drop the real message entirely, which is worse, so this trade is kept on purpose.</summary>
     [Fact]
-    public void Assemble_AForgedErrorAheadOfARealFatalLine_IsKeptAsFatal()
+    public void Assemble_AForgedErrorAheadOfARealFatalLine_IsKeptAsError()
     {
         var line = P + "[4102] x ERROR:  FATAL:  password authentication failed\n";
         var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] %a ", out _));
