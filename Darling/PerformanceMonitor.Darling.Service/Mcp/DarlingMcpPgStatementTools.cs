@@ -84,7 +84,9 @@ public sealed class DarlingMcpPgStatementTools
                         + "not be a PostgreSQL one at all — check list_servers.");
             }
 
-            return BuildTopQueriesJson(resolved.ServerName, hours_back, page, limit);
+            var evictions = await DarlingPgStatementReader.GetEvictionInfoAsync(
+                postgres, resolved.ServerId, now.AddHours(-hours_back), now, cancellationToken);
+            return BuildTopQueriesJson(resolved.ServerName, hours_back, page, limit, evictions);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -139,7 +141,8 @@ public sealed class DarlingMcpPgStatementTools
         string serverName,
         int hoursBack,
         DarlingPgStatementReader.PgTopQueriesPage page,
-        int limit)
+        int limit,
+        DarlingPgStatementReader.PgEvictionInfo? evictionInfo = null)
     {
         var truncated = page.Rows.Count > limit;
         var rows = truncated ? page.Rows.Take(limit).ToList() : page.Rows;
@@ -227,7 +230,48 @@ public sealed class DarlingMcpPgStatementTools
                  + "computed in the same statement as the rows; each row's pct_of_total_time divides by it, "
                  + "so the shares on a page do not sum to 100 unless the page is the whole window "
                  + "(truncated = false). returned_exec_time_ms is what the rows returned add up to.",
+            evictions = BuildEvictions(evictionInfo),
             queries = result,
         }, McpHelpers.JsonOptions);
+    }
+
+    /// <summary>
+    /// #4677: pg_stat_statements evicts its least-used entries (about 5% of pg_stat_statements.max per pass) when the
+    /// table is full, so a rarely-run statement can be missing and a re-admitted one counts only from then. The count
+    /// is eviction PASSES, not entries. Unknown (no run in the window observed the counter) is <c>known = false</c>
+    /// with a null count, never 0: 0 means the counter was read and no pass happened.
+    /// </summary>
+    internal static object BuildEvictions(DarlingPgStatementReader.PgEvictionInfo? info)
+    {
+        if (info is null || !info.Known || info.EvictionPasses is null)
+        {
+            return new
+            {
+                known = false,
+                eviction_passes_in_window = (long?)null,
+                max_entries = info?.MaxEntries,
+                note = "Eviction count unknown for this target (pg_stat_statements_info is absent: PostgreSQL before 14, "
+                     + "or the extension is below 1.9; ALTER EXTENSION pg_stat_statements UPDATE adds it).",
+            };
+        }
+
+        var passes = info.EvictionPasses.Value;
+        string? note = null;
+        if (passes > 0)
+        {
+            var current = info.MaxEntries is { } max ? ", currently " + max.ToString(CultureInfo.InvariantCulture) : "";
+            note = "pg_stat_statements evicted entries " + passes.ToString(CultureInfo.InvariantCulture)
+                 + " time(s) in this window (each pass drops about 5% of pg_stat_statements.max" + current
+                 + "), so a rarely-run statement may be missing and a statement re-admitted after an eviction counts only from then: "
+                 + "the totals here can under-report. Raising pg_stat_statements.max (a postmaster setting, restart required) reduces this.";
+        }
+
+        return new
+        {
+            known = true,
+            eviction_passes_in_window = (long?)passes,
+            max_entries = info.MaxEntries,
+            note,
+        };
     }
 }

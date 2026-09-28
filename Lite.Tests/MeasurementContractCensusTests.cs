@@ -674,6 +674,7 @@ public sealed class MeasurementContractCensusTests
         /* The labels, as the constants the carriers measure under — a reader greps collection_log for these. */
         Assert.Equal("identity_epoch_changes", ServerEpoch.IdentityChangesMeasurement);
         Assert.Equal("statements_epoch_changes", ServerEpoch.StatementsChangesMeasurement);
+        Assert.Equal("statements_dealloc", ServerEpoch.StatementsDeallocMeasurement);
         Assert.Equal("postmaster_epoch_changes", ServerEpoch.PostmasterChangesMeasurement);
 
         /* And the persisted pair, old beside new, under the carriers' declared state keys — the other half
@@ -682,7 +683,7 @@ public sealed class MeasurementContractCensusTests
            own name. */
         Assert.Equal(new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey }, WaitStatsCollector.Instance.StateKeys);
         Assert.Equal(new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey }, CpuUtilizationCollector.Instance.StateKeys);
-        Assert.Equal(new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey }, PgStatementStatsCollector.Instance.StateKeys);
+        Assert.Equal(new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey, ServerEpoch.StatementsDeallocStateKey }, PgStatementStatsCollector.Instance.StateKeys);
         Assert.Equal(new[] { ServerEpoch.PostmasterStateKey, ServerEpoch.PostmasterPreviousStateKey }, PgWaitStatsCollector.Instance.StateKeys);
     }
 

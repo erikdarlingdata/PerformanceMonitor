@@ -119,6 +119,9 @@ public static class ServerEpoch
     /// <summary>The persisted <c>pg_stat_statements_info.stats_reset</c> for a PostgreSQL target's statements family.</summary>
     public const string StatementsStateKey = "statements_epoch";
 
+    /// <summary>The last observed cumulative <c>pg_stat_statements_info.dealloc</c> (eviction passes) for a PostgreSQL target.</summary>
+    public const string StatementsDeallocStateKey = "statements_dealloc";
+
     /// <summary>The <c>stats_reset</c> the latest statements epoch change replaced.</summary>
     public const string StatementsPreviousStateKey = "statements_epoch_previous";
 
@@ -138,6 +141,9 @@ public static class ServerEpoch
 
     /// <summary>Count of statements-epoch changes this run observed (0 or 1).</summary>
     public const string StatementsChangesMeasurement = "statements_epoch_changes";
+
+    /// <summary>Count of pg_stat_statements eviction passes since the previous run (0 means known, none).</summary>
+    public const string StatementsDeallocMeasurement = "statements_dealloc";
 
     /// <summary>Count of postmaster-epoch (Aurora wait family) changes this run observed (0 or 1).</summary>
     public const string PostmasterChangesMeasurement = "postmaster_epoch_changes";
@@ -321,6 +327,35 @@ public static class ServerEpoch
 
         Persist(context, StatementsStateKey, prior, current);
         return changed;
+    }
+
+    /// <summary>
+    /// #4677: records pg_stat_statements eviction passes since the last pass, as the <see cref="StatementsDeallocMeasurement"/>
+    /// count on this run's collection_log row, and stages the cumulative value. Unknown (null) records nothing and leaves the
+    /// prior value. The first known value only seeds (no prior to subtract from, so no count is claimed). After an epoch change,
+    /// or when the counter went down (a reset the epoch did not show), the count is the current value: dealloc restarted from zero.
+    /// </summary>
+    public static void ObserveStatementsDealloc(CollectorContext context, long? dealloc, bool epochChanged)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (!dealloc.HasValue)
+        {
+            return;
+        }
+
+        var current = dealloc.Value;
+        if (context.State.TryGetValue(StatementsDeallocStateKey, out var text)
+            && long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var prior))
+        {
+            context.Measure(StatementsDeallocMeasurement, epochChanged || current < prior ? current : current - prior);
+        }
+
+        var serialized = current.ToString(CultureInfo.InvariantCulture);
+        if (!context.State.TryGetValue(StatementsDeallocStateKey, out var stored)
+            || !string.Equals(stored, serialized, StringComparison.Ordinal))
+        {
+            context.PendingState[StatementsDeallocStateKey] = serialized;
+        }
     }
 
     /// <summary>

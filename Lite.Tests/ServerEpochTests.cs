@@ -451,6 +451,50 @@ public sealed class ServerEpochTests
         Assert.Empty(context.Measurements);
     }
 
+    /* ---------------- the statements eviction observation (#4677) ---------------- */
+
+    private static Dictionary<string, string> DeallocState(long value)
+        => new(StringComparer.Ordinal) { [ServerEpoch.StatementsDeallocStateKey] = value.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+
+    [Fact]
+    public void ObserveStatementsDealloc_Unknown_RecordsNothing()
+    {
+        var context = Context(new CollectorDeltaCalculator(), DeallocState(7), postgres: true);
+        ServerEpoch.ObserveStatementsDealloc(context, null, epochChanged: false);
+        Assert.Empty(context.PendingState);
+        Assert.Empty(context.Measurements);
+    }
+
+    [Fact]
+    public void ObserveStatementsDealloc_FirstValue_SeedsWithoutAMeasure()
+    {
+        var context = Context(new CollectorDeltaCalculator(), postgres: true);
+        ServerEpoch.ObserveStatementsDealloc(context, 12, epochChanged: false);
+        Assert.Equal("12", context.PendingState[ServerEpoch.StatementsDeallocStateKey]);
+        Assert.Empty(context.Measurements);
+    }
+
+    [Theory]
+    [InlineData(10, 14, false, 4)]
+    [InlineData(10, 10, false, 0)]
+    [InlineData(10, 3, true, 3)]
+    [InlineData(10, 20, true, 20)]
+    [InlineData(10, 3, false, 3)]
+    public void ObserveStatementsDealloc_RecordsThePassesSinceTheLastRun(long prior, long current, bool epochChanged, long expected)
+    {
+        var context = Context(new CollectorDeltaCalculator(), DeallocState(prior), postgres: true);
+        ServerEpoch.ObserveStatementsDealloc(context, current, epochChanged);
+        Assert.Equal(ServerEpoch.StatementsDeallocMeasurement + "=" + expected.ToString(System.Globalization.CultureInfo.InvariantCulture), CollectorMeasurementNote.Render(context.Measurements));
+        if (current == prior)
+        {
+            Assert.Empty(context.PendingState);
+        }
+        else
+        {
+            Assert.Equal(current.ToString(System.Globalization.CultureInfo.InvariantCulture), context.PendingState[ServerEpoch.StatementsDeallocStateKey]);
+        }
+    }
+
     /* ---------------- the postmaster observation ---------------- */
 
     /// <summary>
@@ -788,7 +832,7 @@ public sealed class ServerEpochTests
             new[] { ServerEpoch.IdentityStateKey, ServerEpoch.IdentityPreviousStateKey },
             CpuUtilizationCollector.Instance.StateKeys);
         Assert.Equal(
-            new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey },
+            new[] { ServerEpoch.StatementsStateKey, ServerEpoch.StatementsPreviousStateKey, ServerEpoch.StatementsDeallocStateKey },
             PgStatementStatsCollector.Instance.StateKeys);
         Assert.Equal(
             new[] { ServerEpoch.PostmasterStateKey, ServerEpoch.PostmasterPreviousStateKey },
