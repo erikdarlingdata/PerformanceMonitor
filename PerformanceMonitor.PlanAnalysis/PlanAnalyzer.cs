@@ -95,8 +95,24 @@ public static partial class PlanAnalyzer
     /// down to roughly 110 KB — both with well over 2x margin below the smallest real caller, so
     /// unlike the parser, this walk needs no dedicated thread of its own.
     /// </summary>
-    public static void Analyze(ParsedPlan plan, CancellationToken cancellationToken = default)
+    public static void Analyze(ParsedPlan plan, CancellationToken cancellationToken = default) =>
+        Analyze(plan, null, null, cancellationToken);
+
+    /// <summary>
+    /// #4535: the config/serverMetadata overload, mirroring erikdarlingdata/PerformanceStudio dev
+    /// (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.cs:93-102</c>. A null
+    /// <paramref name="config"/> means <see cref="AnalyzerConfig.Default"/>, as in PS. This step
+    /// threads both parameters down to <see cref="AnalyzeStatement"/>, <see cref="AnalyzeNodeTree"/>
+    /// and <see cref="AnalyzeNode"/> unused; no rule reads them yet.
+    /// </summary>
+    public static void Analyze(
+        ParsedPlan plan,
+        AnalyzerConfig? config,
+        ServerMetadata? serverMetadata,
+        CancellationToken cancellationToken)
     {
+        var cfg = config ?? AnalyzerConfig.Default;
+
         /* #4514: every statement, including the ones inside a stored procedure or UDF body.
            This used to walk batch.Statements alone, so an EXEC <procedure> plan analyzed as a
            single statement with nothing to say about the statements actually doing the work.
@@ -106,14 +122,14 @@ public static partial class PlanAnalyzer
         foreach (var stmt in PlanStatements.EnumerateAll(plan))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            AnalyzeStatement(stmt);
+            AnalyzeStatement(stmt, cfg, serverMetadata);
 
             if (stmt.RootNode != null)
-                AnalyzeNodeTree(stmt.RootNode, stmt, cancellationToken);
+                AnalyzeNodeTree(stmt.RootNode, stmt, cfg, cancellationToken);
         }
     }
 
-    private static void AnalyzeStatement(PlanStatement stmt)
+    private static void AnalyzeStatement(PlanStatement stmt, AnalyzerConfig cfg, ServerMetadata? serverMetadata)
     {
         // Rule 3: Serial plan with reason
         // Skip: cost < 1 (CTFP is an integer so cost < 1 can never go parallel),
@@ -606,16 +622,16 @@ public static partial class PlanAnalyzer
                 referencingNodeIds, modifyingNodeIds);
     }
 
-    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt, CancellationToken cancellationToken)
+    private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt, AnalyzerConfig cfg, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        AnalyzeNode(node, stmt);
+        AnalyzeNode(node, stmt, cfg);
 
         foreach (var child in node.Children)
-            AnalyzeNodeTree(child, stmt, cancellationToken);
+            AnalyzeNodeTree(child, stmt, cfg, cancellationToken);
     }
 
-    private static void AnalyzeNode(PlanNode node, PlanStatement stmt)
+    private static void AnalyzeNode(PlanNode node, PlanStatement stmt, AnalyzerConfig cfg)
     {
         // Rule 1: Filter operators — rows survived the tree just to be discarded
         // Quantify the impact by summing child subtree cost (reads, CPU, time).

@@ -437,6 +437,15 @@ public class PlanWarning
     public PlanWarningSource Source { get; set; } = PlanWarningSource.Analyzer;
 
     /// <summary>
+    /// The analyzer rule that produced this finding, set where the rule emits it (#4535). Ported
+    /// from erikdarlingdata/PerformanceStudio dev (85492a1) commit dcc06db,
+    /// <c>src/PlanViewer.Core/Models/PlanModels.cs:412-423</c>. Null for anything no numbered rule
+    /// produced: the engine's own warnings and the wait-stats findings. This step adds the field
+    /// only; no rule stamps it yet.
+    /// </summary>
+    public int? RuleNumber { get; set; }
+
+    /// <summary>
     /// The operators this finding actually came from, so a reader can be taken to them (#4534).
     ///
     /// <para>A list rather than a single id, because the honest answers are genuinely different.
