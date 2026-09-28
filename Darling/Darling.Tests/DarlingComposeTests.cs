@@ -880,7 +880,7 @@ public sealed class DarlingComposeTests
         var (compiled, error) = CompileAged(
             "{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"avg\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", daysOld: 10);
         Assert.True(error is null, error);
-        Assert.Contains("CAST(SUM(f.worker_time_sum) AS double precision) / NULLIF(SUM(f.sample_count), 0)", compiled!.Sql, StringComparison.Ordinal);
+        Assert.Contains("CAST(SUM(f.worker_time_sum)::numeric / NULLIF(SUM(f.sample_count), 0) AS double precision)", compiled!.Sql, StringComparison.Ordinal);
     }
 
     [Fact]
