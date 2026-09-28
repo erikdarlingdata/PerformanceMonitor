@@ -102,6 +102,18 @@ public sealed class PgLogEventClassifier
     public List<PgLogEvent> Classify(string? logBody, bool logTimezoneIsUtc, out int foreignZoneLines)
         => Classify(PgLogEntryAssembler.Assemble(logBody, logTimezoneIsUtc, out foreignZoneLines));
 
+    /// <summary>
+    /// <see cref="Classify(string?, bool, out int)"/> for a caller that also read the target's own
+    /// <c>log_line_prefix</c> with the text (#4501), plumbed the same way <paramref name="logTimezoneIsUtc"/>
+    /// is: passed straight to <see cref="PgLogEntryAssembler.Assemble(string?, bool, string?, out int)"/>,
+    /// which uses it to decide whether the forgery rule applies at all and what separator it requires. Null
+    /// (not collected) falls back to the rule with no separator check.
+    /// </summary>
+    /// <exception cref="PgLogTimezoneUnsupportedException">Only when <paramref name="logTimezoneIsUtc"/> is
+    /// false: the log is stamped in a non-UTC zone (#2993).</exception>
+    public List<PgLogEvent> Classify(string? logBody, bool logTimezoneIsUtc, string? logLinePrefix, out int foreignZoneLines)
+        => Classify(PgLogEntryAssembler.Assemble(logBody, logTimezoneIsUtc, logLinePrefix, out foreignZoneLines));
+
     /// <summary>The walk itself, over entries already assembled — for a transport that assembled them for another consumer too.</summary>
     public List<PgLogEvent> Classify(IReadOnlyList<PgLogEntry> entries)
     {

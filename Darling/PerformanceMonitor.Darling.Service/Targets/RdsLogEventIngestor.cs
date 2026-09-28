@@ -38,6 +38,16 @@ namespace PerformanceMonitor.Darling.Service.Targets;
 /// </summary>
 public sealed class RdsLogEventIngestor
 {
+    /// <summary>
+    /// The <c>log_line_prefix</c> every RDS and Aurora PostgreSQL instance runs under: the engine's default
+    /// parameter group sets it, and unlike almost every other setting the RDS/Aurora documentation lists it
+    /// as NOT modifiable — there is no parameter to change it to anything else (#4501 round 2). That is what
+    /// makes passing it here safe: <see cref="PgLogEntryAssembler.ForgeryCheckFor"/> already reads its
+    /// client fields as sitting BEFORE the pid, not after, so it returns "no check" for this exact string —
+    /// the correct answer, since there is no forgery surface to guard on this transport.
+    /// </summary>
+    internal const string DefaultLogLinePrefix = "%t:%r:%u@%d:[%p]:";
+
     private readonly NpgsqlDataSource _postgres;
     private readonly PgLogEventClassifier _classifier;
     private readonly RdsLogSource _logs;
@@ -189,8 +199,12 @@ public sealed class RdsLogEventIngestor
             /* Outside IngestAsync's tolerant catch, which covers the AWS FETCH: a zone refusal is a statement
                about the target's configuration and has to reach the runner uncommitted (#3008). #4046 part 1b:
                logTimezoneIsUtc skips and counts a foreign-zone line instead of throwing, the same trade the
-               self-hosted route already makes. */
-            events = _classifier.Classify(text, logTimezoneIsUtc, out foreignZoneLines);
+               self-hosted route already makes. #4501 round 2: this transport's prefix is not "not yet
+               collected" the way a self-hosted target's can be — RDS and Aurora fix log_line_prefix at
+               DefaultLogLinePrefix, unwritable by any parameter group setting, so passing it (rather than
+               falling back to no separator check) keeps a K1-shaped statement line
+               (`statement: SELECT 'ERROR:  x'`) that the no-separator fallback would otherwise refuse. */
+            events = _classifier.Classify(text, logTimezoneIsUtc, DefaultLogLinePrefix, out foreignZoneLines);
         }
 
         if (events.Count == 0)
