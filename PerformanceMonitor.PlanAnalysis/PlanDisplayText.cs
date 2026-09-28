@@ -19,11 +19,18 @@ public static class PlanDisplayText
 
     /// <summary>
     /// The Wait Stats card's collapsible header text, matching erikdarlingdata/PerformanceStudio@9b8252e:
-    /// "Wait Stats" alone when there's nothing to show, or "Wait Stats \u2014 Nms total" when there
-    /// is. <paramref name="totalWaitMs"/> is the sum of every wait's WaitTimeMs.
+    /// "Wait Stats" alone when there's nothing to show, or Wait Stats, an em dash, then the total
+    /// in milliseconds when there is. <paramref name="totalWaitMs"/> is the sum of every wait's WaitTimeMs.
     /// </summary>
     public static string WaitStatsHeader(int waitCount, long totalWaitMs) =>
         waitCount > 0 ? $"Wait Stats \u2014 {totalWaitMs:N0}ms total" : "Wait Stats";
+
+    /// <summary>
+    /// The Wait Stats card's header tooltip, matching erikdarlingdata/PerformanceStudio's desktop viewer:
+    /// shown only when there are waits to describe.
+    /// </summary>
+    public static string? WaitStatsHeaderTooltip(int waitCount, long totalWaitMs) =>
+        waitCount > 0 ? $"{totalWaitMs:N0} ms of waits across {waitCount} wait types" : null;
 
     /// <summary>
     /// The CPU:Elapsed ratio shown in the runtime summary, matching

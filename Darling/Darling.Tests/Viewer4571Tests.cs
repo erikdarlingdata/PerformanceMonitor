@@ -21,4 +21,16 @@ public class Viewer4571Tests
     {
         Assert.Equal("Wait Stats \u2014 1,234ms total", PlanDisplayText.WaitStatsHeader(3, 1234));
     }
+
+    [Fact]
+    public void WaitStatsHeaderTooltip_NoWaits_IsNull()
+    {
+        Assert.Null(PlanDisplayText.WaitStatsHeaderTooltip(0, 0));
+    }
+
+    [Fact]
+    public void WaitStatsHeaderTooltip_WithWaits_DescribesCountAndTotal()
+    {
+        Assert.Equal("1,234 ms of waits across 3 wait types", PlanDisplayText.WaitStatsHeaderTooltip(3, 1234));
+    }
 }
