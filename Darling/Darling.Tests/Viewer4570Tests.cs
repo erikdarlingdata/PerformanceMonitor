@@ -180,6 +180,32 @@ public sealed class Viewer4570Tests
         Assert.Contains("\u26a0 spill", row.Value);
     }
 
+    // --- #4628: GrantedMemory="0" must not print a fake 100% ------------------------------
+
+    [Fact]
+    public void BuildRuntimeSummaryRows_MemoryGrantRow_RealGrant_KeepsGrantedUsedPercentText()
+    {
+        var stmt = Statement();
+        stmt.MemoryGrant = new MemoryGrantInfo { GrantedMemoryKB = 1024, MaxUsedMemoryKB = 512 };
+
+        var row = PlanDisplayText.BuildRuntimeSummaryRows(stmt).Single(r => r.Label == "Memory grant");
+
+        Assert.Equal("1.0 MB granted, 512 KB used (50%)", row.Value);
+    }
+
+    [Fact]
+    public void BuildRuntimeSummaryRows_MemoryGrantRow_ZeroGrant_SaysNoGrantWithNoPercent()
+    {
+        var stmt = Statement();
+        stmt.MemoryGrant = new MemoryGrantInfo { GrantedMemoryKB = 0, MaxUsedMemoryKB = 0 };
+
+        var row = PlanDisplayText.BuildRuntimeSummaryRows(stmt).Single(r => r.Label == "Memory grant");
+
+        Assert.Equal("No memory grant", row.Value);
+        Assert.DoesNotContain("%", row.Value);
+        Assert.Null(row.ColorKey);
+    }
+
     [Fact]
     public void BuildRuntimeSummaryRows_CompileTime_AlwaysShownRegardlessOfOtherStats()
     {
