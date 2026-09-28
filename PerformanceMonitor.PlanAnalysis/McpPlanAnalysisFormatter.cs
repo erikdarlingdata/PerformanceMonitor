@@ -95,7 +95,7 @@ public static class McpPlanAnalysisFormatter
     public static string BuildAnalysisResult(string xml, string? serverName, string source, string? identifier)
     {
         var plan = ShowPlanParser.Parse(xml);
-        PlanAnalyzer.Analyze(plan);
+        PlanAnalysisPipeline.Run(plan);
 
         var statements = plan.Batches
             .SelectMany(b => b.Statements)
@@ -150,14 +150,20 @@ public static class McpPlanAnalysisFormatter
                     query_hash = s.QueryHash,
                     query_plan_hash = s.QueryPlanHash,
                     has_actual_stats = hasActuals,
-                    warnings = allWarnings.Select(w => new
-                    {
-                        severity = w.Severity.ToString(),
-                        type = w.WarningType,
-                        message = w.Message,
-                        source = w.Source.ToString(),
-                        origin_node_ids = w.OriginNodeIds
-                    }),
+                    /* #4546: ordered by max_benefit_percent descending, nulls (unscored findings) last —
+                       same ordering PerformanceStudio's viewer and advice builder apply, so the highest-payoff
+                       finding for this statement is always first regardless of parse order. */
+                    warnings = allWarnings
+                        .OrderByDescending(w => w.MaxBenefitPercent ?? -1)
+                        .Select(w => new
+                        {
+                            severity = w.Severity.ToString(),
+                            type = w.WarningType,
+                            message = w.Message,
+                            source = w.Source.ToString(),
+                            origin_node_ids = w.OriginNodeIds,
+                            max_benefit_percent = w.MaxBenefitPercent
+                        }),
                     warning_count = allWarnings.Count,
                     critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
                     /* #3653 A15/A16: impact is labelled for what it is (MissingIndexImpactBasis). #3805: the
