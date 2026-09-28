@@ -92,6 +92,9 @@
     <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
          Darker on light themes so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
     <SolidColorBrush x:Key="WarningTextBrush" Color="#92400E"/>
+    <!-- #4629/#4635: critical-tier text (plan viewer, status bar). A literal hex like WarningTextBrush
+         above, so it stays out of the user-overridable palette. -->
+    <SolidColorBrush x:Key="CriticalTextBrush" Color="#A83A0D"/>
     <!-- Apex (lead-blocker) node + legend border. Darker blue on light themes so it clears >=3:1 as a
          graphical border on the light node card (bright #4FA3FF is only ~2.6:1 on white). The LEAD BLOCKER
          badge fill keeps the bright ApexBrush constant so the apex still pops. -->

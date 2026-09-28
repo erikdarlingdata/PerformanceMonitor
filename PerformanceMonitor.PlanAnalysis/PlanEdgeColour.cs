@@ -39,10 +39,13 @@ public enum PlanEdgeColourKey
 
 /// <summary>
 /// Pure helper computing plan-edge color by the estimate-vs-actual row-count ratio of the CHILD
-/// operator feeding that edge, matching erikdarlingdata/PerformanceStudio's
-/// <c>PlanViewerControl.Rendering.cs</c> <c>GetLinkColorBrush</c> exactly (colors only actual plans;
-/// estimated plans keep the neutral default). Kept here (no WPF dependency) so a unit test can pin
-/// every tier boundary without needing <c>PerformanceMonitor.Ui</c>, which is net10.0-windows-only.
+/// operator feeding that edge, on the same per-execution basis <see cref="PlanRowAccuracy"/> gives the
+/// node label (colors only actual plans; estimated plans keep the neutral default). Started as a match
+/// for erikdarlingdata/PerformanceStudio's <c>GetLinkColorBrush</c>; #4627 found PS compares the CHILD's
+/// un-normalized total actual rows against its per-execution estimate, so this now diverges from PS on
+/// purpose until erikdarlingdata/PerformanceStudio#594 fixes the same bug there. Kept here (no WPF
+/// dependency) so a unit test can pin every tier boundary without needing <c>PerformanceMonitor.Ui</c>,
+/// which is net10.0-windows-only.
 /// </summary>
 public static class PlanEdgeColour
 {
@@ -55,18 +58,20 @@ public static class PlanEdgeColour
     /// <summary>
     /// Returns the color key for the edge feeding <paramref name="child"/>. <paramref name="divergenceLimit"/>
     /// is the raw setting value; this clamps it to <see cref="MinDivergenceLimit"/> itself, so callers
-    /// may pass the setting unclamped.
+    /// may pass the setting unclamped. <paramref name="actualRows"/> is the total across every execution
+    /// (showplan XML's own basis); this normalizes it by <paramref name="actualExecutions"/> before
+    /// comparing against the per-execution <paramref name="estimateRows"/>, via <see cref="PlanRowAccuracy"/>
+    /// — the same normalization the node label applies, so the two can't disagree (#4627).
     /// </summary>
-    public static PlanEdgeColourKey ForChild(bool hasActualStats, double actualRows, double estimateRows, double divergenceLimit)
+    public static PlanEdgeColourKey ForChild(bool hasActualStats, double actualRows, long actualExecutions, double estimateRows, double divergenceLimit)
     {
         if (!hasActualStats)
             return PlanEdgeColourKey.Neutral;
 
         divergenceLimit = System.Math.Max(MinDivergenceLimit, divergenceLimit);
 
-        var accuracyRatio = estimateRows > 0
-            ? actualRows / estimateRows
-            : (actualRows > 0 ? double.MaxValue : 1.0);
+        var actualRowsPerExecution = PlanRowAccuracy.ActualRowsPerExecution(actualRows, actualExecutions);
+        var accuracyRatio = PlanRowAccuracy.Ratio(actualRowsPerExecution, estimateRows);
 
         // Within the neutral band — keep the default color.
         if (accuracyRatio >= 1.0 / divergenceLimit && accuracyRatio <= divergenceLimit)

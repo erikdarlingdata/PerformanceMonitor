@@ -220,9 +220,11 @@ public partial class PlanViewerControl
             HorizontalAlignment = HorizontalAlignment.Center
         });
 
-        // Cost percentage
-        var costColor = node.CostPercent >= 50 ? Brushes.OrangeRed
-            : node.CostPercent >= 25 ? Brushes.Orange
+        // Cost percentage. #4629: the fixed Brushes.OrangeRed/Brushes.Orange both failed WCAG AA on
+        // Light (3.44:1 / 1.97:1 on white); CriticalOrangeBrush/WarningBrush are theme resources tuned
+        // per theme instead.
+        var costColor = node.CostPercent >= 50 ? CriticalOrangeBrush
+            : node.CostPercent >= 25 ? WarningBrush
             : (Brush)FindResource("ForegroundBrush");
 
         stack.Children.Add(new TextBlock
@@ -241,7 +243,7 @@ public partial class PlanViewerControl
 
             // Elapsed time — red if >= 1 second
             var elapsedSec = node.ActualElapsedMs / 1000.0;
-            var elapsedBrush = elapsedSec >= 1.0 ? Brushes.OrangeRed : fgBrush;
+            var elapsedBrush = elapsedSec >= 1.0 ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
                 Text = $"{elapsedSec:F3}s",
@@ -253,7 +255,7 @@ public partial class PlanViewerControl
 
             // CPU time — red if >= 1 second
             var cpuSec = node.ActualCPUMs / 1000.0;
-            var cpuBrush = cpuSec >= 1.0 ? Brushes.OrangeRed : fgBrush;
+            var cpuBrush = cpuSec >= 1.0 ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
                 Text = $"CPU: {cpuSec:F3}s",
@@ -266,10 +268,12 @@ public partial class PlanViewerControl
             // Actual rows per execution vs Estimated rows (accuracy %) — red if off by 10x+.
             // EstimateRows is per-execution, so normalize ActualRows by ActualExecutions before
             // comparing (otherwise multi-execution operators, e.g. an NL inner side, always look off).
+            // PlanRowAccuracy is the one place that does this, so the edge color (GetLinkColorBrush,
+            // below) can't disagree with this label (#4627).
             var estRows = node.EstimateRows;
-            var actualRowsPerExec = node.ActualExecutions > 0 ? node.ActualRows / (double)node.ActualExecutions : node.ActualRows;
-            var accuracyRatio = estRows > 0 ? actualRowsPerExec / estRows : (actualRowsPerExec > 0 ? double.MaxValue : 1.0);
-            var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? Brushes.OrangeRed : fgBrush;
+            var actualRowsPerExec = PlanRowAccuracy.ActualRowsPerExecution(node.ActualRows, node.ActualExecutions);
+            var accuracyRatio = PlanRowAccuracy.Ratio(actualRowsPerExec, estRows);
+            var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? CriticalOrangeBrush : fgBrush;
             var accuracy = estRows > 0
                 ? $" ({accuracyRatio * 100:F0}%)"
                 : "";
@@ -301,7 +305,10 @@ public partial class PlanViewerControl
             });
         }
 
-        // Total warning count badge on root node
+        // Total warning count badge on root node. #4629: was the fixed OrangeBrush (hex FFB347), 1.78:1
+        // on Light's white node background — well under WCAG AA's 4.5:1 floor for text. WarningBrush
+        // is the theme token Light/Dark/CoolBreeze each already tune to pass 4.5:1 on their own
+        // backgrounds, so the badge keeps its orange/warning meaning in every theme.
         if (totalWarningCount > 0)
         {
             var badgeRow = new StackPanel
@@ -314,7 +321,7 @@ public partial class PlanViewerControl
             {
                 Text = "\u26A0",
                 FontSize = 13,
-                Foreground = OrangeBrush,
+                Foreground = WarningBrush,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 4, 0)
             });
@@ -323,7 +330,7 @@ public partial class PlanViewerControl
                 Text = $"{totalWarningCount} warning{(totalWarningCount == 1 ? "" : "s")}",
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = OrangeBrush,
+                Foreground = WarningBrush,
                 VerticalAlignment = VerticalAlignment.Center
             });
             stack.Children.Add(badgeRow);
@@ -385,13 +392,13 @@ public partial class PlanViewerControl
 
     /// <summary>
     /// Returns the brush for the edge feeding <paramref name="child"/>, colored by how far its actual
-    /// row count diverged from its estimate. Only actual plans get non-default colors; matches
-    /// erikdarlingdata/PerformanceStudio's <c>GetLinkColorBrush</c> exactly. The pure ratio-to-tier logic
-    /// lives in <see cref="PlanEdgeColour"/> so it can be pinned without WPF.
+    /// row count diverged from its estimate, on the same per-execution basis as the node label above
+    /// (#4627). Only actual plans get non-default colors. The pure ratio-to-tier logic lives in
+    /// <see cref="PlanEdgeColour"/> so it can be pinned without WPF.
     /// </summary>
     private SolidColorBrush GetLinkColorBrush(PlanNode child)
     {
-        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.EstimateRows, AccuracyRatioDivergenceLimit);
+        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.ActualExecutions, child.EstimateRows, AccuracyRatioDivergenceLimit);
         return key switch
         {
             PlanEdgeColourKey.LightOrange => EdgeLightOrangeBrush,

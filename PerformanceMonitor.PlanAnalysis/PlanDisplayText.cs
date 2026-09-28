@@ -202,14 +202,26 @@ public static class PlanDisplayText
         if (statement.MemoryGrant != null)
         {
             var mg = statement.MemoryGrant;
-            var grantPct = mg.GrantedMemoryKB > 0 ? (double)mg.MaxUsedMemoryKB / mg.GrantedMemoryKB * 100 : 100;
             var hasSpillInTree = HasSpillInPlanTree(statement.RootNode);
-            var grantColorKey = MemoryGrantColorKey(grantPct, hasSpillInTree);
             var spillTag = hasSpillInTree ? " \u26a0 spill" : "";
-            rows.Add(new RuntimeSummaryRow(
-                "Memory grant",
-                $"{FormatMemoryGrantKB(mg.GrantedMemoryKB)} granted, {FormatMemoryGrantKB(mg.MaxUsedMemoryKB)} used ({grantPct:N0}%){spillTag}",
-                grantColorKey));
+            string grantText;
+            string? grantColorKey;
+
+            // GrantedMemory="0" means the query never asked for (or never got) a memory grant \u2014 there
+            // is no "used" fraction to report, so don't fake one up as 100% (#4628).
+            if (mg.GrantedMemoryKB > 0)
+            {
+                var grantPct = (double)mg.MaxUsedMemoryKB / mg.GrantedMemoryKB * 100;
+                grantColorKey = MemoryGrantColorKey(grantPct, hasSpillInTree);
+                grantText = $"{FormatMemoryGrantKB(mg.GrantedMemoryKB)} granted, {FormatMemoryGrantKB(mg.MaxUsedMemoryKB)} used ({grantPct:N0}%){spillTag}";
+            }
+            else
+            {
+                grantColorKey = hasSpillInTree ? "WarningBrush" : null;
+                grantText = $"No memory grant{spillTag}";
+            }
+
+            rows.Add(new RuntimeSummaryRow("Memory grant", grantText, grantColorKey));
 
             if (mg.GrantWaitTimeMs > 0)
                 rows.Add(new RuntimeSummaryRow("Grant wait", $"{mg.GrantWaitTimeMs:N0}ms", "ErrorBrush"));

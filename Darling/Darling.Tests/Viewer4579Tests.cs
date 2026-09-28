@@ -25,27 +25,27 @@ public sealed class Viewer4579Tests
     {
         // hasActualStats = false, even with a wildly diverging ratio, stays neutral (estimated plans
         // never get accuracy-based color).
-        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(false, 1_000_000, 1, Limit));
+        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(false, 1_000_000, 1, 1, Limit));
     }
 
     [Fact]
     public void ActualPlan_ExactMatch_IsNeutral()
     {
-        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(true, 100, 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(true, 100, 1, 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_ZeroEstimate_ZeroActual_IsNeutral()
     {
         // estRows == 0 and actualRows == 0 => ratio treated as 1.0 (PS's exact fallback).
-        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(true, 0, 0, Limit));
+        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(true, 0, 1, 0, Limit));
     }
 
     [Fact]
     public void ActualPlan_ZeroEstimate_NonZeroActual_IsFluoRed()
     {
         // estRows == 0 and actualRows > 0 => ratio treated as double.MaxValue, the top underestimate tier.
-        Assert.Equal(PlanEdgeColourKey.FluoRed, PlanEdgeColour.ForChild(true, 5, 0, Limit));
+        Assert.Equal(PlanEdgeColourKey.FluoRed, PlanEdgeColour.ForChild(true, 5, 1, 0, Limit));
     }
 
     // ---- Underestimate side (accuracyRatio > 1: more actual rows than estimated) ----
@@ -55,44 +55,44 @@ public sealed class Viewer4579Tests
     [InlineData(1.0 / 9.9)]
     public void ActualPlan_JustInsideNeutralBand_IsNeutral(double ratio)
     {
-        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(true, ratio * 100, 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(true, ratio * 100, 1, 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_AtLimit_IsNeutral()
     {
         // accuracyRatio == limit is still inside the closed neutral band ([1/limit, limit]).
-        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(true, Limit * 100, 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.Neutral, PlanEdgeColour.ForChild(true, Limit * 100, 1, 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_JustAboveLimit_IsLightOrange()
     {
-        Assert.Equal(PlanEdgeColourKey.LightOrange, PlanEdgeColour.ForChild(true, Limit * 100 + 1, 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.LightOrange, PlanEdgeColour.ForChild(true, Limit * 100 + 1, 1, 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_AtLimitTimes10_IsFluoOrange()
     {
-        Assert.Equal(PlanEdgeColourKey.FluoOrange, PlanEdgeColour.ForChild(true, Limit * 10 * 100, 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.FluoOrange, PlanEdgeColour.ForChild(true, Limit * 10 * 100, 1, 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_JustBelowLimitTimes10_IsLightOrange()
     {
-        Assert.Equal(PlanEdgeColourKey.LightOrange, PlanEdgeColour.ForChild(true, (Limit * 10 - 0.001) * 100, 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.LightOrange, PlanEdgeColour.ForChild(true, (Limit * 10 - 0.001) * 100, 1, 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_AtLimitTimes100_IsFluoRed()
     {
-        Assert.Equal(PlanEdgeColourKey.FluoRed, PlanEdgeColour.ForChild(true, Limit * 100 * 100, 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.FluoRed, PlanEdgeColour.ForChild(true, Limit * 100 * 100, 1, 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_JustBelowLimitTimes100_IsFluoOrange()
     {
-        Assert.Equal(PlanEdgeColourKey.FluoOrange, PlanEdgeColour.ForChild(true, (Limit * 100 - 0.001) * 100, 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.FluoOrange, PlanEdgeColour.ForChild(true, (Limit * 100 - 0.001) * 100, 1, 100, Limit));
     }
 
     // ---- Overestimate side (accuracyRatio < 1: fewer actual rows than estimated) ----
@@ -100,7 +100,7 @@ public sealed class Viewer4579Tests
     [Fact]
     public void ActualPlan_JustBelowInverseLimit_IsBlue()
     {
-        Assert.Equal(PlanEdgeColourKey.Blue, PlanEdgeColour.ForChild(true, 100, Limit * 100 + 1, Limit));
+        Assert.Equal(PlanEdgeColourKey.Blue, PlanEdgeColour.ForChild(true, 100, 1, Limit * 100 + 1, Limit));
     }
 
     [Fact]
@@ -108,26 +108,26 @@ public sealed class Viewer4579Tests
     {
         // Overestimate tiers use a strict '<' boundary (PS's exact form), so exactly at the tier
         // boundary the ratio has not yet crossed into the next tier.
-        Assert.Equal(PlanEdgeColourKey.Blue, PlanEdgeColour.ForChild(true, 100, Limit * 10 * 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.Blue, PlanEdgeColour.ForChild(true, 100, 1, Limit * 10 * 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_JustAboveInverseLimitTimes10_IsBlue()
     {
-        Assert.Equal(PlanEdgeColourKey.Blue, PlanEdgeColour.ForChild(true, 100, (Limit * 10 - 0.001) * 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.Blue, PlanEdgeColour.ForChild(true, 100, 1, (Limit * 10 - 0.001) * 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_AtInverseLimitTimes100_IsLightBlue()
     {
         // Same strict '<' boundary behavior at the top tier.
-        Assert.Equal(PlanEdgeColourKey.LightBlue, PlanEdgeColour.ForChild(true, 100, Limit * 100 * 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.LightBlue, PlanEdgeColour.ForChild(true, 100, 1, Limit * 100 * 100, Limit));
     }
 
     [Fact]
     public void ActualPlan_JustAboveInverseLimitTimes100_IsLightBlue()
     {
-        Assert.Equal(PlanEdgeColourKey.LightBlue, PlanEdgeColour.ForChild(true, 100, (Limit * 100 - 0.001) * 100, Limit));
+        Assert.Equal(PlanEdgeColourKey.LightBlue, PlanEdgeColour.ForChild(true, 100, 1, (Limit * 100 - 0.001) * 100, Limit));
     }
 
     // ---- Divergence-limit floor ----
@@ -137,7 +137,7 @@ public sealed class Viewer4579Tests
     {
         // limit = 1 is floored to 2.0 (PS's Math.Max(2.0, ...)); a ratio of 3 is then past the floored
         // limit, not inside a (nonsensical) [1, 1] neutral band.
-        Assert.Equal(PlanEdgeColourKey.LightOrange, PlanEdgeColour.ForChild(true, 300, 100, 1.0));
+        Assert.Equal(PlanEdgeColourKey.LightOrange, PlanEdgeColour.ForChild(true, 300, 1, 100, 1.0));
     }
 
     [Fact]
