@@ -80,6 +80,40 @@ public sealed class CollectorRuntimeStateTests
         Assert.Null(collecting.Detail);
     }
 
+    /// <summary>
+    /// #4508: the fast form renders "attempt N of M", and the sustained form renders "retrying every
+    /// {delay}s, attempt N (past the {budget}s fast budget)" — never "attempt 30 of 25", which is what the
+    /// fast form would say once the fast budget's own cap (25) is spent and the attempt number keeps
+    /// climbing past it under the sustained arm.
+    /// </summary>
+    [Fact]
+    public void AttemptStatusText_RendersFastFormAndSustainedFormDifferently()
+    {
+        var fast = new CollectorRuntimeState.Snapshot(
+            CollectorRuntimeState.CollectorPhase.Retrying,
+            CollectorRuntimeState.StartupStep.Store,
+            Detail: null,
+            Attempt: 7,
+            Attempts: 25,
+            AsOfUtc: DateTime.UtcNow);
+
+        Assert.Equal("attempt 7 of 25", CollectorRuntimeState.AttemptStatusText(fast));
+
+        var sustained = new CollectorRuntimeState.Snapshot(
+            CollectorRuntimeState.CollectorPhase.Retrying,
+            CollectorRuntimeState.StartupStep.Store,
+            Detail: null,
+            Attempt: 30,
+            Attempts: 0,
+            AsOfUtc: DateTime.UtcNow,
+            Sustained: true);
+
+        var sustainedText = CollectorRuntimeState.AttemptStatusText(sustained);
+        Assert.Contains("attempt 30", sustainedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("30 of 25", sustainedText, StringComparison.Ordinal);
+        Assert.DoesNotContain("of 0", sustainedText, StringComparison.Ordinal);
+    }
+
     /// <summary>Every publish stamps UTC, because the ping body reports it as an instant and a local-time
     /// stamp serialized with an offset (or worse, without one) is a wrong instant to whoever reads it.</summary>
     [Fact]

@@ -717,11 +717,7 @@ public class StartupFailureTriageTests
     [Fact]
     public void TheStoreSustainedRetryArm_LogsCriticalOnceThenWarningPerRetry()
     {
-        var source = ReadWorkerSource();
-        var sustainedArm = Slice(
-            source,
-            "catch (Exception ex) when (ex is not OperationCanceledException\n                && StartupFailureTriage.IsRetryable(ex))",
-            "await Task.Delay(next.Delay, stoppingToken);");
+        var sustainedArm = ExtractSustainedRetrySite(ReadWorkerSource(), "storeRetryBudget");
 
         Assert.Contains("storeSustainedRetryCriticalLogged", sustainedArm, StringComparison.Ordinal);
         Assert.Contains("_logger.LogCritical(", sustainedArm, StringComparison.Ordinal);
@@ -743,11 +739,74 @@ public class StartupFailureTriageTests
     [Fact]
     public void TheStoreSustainedRetryArm_PublishesRetryingNotStopped()
     {
-        var source = ReadWorkerSource();
-        var sustainedArm = Slice(
-            source,
-            "catch (Exception ex) when (ex is not OperationCanceledException\n                && StartupFailureTriage.IsRetryable(ex))",
-            "await Task.Delay(next.Delay, stoppingToken);");
+        var sustainedArm = ExtractSustainedRetrySite(ReadWorkerSource(), "storeRetryBudget");
+
+        Assert.Contains("_collectorState.PublishRetrying(", sustainedArm, StringComparison.Ordinal);
+        Assert.DoesNotContain("_collectorState.PublishStopped(", sustainedArm, StringComparison.Ordinal);
+        Assert.DoesNotContain("return;", sustainedArm, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4508: the config-load loop's sustained arm — the same once/per-retry split as the store site's
+    /// own pin, keyed on <c>configSustainedRetryCriticalLogged</c> and <c>configRetryBudget</c> so this
+    /// reads the config site even though all three sustained arms now share the identical catch filter.
+    /// </summary>
+    [Fact]
+    public void TheConfigSustainedRetryArm_LogsCriticalOnceThenWarningPerRetry()
+    {
+        var sustainedArm = ExtractSustainedRetrySite(ReadWorkerSource(), "configRetryBudget");
+
+        Assert.Contains("configSustainedRetryCriticalLogged", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("_logger.LogCritical(", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("_logger.LogWarning(", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("StartupFailureTriage.NextAction(attempt, configRetryBudget.Elapsed, ex)", sustainedArm, StringComparison.Ordinal);
+
+        Assert.Equal(1, CountOf(sustainedArm, "configSustainedRetryCriticalLogged = true;"));
+        Assert.Equal(0, CountOf(sustainedArm, "configSustainedRetryCriticalLogged = false;"));
+    }
+
+    /// <summary>
+    /// #4508: the config-load sustained arm still publishes Retrying, never Stopped, and still routes its
+    /// delay through <see cref="StartupFailureTriage.NextAction"/> rather than falling into the terminal
+    /// catch that stands collection down for the life of the process.
+    /// </summary>
+    [Fact]
+    public void TheConfigSustainedRetryArm_PublishesRetryingNotStopped()
+    {
+        var sustainedArm = ExtractSustainedRetrySite(ReadWorkerSource(), "configRetryBudget");
+
+        Assert.Contains("_collectorState.PublishRetrying(", sustainedArm, StringComparison.Ordinal);
+        Assert.DoesNotContain("_collectorState.PublishStopped(", sustainedArm, StringComparison.Ordinal);
+        Assert.DoesNotContain("return;", sustainedArm, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4508: the managed-Postgres bootstrap loop's sustained arm — the same once/per-retry split, keyed
+    /// on <c>bootstrapSustainedRetryCriticalLogged</c> and <c>bootstrapRetryBudget</c>.
+    /// </summary>
+    [Fact]
+    public void TheBootstrapSustainedRetryArm_LogsCriticalOnceThenWarningPerRetry()
+    {
+        var sustainedArm = ExtractSustainedRetrySite(ReadWorkerSource(), "bootstrapRetryBudget");
+
+        Assert.Contains("bootstrapSustainedRetryCriticalLogged", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("_logger.LogCritical(", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("_logger.LogWarning(", sustainedArm, StringComparison.Ordinal);
+        Assert.Contains("StartupFailureTriage.NextAction(attempt, bootstrapRetryBudget.Elapsed, ex)", sustainedArm, StringComparison.Ordinal);
+
+        Assert.Equal(1, CountOf(sustainedArm, "bootstrapSustainedRetryCriticalLogged = true;"));
+        Assert.Equal(0, CountOf(sustainedArm, "bootstrapSustainedRetryCriticalLogged = false;"));
+    }
+
+    /// <summary>
+    /// #4508: the bootstrap sustained arm still publishes Retrying, never Stopped, and still routes its
+    /// delay through <see cref="StartupFailureTriage.NextAction"/> rather than the terminal catch that
+    /// stands collection down for the life of the process.
+    /// </summary>
+    [Fact]
+    public void TheBootstrapSustainedRetryArm_PublishesRetryingNotStopped()
+    {
+        var sustainedArm = ExtractSustainedRetrySite(ReadWorkerSource(), "bootstrapRetryBudget");
 
         Assert.Contains("_collectorState.PublishRetrying(", sustainedArm, StringComparison.Ordinal);
         Assert.DoesNotContain("_collectorState.PublishStopped(", sustainedArm, StringComparison.Ordinal);
@@ -784,6 +843,21 @@ public class StartupFailureTriageTests
             workerSource,
             "var " + budgetVariable + " = System.Diagnostics.Stopwatch.StartNew();",
             "await Task.Delay(StartupFailureTriage.RetryDelay, stoppingToken);");
+
+    /// <summary>
+    /// The sustained retry arm at the site whose wall-clock budget is <paramref name="budgetVariable"/>.
+    ///
+    /// <para>Anchored on the site's own <c>StartupFailureTriage.NextAction(attempt, &lt;budgetVariable&gt;.Elapsed, ex)</c>
+    /// line rather than the shared <c>catch (Exception ex) when (ex is not OperationCanceledException &amp;&amp;
+    /// StartupFailureTriage.IsRetryable(ex))</c> filter: all three sustained arms now share that filter
+    /// verbatim at the same indentation, so a first-match <see cref="Slice"/> on the filter alone always
+    /// takes the config site, whichever site the test is meant to read.</para>
+    /// </summary>
+    private static string ExtractSustainedRetrySite(string workerSource, string budgetVariable)
+        => Slice(
+            workerSource,
+            "StartupFailureTriage.NextAction(attempt, " + budgetVariable + ".Elapsed, ex)",
+            "await Task.Delay(next.Delay, stoppingToken);");
 
     /// <summary>
     /// Just the retry warning's <c>LogWarning</c> call within a site.
