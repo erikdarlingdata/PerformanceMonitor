@@ -422,6 +422,14 @@ public sealed class DarlingCollectorRunner
     private readonly ServerWatermarkCache _watermarkCache = new();
 
     /// <summary>
+    /// Exact per-(server, database) Query Store watermark cache for the enumerated per-item path. The
+    /// runner is constructed once per service process and the backfill holds this same runner, so the
+    /// cache outlives every cycle and sees every writer. See <see cref="DatabaseWatermarkCache"/> for the
+    /// hit rule and the single-writer assumption.
+    /// </summary>
+    private readonly DatabaseWatermarkCache _databaseWatermarkCache = new();
+
+    /// <summary>
     /// When a server's live query_store collection last failed a per-database item — the backfill
     /// worker's yield-to-live signal (#2111), read through <see cref="LastQueryStoreItemFailureUtc"/>
     /// and judged by <see cref="QueryStoreBackfillState.ShouldYieldToLive"/>. Stamped only for
@@ -1457,6 +1465,14 @@ public sealed class DarlingCollectorRunner
                duplicates, the safe direction). Unconditional — dropping an entry that was never cached is a
                no-op on ServerWatermarkCache.Invalidate, so no eligibility check is needed here. */
             _watermarkCache.Invalidate(server.ServerId, definition.Name);
+
+            /* Rows for earlier items may have committed and the faulting item's may or may not have, so
+               no cached per-database Query Store watermark can be trusted. */
+            if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+            {
+                _databaseWatermarkCache.InvalidateServer(server.ServerId);
+            }
+
             throw;
         }
     }
@@ -1644,6 +1660,70 @@ public sealed class DarlingCollectorRunner
         }
 
         _watermarkCache.Advance(server.ServerId, definition.Name, batchMax, watermarkFromUtcColumn, batchMaxNumeric);
+    }
+
+    /// <summary>
+    /// The per-database Query Store watermark: the cache when it can prove the bounded store read's answer,
+    /// otherwise that read (reseeding the cache when the read succeeded).
+    /// </summary>
+    internal async Task<DateTime?> ResolveQueryStoreDatabaseWatermarkAsync(
+        ServerRuntime server, string table, string column, string dbColumn, string database,
+        DateTime readFloor, DateTime collectionTime, CancellationToken ct)
+    {
+        if (_databaseWatermarkCache.TryGet(server.ServerId, database, readFloor, collectionTime, out var cached))
+        {
+            return cached;
+        }
+
+        var generation = _databaseWatermarkCache.Generation;
+        var (value, ok) = await ReadLastCollectedTimeForDatabaseAsync(
+            server.ServerId, table, column, dbColumn, database, ct, readFloor);
+        if (ok)
+        {
+            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, generation);
+        }
+
+        return value;
+    }
+
+    /// <summary>What a Query Store item's batch contributes to the cache, computed at read time.</summary>
+    internal static StagedDatabaseWatermark StageQueryStoreDatabaseWatermark<TRow>(
+        List<TRow> batch, string database, DateTime collectionTime)
+    {
+        if (batch is not List<QueryStoreCollector.Row> rows)
+        {
+            return new StagedDatabaseWatermark(null, true, collectionTime);
+        }
+
+        DateTime? max = null;
+        var foreign = false;
+        foreach (var r in rows)
+        {
+            if (!string.Equals(r.DatabaseName, database, StringComparison.Ordinal))
+            {
+                foreign = true;
+                continue;
+            }
+
+            if (r.LastExecutionTime is DateTime v && (max is null || v > max))
+            {
+                max = v;
+            }
+        }
+
+        return new StagedDatabaseWatermark(max, foreign, collectionTime);
+    }
+
+    /// <summary>Lands a staged contribution. Called only after the item's COPY transaction committed.</summary>
+    internal void CommitQueryStoreDatabaseWatermark(ServerRuntime server, string database, StagedDatabaseWatermark staged)
+    {
+        if (staged.Foreign)
+        {
+            _databaseWatermarkCache.Invalidate(server.ServerId, database);
+            return;
+        }
+
+        _databaseWatermarkCache.Advance(server.ServerId, database, staged.BatchMax, staged.CollectionTime);
     }
 
     private async Task<CollectorRunResult> RunCoreAsync<TRow>(
@@ -2043,6 +2123,8 @@ public sealed class DarlingCollectorRunner
                         var azureReadFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                             ? WatermarkPolicy.ReadFloor(collectionTime)
                             : null;
+                        /* This path is excluded from the per-database cache; the invalidate is only defensive. */
+                        _databaseWatermarkCache.Invalidate(server.ServerId, databaseName);
                         context.Watermark = await GetLastCollectedTimeForDatabaseAsync(
                             server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
                             definition.PerDatabaseWatermarkColumn!, databaseName, dbToken, azureReadFloor);
@@ -2534,6 +2616,10 @@ public sealed class DarlingCollectorRunner
                    whole run survives. Keyed per item, so one database's decision cannot land on another. */
                 var stagedOpenIntervalStamps = new Dictionary<string, string>(StringComparer.Ordinal);
 
+                /* Query Store per-database watermark contributions: staged at read, landed ONLY from
+                   onItemComplete, i.e. after the item's COPY transaction committed. */
+                var stagedDatabaseWatermarks = new Dictionary<string, StagedDatabaseWatermark>(StringComparer.Ordinal);
+
                 var driverResult = await EnumeratedCollectorDriver.RunAsync<TRow>(
                     items,
                     /* Per-database watermark refresh + the catch-up clamp, computed INSIDE the loop —
@@ -2574,9 +2660,13 @@ public sealed class DarlingCollectorRunner
                             var readFloor = string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                                 ? WatermarkPolicy.ReadFloor(collectionTime)
                                 : null;
-                            var raw = await GetLastCollectedTimeForDatabaseAsync(
-                                server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
-                                definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
+                            var raw = readFloor is DateTime cacheFloor
+                                ? await ResolveQueryStoreDatabaseWatermarkAsync(
+                                    server, definition.TargetTable, definition.WatermarkColumn!,
+                                    definition.PerDatabaseWatermarkColumn!, item, cacheFloor, collectionTime, ct)
+                                : await GetLastCollectedTimeForDatabaseAsync(
+                                    server.ServerId, definition.TargetTable, definition.WatermarkColumn!,
+                                    definition.PerDatabaseWatermarkColumn!, item, ct, readFloor);
                             var clamped = WatermarkPolicy.ClampCatchup(raw, collectionTime);
                             if (raw.HasValue && clamped != raw)
                             {
@@ -2777,6 +2867,11 @@ public sealed class DarlingCollectorRunner
                             }
                         }
 
+                        if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
+                        {
+                            stagedDatabaseWatermarks[item] = StageQueryStoreDatabaseWatermark(batch, item, collectionTime);
+                        }
+
                         return batch;
                     },
                     writeBatch: (batch, ct) => WriteBatchAsync(pgConnection, definition, batch, server, collectionTime, context, ct),
@@ -2802,6 +2897,11 @@ public sealed class DarlingCollectorRunner
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             OnQueryStoreItemSucceeded(server.ServerId, item);
+
+                            if (stagedDatabaseWatermarks.Remove(item, out var stagedWatermark))
+                            {
+                                CommitQueryStoreDatabaseWatermark(server, item, stagedWatermark);
+                            }
 
                             /* #2312: NOW the open-interval stamp may land — this hook only fires after
                                the item's read and flush both succeeded. Remove, not read: a stamp left
@@ -2903,6 +3003,8 @@ public sealed class DarlingCollectorRunner
                         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal))
                         {
                             OnQueryStoreItemFailed(server.ServerId, item);
+                            stagedDatabaseWatermarks.Remove(item);
+                            _databaseWatermarkCache.Invalidate(server.ServerId, item);
                         }
 
                         _logger?.LogWarning("Failed to collect {Collector} from [{Database}] on '{Server}': {Message}",
@@ -5676,8 +5778,20 @@ RETURNING s.state_key";
         ICollectorDefinition<TRow> definition, List<TRow> rows, ServerRuntime server,
         DateTime collectionTime, CollectorContext context, CancellationToken cancellationToken)
     {
-        await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
-        return await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+        try
+        {
+            await using var pgConnection = await _postgres.OpenConnectionAsync(cancellationToken);
+            return await WriteBatchAsync(pgConnection, definition, rows, server, collectionTime, context, cancellationToken);
+        }
+        finally
+        {
+            /* Backfill only inserts, so it can only raise the true maximum; the commit may be unknown after
+               a fault, so drop in a finally. */
+            foreach (var db in DistinctQueryStoreDatabases(rows) ?? [])
+            {
+                _databaseWatermarkCache.Invalidate(server.ServerId, db);
+            }
+        }
     }
 
     /// <summary>
@@ -5697,7 +5811,18 @@ RETURNING s.state_key";
     public async Task<DateTime?> GetLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
         CancellationToken cancellationToken, DateTime? collectedSince = null)
+        => (await ReadLastCollectedTimeForDatabaseAsync(
+            serverId, tableName, columnName, databaseColumnName, databaseName, cancellationToken, collectedSince)).Value;
+
+    /// <summary>
+    /// The read behind <see cref="GetLastCollectedTimeForDatabaseAsync"/>, plus whether it succeeded: a null
+    /// from a failed read must never be cached as "no rows".
+    /// </summary>
+    internal async Task<(DateTime? Value, bool Succeeded)> ReadLastCollectedTimeForDatabaseAsync(
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        CancellationToken cancellationToken, DateTime? collectedSince = null)
     {
+        var failed = false;
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
@@ -5722,7 +5847,7 @@ RETURNING s.state_key";
                 var result = await command.ExecuteScalarAsync(cancellationToken);
                 if (result is DateTime dt)
                 {
-                    return dt;
+                    return (dt, true);
                 }
             }
 
@@ -5736,12 +5861,13 @@ RETURNING s.state_key";
                 var fallbackResult = await fallback.ExecuteScalarAsync(cancellationToken);
                 if (fallbackResult is DateTime fallbackDt)
                 {
-                    return fallbackDt;
+                    return (fallbackDt, true);
                 }
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            failed = true;
             /* Parity with the server-scoped twin (#2795). #2344's bound makes a TIMEOUT unlikely here,
                but every other failure — dropped connection, bad SQL — still returned a null that reads
                as a first run, and silence is the property that let the twin's version of this survive
@@ -5752,7 +5878,7 @@ RETURNING s.state_key";
                 + "data already stored: {Message}",
                 serverId, databaseName, tableName, columnName, ex.Message);
         }
-        return null;
+        return (null, !failed);
     }
 
     /// <summary>
@@ -5865,6 +5991,7 @@ RETURNING s.state_key";
            real watermark may have moved by means this cache never saw (a re-add under the same server_id
            reaches this same path — see the remarks on ServerWatermarkCache.InvalidateServer). */
         _watermarkCache.InvalidateServer(serverId);
+        _databaseWatermarkCache.InvalidateServer(serverId);
     }
 
     /// <summary>

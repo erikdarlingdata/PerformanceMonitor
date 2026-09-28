@@ -34,6 +34,8 @@ internal readonly record struct ServerWatermarkEntry(
 /// existing <c>GetLastCollectedTimeAsync</c>/<c>GetLastCollectedTimeWithFrameAsync</c>/
 /// <c>GetLastCollectedInstanceIdAsync</c> methods — this type holds the answer, it does not read it.</para>
 ///
+/// <para>Query Store's per-database watermark is cached separately, by <c>DatabaseWatermarkCache</c>.</para>
+///
 /// <para><b>Advance:</b> after a batch COMMITS, the caller computes the max watermark value over the rows
 /// that batch actually wrote and calls <see cref="Advance"/>, which keeps the GREATER of that and the
 /// cached value. A batch that writes zero rows must not call <see cref="Advance"/> at all — the cache is
