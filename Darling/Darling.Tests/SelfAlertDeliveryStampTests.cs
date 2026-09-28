@@ -284,12 +284,13 @@ public class SelfAlertDeliveryStampTests
         Assert.Empty(second.Outcomes);
         Assert.Equal(readsAfterFirstAsk, store.Reads);
 
-        /* Past the interval the fresh process delivers — and re-stamps at ITS clock, without asking the
-           store again: one writer per store, so once memory is seeded the store cannot know more than it. */
+        /* Past the interval the fresh process delivers — and re-stamps the SLOT it served (one interval on),
+           without asking the store again: one writer per store, so once memory is seeded the store cannot
+           know more than it. */
         second.Now = first.Now.Add(doc.Interval).AddMinutes(1);
         await doc.ApplyAsync(e2, second.Now);
         Assert.Single(second.Outcomes);
-        Assert.Equal(second.Now, store.Stamps[doc.StampKey]);
+        Assert.Equal(first.Now.Add(doc.Interval), store.Stamps[doc.StampKey]);
         Assert.Equal(2, store.Reads);
     }
 
@@ -358,7 +359,7 @@ public class SelfAlertDeliveryStampTests
         var h1 = new Harness(stale);
         await doc.ApplyAsync(h1.Build(), h1.Now);
         Assert.Single(h1.Outcomes);
-        Assert.Equal(Day, stale.Stamps[doc.StampKey]);
+        Assert.Equal(Day - TimeSpan.FromMinutes(1), stale.Stamps[doc.StampKey]);
 
         var fresh = new MemoryStampStore();
         fresh.Stamps[doc.StampKey] = Day - doc.Interval + TimeSpan.FromMinutes(1);
@@ -366,6 +367,66 @@ public class SelfAlertDeliveryStampTests
         await doc.ApplyAsync(h2.Build(), h2.Now);
         Assert.Empty(h2.Outcomes);
         Assert.Equal(0, fresh.Writes);
+    }
+
+    /// <summary>
+    /// #4652: a document keeps its daily slot. The stamp is the slot a delivery served, not the instant a late
+    /// tick sent it, so the next day's slot is not pushed later; a missed stretch of days is skipped, not replayed.
+    /// </summary>
+    [Theory]
+    [InlineData(Digest)]
+    [InlineData(Rollup)]
+    public async Task ADocumentKeepsItsDailySlot_WhenTheTickThatSendsItRunsLate(string document)
+    {
+        var doc = For(document);
+        var store = new MemoryStampStore();
+        var h = new Harness(store);
+        var e = h.Build();
+
+        await doc.ApplyAsync(e, h.Now);
+        Assert.Single(h.Outcomes);
+        Assert.Equal(Day, store.Stamps[doc.StampKey]);
+
+        h.Now = Day.Add(doc.Interval).AddMinutes(40);
+        await doc.ApplyAsync(e, h.Now);
+        Assert.Equal(2, h.Outcomes.Count);
+        Assert.Equal(Day.Add(doc.Interval), store.Stamps[doc.StampKey]);
+
+        /* The old gate measured from the send instant (23 h 30 m ago here) and withheld this one. */
+        h.Now = Day.Add(doc.Interval * 2).AddMinutes(10);
+        await doc.ApplyAsync(e, h.Now);
+        Assert.Equal(3, h.Outcomes.Count);
+        Assert.Equal(Day.Add(doc.Interval * 2), store.Stamps[doc.StampKey]);
+
+        h.Now = Day.Add(doc.Interval * 5).AddHours(3);
+        await doc.ApplyAsync(e, h.Now);
+        Assert.Equal(4, h.Outcomes.Count);
+        Assert.Equal(Day.Add(doc.Interval * 5), store.Stamps[doc.StampKey]);
+
+        await doc.ApplyAsync(e, h.Now);
+        Assert.Equal(4, h.Outcomes.Count);
+    }
+
+    [Fact]
+    public void ServedSlot_IsTheLatestSlotAtOrBeforeNow_OnTheGridAnchoredAtThePreviousSlot()
+    {
+        var d = TimeSpan.FromDays(1);
+        Assert.Equal(Day, DarlingSelfAlertEvaluator.ServedSlot(null, Day, d));
+        Assert.Equal(Day, DarlingSelfAlertEvaluator.ServedSlot(DateTime.MinValue, Day, d));
+        Assert.Equal(Day + d, DarlingSelfAlertEvaluator.ServedSlot(Day, Day + d, d));
+        Assert.Equal(Day + d, DarlingSelfAlertEvaluator.ServedSlot(Day, Day + d + TimeSpan.FromMinutes(59), d));
+        var early = Day + d - TimeSpan.FromMinutes(1);
+        Assert.Equal(early, DarlingSelfAlertEvaluator.ServedSlot(Day, early, d));
+        Assert.Equal(Day + d * 5, DarlingSelfAlertEvaluator.ServedSlot(Day, Day + d * 5 + TimeSpan.FromHours(3), d));
+    }
+
+    [Fact]
+    public void NextGridStamp_AnchorsAtNowThenKeepsTheGrid()
+    {
+        var h = TimeSpan.FromHours(1);
+        Assert.Equal(Day + h, DarlingWorker.NextGridStamp(DateTime.MinValue, Day, h));
+        Assert.Equal(Day + h + h, DarlingWorker.NextGridStamp(Day + h, Day + h + TimeSpan.FromSeconds(15), h));
+        Assert.Equal(Day + h * 4, DarlingWorker.NextGridStamp(Day + h, Day + h * 3 + TimeSpan.FromMinutes(20), h));
     }
 
     /* ---------------- store faults fall open to memory, once, loudly ---------------- */
