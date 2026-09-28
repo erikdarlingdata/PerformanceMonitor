@@ -62,7 +62,7 @@ public static class ContextMenuHelper
         if (grid?.CurrentCell.Column == null || grid.CurrentItem == null) return;
 
         var value = GetCellValue(grid.CurrentCell.Column, grid.CurrentItem);
-        if (value.Length > 0) Clipboard.SetDataObject(value, false);
+        if (value.Length > 0) ClipboardText.TrySetDataObject(value);
     }
 
     public static void CopyRow(object sender)
@@ -76,7 +76,7 @@ public static class ContextMenuHelper
             sb.Append(GetCellValue(col, grid.CurrentItem));
             sb.Append('\t');
         }
-        Clipboard.SetDataObject(sb.ToString().TrimEnd('\t'), false);
+        ClipboardText.TrySetDataObject(sb.ToString().TrimEnd('\t'));
     }
 
     public static void CopyAllRows(object sender)
@@ -103,7 +103,7 @@ public static class ContextMenuHelper
             sb.AppendLine();
         }
 
-        Clipboard.SetDataObject(sb.ToString(), false);
+        ClipboardText.TrySetDataObject(sb.ToString());
     }
 
     public static void ExportToCsv(object sender, string defaultFilePrefix)
@@ -192,7 +192,7 @@ public static class ContextMenuHelper
                 bitmap.UriSource = new Uri(tempFile);
                 bitmap.EndInit();
                 bitmap.Freeze();
-                Clipboard.SetDataObject(new DataObject(DataFormats.Bitmap, bitmap), false);
+                ClipboardText.TrySetDataObject(new DataObject(DataFormats.Bitmap, bitmap));
             }
             finally
             {

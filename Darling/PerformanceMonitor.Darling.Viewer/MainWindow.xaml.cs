@@ -1896,8 +1896,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        Clipboard.SetDataObject(card.CopyPasteSql, false);
-        RecommendationsStatusText.Text = "Fix copied to clipboard.";
+        if (ClipboardText.TrySetDataObject(card.CopyPasteSql))
+        {
+            RecommendationsStatusText.Text = "Fix copied to clipboard.";
+        }
+        else
+        {
+            RecommendationsStatusText.Text = "Couldn't copy: the clipboard is in use.";
+        }
     }
 
     /// <summary>Copies a card's MCP investigation prompt to the clipboard (mirrors Lite's Ask AI).</summary>
@@ -1908,8 +1914,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        Clipboard.SetDataObject(card.AskAiPrompt, false);
-        RecommendationsStatusText.Text = "AI prompt copied to clipboard.";
+        if (ClipboardText.TrySetDataObject(card.AskAiPrompt))
+        {
+            RecommendationsStatusText.Text = "AI prompt copied to clipboard.";
+        }
+        else
+        {
+            RecommendationsStatusText.Text = "Couldn't copy: the clipboard is in use.";
+        }
     }
 
     /// <summary>
@@ -2180,7 +2192,10 @@ public partial class MainWindow : Window
     {
         try
         {
-            Clipboard.SetText(string.Join(Environment.NewLine + Environment.NewLine, MessageText.Text, MessageDetailsText.Text));
+            if (!ClipboardText.TrySetText(string.Join(Environment.NewLine + Environment.NewLine, MessageText.Text, MessageDetailsText.Text)))
+            {
+                ViewerLogger.Warn(ViewerConfigDiagnostics.LogSource, "Copying the diagnostics failed: the clipboard is in use.");
+            }
         }
         catch (Exception ex)
         {

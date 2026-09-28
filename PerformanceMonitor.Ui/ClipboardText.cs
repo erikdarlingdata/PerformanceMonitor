@@ -178,4 +178,44 @@ public static class ClipboardText
             return false;
         }
     }
+
+    /// <summary>
+    /// Guarded sibling of <see cref="TrySetText"/> for <see cref="Clipboard.SetDataObject(object, bool)"/>
+    /// call sites (a plain string via <c>SetDataObject</c> instead of <c>SetText</c> - matches the existing
+    /// call sites' convention of avoiding WPF's <c>Clipboard.Flush()</c> - and the chart bitmap copy, which
+    /// has no text equivalent). Same bounded retry and failure family as <see cref="TrySetText"/>.
+    /// </summary>
+    public static bool TrySetDataObject(object data, bool copy = false)
+    {
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            if (TrySetDataObjectOnce(data, copy))
+            {
+                return true;
+            }
+
+            if (attempt < MaxAttempts)
+            {
+                Thread.Sleep(RetryDelayMs);
+            }
+        }
+
+        return false;
+    }
+
+    // Swapped out by tests, matching WriteOnce's role for TrySetText.
+    internal static Action<object, bool> WriteDataObjectOnce { get; set; } = Clipboard.SetDataObject;
+
+    private static bool TrySetDataObjectOnce(object data, bool copy)
+    {
+        try
+        {
+            WriteDataObjectOnce(data, copy);
+            return true;
+        }
+        catch (ExternalException)
+        {
+            return false;
+        }
+    }
 }

@@ -471,8 +471,9 @@ public partial class SettingsWindow : Window
         var port = McpPortTextBox.Text;
         var command = $"claude mcp add --transport http --scope user sql-monitor-darling http://localhost:{port}/";
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
-        Clipboard.SetDataObject(command, false);
-        McpStatusText.Text = "Copied to clipboard!";
+        McpStatusText.Text = ClipboardText.TrySetDataObject(command)
+            ? "Copied to clipboard!"
+            : "Couldn't copy: the clipboard is in use.";
     }
 
     private void AutoPortButton_Click(object sender, RoutedEventArgs e)
@@ -505,8 +506,9 @@ public partial class SettingsWindow : Window
     {
         var url = $"http://localhost:{WebPortTextBox.Text}/";
         /* SetDataObject with copy=false avoids WPF's problematic Clipboard.Flush(). */
-        Clipboard.SetDataObject(url, false);
-        WebStatusText.Text = "Copied to clipboard!";
+        WebStatusText.Text = ClipboardText.TrySetDataObject(url)
+            ? "Copied to clipboard!"
+            : "Couldn't copy: the clipboard is in use.";
     }
 
     /// <summary>Asks the OS for a free loopback TCP port (bind to port 0, read the assignment, release).</summary>
