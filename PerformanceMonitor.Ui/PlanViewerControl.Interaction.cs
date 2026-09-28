@@ -115,27 +115,27 @@ public partial class PlanViewerControl
         menu.Items.Add(new Separator());
 
         var copyOpItem = new MenuItem { Header = "Copy Operator Name" };
-        copyOpItem.Click += (_, _) => Clipboard.SetDataObject(node.PhysicalOp, false);
+        copyOpItem.Click += (_, _) => ClipboardText.TrySetText(node.PhysicalOp);
         menu.Items.Add(copyOpItem);
 
         if (!string.IsNullOrEmpty(node.FullObjectName))
         {
             var copyObjItem = new MenuItem { Header = "Copy Object Name" };
-            copyObjItem.Click += (_, _) => Clipboard.SetDataObject(node.FullObjectName, false);
+            copyObjItem.Click += (_, _) => ClipboardText.TrySetText(node.FullObjectName);
             menu.Items.Add(copyObjItem);
         }
 
         if (!string.IsNullOrEmpty(node.Predicate))
         {
             var copyPredItem = new MenuItem { Header = "Copy Predicate" };
-            copyPredItem.Click += (_, _) => Clipboard.SetDataObject(node.Predicate, false);
+            copyPredItem.Click += (_, _) => ClipboardText.TrySetText(node.Predicate);
             menu.Items.Add(copyPredItem);
         }
 
         if (!string.IsNullOrEmpty(node.SeekPredicates))
         {
             var copySeekItem = new MenuItem { Header = "Copy Seek Predicate" };
-            copySeekItem.Click += (_, _) => Clipboard.SetDataObject(node.SeekPredicates, false);
+            copySeekItem.Click += (_, _) => ClipboardText.TrySetText(node.SeekPredicates);
             menu.Items.Add(copySeekItem);
         }
 

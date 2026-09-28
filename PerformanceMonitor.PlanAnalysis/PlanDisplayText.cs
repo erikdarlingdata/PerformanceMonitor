@@ -37,4 +37,23 @@ public static class PlanDisplayText
         var effectiveCpu = Math.Max(0L, stats.CpuTimeMs - externalWaitMs);
         return (double)effectiveCpu / stats.ElapsedTimeMs;
     }
+
+    /// <summary>
+    /// The text "Copy Query Text" hands back for <paramref name="statement"/>: the plan's own copy
+    /// normally, or the query the plan was captured from when the plan's copy hit SQL Server's
+    /// 4,000-character showplan cap (<see cref="PlanStatement.IsTextTruncated"/>) -- matching
+    /// erikdarlingdata/PerformanceStudio@35249e2, corrected by @fdd3d22.
+    ///
+    /// <para>Single-statement plans only, counted the same way the Statements grid counts them
+    /// (<paramref name="statementCount"/> is the caller's already-flattened count, descending into
+    /// stored procedure and UDF bodies -- NOT <c>Batches.Sum</c>, which stops at the outer batch and
+    /// would call a plan captured around <c>EXEC dbo.SomeProc</c> single-statement). The captured text
+    /// is the whole batch and showplan records no statement offsets, so for more than one statement
+    /// there is no way to tell which slice belongs to the row the user picked -- handing back a
+    /// confidently wrong statement is worse than handing back a short one.</para>
+    /// </summary>
+    public static string CopyQueryText(PlanStatement statement, int statementCount, string? capturedQueryText) =>
+        statement.IsTextTruncated && statementCount == 1 && !string.IsNullOrEmpty(capturedQueryText)
+            ? capturedQueryText
+            : statement.StatementText;
 }

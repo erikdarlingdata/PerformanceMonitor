@@ -15,19 +15,22 @@ using System.Windows;
 namespace PerformanceMonitor.Ui;
 
 /// <summary>
-/// Guarded clipboard reads for the shared Plan Viewer paste paths (Lite, the Darling viewer, and the
-/// deprecated Full Dashboard all route through here). Windows serializes clipboard access, so
-/// <see cref="Clipboard.GetText()"/> throws <see cref="COMException"/> (<c>CLIPBRD_E_CANT_OPEN</c>,
-/// 0x800401D0) whenever another process momentarily holds the clipboard - a clipboard manager (Ditto,
-/// ClipboardFusion, Windows Clipboard History), Office, a browser, or an RDP / locked-desktop session. That
-/// is a routine transient condition, so a bare call takes the whole app down for no good reason (#2833).
-/// This wraps the read in a short bounded retry and returns failure on persistent inability to open instead
-/// of throwing, letting callers show a graceful notice (button paths) or simply no-op (Ctrl+V paths).
+/// Guarded clipboard reads and writes for the shared Plan Viewer paste/copy paths (Lite, the Darling
+/// viewer, and the deprecated Full Dashboard all route through here). Windows serializes clipboard
+/// access, so <see cref="Clipboard.GetText()"/> / <see cref="Clipboard.SetText(string)"/> throw <see
+/// cref="COMException"/> (<c>CLIPBRD_E_CANT_OPEN</c>, 0x800401D0) whenever another process momentarily
+/// holds the clipboard - a clipboard manager (Ditto, ClipboardFusion, Windows Clipboard History), Office,
+/// a browser, or an RDP / locked-desktop session. That is a routine transient condition, so a bare call
+/// takes the whole app down for no good reason (reads: #2833; writes: #4582). This wraps each read/write
+/// in a short bounded retry and returns failure on persistent inability to open instead of throwing,
+/// letting callers show a graceful notice (button paths) or simply no-op (Ctrl+V paths).
 ///
-/// Two variants share one guarded read-attempt helper: the synchronous <see cref="TryRead"/> (for any
+/// Two read variants share one guarded read-attempt helper: the synchronous <see cref="TryRead"/> (for any
 /// non-async caller) sleeps the calling thread between attempts, while <see cref="TryReadAsync"/> awaits
 /// <see cref="Task.Delay(int)"/> for the same backoff so a UI-thread caller keeps its WPF message pump
 /// responsive on the rare failure path instead of freezing for up to the worst-case retry span (#2837).
+/// <see cref="TrySetText"/> is the write sibling: every call site today is a synchronous button/menu-item
+/// handler, so it sleeps like <see cref="TryRead"/> rather than needing an async twin.
 /// </summary>
 public static class ClipboardText
 {
@@ -118,6 +121,60 @@ public static class ClipboardText
             // COMException (the CLIPBRD_E_CANT_OPEN we care about) derives from ExternalException, so this one
             // catch covers both.
             text = string.Empty;
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to write <paramref name="text"/> to the clipboard, retrying briefly if the clipboard cannot
+    /// be opened (the same <c>CLIPBRD_E_CANT_OPEN</c> family <see cref="TryRead"/> guards against, on the
+    /// write side - #4582: an unguarded <see cref="Clipboard.SetText(string)"/> / <see
+    /// cref="Clipboard.SetDataObject(object, bool)"/> throws and crashes the app when another process holds
+    /// the clipboard). Returns <c>true</c> on success, <c>false</c> when the clipboard could not be opened
+    /// after the bounded retries. Only the clipboard-open failure family is swallowed; any other exception
+    /// propagates. Blocks the calling thread with <see cref="Thread.Sleep(int)"/> between attempts, matching
+    /// <see cref="TryRead"/> - every existing call site is a synchronous button/menu-item handler, not an
+    /// async one, so there is no UI-thread-freeze concern to trade off here the way <see cref="TryReadAsync"/>
+    /// does for reads.
+    /// </summary>
+    public static bool TrySetText(string text)
+    {
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            if (TrySetTextOnce(text))
+            {
+                return true;
+            }
+
+            if (attempt < MaxAttempts)
+            {
+                Thread.Sleep(RetryDelayMs);
+            }
+        }
+
+        return false;
+    }
+
+    // The actual write, swapped out by tests so a pin can force the clipboard-open failure without a real
+    // busy clipboard (COMException/ExternalException isn't something a test can provoke on demand). Defaults
+    // to the real WPF call.
+    internal static Action<string> WriteOnce { get; set; } = Clipboard.SetText;
+
+    /// <summary>
+    /// One guarded write attempt, shared by <see cref="TrySetText"/>: returns <c>true</c> on success, or
+    /// <c>false</c> when the clipboard-open failure family (<see cref="COMException"/> /
+    /// <see cref="ExternalException"/>) is thrown - a transient <c>CLIPBRD_E_CANT_OPEN</c> the caller
+    /// retries. Any other exception propagates.
+    /// </summary>
+    private static bool TrySetTextOnce(string text)
+    {
+        try
+        {
+            WriteOnce(text);
+            return true;
+        }
+        catch (ExternalException)
+        {
             return false;
         }
     }
