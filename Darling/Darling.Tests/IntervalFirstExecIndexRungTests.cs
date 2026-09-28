@@ -19,13 +19,17 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// Pins Darling rung V153 (#4608): a plain btree on <c>first_execution_time</c> for each per-interval
-/// Query Store table (<c>query_store_interval_latest</c>, V143, and <c>query_store_interval_wide</c>,
-/// V145) — the column both the daily retention sweep's
+/// Pins Darling rung V153 (#4608, split #4615): a plain btree on <c>first_execution_time</c> for
+/// <c>query_store_interval_latest</c> (V143) only — the column both the daily retention sweep's
 /// <see cref="DarlingRetention.TimeSlicedDeleteSql"/> filters on and the read gate's per-server floor
-/// reads. This file is the RUNG (ladder, viewer probe) and the live schema-after-migrate proof: both
-/// indexes exist on a fresh migrate, the purge's plan uses one of them (no full scan), and the read
-/// gate's floor query uses one too.
+/// reads. V154 (<c>IntervalFirstExecIndexWideRungTests</c>) is the twin rung for
+/// <c>query_store_interval_wide</c>'s index, split into its own rung so each index build gets its own
+/// migration-command-timeout window. This file's "I am the top rung" claim moved to that class now that
+/// V154 has landed; this file's own rung/probe facts below keep asserting what stays true forever
+/// (present, in-order, gated behind the arm above it) rather than "is exactly the top". This file is the
+/// RUNG (ladder, viewer probe) and the live schema-after-migrate proof for the <c>_latest</c> index: it
+/// exists on a fresh migrate, the purge's plan uses it (no full scan), and the read gate's floor query
+/// uses it too.
 /// </summary>
 /* #1776 own-store: each fact mints its own scratch database through ScratchPostgres and never touches the
    shared store's tables, so it cannot race the live collection and serializing it would be pure slowdown. */
@@ -34,71 +38,78 @@ public sealed class IntervalFirstExecIndexRungTests
     private const int RungVersion = 153;
     private const int PreviousVersion = 152;
 
-    /// <summary>This rung's sentinel ordinal in the viewer probe — the newest, so the last argument.</summary>
+    /// <summary>This rung's sentinel ordinal in the viewer probe — no longer the newest, since V154
+    /// landed above it.</summary>
     private const int ProbeOrdinal = 128;
 
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /// <summary>
-    /// The rung is registered and is the new top of the ladder — the claim this class takes over from
-    /// <c>CaggGroupIndexDropRungTests</c> (V152) now that V153 has landed.
+    /// The rung is registered, and the ladder stays dense above it — the claim this class took over from
+    /// <c>CaggGroupIndexDropRungTests</c> (V152) moved on again to <c>IntervalFirstExecIndexWideRungTests</c>
+    /// (V154) now that V154 has landed.
     /// </summary>
     [Fact]
-    public void TheRungIsRegisteredAtTheTopOfADenseLadder()
+    public void TheRungIsRegistered_AndTheLadderIsDenseAboveIt()
     {
         var versions = PgMigrations.Scripts.Select(s => s.Version).ToList();
 
         Assert.Equal("interval-tables-first-exec-index", PgMigrations.Scripts.Single(s => s.Version == RungVersion).Name);
-        Assert.Equal(StorageVersion.SchemaVersion, PgMigrations.Scripts[^1].Version);
-        Assert.Equal(StorageVersion.SchemaVersion, versions.Max());
-        Assert.Equal(RungVersion, StorageVersion.SchemaVersion);
         Assert.Equal(versions.Distinct().OrderBy(v => v), versions);
+
+        var above = versions.Where(v => v > 45).OrderBy(v => v).ToList();
+        Assert.Equal(Enumerable.Range(above[0], above.Count), above);
     }
 
     /// <summary>
-    /// The viewer probe's sentinel carries this rung, and the map treats it as the TOP arm: a missing top arm
-    /// maps a fully-migrated store one rung short, permanently, because
+    /// The viewer probe's sentinel carries this rung, and the map treats it as an arm gated below the
+    /// current top's arm — a missing arm maps a fully-migrated store one rung short, permanently, because
     /// <see cref="ViewerDataService.RequiredStoreSchemaVersion"/> is <see cref="StorageVersion.SchemaVersion"/>.
     /// </summary>
     [Fact]
-    public void TheProbeMapsAFullyMigratedStoreToThisTopRung()
+    public void TheProbeCarriesThisRungsSentinel_AndTheArmSitsBelowTheCurrentTop()
     {
         var probe = ViewerDataService.StoreSchemaProbeSql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("idx_query_store_interval_latest_first_exec", probe, StringComparison.Ordinal);
 
         var viewer = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.cs");
         Assert.Contains($"reader.GetBoolean({ProbeOrdinal})", viewer, StringComparison.Ordinal);
-        Assert.DoesNotContain($"reader.GetBoolean({ProbeOrdinal + 1})", viewer, StringComparison.Ordinal);
-
-        Assert.Equal(StorageVersion.SchemaVersion, ViewerDataService.RequiredStoreSchemaVersion);
 
         var method = typeof(ViewerDataService).GetMethod("MapProbedSchemaVersion", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var arity = method.GetParameters().Length;
-        Assert.Equal(ProbeOrdinal, arity - 1);
         Assert.Equal("hasIntervalFirstExecIndexes", method.GetParameters()[ProbeOrdinal].Name);
 
+        /* Every rung above this one (V154's hasIntervalWideFirstExecIndex) must also be false, or the map
+           finds the newer arm first and this assertion is checking the wrong rung's fallthrough. */
         var all = Enumerable.Repeat((object)true, arity).ToArray();
-        Assert.Equal(StorageVersion.SchemaVersion, (int)method.Invoke(null, all)!);
-
         var behind = (object[])all.Clone();
-        behind[ProbeOrdinal] = false;
+        for (var i = ProbeOrdinal; i < arity; i++)
+        {
+            behind[i] = false;
+        }
         Assert.Equal(PreviousVersion, (int)method.Invoke(null, behind)!);
 
+        /* V154 (#4608, split #4615) is now the top rung, so this arm no longer needs to be the LAST one —
+           it only has to sit below the current top's arm, which is what the ladder-dense invariant above
+           already guarantees is registered ahead of it. */
         var thisArm = viewer.IndexOf("if (hasIntervalFirstExecIndexes)", StringComparison.Ordinal);
+        var topArm = viewer.IndexOf("if (hasIntervalWideFirstExecIndex)", StringComparison.Ordinal);
         var previousArm = viewer.IndexOf("if (hasCaggGroupIndexDrop)", StringComparison.Ordinal);
         Assert.True(thisArm >= 0, "the viewer has no V153 sentinel arm — a fully-migrated store would map one rung short");
+        Assert.True(topArm >= 0 && topArm < thisArm, "the current top rung's arm must sit above the V153 arm");
         Assert.True(thisArm < previousArm, "the V153 arm sits below V152's, so a current store maps one rung short");
         Assert.Contains(
-            "return " + StorageVersion.SchemaVersion.ToString(CultureInfo.InvariantCulture) + ";",
+            "return " + RungVersion.ToString(CultureInfo.InvariantCulture) + ";",
             viewer[thisArm..previousArm], StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// The LIVE schema after migrate: both indexes exist on the two per-interval tables. Run against a
-    /// pre-V153 build this is RED — neither index exists.
+    /// The LIVE schema after migrate: the _latest index exists. V154's twin
+    /// (<c>IntervalFirstExecIndexWideRungTests</c>) covers <c>_wide</c>'s index in its own rung's file.
+    /// Run against a pre-V153 build this is RED — the index does not exist.
     /// </summary>
     [Fact]
-    public async Task AfterMigrate_BothFirstExecIndexesExist()
+    public async Task AfterMigrate_TheLatestFirstExecIndexExists()
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -116,8 +127,6 @@ public sealed class IntervalFirstExecIndexRungTests
 
             Assert.True(await IndexExistsAsync(connection, "idx_query_store_interval_latest_first_exec", ct),
                 "V153 adds idx_query_store_interval_latest_first_exec");
-            Assert.True(await IndexExistsAsync(connection, "idx_query_store_interval_wide_first_exec", ct),
-                "V153 adds idx_query_store_interval_wide_first_exec");
 
             bodySucceeded = true;
         }
@@ -204,8 +213,8 @@ public sealed class IntervalFirstExecIndexRungTests
     }
 
     /// <summary>
-    /// Rerunning the migration ladder (as startup does on an already-migrated store) is idempotent: the
-    /// two <c>CREATE INDEX IF NOT EXISTS</c> statements do not error and both indexes still exist.
+    /// Rerunning the migration ladder (as startup does on an already-migrated store) is idempotent: this
+    /// rung's <c>CREATE INDEX IF NOT EXISTS</c> statement does not error and the index still exists.
     /// </summary>
     [Fact]
     public async Task MigrateAsync_RunTwice_IsIdempotent()
@@ -226,7 +235,6 @@ public sealed class IntervalFirstExecIndexRungTests
             await PgMigrations.MigrateAsync(connection, ct);
 
             Assert.True(await IndexExistsAsync(connection, "idx_query_store_interval_latest_first_exec", ct));
-            Assert.True(await IndexExistsAsync(connection, "idx_query_store_interval_wide_first_exec", ct));
 
             bodySucceeded = true;
         }

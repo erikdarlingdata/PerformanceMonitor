@@ -320,11 +320,15 @@ public sealed class CaggGroupIndexDropLiveTests
     {
         if (simulatedVersion < 153)
         {
-            /* V153 (#4608) — the interval tables' first_execution_time indexes. */
+            /* V153 (#4608, split #4615) — the interval-tables-latest first_execution_time index. */
             await using var dropLatest = new NpgsqlCommand(
                 "DROP INDEX IF EXISTS collect.idx_query_store_interval_latest_first_exec", connection);
             await dropLatest.ExecuteNonQueryAsync(ct);
+        }
 
+        if (simulatedVersion < 154)
+        {
+            /* V154 (#4608, split #4615) — the interval-tables-wide first_execution_time index. */
             await using var dropWide = new NpgsqlCommand(
                 "DROP INDEX IF EXISTS collect.idx_query_store_interval_wide_first_exec", connection);
             await dropWide.ExecuteNonQueryAsync(ct);
