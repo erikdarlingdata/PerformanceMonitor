@@ -1379,7 +1379,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            System.Diagnostics.Trace.TraceWarning($"#4605 compose Query Store wide-table eligibility check failed; reading raw: {ex.GetType().Name}: {ex.Message}");
+            /* #4508/#4283 census: never carry ex.Message into a web-surface trace; the exception's type name
+               alone is enough to distinguish a fault here (this check never answers an HTTP response either
+               way, but the census sweeps every ex.Message in this file regardless of destination). */
+            System.Diagnostics.Trace.TraceWarning($"#4605 compose Query Store wide-table eligibility check failed; reading raw: {ex.GetType().Name}");
             return false;
         }
     }
