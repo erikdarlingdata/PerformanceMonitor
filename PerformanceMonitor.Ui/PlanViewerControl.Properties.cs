@@ -1066,7 +1066,7 @@ public partial class PlanViewerControl
 
         if (waits.Count == 0)
         {
-            WaitStatsHeader.Text = PlanDisplayText.WaitStatsHeader(0, 0);
+            WaitStatsHeader.Text = "Wait Stats";
             WaitStatsHeader.ToolTip = PlanDisplayText.WaitStatsHeaderTooltip(0, 0);
             WaitStatsEmpty.Text = isActualPlan
                 ? "No wait stats recorded"
@@ -1081,7 +1081,7 @@ public partial class PlanViewerControl
         var maxWait = sorted[0].WaitTimeMs;
         var totalWait = sorted.Sum(w => w.WaitTimeMs);
 
-        WaitStatsHeader.Text = PlanDisplayText.WaitStatsHeader(sorted.Count, totalWait);
+        WaitStatsHeader.Text = $"  Wait Stats \u2014 {totalWait:N0}ms total";
         WaitStatsHeader.ToolTip = PlanDisplayText.WaitStatsHeaderTooltip(sorted.Count, totalWait);
 
         var longestName = sorted.Max(w => w.WaitType.Length);
