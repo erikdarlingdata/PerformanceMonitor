@@ -307,10 +307,10 @@ public partial class PlanViewerControl
 
         // === Estimated Costs Section ===
         AddPropertySection("Estimated Costs");
-        AddPropertyRow("Operator Cost", $"{node.EstimatedOperatorCost:F6} ({node.CostPercent}%)");
-        AddPropertyRow("Subtree Cost", $"{node.EstimatedTotalSubtreeCost:F6}");
-        AddPropertyRow("I/O Cost", $"{node.EstimateIO:F6}");
-        AddPropertyRow("CPU Cost", $"{node.EstimateCPU:F6}");
+        AddPropertyRow("Operator Cost", $"{MetricFormatter.FormatCost(node.EstimatedOperatorCost)} ({node.CostPercent}%)");
+        AddPropertyRow("Subtree Cost", MetricFormatter.FormatCost(node.EstimatedTotalSubtreeCost));
+        AddPropertyRow("I/O Cost", MetricFormatter.FormatCost(node.EstimateIO));
+        AddPropertyRow("CPU Cost", MetricFormatter.FormatCost(node.EstimateCPU));
 
         // === Estimated Rows Section ===
         AddPropertySection("Estimated Rows");
