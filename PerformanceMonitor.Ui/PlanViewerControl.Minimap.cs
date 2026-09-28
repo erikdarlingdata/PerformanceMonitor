@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
@@ -20,19 +21,27 @@ namespace PerformanceMonitor.Ui;
 
 /// <summary>
 /// The plan viewer's minimap: a scaled-down overview of the whole plan in a corner panel, with a
-/// viewport box that tracks the main scroll viewer's scroll/zoom, and click-to-center. The math
-/// (scale, node/subtree rectangles, viewport box, click-to-offset) lives in
+/// viewport box that tracks the main scroll viewer's scroll/zoom, click-to-center, double-click to
+/// zoom and select a node, a resizable panel whose size is remembered across plans, and edges
+/// colored by the same actual/estimated accuracy ratio as the main canvas. The math (scale,
+/// node/subtree rectangles, viewport box, click-to-offset, resize clamp, zoom-to-node) lives in
 /// <see cref="MinimapLayout"/>; this file only builds and positions the WPF shapes from it.
-///
-/// <para>Resize/persist, double-click zoom+select, and accuracy-colored minimap edges are not part
-/// of this pass — the minimap edges use a fixed neutral color until the main canvas' accuracy
-/// coloring is ported.</para>
 /// </summary>
 public partial class PlanViewerControl
 {
     private readonly Dictionary<Border, PlanNode> _minimapNodeMap = new();
     private Border? _minimapViewportBox;
     private bool _minimapVisible;
+
+    // Remembered across plans (and control instances) — matches PerformanceStudio's static fields,
+    // so reopening the minimap on a different plan keeps the size the user last dragged it to.
+    private static double _minimapWidth = 220;
+    private static double _minimapHeight = 220;
+
+    private bool _minimapResizing;
+    private Point _minimapResizeStart;
+    private double _minimapResizeStartWidth;
+    private double _minimapResizeStartHeight;
 
     private void MinimapToggle_Click(object sender, RoutedEventArgs e)
     {
@@ -42,9 +51,16 @@ public partial class PlanViewerControl
             OpenMinimapPanel();
     }
 
+    private void MinimapClose_Click(object sender, RoutedEventArgs e)
+    {
+        CloseMinimapPanel();
+    }
+
     private void OpenMinimapPanel()
     {
         _minimapVisible = true;
+        MinimapPanel.Width = _minimapWidth;
+        MinimapPanel.Height = _minimapHeight;
         MinimapPanel.Visibility = Visibility.Visible;
         RenderMinimap();
     }
@@ -52,6 +68,7 @@ public partial class PlanViewerControl
     private void CloseMinimapPanel()
     {
         _minimapVisible = false;
+        _minimapResizing = false;
         MinimapPanel.Visibility = Visibility.Collapsed;
     }
 
@@ -71,8 +88,10 @@ public partial class PlanViewerControl
 
         var scale = MinimapLayout.GetScale(canvasW, canvasH, PlanCanvas.Width, PlanCanvas.Height);
 
+        var divergenceLimit = Math.Max(PlanEdgeColour.MinDivergenceLimit, AccuracyRatioDivergenceLimit);
+
         RenderMinimapBranches(_currentStatement.RootNode, scale);
-        RenderMinimapEdges(_currentStatement.RootNode, scale);
+        RenderMinimapEdges(_currentStatement.RootNode, scale, divergenceLimit);
         RenderMinimapNodes(_currentStatement.RootNode, scale);
         RenderMinimapViewportBox(scale);
     }
@@ -99,7 +118,7 @@ public partial class PlanViewerControl
         }
     }
 
-    private void RenderMinimapEdges(PlanNode node, double scale)
+    private void RenderMinimapEdges(PlanNode node, double scale, double divergenceLimit)
     {
         foreach (var child in node.Children)
         {
@@ -119,19 +138,37 @@ public partial class PlanViewerControl
             figure.Segments.Add(new LineSegment(new Point(childLeft, childCenterY), true));
             geometry.Figures.Add(figure);
 
-            // Neutral color for now: accuracy-ratio coloring on the minimap lands in a later pass,
-            // once the main canvas' own accuracy-colored edges (tracked separately) are in.
             var path = new WpfPath
             {
                 Data = geometry,
-                Stroke = EdgeBrush,
+                Stroke = GetLinkColorBrush(child, divergenceLimit),
                 StrokeThickness = thickness,
                 StrokeLineJoin = PenLineJoin.Round
             };
             MinimapCanvas.Children.Add(path);
 
-            RenderMinimapEdges(child, scale);
+            RenderMinimapEdges(child, scale, divergenceLimit);
         }
+    }
+
+    /// <summary>
+    /// The minimap's own edge-color lookup, so it can pass a pre-clamped divergence limit down the
+    /// recursion instead of re-clamping per edge. Matches <see cref="GetLinkColorBrush(PlanNode)"/>'s
+    /// tier-to-brush mapping.
+    /// </summary>
+    private SolidColorBrush GetLinkColorBrush(PlanNode child, double clampedDivergenceLimit)
+    {
+        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.EstimateRows, clampedDivergenceLimit);
+        return key switch
+        {
+            PlanEdgeColourKey.LightOrange => EdgeLightOrangeBrush,
+            PlanEdgeColourKey.FluoOrange => EdgeFluoOrangeBrush,
+            PlanEdgeColourKey.FluoRed => EdgeFluoRedBrush,
+            PlanEdgeColourKey.Blue => EdgeBlueBrush,
+            PlanEdgeColourKey.LightBlue => EdgeLightBlueBrush,
+            PlanEdgeColourKey.FluoBlue => EdgeFluoBlueBrush,
+            _ => EdgeBrush,
+        };
     }
 
     private void RenderMinimapNodes(PlanNode node, double scale)
@@ -249,14 +286,102 @@ public partial class PlanViewerControl
         var viewW = PlanScrollViewer.ActualWidth;
         var viewH = PlanScrollViewer.ActualHeight;
 
+        // Double-click on a node zooms to it and selects it in the main canvas, matching
+        // PerformanceStudio. A single click anywhere (node or not) centers the viewport there.
+        if (e.ClickCount == 2)
+        {
+            var node = MinimapLayout.FindNodeAt(_currentStatement.RootNode, pos.X, pos.Y, scale);
+            if (node != null)
+            {
+                ZoomToMinimapNode(node, viewW, viewH);
+                e.Handled = true;
+                return;
+            }
+        }
+
         var (offsetX, offsetY) = MinimapLayout.ClickToScrollOffset(pos.X, pos.Y, scale, _zoomLevel, viewW, viewH);
         PlanScrollViewer.ScrollToHorizontalOffset(offsetX);
         PlanScrollViewer.ScrollToVerticalOffset(offsetY);
         e.Handled = true;
     }
 
+    /// <summary>
+    /// Double-click-to-zoom: sets the main canvas' zoom so the node takes about a third of the
+    /// viewport, scrolls to center it, and selects it (same as clicking the node directly on the
+    /// main canvas), matching PerformanceStudio's <c>ZoomToNode</c>.
+    /// </summary>
+    private void ZoomToMinimapNode(PlanNode node, double viewportWidth, double viewportHeight)
+    {
+        var fitZoom = MinimapLayout.GetZoomToNodeLevel(
+            PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node), viewportWidth, viewportHeight, MinZoom, MaxZoom);
+        SetZoom(fitZoom);
+
+        var (offsetX, offsetY) = MinimapLayout.GetNodeCenterOffset(
+            node.X, node.Y, PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node),
+            _zoomLevel, viewportWidth, viewportHeight);
+        PlanScrollViewer.ScrollToHorizontalOffset(offsetX);
+        PlanScrollViewer.ScrollToVerticalOffset(offsetY);
+
+        foreach (var child in PlanCanvas.Children)
+        {
+            if (child is Border b && b.Tag is PlanNode n && n == node)
+            {
+                SelectNode(b, n);
+                break;
+            }
+        }
+    }
+
     private void PlanScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
     {
         UpdateMinimapViewportBox();
+    }
+
+    /* Resize drags are measured against this control (the UserControl), NOT against MinimapPanel.
+       The panel is pinned to the bottom-right, so growing it moves its own top-left corner — and
+       the grip lives in that corner. Measured in the panel's own coordinates the grip would
+       therefore sit still while the pointer moved, and the drag would fight itself. This control
+       does not move, so deltas taken from it mean what they say. */
+    private void MinimapResizeGrip_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _minimapResizing = true;
+        _minimapResizeStart = e.GetPosition(this);
+        _minimapResizeStartWidth = MinimapPanel.Width;
+        _minimapResizeStartHeight = MinimapPanel.Height;
+        ((UIElement)sender).CaptureMouse();
+        e.Handled = true;
+    }
+
+    private void MinimapResizeGrip_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_minimapResizing) return;
+
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            _minimapResizing = false;
+            return;
+        }
+
+        var current = e.GetPosition(this);
+        var deltaX = current.X - _minimapResizeStart.X;
+        var deltaY = current.Y - _minimapResizeStart.Y;
+        var (newWidth, newHeight) = MinimapLayout.ResizeFromDrag(_minimapResizeStartWidth, _minimapResizeStartHeight, deltaX, deltaY);
+
+        MinimapPanel.Width = newWidth;
+        MinimapPanel.Height = newHeight;
+        _minimapWidth = newWidth;
+        _minimapHeight = newHeight;
+        e.Handled = true;
+
+        RenderMinimap();
+    }
+
+    private void MinimapResizeGrip_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_minimapResizing) return;
+        _minimapResizing = false;
+        ((UIElement)sender).ReleaseMouseCapture();
+        e.Handled = true;
+        RenderMinimap();
     }
 }
