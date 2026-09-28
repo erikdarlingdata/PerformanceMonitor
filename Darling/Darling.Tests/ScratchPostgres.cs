@@ -48,7 +48,12 @@ internal sealed class ScratchPostgres : IAsyncDisposable
             Pooling = false,
         };
 
-        return new ScratchPostgres(baseConnectionString, databaseName, builder.ConnectionString);
+        /* Pinned to UTC the way every product store connection is, so a cluster whose default zone is behind UTC
+           cannot skew timestamp round trips (a chunk's range_end read back through a ::timestamp cast). */
+        return new ScratchPostgres(
+            baseConnectionString,
+            databaseName,
+            PerformanceMonitor.Darling.Storage.DarlingStoreConnection.PinSessionTimeZoneUtc(builder.ConnectionString));
     }
 
     public async ValueTask DisposeAsync()
