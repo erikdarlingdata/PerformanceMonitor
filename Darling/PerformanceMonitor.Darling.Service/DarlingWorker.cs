@@ -3161,7 +3161,7 @@ public sealed class DarlingWorker : BackgroundService
                 && (_fleetSweep is null || _fleetSweep.IsCompleted))
             {
                 var fleetSweepMinutes = FleetSweepEngine.ClampIntervalMinutes(config.Alerts.FleetSweepIntervalMinutes);
-                _nextFleetSweepUtc = DateTime.UtcNow.AddMinutes(fleetSweepMinutes);
+                _nextFleetSweepUtc = NextGridStamp(_nextFleetSweepUtc, DateTime.UtcNow, TimeSpan.FromMinutes(fleetSweepMinutes));
 
                 /* The whole registered population, connected or not — a sweep is about the fleet, and a
                    server that cannot be reached is exactly the kind of fact it must carry (its store rows
@@ -3179,7 +3179,7 @@ public sealed class DarlingWorker : BackgroundService
 
             if (DateTime.UtcNow >= _nextStoreMetricsUtc)
             {
-                _nextStoreMetricsUtc = DateTime.UtcNow.Add(s_storeMetricsInterval);
+                _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);
 
                 /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
                    same log-hash key the runner's log-event runs share. */
@@ -4791,6 +4791,14 @@ public sealed class DarlingWorker : BackgroundService
     /// </summary>
     internal static DateTime ColdStartFirstSweepDue(DateTime coldStartInstant, int serverId)
         => coldStartInstant.Add(CadencePhaseOffset(serverId, ColdStartSpreadSeconds));
+
+    /// <summary>
+    /// #4652: the next due time for a stamp on this loop, on a fixed grid: the first run (still at MinValue) anchors
+    /// the grid at now; after that, the previous due plus the interval, skipping missed slots, so a slow sweep or
+    /// the loop's own 15-second tick is never carried into the next slot.
+    /// </summary>
+    internal static DateTime NextGridStamp(DateTime currentDue, DateTime now, TimeSpan interval) =>
+        currentDue == DateTime.MinValue ? now + interval : CollectorCadence.NextDue(currentDue, now, interval);
 
     /// <summary>
     /// The pure #1575 seed policy for one collector's first post-connect / newly-enabled due time, decided from

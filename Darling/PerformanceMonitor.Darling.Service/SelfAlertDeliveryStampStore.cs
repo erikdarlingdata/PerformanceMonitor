@@ -42,13 +42,15 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public interface ISelfAlertDeliveryStampStore
 {
-    /// <summary>The UTC instant the document keyed <paramref name="stateKey"/> was last DELIVERED, or
+    /// <summary>The UTC slot the latest delivery of the document keyed <paramref name="stateKey"/> served (at or
+    /// before the send, less than one interval before it; #4652), or
     /// <c>null</c> when no delivery has ever been stamped (a fresh store, or a document that has only ever
     /// failed to deliver).</summary>
     Task<DateTime?> GetDeliveredAtUtcAsync(string stateKey, CancellationToken cancellationToken);
 
-    /// <summary>Records that the document keyed <paramref name="stateKey"/> was delivered at
-    /// <paramref name="deliveredAtUtc"/>, replacing any earlier stamp.</summary>
+    /// <summary>Records the slot the delivery of the document keyed <paramref name="stateKey"/> served,
+    /// <paramref name="deliveredAtUtc"/>, replacing any earlier stamp. A stamp written before slots were recorded
+    /// holds a send instant, which is simply the first slot.</summary>
     Task RecordDeliveredAtUtcAsync(string stateKey, DateTime deliveredAtUtc, CancellationToken cancellationToken);
 }
 
@@ -99,10 +101,10 @@ public sealed class PgSelfAlertDeliveryStampStore : ISelfAlertDeliveryStampStore
     public const string StateCollectorName = "self_alert";
 
     /// <summary>The digest's stamp key — one fixed row, the document's one fixed in-memory key made
-    /// durable.</summary>
+    /// durable. The value is the slot the latest delivery served (#4652).</summary>
     public const string CostDigestStateKey = "digest_delivered_at";
 
-    /// <summary>The fleet-sweep rollup's stamp key.</summary>
+    /// <summary>The fleet-sweep rollup's stamp key; the value is the slot the latest delivery served.</summary>
     public const string FleetSweepRollupStateKey = "sweep_rollup_delivered_at";
 
     /// <summary>The analysis singles digest's stamp key (#3712) — the third daily document, same shape.</summary>
