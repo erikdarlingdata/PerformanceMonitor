@@ -22,6 +22,7 @@ public partial class PlanViewerControl : UserControl
 {
     private ParsedPlan? _currentPlan;
     private PlanStatement? _currentStatement;
+    private int _allStatementsCount;
     private double _zoomLevel = 1.0;
     private const double ZoomStep = 0.15;
     private const double MinZoom = 0.1;
@@ -134,9 +135,18 @@ public partial class PlanViewerControl : UserControl
         }
     }
 
+    /// <summary>
+    /// The full query text the host passed <see cref="LoadPlan"/>, held for "Copy Query Text"'s
+    /// truncated-single-statement fallback (#4582, PerformanceStudio's <c>_queryText</c>): the same
+    /// text shown in <see cref="QueryTextExpander"/>, not re-derived from it, so the fallback still
+    /// works even if that panel's own text is edited or hidden later.
+    /// </summary>
+    public string? CapturedQueryText { get; private set; }
+
     public async System.Threading.Tasks.Task LoadPlan(string planXml, string label, string? queryText = null)
     {
         _label = label;
+        CapturedQueryText = queryText;
 
         if (!string.IsNullOrEmpty(queryText))
         {
@@ -172,9 +182,12 @@ public partial class PlanViewerControl : UserControl
 
         // #4514: includes statements nested inside a stored procedure or UDF body, so the
         // viewer's statement list shows the statements the analyzer actually found findings on.
+        // #4582: this count - not Batches.Sum - is also what "Copy Query Text" uses to decide
+        // whether the plan is single-statement, matching the grid.
         var allStatements = PlanStatements.EnumerateAll(_currentPlan)
             .Where(s => s.RootNode != null)
             .ToList();
+        _allStatementsCount = allStatements.Count;
 
         if (allStatements.Count == 0)
         {
@@ -212,6 +225,8 @@ public partial class PlanViewerControl : UserControl
         PlanCanvas.Children.Clear();
         _currentPlan = null;
         _currentStatement = null;
+        _allStatementsCount = 0;
+        CapturedQueryText = null;
         _selectedNodeBorder = null;
         EmptyStateTitle.Text = "No Plan Loaded";
         EmptyStateDetail.Visibility = Visibility.Visible;
@@ -380,9 +395,9 @@ public partial class PlanViewerControl : UserControl
     {
         if (StatementsGrid.SelectedItem is StatementRow row)
         {
-            var text = row.Statement.StatementText;
+            var text = PlanDisplayText.CopyQueryText(row.Statement, _allStatementsCount, CapturedQueryText);
             if (!string.IsNullOrEmpty(text))
-                Clipboard.SetText(text);
+                ClipboardText.TrySetText(text);
         }
     }
 
