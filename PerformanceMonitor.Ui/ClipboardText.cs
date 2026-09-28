@@ -32,9 +32,9 @@ namespace PerformanceMonitor.Ui;
 /// earlier version of this class assumed. Nothing here can see or shorten that internal loop; the only
 /// lever this class has is whether to make ANOTHER attempt once one returns. So the bound is two numbers,
 /// not one: a small attempt count, and a <c>Stopwatch</c> time budget checked between attempts - once the
-/// budget is already spent, the next attempt is skipped even if the attempt count has not run out, so one
-/// slower-than-measured call cannot compound with a second. See the constants below for the numbers this
-/// defends and why.</para>
+/// budget is already spent, the next attempt is skipped even if the attempt count has not run out. The
+/// budget can only skip an attempt, never cut one short, so the worst case is the budget plus one attempt;
+/// at the measured ~1.1 s per call it is about 2.3 s. See the constants below for the numbers and why.</para>
 ///
 /// Two read variants share one guarded read-attempt helper: the synchronous <see cref="TryRead"/> (for any
 /// non-async caller) sleeps the calling thread between attempts, while <see cref="TryReadAsync"/> awaits
@@ -56,9 +56,9 @@ public static class ClipboardText
     private const int RetryDelayMs = 25;
 
     // The backstop for a call slower than the ~1.1 s #4624 measured: checked between attempts, never
-    // mid-attempt (a WPF call already in flight can't be interrupted), so a slow attempt skips the next
-    // retry instead of compounding with it. Keeps the worst case near ~2.5 s even if one attempt runs
-    // longer than typical, instead of two slow attempts stacking past it.
+    // mid-attempt (a WPF call already in flight can't be interrupted), so a first attempt that alone spends
+    // the budget is not retried. An attempt that ends just inside the budget is still followed by one more,
+    // so the worst case is this budget plus one attempt, not the budget itself.
     private static readonly TimeSpan RetryBudget = TimeSpan.FromSeconds(2.5);
 
     // Shared by every retry loop below: true while there is both an attempt and a time budget left to
