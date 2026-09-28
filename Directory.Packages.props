@@ -30,7 +30,7 @@
     <PackageVersion Include="ScottPlot.WPF" Version="5.1.59" />
     <PackageVersion Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
     <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" />
-    <PackageVersion Include="Velopack" Version="1.2.0" />
+    <PackageVersion Include="Velopack" Version="1.2.158" />
     <PackageVersion Include="xunit.v3" Version="4.0.1" />
   </ItemGroup>
 </Project>

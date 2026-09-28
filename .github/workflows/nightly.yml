@@ -275,7 +275,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.version.outputs.VERSION }}"
-          dotnet tool install -g vpk --version 1.2.0
+          dotnet tool install -g vpk --version 1.2.158
           New-Item -ItemType Directory -Force -Path releases/velopack-darlingviewer
           vpk pack -u PerformanceMonitorDarlingViewer -v $version -p publish/DarlingViewer-velopack -e PerformanceMonitor.Darling.Viewer.exe -o releases/velopack-darlingviewer --channel darlingviewer
           $setup = Get-ChildItem releases/velopack-darlingviewer/*Setup.exe | Select-Object -First 1
