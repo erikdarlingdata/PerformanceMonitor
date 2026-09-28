@@ -40,15 +40,15 @@ public static partial class PlanAnalyzer
     /// </summary>
     public static void Analyze(ParsedPlan plan)
     {
-        foreach (var batch in plan.Batches)
+        /* #4514: every statement, including the ones inside a stored procedure or UDF body.
+           This used to walk batch.Statements alone, so an EXEC <procedure> plan analyzed as a
+           single statement with nothing to say about the statements actually doing the work. */
+        foreach (var stmt in PlanStatements.EnumerateAll(plan))
         {
-            foreach (var stmt in batch.Statements)
-            {
-                AnalyzeStatement(stmt);
+            AnalyzeStatement(stmt);
 
-                if (stmt.RootNode != null)
-                    AnalyzeNodeTree(stmt.RootNode, stmt);
-            }
+            if (stmt.RootNode != null)
+                AnalyzeNodeTree(stmt.RootNode, stmt);
         }
     }
 
