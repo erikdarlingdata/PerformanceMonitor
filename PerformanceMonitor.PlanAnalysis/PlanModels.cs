@@ -467,6 +467,16 @@ public class PlanWarning
     /// Short actionable fix suggestion (e.g., "Add INCLUDE (columns) to index").
     /// </summary>
     public string? ActionableFix { get; set; }
+
+    /// <summary>
+    /// True for rules that predate the benefit-scoring framework and haven't been folded into
+    /// A/B/C/D categorization yet, so reviewers know which findings to hold to a higher bar vs
+    /// which are known-legacy. Ported from erikdarlingdata/PerformanceStudio dev (85492a1)
+    /// commit aabbaa2, <c>src/PlanViewer.Core/Models/PlanModels.cs:459</c>. Set by
+    /// <see cref="PlanAnalyzer"/>'s legacy-marking pass, never on the engine's own warnings
+    /// (<see cref="PlanWarningSource.SqlServer"/>).
+    /// </summary>
+    public bool IsLegacy { get; set; }
 }
 
 public enum PlanWarningSeverity { Info, Warning, Critical }

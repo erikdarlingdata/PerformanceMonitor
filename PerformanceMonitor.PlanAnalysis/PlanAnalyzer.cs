@@ -126,6 +126,9 @@ public static partial class PlanAnalyzer
 
             if (stmt.RootNode != null)
                 AnalyzeNodeTree(stmt.RootNode, stmt, cfg, cancellationToken);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            MarkLegacyWarnings(stmt);
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -180,6 +183,68 @@ public static partial class PlanAnalyzer
 
         if (Enum.TryParse<PlanWarningSeverity>(overrideSeverity, ignoreCase: true, out var severity))
             warning.Severity = severity;
+    }
+
+    /// <summary>
+    /// Rule types that predate the benefit-scoring framework and haven't been folded into A/B/C/D
+    /// categorization yet. Tagged so reviewers can hold new-framework items to a higher bar vs
+    /// known-legacy items that will be reworked later. Ported verbatim from
+    /// erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.cs:132-153</c>.
+    /// Kept exactly as PS has it, including entries for rule types PM does not have removed here
+    /// (see #4566): none of the 21 entries are missing from PM's rule set.
+    /// </summary>
+    private static readonly HashSet<string> LegacyWarningTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Excessive Memory Grant",
+        "Large Memory Grant",
+        "Compile Memory Exceeded",
+        "Local Variables",
+        "Optimize For Unknown",
+        "Low Impact Index",
+        "Wide Index Suggestion",
+        "Duplicate Index Suggestions",
+        "Table Variable",
+        "Scalar UDF",
+        "Parallel Skew",
+        "Estimated Plan CE Guess",
+        "Data Type Mismatch",
+        "Lazy Spool Ineffective",
+        "Join OR Clause",
+        "Many-to-Many Merge Join",
+        "Table-Valued Function",
+        "Top Above Scan",
+        "Row Goal",
+        "NOT IN with Nullable Column",
+        "Implicit Conversion",
+    };
+
+    /* MarkLegacyWarnings matches on WarningType alone, and a type name is not unique to the analyzer:
+       "Implicit Conversion" is rule 29's legacy-listed type AND what the parser stamps on the
+       engine's own PlanAffectingConvert element (Source = SqlServer). Matching by name only would
+       therefore brand the ENGINE's record "[SQL Server] [legacy]" -- a badge that exists to flag
+       un-migrated analyzer rules on a warning that is not the analyzer's at all. Legacy status is a
+       fact about the analyzer's own rules, so anything the engine said is skipped. Ported from
+       erikdarlingdata/PerformanceStudio dev (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalyzer.Helpers.cs:11-40</c>. */
+    private static void MarkLegacyWarnings(PlanStatement stmt)
+    {
+        foreach (var w in stmt.PlanWarnings)
+        {
+            if (w.Source != PlanWarningSource.SqlServer && LegacyWarningTypes.Contains(w.WarningType))
+                w.IsLegacy = true;
+        }
+        if (stmt.RootNode != null)
+            MarkLegacyWarningsOnTree(stmt.RootNode);
+    }
+
+    private static void MarkLegacyWarningsOnTree(PlanNode node)
+    {
+        foreach (var w in node.Warnings)
+        {
+            if (w.Source != PlanWarningSource.SqlServer && LegacyWarningTypes.Contains(w.WarningType))
+                w.IsLegacy = true;
+        }
+        foreach (var child in node.Children)
+            MarkLegacyWarningsOnTree(child);
     }
 
     private static void AnalyzeStatement(PlanStatement stmt, AnalyzerConfig cfg, ServerMetadata? serverMetadata)
