@@ -22,6 +22,7 @@ public partial class PlanViewerWindow : Window
     public PlanViewerWindow()
     {
         InitializeComponent();
+        Viewer.AccuracyRatioDivergenceLimit = App.AccuracyRatioDivergenceLimit;
         // The shared PlanViewerControl needs an explicit Cleanup() to unsubscribe ThemeManager.
         Closed += (_, _) => Viewer.Cleanup();
     }

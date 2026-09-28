@@ -66,7 +66,8 @@
                             Background="{DynamicResource BackgroundDarkBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <StackPanel>
-                            <TextBlock Text="Runtime Summary"
+                            <TextBlock x:Name="RuntimeSummaryTitle"
+                                       Text="Runtime Summary"
                                        FontSize="13"
                                        FontWeight="SemiBold"
                                        Foreground="{DynamicResource ForegroundBrush}"

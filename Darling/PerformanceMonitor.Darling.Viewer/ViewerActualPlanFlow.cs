@@ -105,7 +105,7 @@ public static class ViewerActualPlanFlow
     public static async Task OpenFloatingPlanAsync(
         Window owner, ViewerDataService dataService, int serverId, string planXml, string label, string? queryText)
     {
-        var viewer = new PlanViewerControl();
+        var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = ViewerExportSettings.AccuracyRatioDivergenceLimit };
         try
         {
             /* #4530: best-effort — a failed metadata read leaves ServerMetadata null, same as the pre-#4530
