@@ -9408,7 +9408,7 @@ WHERE ca.view_schema = 'collect'
         }
 
         var cache = RollupFloorCaches.GetOrCreateValue(dataSource);
-        IReadOnlySet<string>? measure = null;
+        HashSet<string>? measure = null;
         Dictionary<string, RollupChunkIdentity>? oldestNow = null;
         Dictionary<string, RollupFloorCacheEntry> cachedSnapshot;
         lock (cache.Lock)
