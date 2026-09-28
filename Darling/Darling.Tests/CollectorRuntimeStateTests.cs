@@ -401,9 +401,10 @@ public sealed class CollectorRuntimeStateTests
 
         var calls = Regex.Matches(code, @"_collectorState\.PublishRetrying\((?<args>[^)]*)\)").ToList();
         Assert.True(
-            calls.Count == 3,
+            calls.Count == 4,
             $"expected a retry publish on each of the three collection-blocking startup steps (config load, "
-            + $"managed-Postgres bootstrap, store connect/migrate); found {calls.Count}.");
+            + $"managed-Postgres bootstrap, store connect/migrate) plus the store site's #4508 sustained-retry "
+            + $"arm (fast budget spent, still retryable); found {calls.Count}.");
 
         foreach (var call in calls)
         {
