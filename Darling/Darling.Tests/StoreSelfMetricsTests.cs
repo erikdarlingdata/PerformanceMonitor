@@ -270,14 +270,34 @@ public sealed class StoreSelfMetricsTests
     /// not here would vanish from both.
     /// </summary>
     [Fact]
-    public void TableInsertSql_NamesTheThreeProductTables_AndTheCensusExcludesExactlyThose()
+    public void TableInsertSql_NamesTheSevenProductTables_AndTheCensusExcludesExactlyThose()
     {
         var sql = StoreSelfMetrics.TableInsertSql;
         Assert.Equal("table", StoreSelfMetrics.TableObjectKind);
         Assert.Contains($"'{StoreSelfMetrics.TableObjectKind}'", sql, StringComparison.Ordinal);
 
-        var qualified = new[] { QueryStoreTextStore.TableName, QueryStorePlanMap.TableName, StoreSelfMetrics.AlertLogTable };
-        Assert.Equal(new[] { "collect.query_store_text", "collect.query_store_plan_map", "config.config_alert_log" }, qualified);
+        var qualified = new[]
+        {
+            QueryStoreTextStore.TableName,
+            QueryStorePlanMap.TableName,
+            StoreSelfMetrics.AlertLogTable,
+            "collect." + QueryStoreIntervalLatest.TableName,
+            "collect." + QueryStoreIntervalLatest.PendingTableName,
+            "collect." + QueryStoreIntervalWide.TableName,
+            "collect." + QueryStoreIntervalWide.PendingTableName,
+        };
+        Assert.Equal(
+            new[]
+            {
+                "collect.query_store_text",
+                "collect.query_store_plan_map",
+                "config.config_alert_log",
+                "collect.query_store_interval_latest",
+                "collect.query_store_interval_latest_pending",
+                "collect.query_store_interval_wide",
+                "collect.query_store_interval_wide_pending",
+            },
+            qualified);
 
         foreach (var table in qualified)
         {
@@ -295,15 +315,81 @@ public sealed class StoreSelfMetricsTests
         /* The two payload dimensions are in the same predicate, so they leave the catch-all too. */
         Assert.Contains($"'collect.{PayloadDimensions.QueryTextDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
         Assert.Contains($"'collect.{PayloadDimensions.QueryPlanDimTable}'", StoreSelfMetrics.NamedRelationPredicateSql, StringComparison.Ordinal);
-        /* Exactly five names, and none of them typed by hand: every quoted name in the predicate is one of
-           the five constants. */
+        /* Exactly nine names, and none of them typed by hand: every quoted name in the predicate is one of
+           the nine constants. */
         var quoted = System.Text.RegularExpressions.Regex.Matches(StoreSelfMetrics.NamedRelationPredicateSql, @"'([^']+)'").Select(m => m.Groups[1].Value).ToArray();
-        Assert.Equal(6, quoted.Length); /* five names plus the '.' separator literal */
+        Assert.Equal(10, quoted.Length); /* nine names plus the '.' separator literal */
         Assert.Equal(
             new[] { $"collect.{PayloadDimensions.QueryTextDimTable}", $"collect.{PayloadDimensions.QueryPlanDimTable}" }.Concat(qualified).OrderBy(x => x, StringComparer.Ordinal),
             quoted.Where(q => q != ".").OrderBy(x => x, StringComparer.Ordinal));
-        Assert.Equal(3, sql.Split("UNION ALL").Length);
+        Assert.Equal(7, sql.Split("UNION ALL").Length);
         Assert.DoesNotContain("count(*)", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The census (#4609): every plain (non-hypertable) <c>collect.*</c> table the migrations create is
+    /// either one of <see cref="StoreSelfMetrics.NamedRelationPredicateSql"/>'s named tables or listed here
+    /// with a one-line reason it deliberately stays in <see cref="StoreSelfMetrics.OtherObjectKind"/>. RED
+    /// on the code before #4609 named only three: it would have found the four per-interval tables missing
+    /// from both lists and failed.
+    /// </summary>
+    [Fact]
+    public void PlainCollectTableCensus_EveryTableIsNamedOrDeliberatelyInOther()
+    {
+        /* The CREATE TABLE statements live inside SQL string literals, not code, so this reads their
+           BODIES (CSharpSourceWalker.StringLiteralBodies) rather than the stripped-code text
+           StripCommentsAndStrings produces — that would blank exactly the text this census needs. */
+        var migrationsPath = Path.Combine(RepoRoot(), "Darling", "PerformanceMonitor.Darling.Storage", "PgMigrations.cs");
+        var rawText = File.ReadAllText(migrationsPath);
+        var literalText = string.Join("\n", CSharpSourceWalker.StringLiteralBodies(rawText).Select(b => b.Text));
+
+        var plainTables = Regex.Matches(literalText, @"CREATE TABLE IF NOT EXISTS collect\.([a-z0-9_]+)")
+            .Select(m => "collect." + m.Groups[1].Value)
+            .Distinct()
+            .ToArray();
+        Assert.NotEmpty(plainTables);
+
+        var hypertableTables = PerformanceMonitor.Collectors.CollectorCatalog.All
+            .Select(c => c.TargetTable.Contains('.', StringComparison.Ordinal) ? c.TargetTable : "collect." + c.TargetTable)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var named = Regex.Matches(StoreSelfMetrics.NamedRelationPredicateSql, @"'([^']+)'")
+            .Select(m => m.Groups[1].Value)
+            .Where(q => q != "." && q.StartsWith("collect.", StringComparison.Ordinal))
+            .ToHashSet(StringComparer.Ordinal);
+
+        /* Every plain collect.* table the product creates that is neither a hypertable nor a named row must
+           be one of these, with the one-line reason it is deliberately left in "other". Adding a plain table
+           without updating one of the three lists fails here — the census's whole point. */
+        var deliberatelyOther = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["collect.query_store_interval_latest_coverage"] = "one row per server, bytes too small to matter; the owning table's health already surfaces it",
+            ["collect.query_store_interval_wide_coverage"] = "one row per server, bytes too small to matter; the owning table's health already surfaces it",
+            ["collect.raw_chunk_interval_rung_history"] = "self-telemetry about the store's own tuning, not collected monitoring data (V144 doc)",
+            ["collect.raw_chunk_interval_reconcile_runs"] = "self-telemetry about the store's own tuning, not collected monitoring data (V144 doc)",
+            ["collect.store_metrics"] = "the inventory measuring itself would recurse; StoreMetrics_IsNotACollectorTable pins the exclusion",
+            ["collect.collector_state"] = "per-server collector bookkeeping, bytes too small to matter",
+            ["collect.collector_cost"] = "per-server collector telemetry, bytes too small to matter",
+            ["collect.collector_stall_probes"] = "per-server collector telemetry, bytes too small to matter",
+            ["collect.analysis_state"] = "per-server analysis bookkeeping, bytes too small to matter",
+            ["collect.analysis_collection_caveats"] = "per-server analysis bookkeeping, bytes too small to matter",
+            ["collect.managed_conf_verdicts"] = "per-server bookkeeping, bytes too small to matter",
+            ["collect.default_trace_events"] = "a static reference table shipped by the product, not growth to watch",
+            ["collect.job_history"] = "per-server bookkeeping, bytes too small to matter",
+            ["collect.store_log_events"] = "self-telemetry about the store's own logging, not collected monitoring data",
+            ["collect.store_log_captures"] = "self-telemetry about the store's own logging, not collected monitoring data",
+            ["collect.read_latency"] = "internal self-telemetry (the read-path histogram), not collected monitoring data (V148 doc)",
+            ["collect.pg_statement_text"] = "dimension-shaped content keyed to facts rather than collected as facts, pruned on last_seen (V73 doc)",
+            ["collect.plan_force_actions"] = "the force-plan bot's append-only audit ledger, not collected monitoring data (V107 doc)",
+        };
+
+        var unaccounted = plainTables
+            .Where(t => !hypertableTables.Contains(t))
+            .Where(t => !named.Contains(t))
+            .Where(t => !deliberatelyOther.ContainsKey(t))
+            .ToArray();
+
+        Assert.Empty(unaccounted);
     }
 
     /// <summary>
