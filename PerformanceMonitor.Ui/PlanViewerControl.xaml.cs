@@ -56,6 +56,15 @@ public partial class PlanViewerControl : UserControl
     // Current property section for collapsible groups
     private StackPanel? _currentPropertySection;
 
+    // Properties panel row model, filter and remembered width (#4574). The width is static so a
+    // width the user drags out survives closing the panel and switching plan tabs.
+    private const double DefaultPropertiesWidth = PerformanceMonitor.PlanAnalysis.PropertyRows.DefaultPropertiesWidth;
+    private const double MinPropertiesWidth = PerformanceMonitor.PlanAnalysis.PropertyRows.MinPropertiesWidth;
+    private const double MaxPropertiesWidth = PerformanceMonitor.PlanAnalysis.PropertyRows.MaxPropertiesWidth;
+    private static double _propertiesPanelWidth = DefaultPropertiesWidth;
+    private readonly List<PropertyPanelSection> _propertySections = new();
+    private PropertyPanelSection? _currentSection;
+
     // Canvas panning
     private bool _isPanning;
     private Point _panStart;
@@ -69,6 +78,18 @@ public partial class PlanViewerControl : UserControl
            fires Unloaded when you switch tabs, which would permanently detach this handler.
            Hosts call Cleanup() when the plan tab/window is actually closed. */
         ThemeManager.ThemeChanged += OnThemeChanged;
+
+        // The splitter writes the dragged size straight onto the column, so that is where the
+        // remembered width (#4574) comes from - no drag tracking of our own.
+        var widthDescriptor = System.ComponentModel.DependencyPropertyDescriptor.FromProperty(
+            System.Windows.Controls.ColumnDefinition.WidthProperty, typeof(ColumnDefinition));
+        widthDescriptor?.AddValueChanged(PropertiesColumn, (_, _) =>
+        {
+            if (PropertiesPanel.Visibility != Visibility.Visible) return;
+            var width = PropertiesColumn.Width;
+            if (width.IsAbsolute && width.Value > 0)
+                _propertiesPanelWidth = width.Value;
+        });
     }
 
     /// <summary>Unsubscribes from theme changes. Hosts must call this when the plan tab/window is closed.</summary>
