@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -308,12 +309,16 @@ public sealed class AnalysisPassTokenThreadingTests
     /// interval of the token actually firing. What flaked was getting the token to fire promptly at all.
     /// So the reader now cancels explicitly, from the thread that already knows it is waiting, instead of
     /// hoping a background timer beats a race it does not control: the writer signals once it holds the
-    /// lock, the reader signals once it is about to call <c>AcquireReadLock</c>, and only once both signals
-    /// are observed does the test call <c>Cancel()</c> itself. Because the writer still holds its exclusive
-    /// lock at that point — nothing releases it before the <c>finally</c> below — the reader is guaranteed
-    /// to be genuinely waiting on the writer, not merely about to check a token it has not tried yet, when
-    /// the cancellation arrives. The one wall-clock number left, on the final wait, is a generous backstop
-    /// against a genuine hang, not a budget this test is trying to meet.</para>
+    /// lock, the reader signals once it is about to call <c>AcquireReadLock</c> — but that signal alone
+    /// fires before <c>AcquireReadLock</c> is even called, so cancelling on it alone would usually race
+    /// ahead of the read-lock attempt and catch nothing but an already-cancelled first check, never a
+    /// genuine abandonment. So the test also spins on the lock's own <c>WaitingReadCount</c>, which only
+    /// turns positive once a thread is truly blocked entering it, and only once that is observed too does
+    /// the test call <c>Cancel()</c> itself. Because the writer still holds its exclusive lock at that
+    /// point — nothing releases it before the <c>finally</c> below — a positive <c>WaitingReadCount</c>
+    /// means the reader is genuinely waiting on the writer, not merely about to check a token it has not
+    /// tried yet, when the cancellation arrives. The one wall-clock number left, on the final wait, is a
+    /// generous backstop against a genuine hang, not a budget this test is trying to meet.</para>
     /// </summary>
     [Fact]
     public async Task TheReadLockWaitIsAbandonableWhileAWriterHoldsIt()
@@ -349,6 +354,23 @@ public sealed class AnalysisPassTokenThreadingTests
             });
 
             Assert.True(readerIsWaiting.Wait(TimeSpan.FromSeconds(30)), "the reader never started waiting");
+
+            /* readerIsWaiting only proves the reader TASK has started, not that it has reached the
+               poll loop inside AcquireReadLock yet — cancelling right here would usually race ahead of
+               that call and throw out of the loop's very first ThrowIfCancellationRequested() check,
+               which passes even for a "check once, then block uncancellably" regression that never
+               truly abandons a wait. So spin on the lock's own WaitingReadCount, which only turns
+               positive once a thread is genuinely blocked trying to enter it, and only then cancel.
+               s_dbLock is one static field shared by every DuckDbInitializer in the process, so a
+               parallel run of the rest of the suite could tick another test's blocked reader over this
+               count too — that can only make the spin resolve earlier than this test's own reader
+               blocks, never later, and this test's own writer holds the lock regardless, so it cannot
+               turn a real failure into a false pass. */
+            var dbLock = (ReaderWriterLockSlim)typeof(DuckDbInitializer)
+                .GetField("s_dbLock", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+            Assert.True(SpinWait.SpinUntil(() => dbLock.WaitingReadCount >= 1, TimeSpan.FromSeconds(30)),
+                "no reader ever blocked on the lock");
+            await Task.Delay(100); // settle margin of two poll intervals; nothing asserted on it
 
             /* Explicit and synchronous — Cancel() runs on this thread, not a delay-timer callback that
                needs its own ThreadPool slot, so nothing races the reader's start-up anymore. */
