@@ -170,7 +170,10 @@ public static class McpPlanAnalysisFormatter
                             message = w.Message,
                             source = w.Source.ToString(),
                             origin_node_ids = w.OriginNodeIds,
-                            max_benefit_percent = w.MaxBenefitPercent
+                            max_benefit_percent = w.MaxBenefitPercent,
+                            // #4566: PerformanceStudio dev (85492a1) src/PlanViewer.Core/Output/ResultMapper.cs:255,
+                            // JSON name "is_legacy".
+                            is_legacy = w.IsLegacy
                         }),
                     warning_count = allWarnings.Count,
                     critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
