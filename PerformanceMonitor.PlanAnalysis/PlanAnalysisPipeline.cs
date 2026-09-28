@@ -52,8 +52,9 @@ public static class PlanAnalysisPipeline
 
     /// <summary>
     /// Parses <paramref name="xml"/> on the async path (<see cref="ShowPlanParser.ParseAsync"/>,
-    /// which enforces <see cref="ShowPlanParser.MaxParseCharacters"/> via the reader rather than
-    /// a string-length check), then runs the same analyze/score pipeline as <see cref="Run"/>.
+    /// a thin wrapper over the same dedicated-thread parse <see cref="ShowPlanParser.Parse"/>
+    /// uses, with the same up-front <see cref="ShowPlanParser.MaxParseCharacters"/> check), then
+    /// runs the same analyze/score pipeline as <see cref="Run"/>.
     /// </summary>
     public static async Task<ParsedPlan> RunAsync(string xml, CancellationToken cancellationToken)
     {

@@ -99,22 +99,29 @@ public sealed class PlanSync4512CancellationTests
     }
 
     /// <summary>
-    /// (d) <see cref="ShowPlanParser.ParseAsync"/> enforces <see cref="ShowPlanParser.MaxParseCharacters"/>
-    /// at the reader level (<c>XmlReaderSettings.MaxCharactersInDocument</c>) for XML over the
-    /// limit: <see cref="ParsedPlan.ParseError"/> is set, with no exception and no
-    /// <see cref="OperationCanceledException"/> — a size refusal is a parse failure, not a
-    /// cancellation.
+    /// (d) <see cref="ShowPlanParser.ParseAsync"/> now enforces <see cref="ShowPlanParser.MaxParseCharacters"/>
+    /// with the same up-front <c>xml.Length</c> check the synchronous path uses, so a document
+    /// just one character over the limit is refused before any parse work runs —
+    /// <see cref="ParsedPlan.ParseError"/> is set, with no exception and no
+    /// <see cref="OperationCanceledException"/>. A valid small plan padded with one XML comment
+    /// to exactly <c>MaxParseCharacters + 1</c> chars proves the boundary without building the
+    /// ~150 MB string the old reader-level check needed to exercise.
     /// </summary>
     [Fact]
     public async System.Threading.Tasks.Task ParseAsyncOverTheSizeLimitSetsParseErrorWithNoException()
     {
-        // 400,000 statements is ~150 MB, comfortably over MaxParseCharacters (16 MB) without
-        // needing to build a string right at the boundary.
-        var xml = ManyStatementsPlan(400_000);
+        var body = OneStatementPlan();
+        var padding = ShowPlanParser.MaxParseCharacters + 1 - body.Length - "<!---->".Length;
+        var xml = $"<!--{new string('x', padding)}-->{body}";
+
+        Assert.Equal(ShowPlanParser.MaxParseCharacters + 1, xml.Length);
 
         var plan = await ShowPlanParser.ParseAsync(xml, CancellationToken.None);
 
         Assert.NotNull(plan.ParseError);
+        Assert.Equal(
+            $"Plan XML exceeds the supported size limit of {ShowPlanParser.MaxParseCharacters:N0} characters.",
+            plan.ParseError);
     }
 
     /// <summary>

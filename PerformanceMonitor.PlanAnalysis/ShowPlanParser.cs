@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,28 +44,72 @@ public static class ShowPlanParser
             return plan;
         }
 
-        // #4512: the tree walk below can be cancelled by the caller — the dedicated thread it
-        // runs on has no way to see the CALLER's OperationCanceledException, so an exception
-        // captured on that thread crosses back over the Join() below and gets rethrown here.
-        Exception? capturedException = null;
+        var (thread, tcs) = StartParseThread(xml, plan, cancellationToken);
+        thread.Join();
+        // The dedicated thread already completed tcs by the time Join() returns, so this never
+        // actually waits — it only unwraps the result or rethrows the captured exception with
+        // its original stack intact (Task's exception plumbing uses ExceptionDispatchInfo under
+        // the hood, the same effect ExceptionDispatchInfo.Capture/.Throw would give directly).
+        return tcs.Task.GetAwaiter().GetResult();
+    }
 
-        // The recursive tree walk below can need more stack than the calling thread has
-        // (see ParseThreadStackBytes above), so it always runs on a dedicated thread sized to
-        // guarantee MaxParseDepth is reachable, regardless of whether the caller is a
-        // thread-pool worker, an ASP.NET request thread, or the WPF UI thread.
-        var result = plan;
+    /// <summary>
+    /// The async path: a thin wrapper over the same dedicated-thread parse <see cref="Parse"/>
+    /// uses — it never walks the tree itself, so it can't bring back the stack overflow a
+    /// deeply nested plan caused when this method parsed on the caller's own continuation
+    /// thread (#4551). Enforces the same up-front <see cref="MaxParseCharacters"/> check as
+    /// <see cref="Parse"/>. Every parse caller in production today — the MCP plan tools, the
+    /// analysis passes, and the drill-downs — uses the synchronous <see cref="Parse"/>;
+    /// <see cref="PlanAnalysisPipeline.RunAsync"/> is this method's only caller.
+    /// </summary>
+    public static Task<ParsedPlan> ParseAsync(string xml, CancellationToken cancellationToken)
+    {
+        var plan = new ParsedPlan { RawXml = xml };
+
+        if (xml.Length > MaxParseCharacters)
+        {
+            plan.ParseError = $"Plan XML exceeds the supported size limit of {MaxParseCharacters:N0} characters.";
+            return Task.FromResult(plan);
+        }
+
+        var (_, tcs) = StartParseThread(xml, plan, cancellationToken);
+        return tcs.Task;
+    }
+
+    // Shared by Parse and ParseAsync: starts the dedicated thread sized for MaxParseDepth (see
+    // ParseThreadStackBytes above) and completes tcs from it. Parse blocks on thread.Join() and
+    // then unwraps tcs.Task; ParseAsync returns tcs.Task directly without blocking its caller.
+    private static (Thread Thread, TaskCompletionSource<ParsedPlan> Tcs) StartParseThread(
+        string xml,
+        ParsedPlan plan,
+        CancellationToken cancellationToken)
+    {
+        var tcs = new TaskCompletionSource<ParsedPlan>(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
             {
                 try
                 {
-                    ParseOnDedicatedThread(xml, result, cancellationToken);
+                    ParseOnDedicatedThread(xml, plan, cancellationToken);
+                    tcs.TrySetResult(plan);
                 }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                catch (OperationCanceledException oce) when (cancellationToken.IsCancellationRequested)
                 {
                     // Caught here (rather than inside ParseOnDedicatedThread's own try/catch)
                     // because that catch turns everything into a ParseError, and a cancellation
                     // must reach the caller as OperationCanceledException, not ParseError.
-                    capturedException = new OperationCanceledException(cancellationToken);
+                    // TrySetException (rather than TrySetCanceled) keeps this exact exception,
+                    // stack included, so both Parse's GetResult() and ParseAsync's await rethrow
+                    // it unchanged.
+                    tcs.TrySetException(oce);
+                }
+                catch (Exception ex)
+                {
+                    // Anything else here (e.g. an OutOfMemoryException building the XDocument
+                    // near MaxParseCharacters) is running on a non-pool thread — the runtime has
+                    // nowhere to route it if it escapes, and it ends the whole process. Route it
+                    // to a ParseError instead of letting it become the next crash.
+                    plan.ParseError ??= ex.Message;
+                    tcs.TrySetResult(plan);
                 }
             },
             ParseThreadStackBytes)
@@ -74,65 +117,16 @@ public static class ShowPlanParser
             IsBackground = true,
         };
         thread.Start();
-        thread.Join();
-        if (capturedException is not null)
-            throw capturedException;
-        return result;
+        return (thread, tcs);
     }
 
-    /// <summary>
-    /// The async path: enforces <see cref="MaxParseCharacters"/> at the reader level via
-    /// <see cref="XmlReaderSettings.MaxCharactersInDocument"/> (the synchronous <see cref="Parse"/>
-    /// checks the string length up front; this path streams instead, so the reader itself is the
-    /// guard), and observes <paramref name="cancellationToken"/> while loading and while walking
-    /// the tree. Used by callers already on an async path (the MCP plan tools, the Darling and
-    /// Lite analysis passes) so a caller's cancellation reaches the parser instead of running to
-    /// completion on a plan nobody is waiting for.
-    /// </summary>
-    public static async Task<ParsedPlan> ParseAsync(string xml, CancellationToken cancellationToken)
-    {
-        var plan = new ParsedPlan { RawXml = xml };
-        try
-        {
-            var settings = new XmlReaderSettings
-            {
-                Async = true,
-                DtdProcessing = DtdProcessing.Prohibit,
-                MaxCharactersInDocument = MaxParseCharacters,
-                XmlResolver = null
-            };
-            using var textReader = new StringReader(xml);
-            using var xmlReader = XmlReader.Create(textReader, settings);
-            var document = await XDocument
-                .LoadAsync(xmlReader, LoadOptions.None, cancellationToken)
-                .ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            ParseDocument(document, plan, cancellationToken);
-            return plan;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (XmlException ex)
-        {
-            plan.ParseError = $"The plan XML could not be read: {ex.Message}";
-            return plan;
-        }
-        catch (Exception ex)
-        {
-            plan.ParseError = ex.Message;
-            return plan;
-        }
-    }
-
-    // This runs on the dedicated thread started in Parse, not a thread-pool thread. An
-    // unhandled exception on a non-pool thread is fatal to the whole process (the runtime has
+    // This runs on the dedicated thread started by StartParseThread, not a thread-pool thread.
+    // An unhandled exception on a non-pool thread is fatal to the whole process (the runtime has
     // nowhere to route it), so every statement below must stay inside one of the two try blocks
     // here; nothing may run between or after them unguarded. A cancellation thrown from either
-    // try block propagates past this method to the wrapper in Parse, which captures it and
-    // rethrows it on the caller's thread — it must NOT be caught by the generic catch below,
-    // since that would turn it into a ParseError instead of an OperationCanceledException.
+    // try block propagates past this method to StartParseThread's lambda, which routes it to
+    // tcs.TrySetException — it must NOT be caught by the generic catch below, since that would
+    // turn it into a ParseError instead of an OperationCanceledException.
     private static void ParseOnDedicatedThread(string xml, ParsedPlan plan, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
