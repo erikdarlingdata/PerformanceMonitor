@@ -25,10 +25,10 @@ public sealed class ViewerWaitRowBenefitTests
     {
         var warnings = new List<PlanWarning>
         {
-            new() { WarningType = "Wait: CXPACKET", MaxBenefitPercent = 27.4 },
+            new() { WarningType = "Wait: CXPACKET", MaxBenefitPercent = 42.6 },
         };
 
-        Assert.Equal("up to 27.4%", WaitRowText.Benefit("CXPACKET", warnings));
+        Assert.Equal("up to 43%", WaitRowText.Benefit("CXPACKET", warnings));
     }
 
     [Fact]
@@ -39,11 +39,11 @@ public sealed class ViewerWaitRowBenefitTests
             new() { WarningType = "Wait: cxpacket", MaxBenefitPercent = 12.0 },
         };
 
-        Assert.Equal("up to 12.0%", WaitRowText.Benefit("CXPACKET", warnings));
+        Assert.Equal("up to 12%", WaitRowText.Benefit("CXPACKET", warnings));
     }
 
     [Fact]
-    public void Benefit_UsesTheSharedWholeNumberFormat_AtAndAbove100()
+    public void Benefit_UsesAWholeNumber_AtAndAbove100()
     {
         var warnings = new List<PlanWarning>
         {
@@ -51,6 +51,17 @@ public sealed class ViewerWaitRowBenefitTests
         };
 
         Assert.Equal("up to 100%", WaitRowText.Benefit("PAGEIOLATCH_SH", warnings));
+    }
+
+    [Fact]
+    public void Benefit_RoundsAFractionalScore_ToTheNearestWholePercent()
+    {
+        var warnings = new List<PlanWarning>
+        {
+            new() { WarningType = "Wait: CXPACKET", MaxBenefitPercent = 0.4 },
+        };
+
+        Assert.Equal("up to 0%", WaitRowText.Benefit("CXPACKET", warnings));
     }
 
     [Fact]

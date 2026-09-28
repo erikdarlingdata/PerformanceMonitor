@@ -40,6 +40,6 @@ public static class WaitRowText
         if (finding?.MaxBenefitPercent is not double pct || pct <= 0)
             return null;
 
-        return $"up to {PlanWarningDisplay.FormatBenefitPercent(pct)}%";
+        return $"up to {pct:N0}%";
     }
 }
