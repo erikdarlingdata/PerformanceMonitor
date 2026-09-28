@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Windows.Media;
 using PerformanceMonitor.Ui;
 using Xunit;
@@ -24,17 +25,33 @@ namespace Darling.Tests;
 /// 3.44:1 on Light, 4.46:1 on Dark's node background) — all under WCAG AA's 4.5:1 floor for text.
 ///
 /// <para>The fix reuses the existing theme-token <c>WarningBrush</c> for the "warning" tier (badge,
-/// impact %, skew, cost 25-49%) and adds one new theme token, <c>PlanCriticalOrangeBrush</c>, for the
-/// "critical" tier (cost &gt;= 50%, elapsed/CPU &gt;= 1s, row estimate off by 10x+) — still orange,
-/// still one tier more severe than the warning brush, tuned per theme. This reads every theme's real
-/// declared hex, the same way <c>ThemeStatusContrastTests</c> (#3609) does, and measures with the
-/// shared <see cref="WcagContrast"/> helper, so the pin and any future Settings readout cannot
-/// disagree about a ratio.</para>
+/// impact %, skew, cost 25-49%) and adds one new theme token for the "critical" tier (cost &gt;= 50%,
+/// elapsed/CPU &gt;= 1s, row estimate off by 10x+) — still orange, still one tier more severe than the
+/// warning brush, tuned per theme. That token is <c>CriticalTextBrush</c> (#4632: renamed from the
+/// original <c>PlanCriticalOrangeColor</c>/<c>PlanCriticalOrangeBrush</c> pair) — a literal-hex
+/// <c>SolidColorBrush</c> with no backing <c>&lt;Color&gt;</c> key, the same shape as
+/// <c>WarningTextBrush</c>, so it sits outside the eighteen-key user-overridable palette
+/// <c>ThemeColorOverrideTests</c> pins. This reads every theme's real declared hex, the same way
+/// <c>ThemeStatusContrastTests</c> (#3609) does, and measures with the shared
+/// <see cref="WcagContrast"/> helper, so the pin and any future Settings readout cannot disagree
+/// about a ratio.</para>
+///
+/// <para>Lite and the Darling Viewer only. The deprecated Dashboard's three theme files do not carry
+/// <c>CriticalTextBrush</c> — out of scope, #4632 — so <c>PlanViewerControl</c> falls back to
+/// <c>Brushes.OrangeRed</c> there instead of a per-theme shade.</para>
 ///
 /// <para>Only Light and Dark are held to the 4.5:1 floor here, matching the issue's own two named
 /// themes. Cool Breeze gets an existence-only check: its own <c>WarningColor</c> (unchanged by this
 /// fix, pre-existing) measures 4.41:1 against the properties panel background — a hair under the
 /// floor the issue didn't ask this PR to also close.</para>
+///
+/// <para>#4635 added a fourth background to the floor: the Lite and Darling Viewer status bar's
+/// <c>CollectorHealthText</c>, which also takes <c>CriticalTextBrush</c> when collectors are
+/// erroring or capture is down. Both apps' status bar sits directly on <c>BackgroundLightColor</c>
+/// with nothing between it and the text — the same key already checked as
+/// <see cref="NodeBackgroundKey"/>, kept as its own <see cref="StatusBarBackgroundKey"/> constant and
+/// assertion rather than left to that coincidence. No per-theme value changed for #4635: the existing
+/// #4629 hex already clears this background too.</para>
 /// </summary>
 public class Viewer4629Tests
 {
@@ -46,24 +63,29 @@ public class Viewer4629Tests
     // DynamicResource BackgroundDarkBrush) — what the skew text and missing-index impact % sit on.
     private const string PanelBackgroundKey = "BackgroundDarkColor";
 
+    // #4635: Lite's status bar (MainWindow.xaml Border Grid.Row="2": Background="{DynamicResource
+    // BackgroundLightBrush}") and the Darling Viewer's status row, which sets no Background of its own and so
+    // shows through to the window's (MainWindow.xaml Window: Background="{DynamicResource
+    // BackgroundLightBrush}") — what CollectorHealthText sits on when it takes CriticalTextBrush for
+    // "N erroring" / "Capture down". Equal to NodeBackgroundKey today; its own constant and assertion so a
+    // future change to either resource is caught on its own.
+    private const string StatusBarBackgroundKey = "BackgroundLightColor";
+
     private static readonly string[] LightDarkFiles =
     {
         "Lite/Themes/LightTheme.xaml",
         "Lite/Themes/DarkTheme.xaml",
-        "deprecated/Dashboard/Themes/LightTheme.xaml",
-        "deprecated/Dashboard/Themes/DarkTheme.xaml",
         "Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml",
         "Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml",
     };
 
-    private static readonly string[] AllNineFiles =
+    // #4632: Lite and the Darling Viewer only, three themes each. The deprecated Dashboard's theme files are
+    // out of scope (see the class remarks) and do not carry CriticalTextBrush.
+    private static readonly string[] AllSixFiles =
     {
         "Lite/Themes/LightTheme.xaml",
         "Lite/Themes/DarkTheme.xaml",
         "Lite/Themes/CoolBreezeTheme.xaml",
-        "deprecated/Dashboard/Themes/LightTheme.xaml",
-        "deprecated/Dashboard/Themes/DarkTheme.xaml",
-        "deprecated/Dashboard/Themes/CoolBreezeTheme.xaml",
         "Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml",
         "Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml",
         "Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml",
@@ -73,7 +95,7 @@ public class Viewer4629Tests
         LightDarkFiles.Select(f => new object[] { f });
 
     public static IEnumerable<object[]> EveryThemeFile() =>
-        AllNineFiles.Select(f => new object[] { f });
+        AllSixFiles.Select(f => new object[] { f });
 
     [Theory]
     [MemberData(nameof(LightDarkThemeFiles))]
@@ -84,30 +106,37 @@ public class Viewer4629Tests
         AssertClearsTextFloor(relativePath, declared, "WarningColor", PanelBackgroundKey);
     }
 
+    /// <summary>
+    /// CriticalTextBrush is a literal-hex SolidColorBrush with no backing &lt;Color&gt; key (same shape as
+    /// WarningTextBrush — #4632), so it is read with <see cref="LiteralBrushHex"/> instead of
+    /// <c>ThemeXamlRewriter.DeclaredColors</c>, which only sees &lt;Color&gt; declarations.
+    /// </summary>
     [Theory]
     [MemberData(nameof(LightDarkThemeFiles))]
-    public void PlanCriticalOrangeBrush_ReadsAsTextOnNodeAndPanelBackgrounds(string relativePath)
+    public void CriticalTextBrush_ReadsAsTextOnNodePanelAndStatusBarBackgrounds(string relativePath)
     {
-        var declared = ThemeXamlRewriter.DeclaredColors(ReadRepoFile(relativePath));
-        AssertClearsTextFloor(relativePath, declared, "PlanCriticalOrangeColor", NodeBackgroundKey);
-        AssertClearsTextFloor(relativePath, declared, "PlanCriticalOrangeColor", PanelBackgroundKey);
+        var xaml = ReadRepoFile(relativePath);
+        var declared = ThemeXamlRewriter.DeclaredColors(xaml);
+        var fgHex = LiteralBrushHex(xaml, "CriticalTextBrush");
+        Assert.True(fgHex is not null, $"{relativePath}: no CriticalTextBrush.");
+
+        AssertClearsTextFloor(relativePath, "CriticalTextBrush", fgHex!, declared, NodeBackgroundKey);
+        AssertClearsTextFloor(relativePath, "CriticalTextBrush", fgHex!, declared, PanelBackgroundKey);
+        AssertClearsTextFloor(relativePath, "CriticalTextBrush", fgHex!, declared, StatusBarBackgroundKey);
     }
 
-    /// <summary>Golden pin: every theme family's <c>PlanCriticalOrangeColor</c> value, so a future edit is deliberate.</summary>
+    /// <summary>Golden pin: every theme family's <c>CriticalTextBrush</c> value, so a future edit is deliberate.</summary>
     [Theory]
     [InlineData("Lite/Themes/LightTheme.xaml", "#A83A0D")]
     [InlineData("Lite/Themes/DarkTheme.xaml", "#FF7043")]
     [InlineData("Lite/Themes/CoolBreezeTheme.xaml", "#A83A0D")]
-    [InlineData("deprecated/Dashboard/Themes/LightTheme.xaml", "#A83A0D")]
-    [InlineData("deprecated/Dashboard/Themes/DarkTheme.xaml", "#FF7043")]
-    [InlineData("deprecated/Dashboard/Themes/CoolBreezeTheme.xaml", "#A83A0D")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml", "#A83A0D")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml", "#FF7043")]
     [InlineData("Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml", "#A83A0D")]
-    public void PlanCriticalOrangeColor_MatchesPinnedHex(string relativePath, string expectedHex)
+    public void CriticalTextBrush_MatchesPinnedHex(string relativePath, string expectedHex)
     {
-        var declared = ThemeXamlRewriter.DeclaredColors(ReadRepoFile(relativePath));
-        Assert.True(declared.TryGetValue("PlanCriticalOrangeColor", out var hex), $"{relativePath}: no PlanCriticalOrangeColor.");
+        var hex = LiteralBrushHex(ReadRepoFile(relativePath), "CriticalTextBrush");
+        Assert.True(hex is not null, $"{relativePath}: no CriticalTextBrush.");
         Assert.Equal(expectedHex, hex, ignoreCase: true);
     }
 
@@ -120,21 +149,36 @@ public class Viewer4629Tests
     [MemberData(nameof(EveryThemeFile))]
     public void EveryTheme_DeclaresBothOrangeKeys(string relativePath)
     {
-        var declared = ThemeXamlRewriter.DeclaredColors(ReadRepoFile(relativePath));
-        Assert.True(declared.ContainsKey("WarningColor"), $"{relativePath}: no WarningColor.");
-        Assert.True(declared.ContainsKey("PlanCriticalOrangeColor"), $"{relativePath}: no PlanCriticalOrangeColor.");
+        var xaml = ReadRepoFile(relativePath);
+        Assert.True(ThemeXamlRewriter.DeclaredColors(xaml).ContainsKey("WarningColor"), $"{relativePath}: no WarningColor.");
+        Assert.True(LiteralBrushHex(xaml, "CriticalTextBrush") is not null, $"{relativePath}: no CriticalTextBrush.");
     }
 
     private static void AssertClearsTextFloor(string relativePath, IReadOnlyDictionary<string, string> declared, string colorKey, string backgroundKey)
     {
         Assert.True(declared.TryGetValue(colorKey, out var fgHex), $"{relativePath}: no {colorKey}.");
+        AssertClearsTextFloor(relativePath, colorKey, fgHex, declared, backgroundKey);
+    }
+
+    /// <summary>Overload for a foreground hex already in hand — CriticalTextBrush is a literal hex, not a
+    /// &lt;Color&gt; key <c>DeclaredColors</c> can look up.</summary>
+    private static void AssertClearsTextFloor(string relativePath, string fgLabel, string fgHex, IReadOnlyDictionary<string, string> declared, string backgroundKey)
+    {
         Assert.True(declared.TryGetValue(backgroundKey, out var bgHex), $"{relativePath}: no {backgroundKey}.");
-        Assert.True(ThemeColorOverrides.TryParseHex(fgHex, out var fg), $"{relativePath}: {colorKey} = '{fgHex}' is not a hex color.");
+        Assert.True(ThemeColorOverrides.TryParseHex(fgHex, out var fg), $"{relativePath}: {fgLabel} = '{fgHex}' is not a hex color.");
         Assert.True(ThemeColorOverrides.TryParseHex(bgHex, out var bg), $"{relativePath}: {backgroundKey} = '{bgHex}' is not a hex color.");
 
         var ratio = WcagContrast.Ratio(fg, bg);
         Assert.True(ratio >= WcagContrast.TextMinimum,
-            $"{relativePath}: {colorKey} {fgHex} on {backgroundKey} {bgHex} is {WcagContrast.Format(ratio)}, below the {WcagContrast.TextMinimum}:1 text floor (#4629).");
+            $"{relativePath}: {fgLabel} {fgHex} on {backgroundKey} {bgHex} is {WcagContrast.Format(ratio)}, below the {WcagContrast.TextMinimum}:1 text floor (#4629).");
+    }
+
+    /// <summary>Reads a literal-hex SolidColorBrush's Color attribute directly — for a brush like
+    /// CriticalTextBrush or WarningTextBrush that has no backing &lt;Color&gt; key for DeclaredColors to find.</summary>
+    private static string? LiteralBrushHex(string xaml, string key)
+    {
+        var m = Regex.Match(xaml, "<SolidColorBrush\\s+x:Key=\"" + Regex.Escape(key) + "\"\\s+Color=\"(?<hex>#[0-9A-Fa-f]{6,8})\"\\s*/>");
+        return m.Success ? m.Groups["hex"].Value : null;
     }
 
     private static string ReadRepoFile(string relativePath) =>

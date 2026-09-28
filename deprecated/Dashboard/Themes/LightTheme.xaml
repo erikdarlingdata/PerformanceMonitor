@@ -38,12 +38,6 @@
     <Color x:Key="SuccessColor">#2E7D32</Color>
     <!-- #3609 (Lite parity): was #F57F17, 2.47:1 on BackgroundColor. Now 4.99:1 / 5.35:1 on the card. -->
     <Color x:Key="WarningColor">#AE4F08</Color>
-    <!-- #4629: the plan viewer's "critical" text tier (cost >= 50%, elapsed/CPU >= 1s, a row
-         estimate off by 10x+) used a fixed Brushes.OrangeRed (#FF4500) that measured 3.44:1 on
-         Light's white node background and 4.46:1 on Dark's #22252b node background, both under
-         WCAG AA's 4.5:1 floor for text. This is a more-severe-than-WarningColor red-orange, tuned
-         per theme so it clears 4.5:1 on every page/card/node background in this theme. -->
-    <Color x:Key="PlanCriticalOrangeColor">#A83A0D</Color>
     <Color x:Key="ErrorColor">#C62828</Color>
     <!-- #3609 (Lite parity): was #2eaef1 (the accent), 2.32:1 on BackgroundColor. Now 5.53:1 / 5.93:1 on the card. -->
     <Color x:Key="InfoColor">#0369A1</Color>
@@ -81,7 +75,6 @@
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
-    <SolidColorBrush x:Key="PlanCriticalOrangeBrush" Color="{StaticResource PlanCriticalOrangeColor}"/>
     <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
          Darker on light themes so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
     <SolidColorBrush x:Key="WarningTextBrush" Color="#92400E"/>

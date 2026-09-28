@@ -101,12 +101,13 @@ public partial class PlanViewerControl : UserControl
     /// #4629: the "critical" tier of plan-viewer text that used to be the fixed <c>Brushes.OrangeRed</c>
     /// (cost &gt;= 50%, elapsed/CPU &gt;= 1s, row estimate off by 10x+) — 3.44:1 on the Light theme's
     /// white node background, under WCAG AA's 4.5:1 floor for text (and 4.46:1 on Dark's node
-    /// background, just under it too). <c>PlanCriticalOrangeBrush</c> is a theme resource so Light and
+    /// background, just under it too). <c>CriticalTextBrush</c> is a theme resource so Light and
     /// Dark each get their own AA-passing shade while keeping the same red-orange, more-severe-than-
     /// <see cref="WarningBrush"/> meaning.
     /// </summary>
     private SolidColorBrush CriticalOrangeBrush =>
-        (TryFindResource("PlanCriticalOrangeBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xFF, 0x70, 0x43));
+        // #4632: the deprecated Dashboard's themes carry no CriticalTextBrush, so fall back to the pre-#4629 OrangeRed (3.44:1) there, not #FF7043 (~2.7:1 on white, worse).
+        (TryFindResource("CriticalTextBrush") as SolidColorBrush) ?? Brushes.OrangeRed;
 
     /// <summary>
     /// Flips one Plan Insights card between its normal and its quiet state. A card with nothing to
