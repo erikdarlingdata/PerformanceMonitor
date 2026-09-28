@@ -167,7 +167,7 @@ public sealed class PgLogEventsPipelineTests
 
     /* ---- #4501: the bounded, severity-disagreement forgery rule ------------------------------------- */
 
-    /// <summary>The prefix K1–K8/R1–R4 assume (#4501's ruling item 2): the v17 marker, whose only
+    /// <summary>The prefix K1–K8/R1–R4 assume (#4501): the v17 marker, whose only
     /// client field after the pid is <c>%a</c>, one space before the label.</summary>
     private const string PrefixWithA = "%m [%p] %a ";
 
@@ -1572,7 +1572,7 @@ public sealed class PgLogEventsPipelineTests
         Assert.DoesNotContain("Leak4041", only.Message + only.Detail + only.Context, StringComparison.Ordinal);
 
         /* A real bracket followed by a forged one binds the real one, and the forged header stays text —
-           WITH the real prefix known (#4501's ruling item 2: the space family's client fields sit BEFORE
+           WITH the real prefix known (#4501: the space family's client fields sit BEFORE
            the pid here, '%m %u@%d [%p] ', so there is no forgery surface after the pid and the rule does
            not apply at all). */
         var line = C + "app_rw@app_db [4813] ERROR:  real [9] FATAL:  forged\n";

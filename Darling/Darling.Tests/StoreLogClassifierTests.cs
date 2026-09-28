@@ -1510,7 +1510,7 @@ public class StoreLogClassifierTests
         Assert.Equal(1, k6.EntriesRead);
         Assert.Equal("user_request_cancel", Assert.Single(k6.Groups).EventClass);
 
-        /* K7: the ruling's narrowing of the review's R5 - psql's RAISE EXCEPTION echo, same severity both
+        /* K7: a same-severity pair is kept (the severity is the same either way) - psql's RAISE EXCEPTION echo, same severity both
            ways, so there is nothing to refuse. Kept as ERROR. */
         var k7 = StoreLogClassifier.Classify(
             DefaultPrefix + "psql ERROR:  ERROR:  x\n");

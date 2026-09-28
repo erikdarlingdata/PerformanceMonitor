@@ -254,8 +254,8 @@ public static class PgLogEntryAssembler
     /// Every complete entry in the slab, in log order.
     ///
     /// <para><b>Prefix unknown (#4501).</b> This overload takes no <c>log_line_prefix</c>, so the bounded
-    /// forgery rule (<see cref="IsForgedLabel"/>) runs with NO separator check — the fallback the ruling
-    /// on #4501 calls for when a caller cannot state the prefix: it shrinks what the rule KEEPS rather than
+    /// forgery rule (<see cref="IsForgedLabel"/>) runs with NO separator check — the fallback #4501
+    /// calls for when a caller cannot state the prefix: it shrinks what the rule KEEPS rather than
     /// what it refuses, since an unknown prefix could put anything before the label. A caller that has read
     /// the target's own <c>log_line_prefix</c> should prefer <see cref="Assemble(string?, bool, string?, out int)"/>
     /// instead, which applies the rule only when a client field sits between the pid and the label, using the

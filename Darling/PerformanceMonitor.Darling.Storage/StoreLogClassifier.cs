@@ -817,8 +817,8 @@ public static class StoreLogClassifier
 
     /// <summary>
     /// Whether the label found at <paramref name="colon"/> (named <paramref name="name"/>, starting at
-    /// <paramref name="nameStart"/>) is itself a forgery sitting ahead of the line's REAL label — the reviewer's
-    /// bounded refusal rule for <c>review-4501-sec.md</c>, narrowed by the ruling that follows it.
+    /// <paramref name="nameStart"/>) is itself a forgery sitting ahead of the line's REAL label — a
+    /// bounded refusal rule (#4501), narrowed by the same-severity exception that follows it.
     ///
     /// <para><b>Why this can only happen next to a client-controlled field.</b> The store's own prefix is
     /// Darling-managed (<c>'%m [%p] %a '</c>, or the same set by hand), so <c>application_name</c> — the one field
