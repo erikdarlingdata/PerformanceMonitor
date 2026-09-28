@@ -25,30 +25,20 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class LivePlanShapeIsolationCensusTests
 {
-    /// <summary>These pass in single-process runs today (the failing full runs named only the two classes now
-    /// converted). They are listed so no NEW class joins them; converting one means removing it here.</summary>
-    private static readonly HashSet<string> SharedStoreExplainBaseline = new(StringComparer.Ordinal)
-    {
-        "AnomalyObjectStatsLatestSnapshotsLiveTests.cs",
-        "DarlingAgStatesReaderLiveEqualityTests.cs",
-        "DarlingDeltaSeederTests.cs",
-        "DarlingPgIndexBloatCoverageLivePostgresTests.cs",
-        "EventWindowedReadsAreBoundedLivePostgresTests.cs",
-        "FleetReadsAreBoundedByTheFleetTests.cs",
-        "ForcePlanFailuresAccessPathTests.cs",
-        "JobHistoryPerServerTopNLiveTests.cs",
-        "LatestValueLookbackTests.cs",
-        "ParameterSensitiveDrillDownTextLiveTests.cs",
-        "PgPlanCaptureCsvLiveTests.cs",
-        "PgPlanCaptureLiveTests.cs",
-        "PgServerConfigToolBoundTests.cs",
-        "PgTargetConfigSnapshotBoundTests.cs",
-        "PgTargetSeqScanTests.cs",
-        "PlanRegressionDrillDownReuseLiveTests.cs",
-        "ServerListAndSummaryPlanShapeTests.cs",
-        "StoreMetricsLatestSkipScanLiveTests.cs",
-        "TopCpuQueriesTextLiveTests.cs"
-    };
+    /// <summary>The classes that run <c>EXPLAIN</c> against the shared store and are kept there on purpose, each
+    /// with the reason its assertions cannot be flipped by another class's leftover chunks. Converting one means
+    /// removing it here; a new class must mint its own database instead of joining this list.</summary>
+    private static readonly IReadOnlyDictionary<string, string> SharedStoreExplainBaseline =
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["DarlingDeltaSeederTests.cs"] = "names the planted rows' own chunks by tableoid and asserts only on those two; leftover chunks can't flip it",
+            ["DarlingPgIndexBloatCoverageLivePostgresTests.cs"] = "EXPLAIN appears only in prose; its asserts are census verdict counts, not a plan",
+            ["ParameterSensitiveDrillDownTextLiveTests.cs"] = "counts rows the executed plan resolves against query_text_dim; empty chunks return no rows",
+            ["PgTargetSeqScanTests.cs"] = "Seq Scan is a node inside plan JSON the test seeds and parses; no store plan is asserted",
+            ["PlanRegressionDrillDownReuseLiveTests.cs"] = "sums actual rows from EXPLAIN ANALYZE leaf nodes; empty chunks add 0",
+            ["StoreMetricsLatestSkipScanLiveTests.cs"] = "asserts an index on the plain table collect.store_metrics; no hypertable in the plan",
+            ["TopCpuQueriesTextLiveTests.cs"] = "counts rows resolved against query_text_dim in the executed plan, not chunk layout"
+        };
 
     private const string ScratchToken = "ScratchPostgres.CreateAsync(";
 
@@ -58,7 +48,7 @@ public sealed class LivePlanShapeIsolationCensusTests
         var offenders = ExplainFiles()
             .Where(f => !File.ReadAllText(f).Contains(ScratchToken, StringComparison.Ordinal))
             .Select(Path.GetFileName)
-            .Where(n => !SharedStoreExplainBaseline.Contains(n!))
+            .Where(n => !SharedStoreExplainBaseline.ContainsKey(n!))
             .ToList();
 
         Assert.True(offenders.Count == 0,
@@ -71,7 +61,7 @@ public sealed class LivePlanShapeIsolationCensusTests
     {
         var dir = TestsDirectory();
         var stale = new List<string>();
-        foreach (var name in SharedStoreExplainBaseline)
+        foreach (var name in SharedStoreExplainBaseline.Keys)
         {
             var path = Path.Combine(dir, name);
             if (!File.Exists(path) || File.ReadAllText(path).Contains(ScratchToken, StringComparison.Ordinal))
@@ -85,6 +75,14 @@ public sealed class LivePlanShapeIsolationCensusTests
             + "SharedStoreExplainBaseline: " + string.Join(", ", stale));
     }
 
+    [Fact]
+    public void EveryBaselineEntry_CarriesAReason()
+    {
+        var blank = SharedStoreExplainBaseline.Where(kv => string.IsNullOrWhiteSpace(kv.Value)).Select(kv => kv.Key).ToList();
+
+        Assert.True(blank.Count == 0, "Baseline entries need a reason: " + string.Join(", ", blank));
+    }
+
     private static List<string> ExplainFiles()
     {
         var self = Path.GetFileName(SelfPath());
@@ -93,7 +91,7 @@ public sealed class LivePlanShapeIsolationCensusTests
             .Where(f =>
             {
                 var text = File.ReadAllText(f);
-                return text.Contains("DARLING_TEST_PG", StringComparison.Ordinal)
+                return text.Contains("\"DARLING_TEST_PG\"", StringComparison.Ordinal)
                        && text.Contains("EXPLAIN", StringComparison.Ordinal);
             })
             .ToList();
