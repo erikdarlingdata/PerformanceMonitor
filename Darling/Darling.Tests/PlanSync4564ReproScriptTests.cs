@@ -171,6 +171,26 @@ public class PlanSync4564ReproScriptTests
         Assert.DoesNotContain(header.Split('\n'), line => line.Trim() == "GO");
     }
 
+    /// <summary>
+    /// The GO-injection fixture's database name carries a control character (\n, \r\n, \v/\f/NEL/LS/PS), so
+    /// the USE line is skipped entirely rather than emitted with an embedded line break that a line-based
+    /// batch splitter would read as its own GO. Checks the whole script, not just the header.
+    /// </summary>
+    [Theory]
+    [InlineData("master*/\nGO\nPRINT 'INJECTED';\nGO\n/*")]
+    [InlineData("master\r\nGO\r\nPRINT 'INJECTED';\r\nGO")]
+    [InlineData("master\vGO\fPRINT 'INJECTED';\u0085GO\u2028x\u2029y")]
+    public void BuildReproScript_HostileDatabaseNameWithControlChars_OmitsUseLine(string databaseName)
+    {
+        var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", databaseName, null, null);
+
+        Assert.DoesNotContain(
+            sql.Split('\n'),
+            line => line.Trim('\r', ' ', '\t') == "GO");
+        Assert.DoesNotContain(sql.Split('\n'), line => line.TrimStart().StartsWith("USE [", StringComparison.Ordinal));
+        Assert.Contains("USE statement omitted", sql);
+    }
+
     [Fact]
     public void BuildReproScript_HostileSource_StaysInTheHeaderComment()
     {
@@ -178,6 +198,79 @@ public class PlanSync4564ReproScriptTests
             "SELECT 1", "db", null, null, source: "x*/ PRINT 'INJECTED'; /*");
 
         Assert.Contains("Source: x* / PRINT 'INJECTED'; / *", HeaderComment(sql));
+    }
+
+    /// <summary>
+    /// productName is the one header value that used to skip CommentSafe; every caller passes a constant
+    /// today, but the header comment must stay closed even if that ever changes. #4567.
+    /// </summary>
+    [Fact]
+    public void BuildReproScript_HostileProductName_DoesNotCloseTheHeaderComment()
+    {
+        var sql = ReproScriptBuilder.BuildReproScript(
+            "SELECT 1", "db", null, null, productName: "Evil*/ PRINT 'INJECTED'; /*");
+
+        var header = HeaderComment(sql);
+        Assert.Contains("Evil* / PRINT 'INJECTED'; / *", header);
+    }
+
+    /// <summary>
+    /// A trailing LF must not satisfy the name pattern's end anchor. A literal line break in an XML attribute
+    /// value is normalized to a space by the parser, so the LF is written as a numeric character reference
+    /// (&amp;#10;) to reach IsValidParameterName as an actual \n. #4567.
+    /// </summary>
+    [Fact]
+    public void BuildReproScript_ParameterNameWithTrailingNewline_IsDroppedEntirely()
+    {
+        var plan = PlanWithParameter("@id&#10;", "int", "(1)");
+        var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", "db", plan, null);
+
+        Assert.Contains("1 parameter(s) omitted", sql);
+    }
+
+    /// <summary>
+    /// Simple and forced parameterization name parameters @0, @1, ... . Before the fix, the leading-digit
+    /// name pattern dropped every parameter, the query text was emitted raw, and the script failed with
+    /// "Must declare the scalar variable @1". #4567.
+    /// </summary>
+    [Fact]
+    public void BuildReproScript_LeadingDigitParameterNames_SurviveAsSpExecuteSql()
+    {
+        const string plan = """
+            <ShowPlanXML xmlns="http://schemas.microsoft.com/sqlserver/2004/07/showplan">
+              <BatchSequence><Batch><Statements>
+                <StmtSimple>
+                  <QueryPlan>
+                    <ParameterList>
+                      <ColumnReference Column="@1" ParameterDataType="tinyint" ParameterCompiledValue="(52)" />
+                      <ColumnReference Column="@2" ParameterDataType="int" ParameterCompiledValue="(2)" />
+                    </ParameterList>
+                  </QueryPlan>
+                </StmtSimple>
+              </Statements></Batch></BatchSequence>
+            </ShowPlanXML>
+            """;
+        var sql = ReproScriptBuilder.BuildReproScript(
+            "(@1 tinyint,@2 int)SELECT COUNT(*) FROM dbo.T AS t WHERE t.A=@1 AND t.B=@2", "db", plan, null);
+
+        Assert.Contains("EXECUTE sys.sp_executesql", sql);
+        Assert.Contains("@1 = 52", sql);
+        Assert.Contains("@2 = 2", sql);
+        Assert.DoesNotContain("omitted", sql);
+    }
+
+    /// <summary>
+    /// A malformed data type (trailing text after a close paren) is dropped, not merely stripped of comment
+    /// characters. Structural validation, not a character allowlist. #4567.
+    /// </summary>
+    [Fact]
+    public void BuildReproScript_MalformedDataTypeWithTrailingWords_IsDroppedEntirely()
+    {
+        var plan = PlanWithParameter("@id", "int) SELECT 2 SELECT (1", "(1)");
+        var sql = ReproScriptBuilder.BuildReproScript("SELECT 1", "db", plan, null);
+
+        Assert.Contains("1 parameter(s) omitted", sql);
+        Assert.DoesNotContain("SELECT 2", sql);
     }
 
     /// <summary>The filter lives in script generation, not extraction — raw parameters are unaffected.</summary>
