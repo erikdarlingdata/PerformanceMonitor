@@ -38,6 +38,8 @@ namespace Darling.Tests;
 /// <para>The regression is QUIET, exactly as #3496's was: a revert to the window returns the same two rows on
 /// any store small enough for a test and only shows up as deadline breaches once a store's retention has
 /// filled. So the shape is pinned at the source, and the gated arm asks the planner.</para>
+/// <para>The live arm mints its own scratch database (#4650): other classes' leftover chunks, future-dated or
+/// compressed and empty, change the chunk list a newest-first read visits.</para>
 /// </summary>
 /* Live-fixture tests share one Postgres store; the collection serializes them so cross-test row churn
    cannot race another class's assertions. */
@@ -91,11 +93,14 @@ public sealed class CaptureDownChunkOrderTests
     [Fact]
     public async Task TheShippedRead_ExecutesOnlyTheNewestChunk_AndTheNewestRunDecides_AgainstDevPostgres()
     {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live capture-down access-path test.");
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live capture-down access-path test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        // #1776 own-store: a scratch database, so no other class's chunks shape the plan under test.
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = scratch.ConnectionString;
 
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
@@ -107,6 +112,10 @@ public sealed class CaptureDownChunkOrderTests
         if (timescaleEnabled)
         {
             Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+            /* No background policy job reshapes the chunks under the plan assertion. */
+            await using var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection);
+            await stop.ExecuteNonQueryAsync(ct);
         }
 
         var bodySucceeded = false;
