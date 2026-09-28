@@ -1652,6 +1652,68 @@ public sealed class DarlingComposeTests
         Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
     }
 
+    /* ─────────────── #4605 part 2, LA-7: the query_store_interval_wide (V145) hybrid ─────────────── */
+
+    private static string CompileQueryStoreWideEligible(string planJson, string[]? servers = null)
+    {
+        var plan = ValidPlan(planJson);
+        var context = new ComposeRunContext(
+            servers, WindowStart, WindowEnd, ComposeRunContext.NoVariables, RollupAvailability.All, WindowEnd, RollupCoverage.Unknown,
+            QueryStoreWideEligible: true);
+        var (compiled, error) = ComposeCompiler.Compile(plan, context);
+        Assert.True(error is null, error);
+        Assert.NotNull(compiled);
+        return compiled!.Sql;
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideEligible_ReadsTheTableWithTheServerNameJoin()
+    {
+        /* #4605 part 2: an eligible run reads collect.query_store_interval_wide directly (the table already
+           holds the latest snapshot per interval, every outcome — the raw dedup's own answer) joined to
+           collect.servers to restore server_name, which the table itself does not carry. */
+        var sql = CompileQueryStoreWideEligible(
+            "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}");
+
+        Assert.Contains(
+            "(SELECT w.*, s.server_name FROM collect.query_store_interval_wide AS w "
+            + "JOIN collect.servers AS s ON s.server_id = w.server_id "
+            + "WHERE w.collection_time >= $1 AND w.collection_time <= $2)",
+            sql, StringComparison.Ordinal);
+
+        /* No ROW_NUMBER dedup — the table already holds one row per interval identity. */
+        Assert.DoesNotContain("qs_rn", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("ROW_NUMBER", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideEligible_ModuleNameFilterCompilesAgainstTheFactAlias()
+    {
+        /* module_name is a real column on query_store_stats AND on the wide table, so a LIKE filter on it
+           compiles the same way against the fact alias either way — no join, no CTE, unlike query_stats'
+           object_name (#1568). */
+        var sql = CompileQueryStoreWideEligible(
+            "{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\","
+            + "\"filters\":[{\"dimension\":\"module_name\",\"op\":\"like\",\"value\":\"usp_%\"}]}");
+
+        Assert.Contains("f.module_name LIKE", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compile_QueryStoreWideNotEligible_ReadsTodaysRawDedupUnchanged()
+    {
+        /* The default context (QueryStoreWideEligible: false, the parameter's default) must compile to
+           EXACTLY today's raw ROW_NUMBER dedup — every non-eligible case (the flag false, a pre-V145
+           schema, or a failed eligibility clause all resolve to this same false before Compile ever runs). */
+        var sql = Compile(
+            ValidPlan("{\"source\":\"query_store_stats\",\"measure\":\"qs_executions\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}"));
+
+        Assert.Contains("AS qs_rn", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE qs_rn = 1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("query_store_interval_wide", sql, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Compile_QueryStoreCaggRoute_IsNotWrappedInTheRawDedup()
     {
