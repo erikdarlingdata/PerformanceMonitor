@@ -224,16 +224,44 @@
                     </Canvas>
                 </ScrollViewer>
 
-                <!-- Minimap: a corner overlay panel with a scaled-down view of the whole plan -->
+                <!-- Minimap: a corner overlay panel with a scaled-down view of the whole plan. Resizable
+                     from its header's grip (bounds 160-500px); the size is remembered across plans. -->
                 <Border x:Name="MinimapPanel" Visibility="Collapsed"
                         HorizontalAlignment="Right" VerticalAlignment="Bottom"
                         Margin="0,0,12,12" Width="220" Height="220"
                         Background="{DynamicResource BackgroundDarkBrush}"
                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                        CornerRadius="4" Panel.ZIndex="100">
-                    <Canvas x:Name="MinimapCanvas" ClipToBounds="True"
-                            Background="Transparent"
-                            MouseLeftButtonDown="MinimapCanvas_MouseLeftButtonDown"/>
+                        CornerRadius="4" ClipToBounds="True" Panel.ZIndex="100">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- Header: resize grip (top-left, the corner the panel grows from since it's
+                             pinned bottom-right), title, close button. -->
+                        <DockPanel Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}">
+                            <Border x:Name="MinimapResizeGrip" DockPanel.Dock="Left"
+                                    Width="16" Height="18" Background="Transparent" Cursor="SizeNWSE"
+                                    MouseLeftButtonDown="MinimapResizeGrip_MouseLeftButtonDown"
+                                    MouseMove="MinimapResizeGrip_MouseMove"
+                                    MouseLeftButtonUp="MinimapResizeGrip_MouseLeftButtonUp"
+                                    ToolTip="Drag to resize">
+                                <Canvas Width="10" Height="10" VerticalAlignment="Center" HorizontalAlignment="Center">
+                                    <Line X1="0" Y1="4" X2="4" Y2="0" Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="1" Opacity="0.5"/>
+                                    <Line X1="0" Y1="7" X2="7" Y2="0" Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="1" Opacity="0.5"/>
+                                    <Line X1="0" Y1="10" X2="10" Y2="0" Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="1" Opacity="0.5"/>
+                                </Canvas>
+                            </Border>
+                            <Button DockPanel.Dock="Right" Content="&#x2715;" Click="MinimapClose_Click"
+                                    Width="18" Height="18" Padding="0" FontSize="10" VerticalAlignment="Center"
+                                    Margin="0,0,2,0" ToolTip="Close minimap"/>
+                            <TextBlock Text="Minimap" FontSize="10" VerticalAlignment="Center" Margin="2,1,0,1"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                        </DockPanel>
+                        <Canvas x:Name="MinimapCanvas" Grid.Row="1" ClipToBounds="True"
+                                Background="Transparent"
+                                MouseLeftButtonDown="MinimapCanvas_MouseLeftButtonDown"/>
+                    </Grid>
                 </Border>
             </Grid>
 
