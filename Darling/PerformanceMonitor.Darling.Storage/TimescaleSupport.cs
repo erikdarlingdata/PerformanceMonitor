@@ -10463,7 +10463,18 @@ WITH NO DATA";
     /// <summary>Retention horizon of <see cref="CollectionHealthHourlyView"/>. Its one consumer reads seven days;
     /// 7 d + one bucket (the head hour straddling the cut) + margin, rounded UP to whole days = 8 days — the
     /// same span as <see cref="CollectionHealthRefreshStartOffset"/>. A chunk-level drop, so the slack costs one
-    /// small chunk.</summary>
+    /// small chunk.
+    ///
+    /// <para><b>So this aggregate is NEVER compressed, deliberately (#4619).</b> Retention equal to the refresh
+    /// window means every chunk it keeps overlaps the window every refresh re-materializes. This store keeps
+    /// compression out of that window (<see cref="AggregateCompressMarginSpan"/>: <c>compress_after</c> is the
+    /// refresh start offset plus one raw chunk, because a refresh that reaches a compressed chunk decompresses what
+    /// it re-materializes, turning compression into hourly churn), and that point — nine days here — is past the eight-day
+    /// retention, so no chunk would ever become eligible before it is dropped. Hence no compression settings,
+    /// no compression policy and no <see cref="AggregateCompressionTargets"/> entry, and
+    /// <c>get_store_metrics</c> states this instead of counting the aggregate among those with compression
+    /// DISABLED. A pin fails if the refresh window plus that margin ever falls inside retention, which is the
+    /// point where leaving it uncompressed would become a choice to revisit.</para></summary>
     public const string CollectionHealthRetentionInterval = "8 days";
 
     /// <summary><see cref="TimeSpan"/> twin of <see cref="CollectionHealthRetentionInterval"/>, pinned equal by

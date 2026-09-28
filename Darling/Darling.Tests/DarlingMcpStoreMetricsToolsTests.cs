@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
@@ -688,6 +689,15 @@ public sealed class DarlingMcpStoreMetricsToolsTests
 
     private static readonly DateTime SweepAt = new(2026, 9, 18, 15, 0, 0, DateTimeKind.Unspecified);
 
+    /// <summary>An existence map (#4619) from (kind, name, verdict) triples; a null verdict is "no check".</summary>
+    private static IReadOnlyDictionary<(string ObjectKind, string ObjectName), bool?> Exists(params (string Kind, string Name, bool? Verdict)[] entries)
+        => entries.ToDictionary(e => (e.Kind, e.Name), e => e.Verdict);
+
+    /// <summary>ComputeInventory over rows that all share the store row's sweep, where the existence map is
+    /// never consulted — so the empty one is as good as any.</summary>
+    private static DarlingStoreMetricsReader.InventoryReconciliation? OneSweep(IReadOnlyList<DarlingStoreMetricsReader.StoreMetricRow> rows)
+        => DarlingStoreMetricsReader.ComputeInventory(rows, Exists());
+
     /// <summary>A <c>job_history</c> row as the sweep writes it: role in the name, count in row_count (null =
     /// filtered), population in total_runs, window in schedule_interval_ms, newest-row AGE in
     /// last_run_duration_ms.</summary>
@@ -966,11 +976,11 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             /* Kinds with no bytes contribute nothing and are not stale. */
             new DarlingStoreMetricsReader.StoreMetricRow(StoreSelfMetrics.BackgroundJobObjectKind, "policy_compression x [1]", SweepAt, null, null, null, null, null, null, 100, 3_600_000, 5, 0),
             OwnerRow(),
-            /* From the previous sweep: excluded and counted. */
-            Row(StoreSelfMetrics.HypertableObjectKind, "dropped_since", 7 * gib, at: older),
+            /* From the previous sweep, for an object that still exists: excluded and counted as a gap. */
+            Row(StoreSelfMetrics.HypertableObjectKind, "not_reached", 7 * gib, at: older),
         };
 
-        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows);
+        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows, Exists((StoreSelfMetrics.HypertableObjectKind, "not_reached", true)));
         Assert.NotNull(inventory);
         Assert.Equal(SweepAt, inventory!.SweepAt);
         Assert.Equal(415 * gib, inventory.DatabaseBytes);
@@ -995,7 +1005,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.True(inventory.Reconciled);
 
         /* Ten GiB attributed to no row: a finding. */
-        var gap = DarlingStoreMetricsReader.ComputeInventory(new[]
+        var gap = OneSweep(new[]
         {
             StoreRow(bytes: 415 * gib),
             Row(StoreSelfMetrics.HypertableObjectKind, "a", 400 * gib),
@@ -1007,7 +1017,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
 
         /* The floor: on a 17 MiB store, 1% is 170 KiB and a 160 KiB residual would sit under it — but the
            floor is what carries a small store, and a residual under 64 MiB reconciles regardless. */
-        var small = DarlingStoreMetricsReader.ComputeInventory(new[]
+        var small = OneSweep(new[]
         {
             StoreRow(bytes: 17_192_639),
             Row(StoreSelfMetrics.HypertableObjectKind, "a", 1_720_320),
@@ -1018,7 +1028,7 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.True(small.Reconciled);
 
         /* No catch-all rows: not judgeable, so not reconciled — however small the arithmetic residual. */
-        var noCatchAll = DarlingStoreMetricsReader.ComputeInventory(new[]
+        var noCatchAll = OneSweep(new[]
         {
             StoreRow(bytes: 1_000),
             Row(StoreSelfMetrics.HypertableObjectKind, "a", 1_000),
@@ -1028,8 +1038,8 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Null(noCatchAll.UnenumeratedBytes);
 
         /* No store row: nothing to reconcile against, and no percentage of nothing. */
-        Assert.Null(DarlingStoreMetricsReader.ComputeInventory(new[] { Row(StoreSelfMetrics.HypertableObjectKind, "a", 1) }));
-        Assert.Null(DarlingStoreMetricsReader.ComputeInventory(Array.Empty<DarlingStoreMetricsReader.StoreMetricRow>()));
+        Assert.Null(OneSweep(new[] { Row(StoreSelfMetrics.HypertableObjectKind, "a", 1) }));
+        Assert.Null(OneSweep(Array.Empty<DarlingStoreMetricsReader.StoreMetricRow>()));
 
         Assert.Equal(1.0, DarlingStoreMetricsReader.ReconciliationTolerancePercent);
         Assert.Equal(64L * 1024 * 1024, DarlingStoreMetricsReader.ReconciliationToleranceFloorBytes);
@@ -1067,8 +1077,8 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             new DarlingStoreMetricsReader.UnenumeratedRelation("collect.store_metrics", "r", gib / 2),
         };
 
-        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows)!;
-        var reconciled = DarlingMcpStoreMetricsTools.InventoryNote(inventory, rows, states, largest);
+        var inventory = OneSweep(rows)!;
+        var reconciled = DarlingMcpStoreMetricsTools.InventoryNote(inventory, rows, states, largest, existenceRead: true);
 
         Assert.Contains("account for 409.0 GiB of the 415.0 GiB database (98.55%)", reconciled, StringComparison.Ordinal);
         Assert.Contains("3.0 GiB sits in 14 un-enumerated user-schema relation(s) (object_kind other)", reconciled, StringComparison.Ordinal);
@@ -1077,7 +1087,9 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Contains("RECONCILED: every row together accounts for 99.76%", reconciled, StringComparison.Ordinal);
         Assert.Contains("1 of 2 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("NOT RECONCILED", reconciled, StringComparison.Ordinal);
-        Assert.DoesNotContain("OLDER sweep", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("not from the store row's sweep", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", reconciled, StringComparison.Ordinal);
+        Assert.DoesNotContain("uncompressed by design", reconciled, StringComparison.Ordinal);
         Assert.DoesNotContain("plain-PostgreSQL", reconciled, StringComparison.Ordinal);
 
         /* The gap: a finding, with the direction stated. */
@@ -1088,22 +1100,30 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
             Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
         };
-        var gap = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(gapRows)!, gapRows, states, largest);
+        var gap = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(gapRows)!, gapRows, states, largest, existenceRead: true);
         Assert.Contains("NOT RECONCILED — a finding: 10.0 GiB of pg_database_size is attributed to NO row", gap, StringComparison.Ordinal);
         Assert.DoesNotContain("RECONCILED: every", gap, StringComparison.Ordinal);
 
         /* Missing catch-all rows: a sweep failure, said so, and no coverage verdict dressed up as arithmetic. */
         var partialRows = new[] { StoreRow(bytes: 415 * gib), Row(StoreSelfMetrics.HypertableObjectKind, "a", 400 * gib) };
-        var partial = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(partialRows)!, partialRows, null, null);
+        var partial = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(partialRows)!, partialRows, null, null, existenceRead: true);
         Assert.Contains("'other' catch-all row is MISSING", partial, StringComparison.Ordinal);
         Assert.Contains("'system' catch-all row is MISSING", partial, StringComparison.Ordinal);
         Assert.Contains("NOT RECONCILED: without both catch-all rows", partial, StringComparison.Ordinal);
         Assert.Contains("live read of each aggregate's compression and policy state did not complete", partial, StringComparison.Ordinal);
 
-        /* Stale rows and the live census failing are each named. */
+        /* A row for an object that still exists but the newest sweep did not reach, and the live census
+           failing, are each named — the gap with the two places the service log says why (#4619: there is
+           no "Warning line" for a failed sweep, so the note no longer promises one). */
         var staleRows = rows.Append(Row(StoreSelfMetrics.HypertableObjectKind, "old", gib, at: SweepAt.AddHours(-1))).ToArray();
-        var stale = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(staleRows)!, staleRows, states, null);
-        Assert.Contains("1 object row(s) in the inventory are from an OLDER sweep", stale, StringComparison.Ordinal);
+        var stale = DarlingMcpStoreMetricsTools.InventoryNote(
+            DarlingStoreMetricsReader.ComputeInventory(staleRows, Exists((StoreSelfMetrics.HypertableObjectKind, "old", true)))!,
+            staleRows, states, null, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", stale, StringComparison.Ordinal);
+        Assert.Contains("an Error starting 'Store self-metrics sweep'", stale, StringComparison.Ordinal);
+        Assert.Contains("in a line containing 'plain-PostgreSQL mode'", stale, StringComparison.Ordinal);
+        Assert.DoesNotContain("Warning line", stale, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", stale, StringComparison.Ordinal);
         Assert.Contains("live census naming them did not complete", stale, StringComparison.Ordinal);
 
         /* No TimescaleDB rows at all: the low share is explained, not flagged. */
@@ -1114,12 +1134,217 @@ public sealed class DarlingMcpStoreMetricsToolsTests
             Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 8 * gib, chunks: 70),
             Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, gib, chunks: 60),
         };
-        var plain = DarlingMcpStoreMetricsTools.InventoryNote(DarlingStoreMetricsReader.ComputeInventory(plainRows)!, plainRows, Array.Empty<DarlingStoreMetricsReader.ContinuousAggregateState>(), Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>());
+        var plain = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(plainRows)!, plainRows, Array.Empty<DarlingStoreMetricsReader.ContinuousAggregateState>(), Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>(), existenceRead: true);
         Assert.Contains("a plain-PostgreSQL store, or TimescaleDB unavailable to the sweep", plain, StringComparison.Ordinal);
         Assert.Contains("not a fault", plain, StringComparison.Ordinal);
         Assert.DoesNotContain("the largest being", plain, StringComparison.Ordinal);
 
         Assert.Equal(5, new[] { reconciled, gap, partial, stale, plain }.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /* ---------------- #4619: a gone object is not a sweep gap ---------------- */
+
+    /// <summary>
+    /// #4619: a row from another sweep is split by whether its object still EXISTS — the pin that tells a
+    /// retired object from a real sweep gap. On three production stores every such row was a retired object
+    /// (a superseded baseline and its jobs, a frozen rollup's refresh job), and every one was reported as a
+    /// sweep that "is not completing". Exists: stale, a gap. Gone: dropped, newest last row first, with that
+    /// row's time. No verdict (null, a missing key, or a null map because the check failed): unchecked. A row
+    /// NEWER than the store row (a sweep that failed after its first statements) is a gap like an older one.
+    /// A job_history row under another role is superseded, not missed, whenever the newest sweep wrote its
+    /// own, whatever pg_roles says. None of the three is ever summed.
+    /// </summary>
+    [Fact]
+    public void ComputeInventory_SplitsRowsFromAnotherSweep_ByWhetherTheObjectStillExists()
+    {
+        const long gib = 1L << 30;
+        var dayBefore = SweepAt.AddDays(-1);
+        var weekBefore = SweepAt.AddDays(-7);
+        const string retiredView = "perfmon_baseline";
+        const string retiredJob = "policy_refresh_continuous_aggregate perfmon_baseline [1012]";
+
+        var current = new[]
+        {
+            StoreRow(bytes: 10 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "wait_stats", 4 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+            OwnerRow(),
+        };
+        var outside = new[]
+        {
+            Row(StoreSelfMetrics.HypertableObjectKind, "not_reached", gib, at: dayBefore),
+            Row(StoreSelfMetrics.HypertableObjectKind, "written_after_the_store_row", gib, at: SweepAt.AddMinutes(1)),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, 5 * gib, at: weekBefore),
+            new DarlingStoreMetricsReader.StoreMetricRow(StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, dayBefore, null, null, null, null, null, null, 100, 3_600_000, 5, 0),
+            Row(StoreSelfMetrics.DimensionObjectKind, "no_verdict", gib, at: dayBefore),
+            Row(StoreSelfMetrics.TableObjectKind, "collect.missing_from_the_map", gib, at: dayBefore),
+            OwnerRow(at: weekBefore, role: "previous_role"),
+        };
+        var rows = current.Concat(outside).ToArray();
+        var existence = Exists(
+            (StoreSelfMetrics.HypertableObjectKind, "not_reached", true),
+            (StoreSelfMetrics.HypertableObjectKind, "written_after_the_store_row", true),
+            (StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, false),
+            (StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, false),
+            (StoreSelfMetrics.DimensionObjectKind, "no_verdict", null),
+            /* The role still exists, but the newest sweep read as another one: superseded. */
+            (StoreSelfMetrics.JobHistoryObjectKind, "previous_role", true));
+
+        /* The rows the check is asked about: every non-store row off the store row's stamp, in both directions. */
+        Assert.Equal(
+            outside.Select(r => (r.ObjectKind, r.ObjectName)).OrderBy(k => k),
+            DarlingStoreMetricsReader.RowsOutsideTheSweep(rows).Select(r => (r.ObjectKind, r.ObjectName)).OrderBy(k => k));
+
+        var inventory = DarlingStoreMetricsReader.ComputeInventory(rows, existence)!;
+        Assert.Equal(2, inventory.StaleRowCount);
+        Assert.Equal(2, inventory.UncheckedRowCount);
+        Assert.Equal(
+            new[]
+            {
+                (StoreSelfMetrics.BackgroundJobObjectKind, retiredJob, dayBefore),
+                (StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView, weekBefore),
+                (StoreSelfMetrics.JobHistoryObjectKind, "previous_role", weekBefore),
+            },
+            inventory.DroppedObjects.Select(d => (d.ObjectKind, d.ObjectName, d.LastRowAt)));
+
+        /* None of it is summed: the sums are the store row's sweep alone. */
+        Assert.Equal(4 * gib, inventory.EnumeratedBytes);
+        Assert.Equal(9 * gib, inventory.AttributedBytes);
+        Assert.Equal(4 * gib, inventory.BytesByKind[StoreSelfMetrics.HypertableObjectKind]);
+        Assert.False(inventory.BytesByKind.ContainsKey(StoreSelfMetrics.ContinuousAggregateObjectKind));
+
+        /* The check failed (a null map): no verdict on anything the catalog would have judged. Only the
+           superseded job_history row, judged from the rows themselves, is still retired. */
+        var failed = DarlingStoreMetricsReader.ComputeInventory(rows, null)!;
+        Assert.Equal(0, failed.StaleRowCount);
+        Assert.Equal(6, failed.UncheckedRowCount);
+        Assert.Equal(new[] { "previous_role" }, failed.DroppedObjects.Select(d => d.ObjectName));
+
+        /* Without a job_history row in the newest sweep, an older one is judged by the catalog like any row:
+           here the role exists, so the sweep missed it. */
+        var noCurrentHistory = current.Where(r => r.ObjectKind != StoreSelfMetrics.JobHistoryObjectKind)
+            .Append(OwnerRow(at: weekBefore, role: "previous_role"))
+            .ToArray();
+        var missed = DarlingStoreMetricsReader.ComputeInventory(noCurrentHistory, Exists((StoreSelfMetrics.JobHistoryObjectKind, "previous_role", true)))!;
+        Assert.Equal(1, missed.StaleRowCount);
+        Assert.Empty(missed.DroppedObjects);
+
+        /* The healthy store: nothing outside the sweep, so nothing to check and every count zero. */
+        Assert.Empty(DarlingStoreMetricsReader.RowsOutsideTheSweep(current));
+        Assert.Empty(DarlingStoreMetricsReader.RowsOutsideTheSweep(Array.Empty<DarlingStoreMetricsReader.StoreMetricRow>()));
+        var healthy = DarlingStoreMetricsReader.ComputeInventory(current, null)!;
+        Assert.Equal(0, healthy.StaleRowCount + healthy.UncheckedRowCount + healthy.DroppedObjects.Count);
+    }
+
+    /// <summary>
+    /// #4619: the note says what each kind of row from another sweep IS. A dropped object is named with its
+    /// last row and called history, never a sweep failure; only a row whose object still exists gets the
+    /// "did not reach them" sentence and the two log lines that say why; an unchecked row says which of its
+    /// two causes applies. The three shapes are distinct, and each carries none of the others' claims.
+    /// </summary>
+    [Fact]
+    public void TheInventoryNote_TellsAGoneObjectFromASweepGap()
+    {
+        const long gib = 1L << 30;
+        var sweep = new[]
+        {
+            StoreRow(bytes: 10 * gib),
+            Row(StoreSelfMetrics.HypertableObjectKind, "wait_stats", 5 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+        };
+        var retiredAt = new DateTime(2026, 9, 10, 4, 0, 0, DateTimeKind.Unspecified);
+        var outside = sweep.Append(Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "perfmon_baseline", gib, at: retiredAt)).ToArray();
+        var none = Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>();
+
+        string Note(bool? verdict, bool existenceRead) => DarlingMcpStoreMetricsTools.InventoryNote(
+            DarlingStoreMetricsReader.ComputeInventory(outside, existenceRead
+                ? Exists((StoreSelfMetrics.ContinuousAggregateObjectKind, "perfmon_baseline", verdict))
+                : null)!,
+            outside, null, none, existenceRead);
+
+        var dropped = Note(false, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that no longer exist — dropped or retired since their last row — and are excluded from these sums", dropped, StringComparison.Ordinal);
+        Assert.Contains("That is history, not a sweep failure", dropped, StringComparison.Ordinal);
+        Assert.Contains($"stays its newest for {StoreSelfMetrics.RetentionDays} days", dropped, StringComparison.Ordinal);
+        Assert.Contains("The most recent: perfmon_baseline (continuous_aggregate, last row 2026-09-10T04:00:00.0000000)", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not reach them", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("Store self-metrics sweep", dropped, StringComparison.Ordinal);
+        Assert.DoesNotContain("no verdict", dropped, StringComparison.Ordinal);
+
+        var gap = Note(true, existenceRead: true);
+        Assert.Contains("1 object row(s) are for objects that still exist but are not from the store row's sweep, so the newest sweep did not reach them", gap, StringComparison.Ordinal);
+        Assert.Contains("darling-service_yyyyMMdd.log", gap, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", gap, StringComparison.Ordinal);
+        Assert.DoesNotContain("no verdict", gap, StringComparison.Ordinal);
+
+        var noCheck = Note(null, existenceRead: true);
+        Assert.Contains("1 object row(s) are not from the store row's sweep and are excluded from these sums, with no verdict", noCheck, StringComparison.Ordinal);
+        Assert.Contains("their kind has no existence check on this store", noCheck, StringComparison.Ordinal);
+        Assert.DoesNotContain("did not reach them", noCheck, StringComparison.Ordinal);
+        Assert.DoesNotContain("no longer exist", noCheck, StringComparison.Ordinal);
+
+        var failed = Note(null, existenceRead: false);
+        Assert.Contains("with no verdict on whether their objects still exist: the live existence check did not complete.", failed, StringComparison.Ordinal);
+        Assert.DoesNotContain("their kind has no existence check", failed, StringComparison.Ordinal);
+
+        Assert.Equal(4, new[] { dropped, gap, noCheck, failed }.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /// <summary>
+    /// #4619: collection_health_hourly is uncompressed BY DESIGN, so the compression line explains it rather
+    /// than counting it DISABLED — beside a real finding it is left out of the count and the bytes, and on
+    /// its own it produces no finding at all. The explanation's two spans are the policy's own constants, and
+    /// the claim they support is pinned: retention does not outlast the refresh window, and the refresh
+    /// window plus the store's one-chunk compression margin lies past retention, so no chunk of it could
+    /// ever be compressed. If either stops holding, this fails and the "by design" sentence is a lie to fix.
+    /// </summary>
+    [Fact]
+    public void TheCompressionLine_ExplainsCollectionHealthHourly_InsteadOfCountingIt()
+    {
+        const long gib = 1L << 30;
+        var rows = new[]
+        {
+            StoreRow(bytes: 300 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_hourly", 200 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, "query_store_stats_daily", 35 * gib),
+            Row(StoreSelfMetrics.ContinuousAggregateObjectKind, TimescaleSupport.CollectionHealthHourlyView, 60 * gib),
+            Row(StoreSelfMetrics.OtherObjectKind, StoreSelfMetrics.OtherObjectName, 3 * gib, chunks: 1),
+            Row(StoreSelfMetrics.SystemObjectKind, StoreSelfMetrics.SystemObjectName, 2 * gib, chunks: 1),
+        };
+        var byDesign = new DarlingStoreMetricsReader.ContinuousAggregateState(TimescaleSupport.CollectionHealthHourlyView, false, false, "collection_log", 1005, null, 1006);
+        var states = new[]
+        {
+            new DarlingStoreMetricsReader.ContinuousAggregateState("query_store_stats_hourly", false, true, "query_store_stats", 1001, null, null),
+            new DarlingStoreMetricsReader.ContinuousAggregateState("query_store_stats_daily", true, true, "query_store_stats_hourly", 1002, 1003, 1004),
+            byDesign,
+        };
+        var none = Array.Empty<DarlingStoreMetricsReader.UnenumeratedRelation>();
+        const string explained = "collection_health_hourly is uncompressed by design: each refresh re-materializes its last 8 days and its retention keeps 8 days";
+
+        var both = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, states, none, existenceRead: true);
+        Assert.Contains("1 of 3 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB between them", both, StringComparison.Ordinal);
+        Assert.Contains("not counting the one uncompressed by design below.", both, StringComparison.Ordinal);
+        Assert.Contains(explained, both, StringComparison.Ordinal);
+        Assert.Contains("no chunk of this one gets that old before retention drops it", both, StringComparison.Ordinal);
+
+        var alone = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, new[] { states[1], byDesign }, none, existenceRead: true);
+        Assert.DoesNotContain("compression DISABLED", alone, StringComparison.Ordinal);
+        Assert.Contains(explained, alone, StringComparison.Ordinal);
+
+        /* Compressed after all (a hand-enabled store): nothing to explain, and it is counted like any other. */
+        var enabled = byDesign with { CompressionEnabled = true };
+        var handEnabled = DarlingMcpStoreMetricsTools.InventoryNote(OneSweep(rows)!, rows, new[] { states[0], states[1], enabled }, none, existenceRead: true);
+        Assert.DoesNotContain("uncompressed by design", handEnabled, StringComparison.Ordinal);
+        Assert.Contains("1 of 3 continuous aggregate(s) have compression DISABLED and hold 200.0 GiB between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it).", handEnabled, StringComparison.Ordinal);
+
+        Assert.Equal("8 days", TimescaleSupport.CollectionHealthRefreshStartOffset);
+        Assert.Equal("8 days", TimescaleSupport.CollectionHealthRetentionInterval);
+        Assert.True(TimescaleSupport.CollectionHealthRetentionSpan <= TimescaleSupport.CollectionHealthRefreshStartSpan,
+            "retention outlasts the refresh window, so some chunks sit outside it and could be compressed");
+        Assert.True(TimescaleSupport.CollectionHealthRefreshStartSpan + TimescaleSupport.AggregateCompressMarginSpan > TimescaleSupport.CollectionHealthRetentionSpan,
+            "the refresh window plus the compression margin now falls inside retention, so collection_health_hourly could be compressed");
     }
 
     /// <summary>The byte formatter picks the unit that gives a whole-number part, so a registry table is

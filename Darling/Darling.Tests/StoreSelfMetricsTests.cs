@@ -787,9 +787,14 @@ FROM collect.store_metrics", connection);
         /* #3582: the reconciliation, through the real reader over the real rows. One sweep, so no row is
            from an older one; both catch-all rows present; every byte attributed inside the bar; and the
            named rows are a non-trivial share even of an empty store (roots and indexes are real bytes). */
-        var inventory = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(latest);
+        /* #4619: one sweep, so no row is outside it and the existence check has nothing to ask. */
+        Assert.Empty(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.RowsOutsideTheSweep(latest));
+        var inventory = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(
+            latest, new Dictionary<(string ObjectKind, string ObjectName), bool?>());
         Assert.NotNull(inventory);
         Assert.Equal(0, inventory!.StaleRowCount);
+        Assert.Equal(0, inventory.UncheckedRowCount);
+        Assert.Empty(inventory.DroppedObjects);
         Assert.True(inventory.CatchAllPresent, "a catch-all row is missing from the sweep");
         Assert.True(inventory.EnumeratedBytes > 0);
         Assert.True(inventory.DatabaseBytes > inventory.EnumeratedBytes);
@@ -880,6 +885,129 @@ FROM collect.store_metrics", connection);
         Assert.True(second.Requested is >= 1, $"the forced CHECKPOINT must land in the interval's requested count, not {second.Requested}");
         Assert.Equal(first.CumulativeRequested + second.Requested, second.CumulativeRequested);
         Assert.True(second.IsPressure, "one WAL-forced checkpoint in the interval IS the pressure arm");
+
+        /* #4619: the existence check, through the shipped SQL, over the names THIS SWEEP WROTE. Every one must
+           resolve back to its object: a kind whose lookup drifted from the sweep's name form (the job name, a
+           schema-qualified table, the role) would call a live object dropped, and only the real sweep's own
+           names prove they round-trip. */
+        var logging = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetJobExecutionLoggingAsync(dataSource, ct);
+        Assert.NotEqual(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered, logging.Status);
+        var swept = (await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct))
+            .Where(r => r.ObjectKind != StoreSelfMetrics.StoreObjectKind)
+            .ToList();
+        Assert.Contains(swept, r => r.ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind);
+        Assert.Contains(swept, r => r.ObjectKind == StoreSelfMetrics.TableObjectKind);
+        Assert.Contains(swept, r => r.ObjectKind == StoreSelfMetrics.JobHistoryObjectKind);
+        var everyName = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetObjectExistenceAsync(dataSource, logging, swept, ct);
+        Assert.NotNull(everyName);
+        Assert.Equal(swept.Count, everyName!.Count);
+        foreach (var row in swept)
+        {
+            Assert.True(everyName.TryGetValue((row.ObjectKind, row.ObjectName), out var verdict) && verdict == true,
+                $"{row.ObjectKind} '{row.ObjectName}' was just swept, but the existence check says {(verdict is null ? "no verdict" : verdict.ToString())}");
+        }
+
+        /* The negative control through the same string: a name per kind that nothing carries is gone, and the
+           two shapes with no lookup (a table name without its schema, a kind the check does not know) get no
+           verdict rather than a guess. */
+        static PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.StoreMetricRow Named(string kind, string name)
+            => new(kind, name, DateTime.UtcNow, null, null, null, null, null, null);
+        var gone = new[]
+        {
+            Named(StoreSelfMetrics.HypertableObjectKind, "no_such_hypertable_4619"),
+            Named(StoreSelfMetrics.ContinuousAggregateObjectKind, "no_such_view_4619"),
+            Named(StoreSelfMetrics.BackgroundJobObjectKind, "policy_refresh_continuous_aggregate no_such_view_4619 [999999]"),
+            Named(StoreSelfMetrics.DimensionObjectKind, "no_such_dimension_4619"),
+            Named(StoreSelfMetrics.TableObjectKind, "collect.no_such_table_4619"),
+            Named(StoreSelfMetrics.JobHistoryObjectKind, "no_such_role_4619"),
+        };
+        var noVerdict = new[] { Named(StoreSelfMetrics.TableObjectKind, "unqualified_4619"), Named("no_such_kind_4619", "x") };
+        var negative = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetObjectExistenceAsync(
+            dataSource, logging, gone.Concat(noVerdict).ToList(), ct);
+        Assert.NotNull(negative);
+        Assert.All(gone, r => Assert.False(negative![(r.ObjectKind, r.ObjectName)], $"{r.ObjectKind} '{r.ObjectName}' should be gone"));
+        Assert.All(noVerdict, r => Assert.Null(negative![(r.ObjectKind, r.ObjectName)]));
+
+        /* The plain-PostgreSQL variant, on the same names: the three TimescaleDB kinds get no verdict (their
+           views do not exist on such a store), and every other kind is judged exactly as above. */
+        var timescaleKinds = new[]
+        {
+            StoreSelfMetrics.HypertableObjectKind, StoreSelfMetrics.ContinuousAggregateObjectKind, StoreSelfMetrics.BackgroundJobObjectKind,
+        };
+        var plain = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetObjectExistenceAsync(
+            dataSource,
+            logging with { Status = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.JobExecutionLoggingStatus.NotRegistered },
+            swept,
+            ct);
+        Assert.NotNull(plain);
+        Assert.All(swept, r => Assert.Equal(timescaleKinds.Contains(r.ObjectKind) ? (bool?)null : true, plain![(r.ObjectKind, r.ObjectName)]));
+
+        /* And the split end to end, with both retirements the issue found on production stores: a job
+           deleted while its object stays (#3653's frozen rollups), and a view dropped (#4289's superseded
+           baselines) along with any job the sweep had a row for. Sweep again, and the rows the newest sweep
+           did not write are exactly those, all DROPPED, and nothing is a sweep gap. Then remove one live
+           hypertable's row from the newest sweep, the shape of a sweep that missed it: that one is a gap.
+           (The view's own refresh job usually has no row: the sweep lists jobs from job_stats, which shows
+           a job only once the scheduler has run it.) The view is a LEAF — no other aggregate is built on
+           its materialization — so dropping it retires exactly one aggregate row. */
+        string retiredView;
+        await using (var leaf = new NpgsqlCommand(@"
+SELECT ca.view_name
+FROM timescaledb_information.continuous_aggregates ca
+WHERE ca.view_schema = 'collect'
+AND   NOT EXISTS (
+        SELECT 1 FROM timescaledb_information.continuous_aggregates child
+        WHERE child.hypertable_schema = ca.materialization_hypertable_schema
+        AND   child.hypertable_name = ca.materialization_hypertable_name)
+ORDER BY ca.view_name
+LIMIT 1", connection))
+        {
+            retiredView = (string)(await leaf.ExecuteScalarAsync(ct))!;
+        }
+
+        bool ServesTheView(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.StoreMetricRow r)
+            => r.ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind && r.ObjectName.Contains(" " + retiredView + " [", StringComparison.Ordinal);
+        var retiredJob = swept.First(r => r.ObjectKind == StoreSelfMetrics.BackgroundJobObjectKind && !ServesTheView(r)).ObjectName;
+        var retiredJobId = int.Parse(retiredJob[(retiredJob.LastIndexOf('[') + 1)..^1], CultureInfo.InvariantCulture);
+        var retiredJobs = swept.Where(ServesTheView).Select(r => r.ObjectName).Append(retiredJob).ToList();
+        Assert.True(swept.Any(r => r.ObjectKind == StoreSelfMetrics.ContinuousAggregateObjectKind && r.ObjectName == retiredView), $"the sweep wrote no continuous_aggregate row for {retiredView}");
+        await ExecAsync(connection, $"SELECT delete_job({retiredJobId})", ct);
+        await ExecAsync(connection, $"DROP MATERIALIZED VIEW collect.{retiredView} CASCADE", ct);
+
+        var thirdSweepAt = secondSweepAt.AddSeconds(2);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, thirdSweepAt, null, ct);
+
+        async Task<PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.InventoryReconciliation> InventoryNowAsync()
+        {
+            var now = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
+            var outside = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.RowsOutsideTheSweep(now);
+            var existence = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetObjectExistenceAsync(dataSource, logging, outside, ct);
+            Assert.NotNull(existence);
+            return PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(now, existence)!;
+        }
+
+        var afterRetiring = await InventoryNowAsync();
+        Assert.Equal(0, afterRetiring.StaleRowCount);
+        Assert.Equal(0, afterRetiring.UncheckedRowCount);
+        Assert.Equal(
+            retiredJobs.Select(j => (StoreSelfMetrics.BackgroundJobObjectKind, j)).Append((StoreSelfMetrics.ContinuousAggregateObjectKind, retiredView)).OrderBy(k => k),
+            afterRetiring.DroppedObjects.Select(d => (d.ObjectKind, d.ObjectName)).OrderBy(k => k));
+        Assert.All(afterRetiring.DroppedObjects, d => Assert.Equal(DateTime.SpecifyKind(secondSweepAt, DateTimeKind.Unspecified), d.LastRowAt, TimeSpan.FromMilliseconds(1)));
+
+        var missedHypertable = swept.First(r => r.ObjectKind == StoreSelfMetrics.HypertableObjectKind).ObjectName;
+        await using (var miss = new NpgsqlCommand(
+            "DELETE FROM collect.store_metrics WHERE object_kind = $1 AND object_name = $2 AND metric_time = $3", connection))
+        {
+            miss.Parameters.AddWithValue(StoreSelfMetrics.HypertableObjectKind);
+            miss.Parameters.AddWithValue(missedHypertable);
+            miss.Parameters.AddWithValue(DateTime.SpecifyKind(thirdSweepAt, DateTimeKind.Unspecified));
+            Assert.Equal(1, await miss.ExecuteNonQueryAsync(ct));
+        }
+
+        var afterMissing = await InventoryNowAsync();
+        Assert.Equal(1, afterMissing.StaleRowCount);
+        Assert.Equal(afterRetiring.DroppedObjects.Count, afterMissing.DroppedObjects.Count);
+        Assert.DoesNotContain(afterMissing.DroppedObjects, d => d.ObjectName == missedHypertable);
     }
 
     /// <summary>
@@ -1026,9 +1154,14 @@ FROM named, removed", connection))
         /* The whole-store reconciliation through the real reader: one sweep, both catch-all rows, inside the bar. */
         await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         var latest = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetLatestAsync(dataSource, ct);
-        var inventory = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(latest);
+        /* #4619: one sweep, so no row is outside it and the existence check has nothing to ask. */
+        Assert.Empty(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.RowsOutsideTheSweep(latest));
+        var inventory = PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.ComputeInventory(
+            latest, new Dictionary<(string ObjectKind, string ObjectName), bool?>());
         Assert.NotNull(inventory);
         Assert.Equal(0, inventory!.StaleRowCount);
+        Assert.Equal(0, inventory.UncheckedRowCount);
+        Assert.Empty(inventory.DroppedObjects);
         Assert.True(inventory.CatchAllPresent, "a catch-all row is missing from the sweep");
         Assert.True(inventory.Reconciled,
             $"the inventory did not reconcile: database {inventory.DatabaseBytes}, attributed {inventory.AttributedBytes}, "

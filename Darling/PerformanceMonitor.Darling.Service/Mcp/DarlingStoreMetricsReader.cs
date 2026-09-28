@@ -853,8 +853,18 @@ WHERE name = $1";
     /// <param name="SystemRelationCount">The <c>system</c> row's relation count; null likewise.</param>
     /// <param name="ResidualBytes"><c>DatabaseBytes - AttributedBytes</c>. Expected small and non-zero (the
     /// directory's non-relation files, plus movement between statements); can be negative.</param>
-    /// <param name="StaleRowCount">Latest rows whose <c>metric_time</c> is NOT the store row's — objects the
-    /// newest sweep did not reach. Non-zero means the sweep is not completing and the note says so.</param>
+    /// <param name="StaleRowCount">Latest rows whose <c>metric_time</c> is NOT the store row's AND whose
+    /// object still exists (#4619): objects the newest sweep should have reached and did not. Non-zero is a
+    /// sweep that failed part-way or skipped its TimescaleDB arms, and the note says where the service logged
+    /// which.</param>
+    /// <param name="UncheckedRowCount">Latest rows from another sweep whose object's existence could not be
+    /// read: the live check failed, or the kind needs a TimescaleDB catalog this database does not have.
+    /// Excluded from the sums like the others, with no verdict either way.</param>
+    /// <param name="DroppedObjects">Latest rows from another sweep whose object no longer exists (#4619) —
+    /// retired by the product (the superseded baselines of #4289, the frozen legacy rollups' jobs of #3653)
+    /// or dropped by hand. <c>collect.store_metrics</c> is append-only, so such an object's last row stays
+    /// its newest for <see cref="StoreSelfMetrics.RetentionDays"/> days; it is history, NOT a sweep failure.
+    /// Newest last row first.</param>
     public sealed record InventoryReconciliation(
         DateTime SweepAt,
         long DatabaseBytes,
@@ -866,7 +876,9 @@ WHERE name = $1";
         long? SystemBytes,
         int? SystemRelationCount,
         long ResidualBytes,
-        int StaleRowCount)
+        int StaleRowCount,
+        int UncheckedRowCount,
+        IReadOnlyList<DroppedObject> DroppedObjects)
     {
         /// <summary>Percent of the database under named objects — the coverage statement. Null on a zero-byte
         /// database, never a division by zero dressed as a hundred.</summary>
@@ -901,18 +913,14 @@ WHERE name = $1";
         StoreSelfMetrics.TableObjectKind,
     };
 
-    /// <summary>
-    /// Reconciles the newest sweep's inventory against its own database figure (#3582). Pure. Null when
-    /// there is no store row to reconcile against — the tool then says coverage is unknown rather than
-    /// computing a percentage of nothing. Rows from other sweeps are counted, not summed.
-    /// </summary>
-    public static InventoryReconciliation? ComputeInventory(IReadOnlyList<StoreMetricRow> latest)
-    {
-        if (latest is null)
-        {
-            throw new ArgumentNullException(nameof(latest));
-        }
+    /// <summary>One object the newest sweep did not reach because it no longer exists (#4619), with the
+    /// <c>metric_time</c> of its last row — "dropped since" that time.</summary>
+    public sealed record DroppedObject(string ObjectKind, string ObjectName, DateTime LastRowAt);
 
+    /// <summary>The newest store row that carries a size: the sweep every inventory figure is taken from.
+    /// Null when no sweep has written one.</summary>
+    private static StoreMetricRow? NewestStoreRow(IReadOnlyList<StoreMetricRow> latest)
+    {
         StoreMetricRow? store = null;
         foreach (var row in latest)
         {
@@ -923,6 +931,61 @@ WHERE name = $1";
             }
         }
 
+        return store;
+    }
+
+    /// <summary>
+    /// The object rows that are NOT from the store row's sweep (#4619) — the rows whose objects
+    /// <see cref="GetObjectExistenceAsync"/> checks. Pure. Older rows are objects the newest sweep did not
+    /// reach; NEWER rows exist too, because the sweep is not one transaction and writes the store row last,
+    /// so a sweep that failed after its first statements leaves rows stamped later than the newest store
+    /// row. Empty when there is no store row or every row shares its stamp, which is the healthy store:
+    /// the check then costs no query.
+    /// </summary>
+    public static IReadOnlyList<StoreMetricRow> RowsOutsideTheSweep(IReadOnlyList<StoreMetricRow> latest)
+    {
+        if (latest is null)
+        {
+            throw new ArgumentNullException(nameof(latest));
+        }
+
+        var store = NewestStoreRow(latest);
+        if (store is null)
+        {
+            return Array.Empty<StoreMetricRow>();
+        }
+
+        return latest
+            .Where(r => r.ObjectKind != StoreSelfMetrics.StoreObjectKind && r.MetricTime != store.MetricTime)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Reconciles the newest sweep's inventory against its own database figure (#3582). Pure. Null when
+    /// there is no store row to reconcile against — the tool then says coverage is unknown rather than
+    /// computing a percentage of nothing. Rows from other sweeps are never summed; since #4619 they are
+    /// split by whether their object still exists, from <paramref name="existence"/>
+    /// (<see cref="GetObjectExistenceAsync"/>'s result): true is a real sweep gap
+    /// (<see cref="InventoryReconciliation.StaleRowCount"/>), false a retired object
+    /// (<see cref="InventoryReconciliation.DroppedObjects"/>), and null — or a null map, the check having
+    /// failed — no verdict (<see cref="InventoryReconciliation.UncheckedRowCount"/>).
+    ///
+    /// <para><b>One kind is judged here, not in the catalog.</b> A <c>job_history</c> row is named for the
+    /// role the sweep read job history as (<c>current_user</c>), and that role usually still exists after
+    /// the sweep stops running as it. When the newest sweep wrote a <c>job_history</c> row of its own, an
+    /// older one under another role is superseded, not missed, so it is counted as retired whatever the
+    /// catalog says.</para>
+    /// </summary>
+    public static InventoryReconciliation? ComputeInventory(
+        IReadOnlyList<StoreMetricRow> latest,
+        IReadOnlyDictionary<(string ObjectKind, string ObjectName), bool?>? existence)
+    {
+        if (latest is null)
+        {
+            throw new ArgumentNullException(nameof(latest));
+        }
+
+        var store = NewestStoreRow(latest);
         if (store is null)
         {
             return null;
@@ -932,6 +995,10 @@ WHERE name = $1";
         long? other = null, system = null;
         int? otherCount = null, systemCount = null;
         var stale = 0;
+        var uncheckedCount = 0;
+        var dropped = new List<DroppedObject>();
+        var sweepWroteJobHistory = latest.Any(r =>
+            r.ObjectKind == StoreSelfMetrics.JobHistoryObjectKind && r.MetricTime == store.MetricTime);
 
         foreach (var row in latest)
         {
@@ -942,7 +1009,25 @@ WHERE name = $1";
 
             if (row.MetricTime != store.MetricTime)
             {
-                stale++;
+                bool? exists = row.ObjectKind == StoreSelfMetrics.JobHistoryObjectKind && sweepWroteJobHistory
+                    ? false
+                    : existence is not null && existence.TryGetValue((row.ObjectKind, row.ObjectName), out var known)
+                        ? known
+                        : null;
+
+                if (exists == true)
+                {
+                    stale++;
+                }
+                else if (exists == false)
+                {
+                    dropped.Add(new DroppedObject(row.ObjectKind, row.ObjectName, row.MetricTime));
+                }
+                else
+                {
+                    uncheckedCount++;
+                }
+
                 continue;
             }
 
@@ -987,7 +1072,130 @@ WHERE name = $1";
             system,
             systemCount,
             store.TotalBytes.Value - attributed,
-            stale);
+            stale,
+            uncheckedCount,
+            dropped
+                .OrderByDescending(d => d.LastRowAt)
+                .ThenBy(d => d.ObjectKind, StringComparer.Ordinal)
+                .ThenBy(d => d.ObjectName, StringComparer.Ordinal)
+                .ToList());
+    }
+
+    /// <summary>
+    /// Whether each object named by a row from another sweep still exists (#4619), read LIVE at tool time:
+    /// without it every object the product retires — a superseded baseline's view and its three policy
+    /// jobs (#4289), a frozen rollup's refresh job (#3653) — reads as a sweep that did not reach it, for as
+    /// long as the append-only series keeps that object's last row. One lookup per <c>object_kind</c>, in
+    /// the NAME FORM the sweep writes for that kind:
+    /// <list type="bullet">
+    /// <item><c>hypertable</c> and <c>continuous_aggregate</c>: the bare name in the same
+    /// <c>timescaledb_information</c> view the sweep enumerates from;</item>
+    /// <item><c>background_job</c>: <see cref="StoreSelfMetrics.BackgroundJobObjectNameSql"/>, the one
+    /// expression the sweep names jobs with, so a job re-created under a new <c>job_id</c> is the old one
+    /// gone rather than the old one missed;</item>
+    /// <item><c>dimension</c>: the bare table name, in <c>collect</c>; <c>table</c>: the
+    /// schema-qualified name every named-table row carries (a name without a schema gets no verdict);</item>
+    /// <item><c>job_history</c>: the role the sweep read as, in <c>pg_roles</c>;</item>
+    /// <item>the constant-named rows the sweep writes on EVERY run (<c>other</c>, <c>system</c>,
+    /// <c>checkpointer</c>): true — such a row from another sweep is always a real gap;</item>
+    /// <item>any other kind: NULL, no verdict.</item>
+    /// </list>
+    /// Catalog reads only — <c>pg_class</c>, <c>pg_namespace</c>, <c>pg_roles</c> and the TimescaleDB
+    /// information views are readable by every role, the <c>mcp</c> role included, and none of these
+    /// lookups resolves a name through a schema ACL the way <c>to_regclass</c> would. $1 the kinds and $2
+    /// the names, as two parallel arrays.
+    /// </summary>
+    public const string ObjectExistenceSql = $@"
+SELECT
+    s.object_kind,
+    s.object_name,
+    CASE s.object_kind
+        WHEN '{StoreSelfMetrics.HypertableObjectKind}' THEN EXISTS (
+            SELECT 1 FROM timescaledb_information.hypertables h WHERE h.hypertable_name = s.object_name)
+        WHEN '{StoreSelfMetrics.ContinuousAggregateObjectKind}' THEN EXISTS (
+            SELECT 1 FROM timescaledb_information.continuous_aggregates ca WHERE ca.view_name = s.object_name)
+        WHEN '{StoreSelfMetrics.BackgroundJobObjectKind}' THEN EXISTS (
+            SELECT 1 FROM timescaledb_information.jobs j WHERE {StoreSelfMetrics.BackgroundJobObjectNameSql} = s.object_name)
+        {ObjectExistenceCatalogArms}
+    END AS still_exists
+FROM unnest($1::text[], $2::text[]) AS s (object_kind, object_name)";
+
+    /// <summary>The plain-PostgreSQL variant of <see cref="ObjectExistenceSql"/>: the TimescaleDB views do not
+    /// exist there, so the three kinds read from them get no verdict (NULL), and every other kind is judged
+    /// exactly as on a TimescaleDB store. $1 the kinds, $2 the names.</summary>
+    public const string ObjectExistencePlainSql = $@"
+SELECT
+    s.object_kind,
+    s.object_name,
+    CASE s.object_kind
+        {ObjectExistenceCatalogArms}
+    END AS still_exists
+FROM unnest($1::text[], $2::text[]) AS s (object_kind, object_name)";
+
+    /// <summary>The arms of both existence variants that read only PostgreSQL's own catalogs. The CASE falls
+    /// through to NULL for any kind not named here or above it.</summary>
+    private const string ObjectExistenceCatalogArms = $@"WHEN '{StoreSelfMetrics.DimensionObjectKind}' THEN EXISTS (
+            SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'collect' AND c.relname = s.object_name)
+        WHEN '{StoreSelfMetrics.TableObjectKind}' THEN CASE WHEN strpos(s.object_name, '.') > 0 THEN EXISTS (
+            SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = split_part(s.object_name, '.', 1) AND c.relname = split_part(s.object_name, '.', 2)) END
+        WHEN '{StoreSelfMetrics.JobHistoryObjectKind}' THEN EXISTS (
+            SELECT 1 FROM pg_roles r WHERE r.rolname = s.object_name)
+        WHEN '{StoreSelfMetrics.OtherObjectKind}' THEN true
+        WHEN '{StoreSelfMetrics.SystemObjectKind}' THEN true
+        WHEN '{StoreSelfMetrics.CheckpointerObjectKind}' THEN true";
+
+    /// <summary>
+    /// Reads <see cref="ObjectExistenceSql"/> (or its plain variant, by the same
+    /// <see cref="JobExecutionLoggingStatus.NotRegistered"/> signal the other TimescaleDB-only reads use)
+    /// for <paramref name="rows"/> — <see cref="RowsOutsideTheSweep"/>'s result. No rows, no query: the
+    /// healthy store pays nothing. Unlike <see cref="GetContinuousAggregateStatesAsync"/>, a store without
+    /// TimescaleDB still queries, because three of the kinds are judged from PostgreSQL's own catalogs.
+    /// Failure-isolated to NULL — every row then gets no verdict and the note says the check did not
+    /// complete — never to an empty map, which would read the same way by accident rather than by design.
+    /// </summary>
+    public static async Task<IReadOnlyDictionary<(string ObjectKind, string ObjectName), bool?>?> GetObjectExistenceAsync(
+        NpgsqlDataSource postgres,
+        JobExecutionLoggingReading logging,
+        IReadOnlyList<StoreMetricRow> rows,
+        CancellationToken cancellationToken = default)
+    {
+        if (logging is null)
+        {
+            throw new ArgumentNullException(nameof(logging));
+        }
+
+        if (rows is null)
+        {
+            throw new ArgumentNullException(nameof(rows));
+        }
+
+        var existence = new Dictionary<(string ObjectKind, string ObjectName), bool?>();
+        if (rows.Count == 0)
+        {
+            return existence;
+        }
+
+        try
+        {
+            await using var command = postgres.CreateCommand(
+                logging.Status == JobExecutionLoggingStatus.NotRegistered ? ObjectExistencePlainSql : ObjectExistenceSql);
+            command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+            command.Parameters.AddWithValue(rows.Select(r => r.ObjectKind).ToArray());
+            command.Parameters.AddWithValue(rows.Select(r => r.ObjectName).ToArray());
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                existence[(reader.GetString(0), reader.GetString(1))] = reader.IsDBNull(2) ? null : reader.GetBoolean(2);
+            }
+
+            return existence;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
