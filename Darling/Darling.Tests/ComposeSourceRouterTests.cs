@@ -447,7 +447,7 @@ public sealed class ComposeSourceRouterTests
         Assert.Equal("query_stats_hourly", route.CaggRelation);
     }
 
-    /// <summary>#4605 part 2 (LA-3): <see cref="ComposeSourceRouter.Resolve"/> now takes the panel's mode and
+    /// <summary>#4605 part 2: <see cref="ComposeSourceRouter.Resolve"/> now takes the panel's mode and
     /// its pre-route effective bucket as explicit parameters (moved ahead of routing in
     /// <c>ComposeCompiler.Compile</c>). Pins that the values actually arrive unchanged — a Ranked plan carries
     /// no bucket; a TimeSeries/Hour plan carries Hour — via <see cref="ComposeSourceRouter.LastResolveInput"/>,

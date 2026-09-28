@@ -144,7 +144,7 @@ public static class ComposeCaggCatalog
 /// </summary>
 public static class ComposeSourceRouter
 {
-    /// <summary>Test-only observability for the mode/effective-bucket wiring (#4605 part 2, LA-3): the last
+    /// <summary>Test-only observability for the mode/effective-bucket wiring (#4605 part 2): the last
     /// values <see cref="Resolve"/> received. Not consulted by any routing decision — <c>ComposeCompiler.Compile</c>
     /// runs synchronously and single-threaded per call, so a test reading this right after its own call is not
     /// contaminated by another.</summary>

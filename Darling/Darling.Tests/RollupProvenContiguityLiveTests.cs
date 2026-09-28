@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 using Xunit;
 
@@ -42,10 +43,6 @@ public sealed class RollupProvenContiguityLiveTests
         Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the live proven-contiguity test");
 
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
-        {
-            await stop.ExecuteNonQueryAsync(ct);
-        }
 
         var view = TimescaleSupport.QueryStatsIntervalHourlyView;
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
@@ -57,7 +54,13 @@ public sealed class RollupProvenContiguityLiveTests
         await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
 
         var jobId = await ReadJobIdAsync(connection, view, ct);
-        await RunJobAsync(connection, jobId, ct);
+
+        /* The signal this test proves reads timescaledb_information.job_stats — the view TimescaleDB's own
+           background scheduler populates. A foreground CALL run_job() executes the policy but does NOT
+           update job_stats (TimescaleDB issue #5188), so the run must go through the real scheduler, the
+           same RunJobViaSchedulerAsync pattern StoreSelfMetricsTests uses. No stop_background_workers call
+           here for that reason — this test needs the scheduler running. */
+        await RunJobViaSchedulerAsync(connection, jobId, ct);
 
         var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
         try
@@ -118,10 +121,6 @@ public sealed class RollupProvenContiguityLiveTests
         Assert.True(timescaleEnabled, "TimescaleDB must be available on CI for the live batching-trap test");
 
         await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
-        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
-        {
-            await stop.ExecuteNonQueryAsync(ct);
-        }
 
         var view = TimescaleSupport.QueryStatsIntervalHourlyView;
         var now = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
@@ -141,7 +140,9 @@ public sealed class RollupProvenContiguityLiveTests
             await cap.ExecuteNonQueryAsync(ct);
         }
 
-        await RunJobAsync(connection, jobId, ct);
+        /* Through the real scheduler, same reason as the sibling test above: job_stats.last_run_status is
+           what the signal reads, and only the scheduler path updates it. */
+        await RunJobViaSchedulerAsync(connection, jobId, ct);
 
         /* Confirm the trap actually fired: only PART of the backlog materialized, and the run still reports
            Success — otherwise this test would be proving nothing. */
@@ -165,14 +166,15 @@ public sealed class RollupProvenContiguityLiveTests
     {
         await using var insert = new NpgsqlCommand(
             @"INSERT INTO collect.query_stats
-                (server_id, server_name, database_name, query_hash, sql_handle, collection_time,
+                (collection_id, server_id, server_name, database_name, query_hash, sql_handle, collection_time,
                  delta_worker_time, delta_elapsed_time, delta_execution_count, sample_interval_seconds)
-              SELECT -460500, 'PROVEN-CONTIG-4605-SRV', 'msdb', 'hash', 'handle', gs,
+              SELECT $3 + row_number() OVER (ORDER BY gs), -460500, 'PROVEN-CONTIG-4605-SRV', 'msdb', 'hash', 'handle', gs,
                      1000, 2000, 1, 900
               FROM generate_series($1::timestamp, $2::timestamp, INTERVAL '15 minutes') AS gs",
             connection);
         insert.Parameters.AddWithValue(DateTime.SpecifyKind(fromUtc, DateTimeKind.Unspecified));
         insert.Parameters.AddWithValue(DateTime.SpecifyKind(toUtc, DateTimeKind.Unspecified));
+        insert.Parameters.AddWithValue(CollectionIdGenerator.Next());
         await insert.ExecuteNonQueryAsync(ct);
     }
 
@@ -189,16 +191,37 @@ public sealed class RollupProvenContiguityLiveTests
         return Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture);
     }
 
-    private static async Task RunJobAsync(NpgsqlConnection connection, int jobId, System.Threading.CancellationToken ct)
+    /// <summary>
+    /// Runs the job through the REAL scheduler — arm with <c>next_start => now()</c>, poll
+    /// <c>last_successful_finish</c> until it advances. A foreground <c>CALL run_job()</c> executes the policy
+    /// but does not update <c>timescaledb_information.job_stats</c> (TimescaleDB issue #5188), and that view is
+    /// exactly what <see cref="PerformanceMonitor.Darling.Storage.RollupProvenContiguity"/> reads, so the run
+    /// must go through the scheduler for the signal under test to see it. Left scheduled afterward (not
+    /// parked): the signal under test requires <c>scheduled = true</c>, and its own next run is an hour out
+    /// on this policy's cadence, far beyond this test's lifetime.
+    /// </summary>
+    private static async Task RunJobViaSchedulerAsync(NpgsqlConnection connection, int jobId, System.Threading.CancellationToken ct)
     {
-        await using var run = new NpgsqlCommand($"CALL run_job({jobId})", connection);
-        await run.ExecuteNonQueryAsync(ct);
+        var before = await ReadLastSuccessfulFinishAsync(connection, jobId, ct);
+        await using (var arm = new NpgsqlCommand("SELECT alter_job($1::integer, scheduled => true, next_start => now())", connection))
+        {
+            arm.Parameters.AddWithValue(jobId);
+            await arm.ExecuteNonQueryAsync(ct);
+        }
+
+        var deadline = DateTime.UtcNow.AddSeconds(90);
+        while (await ReadLastSuccessfulFinishAsync(connection, jobId, ct) <= before)
+        {
+            Assert.True(DateTime.UtcNow < deadline,
+                $"the scheduler did not complete a run of job {jobId} within 90s of next_start => now()");
+            await Task.Delay(500, ct);
+        }
     }
 
     private static async Task<DateTime> ReadLastSuccessfulFinishAsync(NpgsqlConnection connection, int jobId, System.Threading.CancellationToken ct)
     {
         await using var read = new NpgsqlCommand(
-            "SELECT last_finish FROM _timescaledb_internal.bgw_job_stat WHERE job_id = $1", connection);
+            "SELECT last_successful_finish FROM timescaledb_information.job_stats WHERE job_id = $1", connection);
         read.Parameters.AddWithValue(jobId);
         var value = await read.ExecuteScalarAsync(ct);
         return DateTime.SpecifyKind((DateTime)value!, DateTimeKind.Utc);
