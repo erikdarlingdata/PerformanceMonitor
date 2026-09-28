@@ -185,6 +185,39 @@ public sealed class MigrationDataMovingRungCensusPins
             + "decompressed relation an empty shell (one 8 KB page per compressed chunk, V142's own measured "
             + "property) - so a store many times today's size would still build both in low seconds, nowhere "
             + "near a MigrationCommandTimeoutSeconds window, and this rung does not move the multiple"),
+        new(
+            153,
+            SetsTheFloor: false,
+            "CREATE INDEX over the populated collect.query_store_interval_latest table (created V143) "
+            + "(#4608, split into its own rung #4615) - real collected series, V104's/V142's/V150's shape "
+            + "rather than a same-rung freebie, but a plain (uncompressed) heap rather than a compressed "
+            + "hypertable, so every row is a real page rather than V142's/V150's empty-shell compressed "
+            + "chunks. Measured on a rig seeded at generate_series scale with the same maintenance_work_mem "
+            + "(2047 MB) and max_parallel_maintenance_workers (2) the field store runs: the index built in "
+            + "1.41 s at 5M rows, 3.61 s at 10M, and 8.13 s at 20M rows (near-linear, ~0.28-0.41 ms/row) with "
+            + "max_parallel_maintenance_workers = 2, versus roughly 2.3x slower serial (0 workers) on the same "
+            + "20M-row seed. query_store_interval_latest is kept to 15 days by the purge this rung speeds up, "
+            + "and the field store measured 18.3M rows at that horizon on 2026-09-28 - a full-horizon store "
+            + "(roughly 6-7x today's rows, ~110M) projects to roughly 20-25 s with parallel workers, nowhere "
+            + "near the 280 s MigrationCommandTimeoutSeconds window this rung's own SET LOCAL lock_timeout "
+            + "leaves. V143 is new in 3.9.0 (v3.8.0 was schema 125), so every store upgrading from a released "
+            + "version creates the table EMPTY in this same migrate run and builds the index instantly; only "
+            + "a nightly-build store already holds rows, and only for the few days since it picked up V143 - "
+            + "nowhere near the horizon in practice"),
+        new(
+            154,
+            SetsTheFloor: false,
+            "CREATE INDEX over the populated collect.query_store_interval_wide table (created V145) (#4608, "
+            + "split into its own rung #4615) - V153's twin, same shape and same measurement basis, on the "
+            + "table this rung purges/reads instead: the index built in 3.52 s at 9M rows with "
+            + "max_parallel_maintenance_workers = 2. query_store_interval_wide is kept to 9 days, and the "
+            + "field store measured 9.3M rows at that horizon on 2026-09-28 - a full-horizon store (roughly "
+            + "6-7x today's rows, ~65M) projects to roughly 25-30 s with parallel workers, nowhere near the "
+            + "280 s MigrationCommandTimeoutSeconds window this rung's own SET LOCAL lock_timeout leaves. "
+            + "V145 is new in 3.9.0 (v3.8.0 was schema 125), so every store upgrading from a released version "
+            + "creates the table EMPTY in this same migrate run and builds the index instantly; only a "
+            + "nightly-build store already holds rows, and only for the few days since it picked up V145 - "
+            + "nowhere near the horizon in practice"),
     ];
 
     /// <summary>
