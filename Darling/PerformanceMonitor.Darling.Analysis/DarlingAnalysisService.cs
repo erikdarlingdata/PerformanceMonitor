@@ -235,8 +235,16 @@ public sealed class DarlingAnalysisService
     /// (see <see cref="IsAnalyzing"/>), so without it every pass recomputed every 30-day baseline and the MCP and web
     /// hosts paid for them again; with it, all of them share one compute per series per analysis hour. Null keeps each
     /// provider's cache private to this instance, as before.</param>
+    /// <param name="analyzerConfig">#4535: the plan analyzer's per-rule config (darling.json's
+    /// optional "analyzer" section), forwarded to the fact and drill-down collectors' plan-analysis
+    /// calls. Null (the default) is <see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default"/>
+    /// — today's behavior, byte-for-byte.</param>
     public DarlingAnalysisService(
-        NpgsqlDataSource postgres, IPlanFetcher? planFetcher = null, ILogger? logger = null, BaselineCache? baselineCache = null)
+        NpgsqlDataSource postgres,
+        IPlanFetcher? planFetcher = null,
+        ILogger? logger = null,
+        BaselineCache? baselineCache = null,
+        PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
@@ -246,10 +254,10 @@ public sealed class DarlingAnalysisService
         /* The SQL Server set: the five objects this service always composed, in the same order. */
         var sqlServerBaselines = new PgBaselineProvider(postgres, logger, baselineCache);
         _sqlServerEngine = new AnalysisEngineSet(
-            new PgFactCollector(postgres, logger),
+            new PgFactCollector(postgres, logger, analyzerConfig),
             new PgAnomalyDetector(postgres, sqlServerBaselines, logger),
             new InferenceEngine(new RelationshipGraph()),
-            new PgDrillDownCollector(postgres, planFetcher, logger),
+            new PgDrillDownCollector(postgres, planFetcher, logger, analyzerConfig),
             sqlServerBaselines,
             TotalDataSpanSql);
 

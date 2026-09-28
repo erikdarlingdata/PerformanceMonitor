@@ -8,6 +8,7 @@ using PerformanceMonitor.Analysis;
 using PerformanceMonitor.PlanAnalysis;
 using PerformanceMonitorLite.Database;
 
+using PerformanceMonitorLite;
 namespace PerformanceMonitorLite.Analysis;
 
 public partial class DuckDbFactCollector
@@ -633,7 +634,7 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var summary = PlanAdvisoryAggregator.SummarizeCancellable(planXmls, context.CancellationToken);
+            var summary = PlanAdvisoryAggregator.SummarizeCancellable(planXmls, App.AnalyzerConfig, context.CancellationToken);
 
             if (summary.MissingIndexCount > 0)
             {

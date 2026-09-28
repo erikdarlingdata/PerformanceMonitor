@@ -42,6 +42,17 @@ public sealed class DarlingConfig
     [JsonPropertyName("postgres")]
     public PostgresConfig Postgres { get; set; } = new();
 
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule disable/severity-override config, read from an optional
+    /// <c>analyzer</c> section in darling.json — the same shape as erikdarlingdata/PerformanceStudio's
+    /// <c>.planview.json</c> root (<see cref="PerformanceMonitor.PlanAnalysis.AnalyzerConfig"/>). Null
+    /// (the section omitted entirely) behaves exactly like an explicit <c>AnalyzerConfig.Default</c>:
+    /// no rule disabled, no severity overridden. Not auto-discovered from any other file — PM does not
+    /// couple to PlanViewer's <c>~/.planview.json</c> convention.
+    /// </summary>
+    [JsonPropertyName("analyzer")]
+    public PerformanceMonitor.PlanAnalysis.AnalyzerConfig? Analyzer { get; set; }
+
     [JsonPropertyName("servers")]
     public List<MonitoredServer> Servers { get; set; } = new();
 

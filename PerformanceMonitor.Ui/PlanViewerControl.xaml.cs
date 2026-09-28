@@ -20,6 +20,15 @@ namespace PerformanceMonitor.Ui;
 
 public partial class PlanViewerControl : UserControl
 {
+    /// <summary>
+    /// #4535: the plan analyzer's per-rule config, set by the host (the Darling Viewer from its
+    /// darling.json "analyzer" section, Lite from settings.json's "analyzer" key) before
+    /// <see cref="LoadPlan"/> runs. Null (the default — no host has set it, or the section is
+    /// omitted) behaves as <see cref="AnalyzerConfig.Default"/>: no rule disabled, no severity
+    /// overridden, exactly today's behavior.
+    /// </summary>
+    public AnalyzerConfig? AnalyzerConfig { get; set; }
+
     private ParsedPlan? _currentPlan;
     private PlanStatement? _currentStatement;
     private int _allStatementsCount;
@@ -216,11 +225,12 @@ public partial class PlanViewerControl : UserControl
         /* Parse + analyze off the UI thread — a multi-MB showplan is two heavy passes that would
            otherwise freeze the window for seconds. Only the render below touches the UI. A refused
            or exception-terminated parse sets ParsedPlan.ParseError instead of throwing; see below. */
+        var analyzerConfig = AnalyzerConfig;
         var serverMetadata = ServerMetadata;
         _currentPlan = await System.Threading.Tasks.Task.Run(() =>
         {
             var plan = ShowPlanParser.Parse(planXml);
-            PlanAnalysisPipeline.Run(plan, null, serverMetadata, System.Threading.CancellationToken.None);
+            PlanAnalysisPipeline.Run(plan, analyzerConfig, serverMetadata, System.Threading.CancellationToken.None);
             return plan;
         });
 

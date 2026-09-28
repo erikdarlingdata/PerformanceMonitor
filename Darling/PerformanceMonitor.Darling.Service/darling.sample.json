@@ -258,6 +258,18 @@
     "uncorroboratedRoute": "digest"
   },
 
+  // Plan analyzer per-rule overrides (#4535, optional section). Omit the whole section for today's
+  // behavior: every rule runs at its built-in severity. "disabled" takes a rule number and drops that
+  // rule's findings from analyze_query_plan/analyze_procedure_plan/analyze_query_store_plan/
+  // analyze_plan_xml and the Viewer's plan window alike; "severity_overrides" maps a rule number to a
+  // replacement severity string. Example: hide rule 20 (Local Variables) and downgrade rule 5:
+  // "analyzer": {
+  //   "rules": {
+  //     "disabled": [20],
+  //     "severity_overrides": { "5": "Low" }
+  //   }
+  // }
+
   // Auto force-plan bot (#2138 phase 1, optional section). "enabled": false (the default) means the
   // bot evaluates nothing. Enabled with "dryRun": true (also the default) is SHADOW MODE: after each
   // scheduled analysis pass it journals every would-force / blocked decision, with evidence, to

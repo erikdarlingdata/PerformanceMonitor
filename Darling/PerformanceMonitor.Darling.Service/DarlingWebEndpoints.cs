@@ -289,7 +289,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// and the MCP host's analysis fill — so compare_analysis' banding here reads a series the store was already asked
     /// for this analysis hour from memory. Null keeps the analysis service's baselines private to it.</para>
     /// </summary>
-    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null)
+    public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
         /* #4442 scope 2: RunComposedPanelAsync is a static method shared with the MCP run_custom_view_panel
            tool (Mcp/DarlingMcpCustomViewTools.cs) and carries no instance state, so it cannot take the
@@ -316,7 +316,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            persisted-finding read — need only the store; the optional plan fetcher is for the excluded
            analyze/drill path, but the logger is also the analysis service's own logger (#4316)). Shared across
            requests, like the MCP host's singleton. */
-        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache);
+        var analysis = new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache, analyzerConfig: analyzerConfig);
 
         /* The pre-banded fleet roll-up (also surfaced as the get_fleet_overview MCP tool). */
         app.MapGet("/api/fleet", async (HttpContext context) =>
