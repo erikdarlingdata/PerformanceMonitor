@@ -48,8 +48,8 @@ public partial class PlanViewerControl
 
         // Cost
         AddTooltipSection(stack, "Costs");
-        AddTooltipRow(stack, "Cost", $"{node.CostPercent}% of statement ({node.EstimatedOperatorCost:F6})");
-        AddTooltipRow(stack, "Subtree Cost", $"{node.EstimatedTotalSubtreeCost:F6}");
+        AddTooltipRow(stack, "Cost", $"{node.CostPercent}% of statement ({MetricFormatter.FormatCost(node.EstimatedOperatorCost)})");
+        AddTooltipRow(stack, "Subtree Cost", MetricFormatter.FormatCost(node.EstimatedTotalSubtreeCost));
 
         // Rows
         AddTooltipSection(stack, "Rows");
@@ -66,8 +66,8 @@ public partial class PlanViewerControl
         if (node.EstimateIO > 0 || node.EstimateCPU > 0 || node.EstimatedRowSize > 0)
         {
             AddTooltipSection(stack, "Estimates");
-            if (node.EstimateIO > 0) AddTooltipRow(stack, "I/O Cost", $"{node.EstimateIO:F6}");
-            if (node.EstimateCPU > 0) AddTooltipRow(stack, "CPU Cost", $"{node.EstimateCPU:F6}");
+            if (node.EstimateIO > 0) AddTooltipRow(stack, "I/O Cost", MetricFormatter.FormatCost(node.EstimateIO));
+            if (node.EstimateCPU > 0) AddTooltipRow(stack, "CPU Cost", MetricFormatter.FormatCost(node.EstimateCPU));
             if (node.EstimatedRowSize > 0) AddTooltipRow(stack, "Avg Row Size", $"{node.EstimatedRowSize} B");
         }
 
