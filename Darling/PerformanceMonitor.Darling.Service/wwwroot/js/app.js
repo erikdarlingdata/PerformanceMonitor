@@ -25,10 +25,12 @@
  *   #/notebook/{id}     — a saved notebook, rendered as a document (#1563 D7; renderView kind-detects)
  *   #/notebook/{id}/edit— the notebook composer editing a saved notebook (#1563 D7)
  *   #/notebook/new      — the notebook composer creating a new notebook (optionally /new/{template})
- * The refresh loop re-renders the active page every 60s and PAUSES while the tab is hidden (the interval skips
- * work when document.hidden), refreshing once immediately when the tab becomes visible again. It also pauses
- * on the operator's own say-so — the shell's "Pause auto-refresh" control (#4222d), persisted in localStorage,
- * which resuming clears by running one refresh immediately. The 60s refresh DELIBERATELY does NOT re-render
+ * The refresh loop refreshes the shell (sidebar, view list, AG nav) every 60s and re-renders the active page on
+ * that page's own interval (60s for the built-in pages; a saved view or notebook carries its own `refresh`
+ * setting), backing off when a page renders slowly (refresh-policy.js). It PAUSES while the tab is hidden,
+ * refreshing once immediately when the tab becomes visible again (the page only if it is due). It also pauses
+ * on the operator's own say-so — the shell's "Pause all auto-refresh" master control (#4222d), persisted in
+ * localStorage, which resuming clears by running one refresh immediately. The refresh DELIBERATELY does NOT re-render
  * either composer route or #/triage (the poll guard in refresh()) — a background rebuild would discard an
  * in-progress edit, or waste a read against a page opened to read once — while the sidebar (server list + view
  * list) still refreshes.
@@ -42,14 +44,18 @@ import { renderSweeps } from "./pages/sweeps.js";
 import { renderServer } from "./pages/server.js";
 import { renderAlerts } from "./pages/alerts.js";
 import { renderAlertRuleList } from "./pages/alert-rules.js";
-import { renderViewList, renderView } from "./pages/views.js";
+import { renderViewList, renderView, currentViewRefresh, onViewRefreshChange, clearViewRefresh } from "./pages/views.js";
+import { REFRESH_CHOICES, nextRefreshDelayMs, isBackedOff, defaultRefreshChoice, refreshLabel } from "./refresh-policy.js";
 import { renderTriage } from "./pages/triage.js";
 import { renderEditor } from "./editor.js";
 import { renderNotebookEditor } from "./notebook.js";
 import { renderAlertEditor } from "./alert-editor.js";
 import { getSession, listViews } from "./views-api.js";
 
+/* The shell (sidebar, view list, AG nav) refreshes every POLL_MS; the page re-renders on its own interval. */
 const POLL_MS = 60000;
+/* How often the scheduler looks at the clock. It does no reads itself. */
+const SCHEDULER_TICK_MS = 1000;
 
 const main = document.getElementById("main");
 const serverList = document.getElementById("server-list");
@@ -128,6 +134,7 @@ function route(opts) {
   if (isSessionExpired()) return;
 
   const r = currentRoute();
+  markPageRenderStart(r.name, !!(opts && opts.poll === true));
   setActiveNav(r);
   if (r.name === "server") renderServer(main, r.param, r.tab, opts);
   else if (r.name === "ag") renderAg(main);
@@ -297,7 +304,307 @@ function updateStatusBar(d) {
     el("span", { class: "sb-item", text: healthy + " collectors healthy · " + failing + " failing" }),
     el("span", { class: "sb-sep", text: "·" }),
     el("span", { class: "sb-item", text: "Updated " + localTime(d.generated_at) }),
+    el("span", { class: "sb-sep", text: "·" }),
+    el("span", { class: "sb-item", id: "refresh-hint" }),
   ]);
+  updateRefreshHint();
+}
+
+/* ─────────────────────────── refresh loop ─────────────────────────── */
+
+/* Routes whose page the poll never re-renders (an in-progress edit, or a page opened to read once). */
+function isNoPollRoute(routeName) {
+  return routeName === "editor" || routeName === "notebookEditor" || routeName === "alertEditor"
+    || routeName === "triage";
+}
+
+/* Per-page schedule (#4666). pageNextRefreshAt is when the page may re-render next (Infinity = never);
+   pageRenderStart is set while a render's reads are outstanding, and its end is the moment hasInFlightReads()
+   next reads false — that duration feeds the back-off. */
+let pageNextRefreshAt = Infinity;
+let pageRenderStart = 0;
+let pageRendering = false;
+let pageLastRenderMs = 0;
+let shellLastRefreshAt = Date.now();
+
+/* The page's own interval in ms; 0 means no automatic re-render. */
+function pageIntervalMs() {
+  const name = currentRoute().name;
+  if (isNoPollRoute(name)) return 0;
+  if (name === "view" || name === "notebook") {
+    const choice = currentViewRefresh() || defaultRefreshChoice(name === "notebook");
+    return REFRESH_CHOICES[choice] ?? 0;
+  }
+  return POLL_MS;
+}
+
+function markPageRenderStart(routeName, isPoll) {
+  if (!isPoll && (routeName === "view" || routeName === "notebook")) clearViewRefresh();
+  if (isNoPollRoute(routeName)) {
+    pageRendering = false;
+    pageNextRefreshAt = Infinity;
+    return;
+  }
+  pageRendering = true;
+  pageRenderStart = Date.now();
+  pageNextRefreshAt = Infinity;
+}
+
+function settlePageRender(now) {
+  pageRendering = false;
+  pageLastRenderMs = now - pageRenderStart;
+  scheduleNextPageRefresh(now);
+}
+
+function scheduleNextPageRefresh(from) {
+  const delay = nextRefreshDelayMs(pageIntervalMs(), pageLastRenderMs);
+  pageNextRefreshAt = delay === null ? Infinity : from + delay;
+  updateRefreshHint();
+}
+
+function pageIsDue(now) {
+  return !pageRendering && now >= pageNextRefreshAt;
+}
+
+function refreshShell() {
+  shellLastRefreshAt = Date.now();
+  /* The sidebar and the route() below both read /api/fleet in this same synchronous pass; apiGetFleet hands the
+     second caller the first one's request, so a tick costs the store ONE fleet roll-up, not two (#3895). */
+  refreshSidebar();
+  refreshViewList();
+  refreshAgNav();
+}
+
+/* Re-render the page from the poll. Editors and #/triage are never re-rendered from the poll (a rebuild would
+   discard an in-progress edit, or waste a read against a page opened to read once), and neither is a page whose
+   own last render's reads are still outstanding (#4191): a poll landing mid-load would fire every one of its
+   panel reads a second time on top of the first. */
+function refreshPage() {
+  if (isNoPollRoute(currentRoute().name) || hasInFlightReads()) return;
+  route({ poll: true });
+}
+
+/* The refresh entry the master pause and the tab-visible handler use: always the shell, and the page when
+   `force` is set or it is due. */
+function refresh(force) {
+  if (isSessionExpired()) return;
+  refreshShell();
+  if (force || pageIsDue(Date.now())) refreshPage();
+}
+
+function schedulerTick() {
+  if (document.hidden || isAutoRefreshPaused() || isSessionExpired()) {
+    updateRefreshHint();
+    return;
+  }
+  const now = Date.now();
+  if (pageRendering && !hasInFlightReads()) settlePageRender(now);
+  if (now - shellLastRefreshAt >= POLL_MS) refreshShell();
+  if (pageIsDue(now)) refreshPage();
+  updateRefreshHint();
+}
+
+function hhmm(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function updateRefreshHint() {
+  const hint = document.getElementById("refresh-hint");
+  if (!hint) return;
+  const interval = pageIntervalMs();
+  let text;
+  if (isAutoRefreshPaused()) text = "Auto-refresh paused";
+  else if (interval === 0) text = "Auto-refresh off";
+  else if (isBackedOff(interval, pageLastRenderMs) && Number.isFinite(pageNextRefreshAt)) {
+    text = "Next refresh " + hhmm(pageNextRefreshAt) + " (slow page)";
+  } else {
+    const choice = Object.keys(REFRESH_CHOICES).find((k) => REFRESH_CHOICES[k] === interval);
+    text = "Auto-refresh: " + (choice ? refreshLabel(choice) : "1 min");
+  }
+  hint.textContent = text;
+}
+
+/* The session-expired takeover owns the DOM from the moment it fires until the operator signs in again —
+     see showSignedOutState/onSessionExpired below (#4187). hashchange keeps calling this (a stray click, the
+     back button), and re-dispatching to a page here would just start a fresh round of reads that fail the
+     same way; short-circuiting is simpler than unwiring every listener that can reach route(). */
+  if (isSessionExpired()) return;
+
+  const r = currentRoute();
+  markPageRenderStart(r.name, !!(opts && opts.poll === true));
+  setActiveNav(r);
+  if (r.name === "server") renderServer(main, r.param, r.tab, opts);
+  else if (r.name === "ag") renderAg(main);
+  else if (r.name === "sweeps") renderSweeps(main, opts);
+  else if (r.name === "alerts") renderAlerts(main);
+  else if (r.name === "alertRules") renderAlertRuleList(main);
+  else if (r.name === "alertEditor") renderAlertEditor(main, r.id, r.template);
+  else if (r.name === "triage") renderTriage(main, r.query);
+  else if (r.name === "views") renderViewList(main);
+  else if (r.name === "view") renderView(main, r.id);
+  else if (r.name === "editor") renderEditor(main, r.id);
+  else if (r.name === "notebook") renderView(main, r.id); // renderView kind-detects -> notebook document
+  else if (r.name === "notebookEditor") renderNotebookEditor(main, r.id, r.template);
+  else renderFleet(main);
+}
+
+/* Whether a route targets a specific saved view/notebook (its renderer or composer) — the routes whose sidebar
+   entry should light up, and which the poll guard must not clobber (for the composer forms). */
+function isViewItemRoute(name) {
+  return name === "view" || name === "editor" || name === "notebook" || name === "notebookEditor";
+}
+
+/* The sidebar's "Custom Views" nav stays lit across the list, both renderers, and both composers; the "Alert Rules"
+   nav stays lit across its list + editor. */
+function navKeyFor(r) {
+  if (r.name === "views" || isViewItemRoute(r.name)) return "views";
+  if (r.name === "alertRules" || r.name === "alertEditor") return "alert-rules";
+  return r.name;
+}
+
+function setActiveNav(r) {
+  const navKey = navKeyFor(r);
+  document.querySelectorAll(".nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === navKey));
+  updateServerActive(r);
+  updateViewActive(r);
+}
+
+function updateServerActive(r) {
+  serverList.querySelectorAll(".server-item").forEach((item) => {
+    const active = r.name === "server" && (item.dataset.server === r.param || item.dataset.display === r.param);
+    item.classList.toggle("active", active);
+  });
+}
+
+function updateViewActive(r) {
+  if (!viewList) return;
+  viewList.querySelectorAll(".view-item").forEach((item) => {
+    const active = isViewItemRoute(r.name) && item.dataset.view === String(r.id);
+    item.classList.toggle("active", active);
+  });
+}
+
+/* ─────────────────────────── sidebar ─────────────────────────── */
+
+async function refreshSidebar() {
+  const res = await apiGetFleet();
+  if (res.kind !== "data") {
+    mount(serverList, el("div", { class: "muted", style: "padding:0.5rem 1.25rem", text: res.kind === "error" ? "Fleet unavailable" : "" }));
+    updateStatusBar(null);
+    return;
+  }
+
+  const cards = [...(res.data.cards || [])].sort((a, b) => a.display_name.localeCompare(b.display_name));
+  const r = currentRoute();
+  mount(
+    serverList,
+    cards.map((c) => {
+      const target = c.server_name || c.display_name;
+      const active = r.name === "server" && (r.param === c.server_name || r.param === c.display_name);
+      return el(
+        "div",
+        {
+          class: "server-item" + (active ? " active" : ""),
+          dataset: { server: target, display: c.display_name },
+          onActivate: () => navigateServer(target),
+        },
+        [el("span", { class: "dot " + bandClass(c.band) }), el("span", { class: "name", text: c.display_name })]
+      );
+    })
+  );
+  updateStatusBar(res.data);
+}
+
+/* ─────────────────────────── availability-groups nav gate (#991) ─────────────────────────── */
+
+/* Always On is opt-in and most fleets have none, so the Availability Groups entry stays hidden until the store
+   actually has AG data — a permanent entry that only ever says "nothing here" is noise. The probe converges the
+   way ComposeStoreAvailability's does: once AGs are seen the answer is cached for the session and the probe stops;
+   while none are seen the 60s poll re-probes, so standing up an AG reveals the entry without a reload. The #/ag
+   route itself is never gated — a deep link renders the page (with its own empty state) either way. */
+let agNavRevealed = false;
+
+async function refreshAgNav() {
+  if (agNavRevealed) return;
+  const link = document.querySelector('.nav a[data-route="ag"]');
+  if (!link) return;
+
+  // #4189: a count-only read, not the full topology /api/ag builds — this probe only ever checks the one field.
+  const res = await apiGet("/api/ag/count");
+  if (res.kind !== "data" || !res.data || !res.data.availability_group_count) return;
+
+  agNavRevealed = true;
+  link.hidden = false;
+}
+
+/* ─────────────────────────── sidebar view list (#1563) ─────────────────────────── */
+
+/* Populated like refreshSidebar: the saved custom views + a "New view" affordance shown ONLY when the session
+   reports can_edit. Kept fresh on the 60s poll even while the composer is open. */
+async function refreshViewList() {
+  if (!viewList) return;
+  const [session, res] = await Promise.all([getSession(), listViews()]);
+  const r = currentRoute();
+  const items = [];
+
+  if (res.kind === "data" && Array.isArray(res.data)) {
+    for (const v of res.data) {
+      const active = isViewItemRoute(r.name) && String(r.id) === String(v.id);
+      /* The summary carries the view kind (definition->>'kind'), so the sidebar links + badges a notebook without
+         fetching its definition; a notebook links to its own route and gets a document glyph (CSS). */
+      const isNotebook = v.kind === "notebook";
+      items.push(
+        el("a", {
+          class: "view-item" + (active ? " active" : "") + (isNotebook ? " is-notebook" : ""),
+          href: (isNotebook ? "#/notebook/" : "#/view/") + encodeURIComponent(v.id),
+          dataset: { view: String(v.id) },
+          title: v.description || v.name,
+          text: v.name,
+        })
+      );
+    }
+  }
+
+  if (session.can_edit) {
+    items.push(el("a", { class: "view-item new-view", href: "#/view/new", text: "＋ New view" }));
+    items.push(el("a", { class: "view-item new-view", href: "#/notebook/new", text: "＋ New notebook" }));
+  }
+
+  if (!items.length) {
+    items.push(el("div", { class: "muted", style: "padding:0.35rem 1.25rem", text: "No views yet" }));
+  }
+
+  mount(viewList, items);
+}
+
+/* ─────────────────────────── status bar ─────────────────────────── */
+
+/* A fixed footer mirroring the WPF viewer's status bar: fleet server count, collectors healthy/failing across
+   the fleet, and the last refresh time. Built from the SAME /api/fleet response the sidebar just read (no extra
+   round-trip). Store size has no web endpoint, so it is deliberately omitted here. */
+function updateStatusBar(d) {
+  if (!statusbar) return;
+  if (!d) {
+    mount(statusbar, el("span", { class: "sb-item muted", text: "Fleet unavailable" }));
+    return;
+  }
+  let healthy = 0;
+  let failing = 0;
+  for (const c of d.cards || []) {
+    healthy += c.healthy_collector_count || 0;
+    failing += c.failed_collector_count || 0;
+  }
+  const servers = d.total_servers || 0;
+  mount(statusbar, [
+    el("span", { class: "sb-item", text: servers + (servers === 1 ? " server" : " servers") }),
+    el("span", { class: "sb-sep", text: "·" }),
+    el("span", { class: "sb-item", text: healthy + " collectors healthy · " + failing + " failing" }),
+    el("span", { class: "sb-sep", text: "·" }),
+    el("span", { class: "sb-item", text: "Updated " + localTime(d.generated_at) }),
+    el("span", { class: "sb-sep", text: "·" }),
+    el("span", { class: "sb-item", id: "refresh-hint" }),
+  ]);
+  updateRefreshHint();
 }
 
 /* ─────────────────────────── refresh loop ─────────────────────────── */
@@ -369,7 +676,7 @@ function setAutoRefreshPaused(paused) {
 }
 
 function updateAutoRefreshToggle(button, paused) {
-  const label = paused ? "Resume auto-refresh" : "Pause auto-refresh";
+  const label = paused ? "Resume auto-refresh" : "Pause all auto-refresh";
   button.textContent = label;
   button.setAttribute("aria-label", label);
   button.setAttribute("title", label);
@@ -385,18 +692,21 @@ function initAutoRefreshToggle() {
     const paused = !isAutoRefreshPaused();
     setAutoRefreshPaused(paused);
     updateAutoRefreshToggle(button, paused);
-    if (!paused) refresh();
+    if (!paused) refresh(true);
+    updateRefreshHint();
   });
 }
 
 function start() {
   window.addEventListener("hashchange", route);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && !isAutoRefreshPaused()) refresh();
+    if (!document.hidden && !isAutoRefreshPaused()) refresh(false);
   });
-  setInterval(() => {
-    if (!document.hidden && !isAutoRefreshPaused()) refresh();
-  }, POLL_MS);
+  onViewRefreshChange(() => {
+    if (!pageRendering) scheduleNextPageRefresh(Date.now());
+    else updateRefreshHint();
+  });
+  setInterval(schedulerTick, SCHEDULER_TICK_MS);
   onSessionExpired(showSignedOutState);
   initAutoRefreshToggle();
 

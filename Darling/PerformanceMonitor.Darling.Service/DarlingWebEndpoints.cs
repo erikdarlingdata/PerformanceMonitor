@@ -1684,14 +1684,35 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>What a stored DASHBOARD definition's root may carry.</summary>
     private static readonly IReadOnlySet<string> s_dashboardRootKeys = new HashSet<string>(StringComparer.Ordinal)
     {
-        "kind", "panels", "variables", "range",
+        "kind", "panels", "variables", "range", "refresh",
     };
 
     /// <summary>What a stored NOTEBOOK definition's root may carry (design D7).</summary>
     private static readonly IReadOnlySet<string> s_notebookRootKeys = new HashSet<string>(StringComparer.Ordinal)
     {
-        "kind", "cells", "variables", "range",
+        "kind", "cells", "variables", "range", "refresh",
     };
+
+    /// <summary>The page auto-refresh choices a stored definition's optional root <c>refresh</c> may carry (#4666).</summary>
+    internal static readonly string[] RefreshChoices = { "off", "1m", "5m", "15m" };
+
+    /// <summary>Validates the optional root <c>refresh</c> key: absent is fine (the page type's default applies),
+    /// anything else must be one of <see cref="RefreshChoices"/>.</summary>
+    private static string? RefreshError(JsonObject rootObject, string prefix)
+    {
+        if (!rootObject.ContainsKey("refresh"))
+        {
+            return null;
+        }
+
+        var node = rootObject["refresh"];
+        if (node is JsonValue value && value.TryGetValue<string>(out var text) && Array.IndexOf(RefreshChoices, text) >= 0)
+        {
+            return null;
+        }
+
+        return $"{prefix}.refresh must be one of \"off\", \"1m\", \"5m\", \"15m\".";
+    }
 
     /// <summary>What a markdown cell may carry: its discriminator and its prose.</summary>
     private static readonly IReadOnlySet<string> s_markdownCellKeys = new HashSet<string>(StringComparer.Ordinal)
@@ -1869,6 +1890,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         if (rangeError is not null)
         {
             return DefinitionValidation.Fail(rangeError);
+        }
+
+        if (RefreshError(rootObject, "definition") is string refreshError)
+        {
+            return DefinitionValidation.Fail(refreshError);
         }
 
         /* Strict keys inside the shared root objects (#2733) — after the parsers, so a structural error
@@ -2133,6 +2159,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         if (rangeError is not null)
         {
             return DefinitionValidation.Fail(rangeError);
+        }
+
+        if (RefreshError(rootObject, "notebook") is string refreshError)
+        {
+            return DefinitionValidation.Fail(refreshError);
         }
 
         /* Strict keys inside the shared root objects (#2733) — same placement rationale as the dashboard arm. */

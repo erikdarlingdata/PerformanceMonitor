@@ -69,6 +69,9 @@ a:hover { text-decoration: underline; }
 .auto-refresh-toggle:hover { color: var(--fg); border-color: var(--accent); }
 .auto-refresh-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 
+.refresh-control { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
+.refresh-control .refresh-select { font-size: 0.82rem; }
+
 .nav { padding: 0.5rem 0; border-bottom: 1px solid var(--border); }
 .nav a,
 .server-item {

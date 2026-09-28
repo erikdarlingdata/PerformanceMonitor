@@ -32,6 +32,65 @@ import { renderMarkdown } from "../markdown.js";
 import { NOTEBOOK_TEMPLATES, isNotebookDefinition } from "../notebook.js";
 import { DASHBOARD_TEMPLATES } from "../view-templates.js";
 import * as api from "../views-api.js";
+import { refreshChoiceOf } from "../refresh-policy.js";
+import { buildRefreshControl } from "../refresh-control.js";
+
+/* #4666: the saved view/notebook on screen and its effective auto-refresh choice. app.js reads it through
+   currentViewRefresh() to time the page's own re-render, and is told about a change through
+   onViewRefreshChange(). A choice made by a session that cannot save is remembered per view id for this page
+   load only, so the 5-minute re-render does not snap the select back to the stored value. */
+let currentRefresh = null;
+let refreshListener = null;
+const sessionRefreshChoice = new Map();
+
+/** The loaded saved view's effective refresh choice ("off" | "1m" | "5m" | "15m"), or null off a view page. */
+export function currentViewRefresh() {
+  return currentRefresh;
+}
+
+/** app.js registers one callback, called whenever the operator changes the loaded view's choice. */
+export function onViewRefreshChange(fn) {
+  refreshListener = fn;
+}
+
+/** Clears the loaded view's choice; app.js calls it when the route leaves a view page. */
+export function clearViewRefresh() {
+  currentRefresh = null;
+}
+
+/** The labelled "Auto-refresh:" select for a saved view or notebook page. */
+function viewRefreshControl(view, def, isNotebook, canEdit) {
+  const id = String(view.id);
+  const stored = refreshChoiceOf(def, isNotebook);
+  const initial = sessionRefreshChoice.has(id) ? sessionRefreshChoice.get(id) : stored;
+  currentRefresh = initial;
+  const control = buildRefreshControl(initial, async (choice) => {
+    currentRefresh = choice;
+    if (refreshListener) refreshListener();
+    if (!canEdit) {
+      sessionRefreshChoice.set(id, choice);
+      control.note("not saved: read-only");
+      return;
+    }
+    control.note("Saving…");
+    const res = await api.updateView(view.id, {
+      name: view.name,
+      description: view.description ?? null,
+      definition: { ...def, refresh: choice },
+      version: view.version,
+    });
+    if (res.kind === "data" && res.data) {
+      view.version = res.data.version;
+      def.refresh = choice;
+      sessionRefreshChoice.delete(id);
+      control.note("Saved");
+    } else {
+      sessionRefreshChoice.set(id, choice);
+      control.note("not saved: " + (res.message || "save failed"));
+    }
+  });
+  return control.root;
+}
 
 /** The time-range choices the rendered view's chrome offers (mirrors the composer's RANGE_OPTIONS). */
 const VIEW_RANGE_OPTIONS = [
@@ -436,6 +495,7 @@ export async function renderView(main, id) {
     el("h2", { text: view.name || "View" }),
     view.description ? el("div", { class: "meta", text: view.description }) : null,
     el("div", { class: "spacer" }),
+    viewRefreshControl(view, def, false, canEdit),
     exportButton(view),
     canEdit ? el("a", { class: "btn small", href: "#/view/" + encodeURIComponent(id) + "/edit", text: "Edit" }) : null,
     canEdit ? deleteButton(id, status) : null,
@@ -538,6 +598,7 @@ export async function renderNotebookDoc(main, opts) {
         el("span", { class: "notebook-badge", text: "Notebook" }),
         opts.view.description ? el("div", { class: "meta", text: opts.view.description }) : null,
         el("div", { class: "spacer" }),
+        viewRefreshControl(opts.view, def, true, canEdit),
         exportButton(opts.view),
         canEdit ? el("a", { class: "btn small", href: "#/notebook/" + encodeURIComponent(opts.view.id) + "/edit", text: "Edit" }) : null,
         canEdit ? deleteButton(opts.view.id, status) : null,
