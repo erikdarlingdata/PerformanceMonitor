@@ -2640,7 +2640,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             /* #4653: only a measure that really divides carries a suffix; omitted otherwise, so the payload grows
                by the ratio measures alone (editor.js reads `labelSuffix || ""`, so an absent field renders the same). */
             var labelSuffix = MeasureCatalog.LabelSuffix(m);
-            if (labelSuffix.Length >= 0)
+            if (labelSuffix.Length > 0)
             {
                 node["labelSuffix"] = labelSuffix;
             }
