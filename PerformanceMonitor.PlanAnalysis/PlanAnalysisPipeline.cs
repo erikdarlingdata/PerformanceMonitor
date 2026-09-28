@@ -34,7 +34,20 @@ public static class PlanAnalysisPipeline
     /// pipeline before the next stage rather than finishing analysis and scoring on a plan
     /// nobody is waiting for.
     /// </summary>
-    public static ParsedPlan Run(ParsedPlan plan, CancellationToken cancellationToken)
+    public static ParsedPlan Run(ParsedPlan plan, CancellationToken cancellationToken) =>
+        Run(plan, null, null, cancellationToken);
+
+    /// <summary>
+    /// #4535: the config/serverMetadata overload, mirroring erikdarlingdata/PerformanceStudio dev
+    /// (85492a1) <c>src/PlanViewer.Core/Services/PlanAnalysisPipeline.cs:52-72</c>. The other
+    /// overloads forward with nulls, which <see cref="PlanAnalyzer.Analyze"/> treats as
+    /// <see cref="AnalyzerConfig.Default"/>.
+    /// </summary>
+    public static ParsedPlan Run(
+        ParsedPlan plan,
+        AnalyzerConfig? config,
+        ServerMetadata? serverMetadata,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -44,7 +57,7 @@ public static class PlanAnalysisPipeline
         if (!plan.Batches.SelectMany(batch => batch.Statements).Any())
             return plan;
 
-        PlanAnalyzer.Analyze(plan, cancellationToken);
+        PlanAnalyzer.Analyze(plan, config, serverMetadata, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         BenefitScorer.Score(plan, cancellationToken);
         return plan;

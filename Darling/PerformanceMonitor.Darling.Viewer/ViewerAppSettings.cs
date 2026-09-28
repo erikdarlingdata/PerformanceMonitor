@@ -94,6 +94,15 @@ public sealed class ViewerAppSettings
     /// applied at startup and live-previewed from the Settings window via the shared <c>ThemeManager</c>.</summary>
     public string ColorTheme { get; set; } = "Dark";
 
+    /// <summary>
+    /// How far a plan operator's actual row count may diverge from its estimate before the plan viewer
+    /// colors the edge feeding it (#4579), matching PerformanceStudio's <c>AccuracyRatioDivergenceLimit</c>
+    /// setting. The viewer floors this at <see cref="PerformanceMonitor.PlanAnalysis.PlanEdgeColour.MinDivergenceLimit"/>
+    /// when it renders, so a hand-edited value below that has no effect. Mirrors Lite's
+    /// <c>App.AccuracyRatioDivergenceLimit</c>.
+    /// </summary>
+    public double AccuracyRatioDivergenceLimit { get; set; } = PerformanceMonitor.PlanAnalysis.PlanEdgeColour.DefaultDivergenceLimit;
+
     /* ---------------- Notifications / alert thresholds (mirrors Lite App.*) ---------------- */
 
     public bool MinimizeToTray { get; set; } = true;
@@ -203,6 +212,9 @@ public sealed class ViewerAppSettings
         TimeDisplayMode = (TimeDisplayMode is "ServerTime" or "LocalTime" or "UTC") ? TimeDisplayMode : "ServerTime";
         OverviewSortMode = (OverviewSortMode is "Cpu" or "Name") ? OverviewSortMode : "Cpu";
         ColorTheme = (ColorTheme is "Dark" or "Light" or "CoolBreeze") ? ColorTheme : "Dark";
+        AccuracyRatioDivergenceLimit = AccuracyRatioDivergenceLimit >= PerformanceMonitor.PlanAnalysis.PlanEdgeColour.MinDivergenceLimit
+            ? AccuracyRatioDivergenceLimit
+            : PerformanceMonitor.PlanAnalysis.PlanEdgeColour.DefaultDivergenceLimit;
 
         AlertCpuThreshold = Clamp(AlertCpuThreshold, 1, 100, 80);
         AlertCpuMode = (AlertCpuMode is "Total" or "SqlOnly") ? AlertCpuMode : "Total";
@@ -354,7 +366,12 @@ public static class ViewerExportSettings
     {
         ArgumentNullException.ThrowIfNull(settings);
         CsvSeparator = settings.CsvSeparator;
+        AccuracyRatioDivergenceLimit = settings.AccuracyRatioDivergenceLimit;
     }
+
+    /// <summary>Current plan-edge accuracy-ratio divergence limit (#4579). Defaults to
+    /// <see cref="PerformanceMonitor.PlanAnalysis.PlanEdgeColour.DefaultDivergenceLimit"/>.</summary>
+    public static double AccuracyRatioDivergenceLimit { get; set; } = PerformanceMonitor.PlanAnalysis.PlanEdgeColour.DefaultDivergenceLimit;
 }
 
 /// <summary>

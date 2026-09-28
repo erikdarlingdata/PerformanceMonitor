@@ -39,6 +39,22 @@ public partial class PlanViewerControl : UserControl
     private static readonly SolidColorBrush EdgeBrush = new(Color.FromRgb(0x6B, 0x72, 0x80));
     private static readonly SolidColorBrush OrangeBrush = new(Color.FromRgb(0xFF, 0xB3, 0x47));
 
+    // Edge accuracy-ratio colors, matching erikdarlingdata/PerformanceStudio's PlanViewerControl exactly.
+    private static readonly SolidColorBrush EdgeLightOrangeBrush = new(Color.FromRgb(0xFF, 0xB7, 0x4D));
+    private static readonly SolidColorBrush EdgeFluoOrangeBrush = new(Color.FromRgb(0xFF, 0x8C, 0x00));
+    private static readonly SolidColorBrush EdgeFluoRedBrush = new(Color.FromRgb(0xFF, 0x17, 0x44));
+    private static readonly SolidColorBrush EdgeBlueBrush = new(Color.FromRgb(0x42, 0x8B, 0xCA));
+    private static readonly SolidColorBrush EdgeLightBlueBrush = new(Color.FromRgb(0x64, 0xB5, 0xF6));
+    private static readonly SolidColorBrush EdgeFluoBlueBrush = new(Color.FromRgb(0x00, 0xE5, 0xFF));
+
+    /// <summary>
+    /// How far a child operator's actual row count may diverge from its estimate before the edge feeding
+    /// it is colored; matches PerformanceStudio's <c>AccuracyRatioDivergenceLimit</c> setting (default 10,
+    /// floored at <see cref="PlanEdgeColour.MinDivergenceLimit"/> when applied). Hosts set this from their
+    /// own settings store before rendering.
+    /// </summary>
+    public double AccuracyRatioDivergenceLimit { get; set; } = PlanEdgeColour.DefaultDivergenceLimit;
+
     // Theme-aware brushes resolved at call time from Application.Resources
     private SolidColorBrush TooltipBgBrush =>
         (TryFindResource("PlanTooltipBgBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x1A, 0x1D, 0x23));
@@ -396,15 +412,8 @@ public class StatementRow
     public PlanStatement Statement { get; set; } = null!;
 
     // Display helpers — grid binds to these, sorting uses the raw properties via SortMemberPath
-    public string CpuDisplay => FormatDuration(CpuMs);
-    public string ElapsedDisplay => FormatDuration(ElapsedMs);
-    public string UdfDisplay => UdfMs > 0 ? FormatDuration(UdfMs) : "";
+    public string CpuDisplay => MetricFormatter.FormatDuration(CpuMs);
+    public string ElapsedDisplay => MetricFormatter.FormatDuration(ElapsedMs);
+    public string UdfDisplay => UdfMs > 0 ? MetricFormatter.FormatDuration(UdfMs) : "";
     public string CostDisplay => EstCost > 0 ? $"{EstCost:F2}" : "";
-
-    private static string FormatDuration(long ms)
-    {
-        if (ms < 1000) return $"{ms}ms";
-        if (ms < 60_000) return $"{ms / 1000.0:F1}s";
-        return $"{ms / 60_000}m {(ms % 60_000) / 1000}s";
-    }
 }
