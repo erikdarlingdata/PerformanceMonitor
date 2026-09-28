@@ -64,4 +64,13 @@ public sealed class DarlingWebAssetsTests
             $"wwwroot/{relativePath} was not copied to the build output ({path}). The SPA loads it by exact path; " +
             "check the recursive <Content Include=\"wwwroot\\**\\*\"> glob in PerformanceMonitor.Darling.Service.csproj.");
     }
+    [Fact]
+    public void EditorJs_MeasurePickers_UseTheServerLabelSuffix_NotTheKind()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "wwwroot", "js", "editor.js");
+        var js = File.ReadAllText(path);
+        Assert.DoesNotContain("kind === \"ratio\" ? \" (ratio)\"", js, StringComparison.Ordinal);
+        Assert.Contains("x.displayName + (x.labelSuffix || \"\")", js, StringComparison.Ordinal);
+        Assert.Contains("const suffix = m.labelSuffix || \"\";", js, StringComparison.Ordinal);
+    }
 }

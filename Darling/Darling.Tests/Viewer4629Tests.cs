@@ -38,10 +38,11 @@ namespace Darling.Tests;
 /// <c>CriticalTextBrush</c> — out of scope, #4632 — so <c>PlanViewerControl</c> falls back to
 /// <c>Brushes.OrangeRed</c> there instead of a per-theme shade.</para>
 ///
-/// <para>Only Light and Dark are held to the 4.5:1 floor here, matching the issue's own two named
-/// themes. Cool Breeze gets an existence-only check: its own <c>WarningColor</c> (unchanged by this
-/// fix, pre-existing) measures 4.41:1 against the properties panel background — a hair under the
-/// floor the issue didn't ask this PR to also close.</para>
+/// <para>#4651: Cool Breeze's own <c>WarningColor</c> measured 4.41:1 against the properties panel
+/// background, a hair under the floor — the panel was the worst of its backgrounds, since a warning
+/// amber reads better the lighter the page gets. #4651 darkened it one step, same hue (#9E4A0B to
+/// #9C490B, hue 25.71&#176; to 25.65&#176;), to 4.50:1 there — the smallest darkening that clears the
+/// floor everywhere it sits. All three themes are held to the same bar below.</para>
 ///
 /// <para>#4635 added a fourth background to the floor: the Lite and Darling Viewer status bar's
 /// <c>CollectorHealthText</c>, which also takes <c>CriticalTextBrush</c> when collectors are
@@ -61,6 +62,11 @@ public class Viewer4629Tests
     // DynamicResource BackgroundDarkBrush) — what the skew text and missing-index impact % sit on.
     private const string PanelBackgroundKey = "BackgroundDarkColor";
 
+    // #4651: a "card" surface (e.g. the Darling Viewer's fleet Warning-count card in MainWindow.xaml:
+    // Background="{DynamicResource BackgroundBrush}", Foreground="{DynamicResource WarningBrush}") — the
+    // third background the #4651 ruling names alongside the panel, plan nodes and status bar.
+    private const string CardBackgroundKey = "BackgroundColor";
+
     // #4635: Lite's status bar (MainWindow.xaml Border Grid.Row="2": Background="{DynamicResource
     // BackgroundLightBrush}") and the Darling Viewer's status row, which sets no Background of its own and so
     // shows through to the window's (MainWindow.xaml Window: Background="{DynamicResource
@@ -69,16 +75,8 @@ public class Viewer4629Tests
     // future change to either resource is caught on its own.
     private const string StatusBarBackgroundKey = "BackgroundLightColor";
 
-    private static readonly string[] LightDarkFiles =
-    {
-        "Lite/Themes/LightTheme.xaml",
-        "Lite/Themes/DarkTheme.xaml",
-        "Darling/PerformanceMonitor.Darling.Viewer/Themes/LightTheme.xaml",
-        "Darling/PerformanceMonitor.Darling.Viewer/Themes/DarkTheme.xaml",
-    };
-
-    // #4632: Lite and the Darling Viewer only, three themes each. The deprecated Dashboard's theme files are
-    // out of scope (see the class remarks) and do not carry CriticalTextBrush.
+    // #4632/#4651: Lite and the Darling Viewer only, three themes each. The deprecated Dashboard's theme
+    // files are out of scope (see the class remarks) and do not carry CriticalTextBrush.
     private static readonly string[] AllSixFiles =
     {
         "Lite/Themes/LightTheme.xaml",
@@ -89,19 +87,18 @@ public class Viewer4629Tests
         "Darling/PerformanceMonitor.Darling.Viewer/Themes/CoolBreezeTheme.xaml",
     };
 
-    public static IEnumerable<object[]> LightDarkThemeFiles() =>
-        LightDarkFiles.Select(f => new object[] { f });
-
     public static IEnumerable<object[]> EveryThemeFile() =>
         AllSixFiles.Select(f => new object[] { f });
 
     [Theory]
-    [MemberData(nameof(LightDarkThemeFiles))]
-    public void WarningBrush_ReadsAsTextOnNodeAndPanelBackgrounds(string relativePath)
+    [MemberData(nameof(EveryThemeFile))]
+    public void WarningBrush_ReadsAsTextOnNodePanelCardAndStatusBarBackgrounds(string relativePath)
     {
         var declared = ThemeXamlRewriter.DeclaredColors(RepoFile.ReadRepoFile(relativePath));
         AssertClearsTextFloor(relativePath, declared, "WarningColor", NodeBackgroundKey);
         AssertClearsTextFloor(relativePath, declared, "WarningColor", PanelBackgroundKey);
+        AssertClearsTextFloor(relativePath, declared, "WarningColor", CardBackgroundKey);
+        AssertClearsTextFloor(relativePath, declared, "WarningColor", StatusBarBackgroundKey);
     }
 
     /// <summary>
@@ -110,8 +107,8 @@ public class Viewer4629Tests
     /// <c>ThemeXamlRewriter.DeclaredColors</c>, which only sees &lt;Color&gt; declarations.
     /// </summary>
     [Theory]
-    [MemberData(nameof(LightDarkThemeFiles))]
-    public void CriticalTextBrush_ReadsAsTextOnNodePanelAndStatusBarBackgrounds(string relativePath)
+    [MemberData(nameof(EveryThemeFile))]
+    public void CriticalTextBrush_ReadsAsTextOnNodePanelCardAndStatusBarBackgrounds(string relativePath)
     {
         var xaml = RepoFile.ReadRepoFile(relativePath);
         var declared = ThemeXamlRewriter.DeclaredColors(xaml);
@@ -120,6 +117,7 @@ public class Viewer4629Tests
 
         AssertClearsTextFloor(relativePath, "CriticalTextBrush", fgHex!, declared, NodeBackgroundKey);
         AssertClearsTextFloor(relativePath, "CriticalTextBrush", fgHex!, declared, PanelBackgroundKey);
+        AssertClearsTextFloor(relativePath, "CriticalTextBrush", fgHex!, declared, CardBackgroundKey);
         AssertClearsTextFloor(relativePath, "CriticalTextBrush", fgHex!, declared, StatusBarBackgroundKey);
     }
 
@@ -139,9 +137,8 @@ public class Viewer4629Tests
     }
 
     /// <summary>
-    /// Every theme this control's host apps ship — including Cool Breeze, which the strict floor tests
-    /// above skip — must at least declare both keys, so <c>FindResource</c> can never throw for a
-    /// missing key regardless of which theme is active.
+    /// Every theme this control's host apps ship must at least declare both keys, so
+    /// <c>FindResource</c> can never throw for a missing key regardless of which theme is active.
     /// </summary>
     [Theory]
     [MemberData(nameof(EveryThemeFile))]

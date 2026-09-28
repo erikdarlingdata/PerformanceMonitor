@@ -34,6 +34,8 @@ namespace Darling.Tests;
 /// returns the identical MAX-per-collector rows the unbounded statement returns, for collectors whose true
 /// last run sits inside the floor; and (2) the bounded statement's plan touches a bounded, not
 /// retention-sized, chunk count — seeded at 2x the chunks and shown not to grow.</para>
+/// <para>Mints its own scratch database (#4650): other classes' leftover chunks, future-dated or compressed and
+/// empty, change the chunk list a plan-shape assertion reads.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class DarlingWatermarkFloorPlanShapeLiveTests
@@ -49,11 +51,14 @@ public sealed class DarlingWatermarkFloorPlanShapeLiveTests
     [Fact]
     public async Task BoundedRead_MatchesUnboundedOracle_AcrossManyCompressedChunks()
     {
-        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
-        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
-            "Set DARLING_TEST_PG to a Postgres connection string to run the live watermark floor plan test.");
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live watermark floor plan test (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        // #1776 own-store: a scratch database, so no other class's chunks shape the plan under test.
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        var connectionString = scratch.ConnectionString;
         using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(ct);
         await PgMigrations.MigrateAsync(connection, ct);
@@ -64,6 +69,10 @@ public sealed class DarlingWatermarkFloorPlanShapeLiveTests
         if (timescaleEnabled)
         {
             Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+            /* No background policy job reshapes the chunks under the plan assertion. */
+            await using var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection);
+            await stop.ExecuteNonQueryAsync(ct);
         }
 
         await DeleteLiveRowsAsync(connection, ct);

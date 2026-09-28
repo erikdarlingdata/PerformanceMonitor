@@ -33,6 +33,8 @@ import { SERIES_COLORS, normalizeColor } from "./charts.js";
 import { renderComposedPanelCard } from "./compose.js";
 import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
+import { refreshChoiceOf } from "./refresh-policy.js";
+import { buildRefreshControl } from "./refresh-control.js";
 import * as derive from "./derive.js";
 
 /** The FORMATTERS keys the format pickers offer (mirrors util.js FORMATTERS). */
@@ -97,7 +99,7 @@ export async function renderEditor(main, id) {
     loadedVersion = res.data.version;
     model = viewToModel(res.data);
   } else {
-    model = { name: "", description: "", panels: [newPanel()], variables: [], rangeHours: null };
+    model = { name: "", description: "", panels: [newPanel()], variables: [], rangeHours: null, refresh: null };
   }
 
   buildEditor(main, { model, editingId, loadedVersion, catalog, fleet });
@@ -199,6 +201,7 @@ function viewToModel(view) {
     panels: panels.length ? panels : [newPanel()],
     variables: parseVariables(def.variables),
     rangeHours: def.range && typeof def.range.hours === "number" ? def.range.hours : null,
+    refresh: typeof def.refresh === "string" ? def.refresh : null,
   };
 }
 
@@ -372,6 +375,7 @@ function modelToDefinition(model) {
     .map((v) => (v.default ? { name: v.name, dimension: v.dimension, default: v.default } : { name: v.name, dimension: v.dimension }));
   if (variables.length) def.variables = variables;
   if (model.rangeHours) def.range = { hours: model.rangeHours };
+  if (model.refresh) def.refresh = model.refresh;
   return def;
 }
 
@@ -514,6 +518,8 @@ function buildEditor(main, ctx) {
     el("div", { class: "page-head" }, [
       el("a", { href: backHash, text: "← Back" }),
       el("h2", { text: ctx.editingId != null ? "Edit view" : "New view" }),
+      el("div", { class: "spacer" }),
+      buildRefreshControl(refreshChoiceOf(model, false), (choice) => { model.refresh = choice; }).root,
     ]),
     el("div", { class: "editor-meta" }, [field("Name", nameInput), field("Description", descInput)]),
     viewScopeSection,
@@ -1243,7 +1249,7 @@ export function buildComposedPanelBody(p, opts) {
     const sel = el("select", { class: "editor-select", "aria-label": "Second measure" });
     sel.appendChild(el("option", { value: "", text: "— none —" }));
     for (const x of sameSource.sort((a, b) => a.displayName.localeCompare(b.displayName))) {
-      sel.appendChild(el("option", { value: x.key, text: x.displayName + (x.kind === "ratio" ? " (ratio)" : "") }));
+      sel.appendChild(el("option", { value: x.key, text: x.displayName + (x.labelSuffix || "") }));
     }
     sel.value = p.overlay && p.overlay.measure ? p.overlay.measure : "";
     sel.addEventListener("change", () => {
@@ -1744,7 +1750,7 @@ function buildComposedMeasureSelect(compose, current, scopeServer, onChange) {
   for (const [cat, ms] of [...byCat.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const group = el("optgroup", { label: cat });
     for (const m of ms.sort((a, b) => a.displayName.localeCompare(b.displayName))) {
-      const suffix = m.kind === "ratio" ? " (ratio)" : "";
+      const suffix = m.labelSuffix || "";
       const caption = measureCaption(m, compose);
       /* D4: when the view is scoped to one concrete server this measure can't collect on, grey (disable) the option
          — but keep an already-CHOSEN measure selectable so re-scoping never silently drops the panel's metric (the

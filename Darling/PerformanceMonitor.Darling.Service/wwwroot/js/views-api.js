@@ -19,6 +19,7 @@
  */
 
 import { apiGet, apiSend } from "./util.js";
+import { REFRESH_CHOICES } from "./refresh-policy.js";
 
 let _sessionPromise = null;
 let _catalogPromise = null;
@@ -130,6 +131,9 @@ export function validateDefinition(def, catalog) {
   if (def.range != null && (typeof def.range !== "object" || Array.isArray(def.range))) {
     return "Definition 'range' must be an object.";
   }
+  if (def.refresh !== undefined && !Object.prototype.hasOwnProperty.call(REFRESH_CHOICES, def.refresh)) {
+    return "Definition 'refresh' must be one of \"off\", \"1m\", \"5m\", \"15m\".";
+  }
 
   const reads = new Map((catalog.reads || []).map((r) => [r.name, r]));
   const vizSet = new Set(catalog.viz || []);
@@ -209,6 +213,9 @@ function validateNotebookDefinition(def, catalog) {
   }
   if (def.range != null && (typeof def.range !== "object" || Array.isArray(def.range))) {
     return "Definition 'range' must be an object.";
+  }
+  if (def.refresh !== undefined && !Object.prototype.hasOwnProperty.call(REFRESH_CHOICES, def.refresh)) {
+    return "Definition 'refresh' must be one of \"off\", \"1m\", \"5m\", \"15m\".";
   }
 
   const sets = composeCatalogSets(catalog);
