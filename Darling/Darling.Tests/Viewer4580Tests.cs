@@ -206,4 +206,100 @@ public class Viewer4580Tests
         Assert.Equal(0, offsetX);
         Assert.Equal(0, offsetY);
     }
+
+    // -- Part 2: resize clamp, double-click zoom-and-center, minimap node hit-testing --
+    // These members are new on this branch; the RED for this section is a compile failure on the
+    // pre-fix branch (b3317c250, part 1), same as the class overall.
+
+    [Fact]
+    public void ClampPanelSize_ClampsToPerformanceStudiosBounds()
+    {
+        Assert.Equal(MinimapLayout.MinPanelSize, MinimapLayout.ClampPanelSize(50));
+        Assert.Equal(MinimapLayout.MaxPanelSize, MinimapLayout.ClampPanelSize(9999));
+        Assert.Equal(300, MinimapLayout.ClampPanelSize(300));
+    }
+
+    [Fact]
+    public void ResizeFromDrag_SubtractsDeltaFromStartSize_ClampedToBounds()
+    {
+        // Dragging toward the top-left (negative delta) grows the panel pinned bottom-right.
+        var (width, height) = MinimapLayout.ResizeFromDrag(220, 220, -30, -10);
+        Assert.Equal(250, width);
+        Assert.Equal(230, height);
+    }
+
+    [Fact]
+    public void ResizeFromDrag_ClampsBelowMinAndAboveMax()
+    {
+        var (width, height) = MinimapLayout.ResizeFromDrag(170, 170, 500, 500);
+        Assert.Equal(MinimapLayout.MinPanelSize, width);
+        Assert.Equal(MinimapLayout.MinPanelSize, height);
+
+        var (width2, height2) = MinimapLayout.ResizeFromDrag(480, 480, -500, -500);
+        Assert.Equal(MinimapLayout.MaxPanelSize, width2);
+        Assert.Equal(MinimapLayout.MaxPanelSize, height2);
+    }
+
+    [Fact]
+    public void GetZoomToNodeLevel_FitsNodeToAboutAThirdOfTheViewport()
+    {
+        // Node 200x60, viewport 900x600: width-bound fitZoom = 900/600 = 1.5, height-bound = 600/180 = 3.33.
+        // The smaller wins, clamped to [0.1, 3.0].
+        var zoom = MinimapLayout.GetZoomToNodeLevel(200, 60, 900, 600, 0.1, 3.0);
+        Assert.Equal(1.5, zoom, 3);
+    }
+
+    [Fact]
+    public void GetZoomToNodeLevel_ClampsToMaxZoom()
+    {
+        var zoom = MinimapLayout.GetZoomToNodeLevel(10, 10, 900, 600, 0.1, 3.0);
+        Assert.Equal(3.0, zoom, 3);
+    }
+
+    [Fact]
+    public void GetZoomToNodeLevel_ReturnsMinZoom_WhenViewportOrNodeHasNoSize()
+    {
+        Assert.Equal(0.1, MinimapLayout.GetZoomToNodeLevel(0, 60, 900, 600, 0.1, 3.0));
+        Assert.Equal(0.1, MinimapLayout.GetZoomToNodeLevel(200, 60, 0, 600, 0.1, 3.0));
+    }
+
+    [Fact]
+    public void GetNodeCenterOffset_CentersNodeInViewport_ClampedToZero()
+    {
+        // Node at (100, 50), 20x10, zoom 1.0, viewport 400x300: center=(110,55), offset=(110-200,55-150) -> clamped to 0.
+        var (offsetX, offsetY) = MinimapLayout.GetNodeCenterOffset(100, 50, 20, 10, 1.0, 400, 300);
+        Assert.Equal(0, offsetX);
+        Assert.Equal(0, offsetY);
+    }
+
+    [Fact]
+    public void GetNodeCenterOffset_CentersWithoutClamping_WhenFarFromTheEdge()
+    {
+        var (offsetX, offsetY) = MinimapLayout.GetNodeCenterOffset(1000, 500, 20, 10, 1.0, 200, 100);
+        Assert.Equal(1000 + 10 - 100, offsetX, 3);
+        Assert.Equal(500 + 5 - 50, offsetY, 3);
+    }
+
+    [Fact]
+    public void FindNodeAt_ReturnsTheNodeWhoseRectangleContainsThePoint()
+    {
+        // Rows far enough apart (500) that nodes' rectangles never overlap, so the match is unambiguous.
+        var root = MakeNode(0, 0);
+        var child = MakeNode(0, 500);
+        var grandchild = MakeNode(0, 1000);
+        child.Children.Add(grandchild);
+        root.Children.Add(child);
+
+        // At scale 1, grandchild's rect is Y=1000..1000+height, X=0..NodeWidth. Pick a point inside it.
+        var found = MinimapLayout.FindNodeAt(root, 10, 1002, 1.0);
+        Assert.Same(grandchild, found);
+    }
+
+    [Fact]
+    public void FindNodeAt_ReturnsNull_WhenNoNodeContainsThePoint()
+    {
+        var root = MakeNode(0, 0);
+        var found = MinimapLayout.FindNodeAt(root, 9999, 9999, 1.0);
+        Assert.Null(found);
+    }
 }

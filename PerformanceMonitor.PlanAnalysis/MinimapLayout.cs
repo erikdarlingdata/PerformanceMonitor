@@ -142,6 +142,73 @@ public static class MinimapLayout
         return (x, y, width, height);
     }
 
+    /// <summary>The minimap panel's minimum width/height while resizing.</summary>
+    public const double MinPanelSize = 160;
+
+    /// <summary>The minimap panel's maximum width/height while resizing.</summary>
+    public const double MaxPanelSize = 500;
+
+    /// <summary>Clamps a minimap panel width or height to <see cref="MinPanelSize"/>..<see cref="MaxPanelSize"/>.</summary>
+    public static double ClampPanelSize(double size) => Math.Max(MinPanelSize, Math.Min(MaxPanelSize, size));
+
+    /// <summary>
+    /// The panel's new width/height from a resize-grip drag. The grip sits in the panel's top-left
+    /// corner while the panel itself is pinned bottom-right, so dragging toward the top-left (away
+    /// from the pinned corner) is what grows the panel: the deltas subtract from the size the drag
+    /// started at. Both dimensions are clamped to <see cref="MinPanelSize"/>..<see cref="MaxPanelSize"/>.
+    /// </summary>
+    public static (double Width, double Height) ResizeFromDrag(double startWidth, double startHeight, double deltaX, double deltaY)
+        => (ClampPanelSize(startWidth - deltaX), ClampPanelSize(startHeight - deltaY));
+
+    /// <summary>
+    /// The zoom level that fits a node to about a third of the viewport, for double-click-to-zoom.
+    /// Clamped to <paramref name="minZoom"/>..<paramref name="maxZoom"/>. Returns <paramref name="minZoom"/>
+    /// when the viewport or node has no usable size (nothing sensible to fit to).
+    /// </summary>
+    public static double GetZoomToNodeLevel(double nodeWidth, double nodeHeight, double viewportWidth, double viewportHeight, double minZoom, double maxZoom)
+    {
+        if (viewportWidth <= 0 || viewportHeight <= 0 || nodeWidth <= 0 || nodeHeight <= 0)
+            return minZoom;
+
+        var fitZoom = Math.Min(viewportWidth / (nodeWidth * 3), viewportHeight / (nodeHeight * 3));
+        return Math.Max(minZoom, Math.Min(maxZoom, fitZoom));
+    }
+
+    /// <summary>
+    /// The main scroll viewer's offset that centers <paramref name="nodeX"/>/<paramref name="nodeY"/>
+    /// (a node's plan-space position) in the viewport at <paramref name="zoomLevel"/>. Clamped to zero
+    /// so a node near the top-left edge never asks for a negative offset. Used for both double-click
+    /// zoom-and-center and single-click center-on-node.
+    /// </summary>
+    public static (double OffsetX, double OffsetY) GetNodeCenterOffset(
+        double nodeX, double nodeY, double nodeWidth, double nodeHeight,
+        double zoomLevel, double viewportWidth, double viewportHeight)
+    {
+        var centerX = (nodeX + nodeWidth / 2) * zoomLevel - viewportWidth / 2;
+        var centerY = (nodeY + nodeHeight / 2) * zoomLevel - viewportHeight / 2;
+        return (Math.Max(0, centerX), Math.Max(0, centerY));
+    }
+
+    /// <summary>
+    /// Finds the node whose minimap rectangle (see <see cref="GetNodeRect"/>) contains a minimap-space
+    /// point, searching this node then its descendants depth-first. Returns null when no node's
+    /// rectangle contains the point.
+    /// </summary>
+    public static PlanNode? FindNodeAt(PlanNode node, double pointX, double pointY, double scale)
+    {
+        var (x, y, width, height) = GetNodeRect(node, scale);
+        if (pointX >= x && pointX <= x + width && pointY >= y && pointY <= y + height)
+            return node;
+
+        foreach (var child in node.Children)
+        {
+            var found = FindNodeAt(child, pointX, pointY, scale);
+            if (found != null) return found;
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// The main scroll viewer's target offset for a click at a minimap point: convert the click
     /// back to plan content coordinates, then center the viewport on that point. Clamped to zero
