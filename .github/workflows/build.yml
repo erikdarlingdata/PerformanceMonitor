@@ -300,6 +300,17 @@ jobs:
             echo "::notice title=Full build::At least one changed file is off the documentation allowlist (${DOCS_COUNT:-0} of ${ALL_COUNT:-0} classified as documentation)."
           fi
 
+      # Every web-dashboard module must parse and link (#4666, #4672). The C# tests only READ the
+      # dashboard's JavaScript, so a syntax error, a missing file or a missing named export passes
+      # every other check and blanks the whole dashboard in the browser. A step INSIDE build, not a
+      # job of its own: a failing job that build `needs:` would SKIP build, and a skipped build reads
+      # as success, so the gate would fail open. It runs on every change the docs fast path does not
+      # engage for (about two seconds), so a docs-only change stays fast.
+      - name: Parse and link every wwwroot/js module
+        if: steps.fastpath.outputs.engaged != 'true'
+        shell: bash
+        run: bash .github/scripts/check-web-js.sh
+
       - name: Setup .NET 10.0
         if: steps.fastpath.outputs.engaged != 'true'
         uses: actions/setup-dotnet@v6
