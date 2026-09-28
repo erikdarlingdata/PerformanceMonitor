@@ -51,13 +51,13 @@ public partial class ViewerServerTab
     // Returns a Task (not async void) for signature parity with Lite's OpenPlanTab (#2870): the Ctrl+V paste
     // guard there awaits the load so it spans the off-thread parse, and this twin stays identical. This viewer
     // tab has no paste caller today; every "View Plan" caller here discards the Task (CS4014 is an error).
-    private async Task OpenPlanTab(string planXml, string label, string? queryText = null)
+    private async Task OpenPlanTab(string planXml, string label, string? queryText = null, string? databaseName = null)
     {
         HidePlanLoading();
         var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = ViewerExportSettings.AccuracyRatioDivergenceLimit };
         try
         {
-            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_server.ServerId);
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_server.ServerId, databaseName);
             await viewer.LoadPlan(planXml, label, queryText);
         }
         catch (System.Xml.XmlException ex)
@@ -201,7 +201,14 @@ public partial class ViewerServerTab
                 return;
             }
 
-            _ = OpenPlanTab(planXml, label, queryText);
+            var databaseName = grid.CurrentItem switch
+            {
+                ViewerQueryStatsRow s => s.DatabaseName,
+                ViewerQueryStoreRow q => q.DatabaseName,
+                ViewerProcedureStatsRow p => p.DatabaseName,
+                _ => null
+            };
+            _ = OpenPlanTab(planXml, label, queryText, databaseName);
         }
         catch (OperationCanceledException)
         {
@@ -280,7 +287,7 @@ public partial class ViewerServerTab
                 return;
             }
 
-            _ = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText);
+            _ = OpenPlanTab(plan, $"QS Plan - Q{row.QueryId}/P{row.PlanId}", row.QueryText, row.DatabaseName);
         }
         catch (Exception ex)
         {

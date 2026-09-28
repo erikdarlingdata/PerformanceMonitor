@@ -55,14 +55,17 @@ public sealed class PlanServerMetadataReaderTests : IClassFixture<SharedDuckDbFi
         var conn = await SeedConnectionAsync();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
-INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, cpu_count, physical_memory_mb)
-VALUES ($1, $2, $3, $4, $5, $6, $7)";
+INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, cpu_count, physical_memory_mb)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)";
         void P(object v) => cmd.Parameters.Add(new DuckDBParameter { Value = v });
         P(_nextId--);
         P(DateTime.UtcNow);
         P(ServerId);
         P("PlanServerMetadataSrv");
         P(edition);
+        P("16.0.4150.1");
+        P("RTM");
+        P(2);
         P(4);
         P(16384L);
         await cmd.ExecuteNonQueryAsync();

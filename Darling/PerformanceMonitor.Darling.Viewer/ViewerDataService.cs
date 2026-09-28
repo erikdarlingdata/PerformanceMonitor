@@ -2516,15 +2516,16 @@ SELECT
     }
 
     /// <summary>
-    /// #4530: the server's edition/MAXDOP for plan-analysis rule 38, for the viewer's own plan-opening
-    /// sites (<see cref="PerformanceMonitor.Ui.PlanViewerControl.ServerMetadata"/>) — this app has no
-    /// live connection to the monitored server at plan-view time, so it reads the collected copy the
+    /// #4530/#4597: the server's edition/MAXDOP/cost threshold/max memory for plan analysis, plus the
+    /// database's name and compat level when <paramref name="databaseName"/> is known, for the viewer's own
+    /// plan-opening sites (<see cref="PerformanceMonitor.Ui.PlanViewerControl.ServerMetadata"/>) — this app
+    /// has no live connection to the monitored server at plan-view time, so it reads the collected copy the
     /// same way the MCP plan tools and the drill-downs do. Non-fatal: a missing row or a read failure
     /// returns null, same as <see cref="DarlingServerMetadataReader.ReadAsync"/> itself.
     /// </summary>
     public Task<PerformanceMonitor.PlanAnalysis.ServerMetadata?> GetPlanAnalysisServerMetadataAsync(
-        int serverId, CancellationToken cancellationToken = default) =>
-        DarlingServerMetadataReader.ReadAsync(_dataSource, serverId, cancellationToken);
+        int serverId, string? databaseName = null, CancellationToken cancellationToken = default) =>
+        DarlingServerMetadataReader.ReadAsync(_dataSource, serverId, databaseName, cancellationToken);
 
     /// <summary>All registered servers, ordered as the server list displays them.</summary>
     public async Task<List<DarlingServer>> GetServersAsync(CancellationToken cancellationToken = default)
