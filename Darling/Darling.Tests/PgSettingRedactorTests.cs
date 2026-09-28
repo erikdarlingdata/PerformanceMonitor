@@ -18,6 +18,31 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class PgSettingRedactorTests
 {
+    /// <summary>
+    /// Runs one <see cref="PgSettingRedactor.Redact"/> call with <see cref="PgSettingRedactor.MatchTimeoutForTest"/>
+    /// forced to a generous 10s for just that call via <see cref="GenerousRedactorTimeout"/>, which restores
+    /// whatever value was there before (not a hard null) once the <c>using</c> scope ends, even if the call
+    /// throws — so a caller nested inside some other override is not clobbered once this call returns. Every
+    /// exact-output correctness assertion in this class goes through this one seam (test-only flake fix, no
+    /// issue number): the production 100ms
+    /// <see cref="PgSettingRedactor.TimeBoundPattern"/> timeout is a real budget on a quiet box, but a loaded
+    /// runner's own scheduling delay — not real backtracking — can push even genuinely linear matching past
+    /// it, and <see cref="PgSettingRedactor.Redact"/> cannot tell that apart from catastrophic backtracking:
+    /// both mask the value WHOLE, which then fails an exact-output equality check on otherwise-correct output
+    /// (seen live: <c>RedactsPerTheRuling_AndIsIdempotent</c> with <c>name: "archive_command", value:
+    /// "sshpass -p hunter2 ssh user@host"</c> failed on a loaded dev run and passed cleanly alone). Real
+    /// catastrophic backtracking still blows past the 10s budget too, so this stays the primary guard against
+    /// it (a planted catastrophic pattern proves this — see PR #4663's body for the RED run). A test whose
+    /// whole point IS the production timeout — <c>ForcedTimeout_MasksWholeValue_AndNamesOnlyTheSetting</c>,
+    /// <c>ForcedTimeout_ThrowingCallback_StillReturnsMaskAndDoesNotThrow</c> — sets its own short override
+    /// instead of calling this helper.
+    /// </summary>
+    private static string? RedactUnderGenerousTimeout(string? name, string? value, Action<string?>? onMatchTimeout = null)
+    {
+        using var _ = GenerousRedactorTimeout.Begin();
+        return PgSettingRedactor.Redact(name, value, onMatchTimeout);
+    }
+
     [Fact]
     public void RulesVersionIsPinned()
     {
@@ -27,7 +52,7 @@ public sealed class PgSettingRedactorTests
     [Fact]
     public void NullValue_StaysNull()
     {
-        Assert.Null(PgSettingRedactor.Redact("primary_conninfo", null));
+        Assert.Null(RedactUnderGenerousTimeout("primary_conninfo", null));
     }
 
     /// <summary>
@@ -326,12 +351,12 @@ public sealed class PgSettingRedactorTests
     [MemberData(nameof(RedactionCases))]
     public void RedactsPerTheRuling_AndIsIdempotent(string name, string value, string expected)
     {
-        var actual = PgSettingRedactor.Redact(name, value);
+        var actual = RedactUnderGenerousTimeout(name, value);
 
         Assert.Equal(expected, actual);
 
         // f(f(x)) == f(x): re-running the redactor over its own output changes nothing further.
-        Assert.Equal(actual, PgSettingRedactor.Redact(name, actual));
+        Assert.Equal(actual, RedactUnderGenerousTimeout(name, actual));
     }
 
     /// <summary>
@@ -343,13 +368,13 @@ public sealed class PgSettingRedactorTests
     {
         Assert.Equal(
             "PGPASSWORD=******** psql",
-            PgSettingRedactor.Redact("restore_command", "PGPASSWORD=hunter2 psql"));
+            RedactUnderGenerousTimeout("restore_command", "PGPASSWORD=hunter2 psql"));
     }
 
     [Fact]
     public void NeverThrows_OnEmptyName()
     {
-        var result = PgSettingRedactor.Redact(string.Empty, "password=hunter2");
+        var result = RedactUnderGenerousTimeout(string.Empty, "password=hunter2");
 
         Assert.Equal("password=********", result);
     }
@@ -357,7 +382,7 @@ public sealed class PgSettingRedactorTests
     [Fact]
     public void NeverThrows_OnNullName()
     {
-        var result = PgSettingRedactor.Redact(null, "password=hunter2");
+        var result = RedactUnderGenerousTimeout(null, "password=hunter2");
 
         Assert.Equal("password=********", result);
     }
@@ -371,7 +396,7 @@ public sealed class PgSettingRedactorTests
     [InlineData("passwordcheck.min_password_length", "8")]
     public void AllowlistedPolicyNames_AreNotMasked(string name, string value)
     {
-        Assert.Equal(value, PgSettingRedactor.Redact(name, value));
+        Assert.Equal(value, RedactUnderGenerousTimeout(name, value));
     }
 
     // Negative case: a REAL secret next to an allowlisted name in the same batch is still masked — the
@@ -379,8 +404,8 @@ public sealed class PgSettingRedactorTests
     [Fact]
     public void AllowlistedPolicyName_DoesNotShieldARealSecretElsewhere()
     {
-        Assert.Equal("md5+password", PgSettingRedactor.Redact("rds.accepted_password_auth_method", "md5+password"));
-        Assert.Equal("********", PgSettingRedactor.Redact("app.db_password", "fake-secret-value"));
+        Assert.Equal("md5+password", RedactUnderGenerousTimeout("rds.accepted_password_auth_method", "md5+password"));
+        Assert.Equal("********", RedactUnderGenerousTimeout("app.db_password", "fake-secret-value"));
     }
 
     /// <summary>
@@ -433,7 +458,7 @@ public sealed class PgSettingRedactorTests
     [InlineData("archive_command", "pg_password=abc", "pg_password=********")]
     public void FrozenParityWithPreviousRedactor(string name, string value, string expectedFromDev)
     {
-        Assert.Equal(expectedFromDev, PgSettingRedactor.Redact(name, value));
+        Assert.Equal(expectedFromDev, RedactUnderGenerousTimeout(name, value));
     }
 
     /// <summary>
@@ -445,12 +470,12 @@ public sealed class PgSettingRedactorTests
     /// (test-only flake fix, no issue number). This version asserts two things instead, both measured in the
     /// same run so a loaded runner moves them together:
     /// <list type="bullet">
-    /// <item>the redacted OUTPUT at each size is exactly what a linear, non-timed-out pass produces. This is
-    /// the primary guard: every lookaround-bearing pattern in <see cref="PgSettingRedactor"/> already runs
-    /// under a 100ms match timeout (<see cref="PgSettingRedactor.TimeBoundPattern"/>), so catastrophic
-    /// backtracking does not hang the process — it makes <see cref="PgSettingRedactor.Redact"/> mask the WHOLE
-    /// value instead of matching correctly, and THAT wrong output is what this assertion catches, independent
-    /// of timing;</item>
+    /// <item>the redacted OUTPUT at each size is exactly what a linear, non-timed-out pass produces, checked
+    /// through <see cref="RedactUnderGenerousTimeout"/> (see its doc comment for why) instead of calling
+    /// <see cref="PgSettingRedactor.Redact"/> directly. This is still the primary guard: real catastrophic
+    /// backtracking blows past that helper's 10s budget too, and THAT wrong output is what this assertion
+    /// catches, independent of timing (a planted catastrophic pattern proves this -- see PR #4663's body for
+    /// the RED run);</item>
     /// <item>elapsed time at 32,000 characters stays well under quadratic relative to a 2,000-character
     /// baseline, taking the MINIMUM of several repeats at each size (a min, not a mean, so one GC pause or
     /// scheduler hiccup can't drag the number up). Linear scaling gives about a 16x ratio (32000 / 2000);
@@ -479,11 +504,18 @@ public sealed class PgSettingRedactorTests
         var expectedBaseline = trailingAssignment ? baselineBody + "=********" : baselineBody;
         var expectedLarge = trailingAssignment ? largeBody + "=********" : largeBody;
 
-        // Output check first — this also serves as the warm-up run for each size: pays JIT/regex-compile cost
-        // once, outside anything the timing below measures.
-        Assert.Equal(expectedBaseline, PgSettingRedactor.Redact("archive_command", baselineValue));
-        Assert.Equal(expectedLarge, PgSettingRedactor.Redact("archive_command", largeValue));
+        // Output check first, through the same RedactUnderGenerousTimeout helper every other exact-output
+        // assertion in this class uses (see its doc comment for why). It no longer warms the compiled, timed
+        // path below either way: with the override set, TimeBoundPattern.Replace builds a throwaway,
+        // uncompiled Regex per pattern instead of touching the production _default instances, so the timing
+        // loop's own MINIMUM of several repeats (below) absorbs any first-run cost on the production path
+        // instead.
+        Assert.Equal(expectedBaseline, RedactUnderGenerousTimeout("archive_command", baselineValue));
+        Assert.Equal(expectedLarge, RedactUnderGenerousTimeout("archive_command", largeValue));
 
+        // Timing repeats stay on the PRODUCTION path (no override): forcing the override here would make
+        // every Redact call build a throwaway, uncompiled Regex per pattern, which would distort the
+        // near-linear-scaling ratio this part measures.
         var baselineMs = MinElapsedMilliseconds(() => PgSettingRedactor.Redact("archive_command", baselineValue), Repeats);
         var largeMs = MinElapsedMilliseconds(() => PgSettingRedactor.Redact("archive_command", largeValue), Repeats);
 
@@ -582,7 +614,10 @@ public sealed class PgSettingRedactorTests
     {
         Assert.True(PgSettingRedactor.WarmedUp);
 
-        var result = PgSettingRedactor.Redact("archive_command", "PGPASSWORD=hunter2 psql -c 'select 1'");
+        // WarmedUp above is the timing-independent pin that warmup ran; this call only needs to confirm
+        // ordinary correct redaction, same as every other exact-output assertion in this class, so it goes
+        // through the same generous-timeout helper rather than the production timeout.
+        var result = RedactUnderGenerousTimeout("archive_command", "PGPASSWORD=hunter2 psql -c 'select 1'");
 
         Assert.Equal("PGPASSWORD=******** psql -c 'select 1'", result);
     }

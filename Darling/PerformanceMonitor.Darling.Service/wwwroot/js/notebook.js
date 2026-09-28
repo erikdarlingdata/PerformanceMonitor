@@ -36,6 +36,8 @@ import {
 } from "./editor.js";
 import { buildCreateAlertAction } from "./alert-seed.js";
 import * as api from "./views-api.js";
+import { refreshChoiceOf } from "./refresh-policy.js";
+import { buildRefreshControl } from "./refresh-control.js";
 
 /** The definition discriminator: a notebook definition carries kind:"notebook"; a dashboard omits it. */
 export const NOTEBOOK_KIND = "notebook";
@@ -107,7 +109,7 @@ export async function renderNotebookEditor(main, id, templateKey) {
 
 /** A brand-new notebook: one empty markdown cell + one empty panel cell (both cell kinds visible to start). */
 function blankNotebookModel() {
-  return { name: "", description: "", cells: [markdownCellModel(""), panelCellModel()], variables: [], rangeHours: null };
+  return { name: "", description: "", cells: [markdownCellModel(""), panelCellModel()], variables: [], rangeHours: null, refresh: null };
 }
 
 function markdownCellModel(text) {
@@ -129,6 +131,7 @@ function notebookToModel(view) {
     cells: cells.length ? cells : [markdownCellModel("")],
     variables: parseVariables(def.variables),
     rangeHours: def.range && typeof def.range.hours === "number" ? def.range.hours : null,
+    refresh: typeof def.refresh === "string" ? def.refresh : null,
   };
 }
 
@@ -165,6 +168,7 @@ function modelToNotebookDefinition(model) {
     .map((v) => (v.default ? { name: v.name, dimension: v.dimension, default: v.default } : { name: v.name, dimension: v.dimension }));
   if (variables.length) def.variables = variables;
   if (model.rangeHours) def.range = { hours: model.rangeHours };
+  if (model.refresh) def.refresh = model.refresh;
   return def;
 }
 
@@ -312,6 +316,8 @@ function buildNotebookEditor(main, ctx) {
     el("div", { class: "page-head" }, [
       el("a", { href: backHash, text: "← Back" }),
       el("h2", { text: ctx.editingId != null ? "Edit notebook" : "New notebook" }),
+      el("div", { class: "spacer" }),
+      buildRefreshControl(refreshChoiceOf(model, true), (choice) => { model.refresh = choice; }).root,
     ]),
     el("div", { class: "editor-meta" }, [field("Name", nameInput), field("Description", descInput)]),
     viewScopeSection,
