@@ -27,7 +27,7 @@ public sealed class CompressAfterStaggerTests
 {
     /// <summary>
     /// Every heavy table's stagger keeps its <c>compress_after</c> at or above
-    /// <see cref="TimescaleSupport.HourlyRefreshStartSpan"/> \u2014 the same floor
+    /// <see cref="TimescaleSupport.HourlyRefreshStartSpan"/> — the same floor
     /// <see cref="TimescaleSupport.CompressAfterDays"/> alone is pinned against, and one #4510 must not
     /// quietly cross under: the hourly aggregate refresh reads a day back and would refresh a chunk that had
     /// disappeared into a compression rewrite mid-refresh.
@@ -48,7 +48,7 @@ public sealed class CompressAfterStaggerTests
     }
 
     /// <summary>
-    /// The eligibility hours {N, N+12} \u2014 which cover both a 24-hour and a 12-hour chunked table \u2014 are
+    /// The eligibility hours {N, N+12} — which cover both a 24-hour and a 12-hour chunked table — are
     /// pairwise disjoint across every heavy table, and none of them is hour 0 (the unstaggered instant every
     /// table used to share, and the whole burst this fixes).
     /// </summary>
@@ -66,7 +66,7 @@ public sealed class CompressAfterStaggerTests
 
     /// <summary>
     /// Every key in <see cref="TimescaleSupport.HeavyCompressAfterOffsetHours"/> is a real hypertable on
-    /// <see cref="TimescaleSupport.CompressionPhaseOrder"/> \u2014 a misspelled or retired table would silently
+    /// <see cref="TimescaleSupport.CompressionPhaseOrder"/> — a misspelled or retired table would silently
     /// stop staggering, the same failure shape <see cref="TimescaleSupport.HeaviestCompressionTables"/>'s own
     /// membership pin exists to catch.
     /// </summary>
@@ -80,7 +80,7 @@ public sealed class CompressAfterStaggerTests
     }
 
     /// <summary>
-    /// The largest offset stays well inside a day \u2014 past 11 it starts to look like a second
+    /// The largest offset stays well inside a day — past 11 it starts to look like a second
     /// <see cref="TimescaleSupport.CompressAfterDays"/> rather than a stagger, and that is a design change
     /// this map must not drift into by simply growing.
     /// </summary>
@@ -107,7 +107,7 @@ public sealed class CompressAfterStaggerTests
 
     /// <summary>
     /// A table with no entry in <see cref="TimescaleSupport.HeavyCompressAfterOffsetHours"/> keeps the plain
-    /// <c>'1 days'</c> literal byte-identical to before #4510 \u2014 the change must not touch any table it was
+    /// <c>'1 days'</c> literal byte-identical to before #4510 — the change must not touch any table it was
     /// not asked to.
     /// </summary>
     [Fact]
@@ -120,7 +120,7 @@ public sealed class CompressAfterStaggerTests
     }
 
     /// <summary>
-    /// A qualified name (<c>collect.query_stats</c>) resolves the same offset as the bare name \u2014
+    /// A qualified name (<c>collect.query_stats</c>) resolves the same offset as the bare name —
     /// <see cref="TimescaleSupport.AddCompressionPolicySql(string)"/>'s raw-name overload is reachable with
     /// either, the same contract <see cref="TimescaleSupport.TryCompressionPhaseMinutesFor"/> already keeps.
     /// </summary>
@@ -134,9 +134,9 @@ public sealed class CompressAfterStaggerTests
     }
 
     /// <summary>
-    /// #4510's coordinator note: the phase MINUTES the stagger's tables already hold stay untouched \u2014 an
-    /// external hourly reader depends on compression never starting before :36 of the hour. This change
-    /// alters WHICH HOUR a heavy table becomes eligible, never which minute its policy starts on.
+    /// The phase minutes stay where they were: another reader relies on compression starting no earlier
+    /// than :36 past the hour. This change alters WHICH HOUR a heavy table becomes eligible, never which
+    /// minute its policy starts on.
     /// </summary>
     [Fact]
     public void EveryCompressionJob_PhaseMinuteAtLeast36()
