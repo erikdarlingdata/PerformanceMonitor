@@ -56,6 +56,7 @@ public partial class MainWindow : Window
 
     private ViewerDataService? _dataService;
     private DispatcherTimer? _refreshTimer;
+    private bool _storeUnavailable;
     private DispatcherTimer? _overviewTimer;
     private bool _refreshInFlight;
     private bool _refreshRequested;
@@ -542,6 +543,11 @@ public partial class MainWindow : Window
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
+        if (_storeUnavailable)
+        {
+            return;
+        }
+
         /* Refresh the sidebar status dots + the status bar every cycle regardless of the visible tab, so
            freshness stays current even while a per-server tab is up.
 
@@ -921,6 +927,12 @@ public partial class MainWindow : Window
     {
         if (!ReferenceEquals(e.OriginalSource, MainTabs))
         {
+            return;
+        }
+
+        if (_storeUnavailable)
+        {
+            ApplyStoreUnavailableShell();
             return;
         }
 
@@ -2078,8 +2090,32 @@ public partial class MainWindow : Window
         MessageText.Text = message;
         MessageDetailsText.Text = details ?? "";
         MessageDetailsPanel.Visibility = string.IsNullOrWhiteSpace(details) ? Visibility.Collapsed : Visibility.Visible;
-        MessageOverlay.Visibility = Visibility.Visible;
+        _storeUnavailable = true;
+        ApplyStoreUnavailableShell();
         StatusText.Text = "";
+    }
+
+    /// <summary>
+    /// Applies <see cref="StoreUnavailableShell"/>: the failure message over the content column unless the Plan
+    /// Viewer is showing, and the store-dependent sidebar entries disabled (#4648).
+    /// </summary>
+    private void ApplyStoreUnavailableShell()
+    {
+        bool planViewerShowing = MainTabs.Visibility == Visibility.Visible
+            && MainWindowPlanViewerTab.Visibility == Visibility.Visible
+            && MainWindowPlanViewerTab.IsSelected;
+        MessageOverlay.Visibility = StoreUnavailableShell.OverlayVisible(_storeUnavailable, planViewerShowing)
+            ? Visibility.Visible : Visibility.Collapsed;
+        bool enabled = !_storeUnavailable;
+        foreach (UIElement entry in new UIElement[]
+                 {
+                     AddServerSidebarButton, AddMultipleServersSidebarButton, ManageServersSidebarButton,
+                     ManageTagsSidebarButton, ImportSettingsSidebarButton, SettingsSidebarButton,
+                     ServerSearchRow, ServerList,
+                 })
+        {
+            entry.IsEnabled = enabled;
+        }
     }
 
     /// <summary>
