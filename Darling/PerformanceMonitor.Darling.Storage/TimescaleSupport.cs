@@ -9644,7 +9644,11 @@ WHERE (j.proc_name LIKE '%compression%' OR j.proc_name LIKE '%columnstore%')";
     /// rejects.</para>
     /// </summary>
     public static string SetCompressAfterSql =>
-        "SELECT alter_job($1::integer, config => jsonb_set(config, '{compress_after}', to_jsonb($2::text)))";
+        @"SELECT alter_job(
+    j.job_id,
+    config => jsonb_set(j.config, '{compress_after}', to_jsonb($2::text)))
+FROM timescaledb_information.jobs AS j
+WHERE j.job_id = $1::integer";
 
     /// <summary>
     /// Converges EXISTING compression policies onto <see cref="CompressScheduleInterval"/> (#1778) and onto
