@@ -4807,7 +4807,7 @@ public sealed class DarlingWorker : BackgroundService
     /// after first connect, then daily — not up to 24h later).</item>
     /// </list>
     /// The steady-state advance in <see cref="RunDueCollectorsAsync"/> is grid-based
-    /// (<see cref="ComputeNextDue"/>: previous due time plus the interval). Pure and
+    /// (<see cref="CollectorCadence.NextDue"/>: previous due time plus the interval). Pure and
     /// Kind-agnostic (compares by ticks; the caller passes matching UTC values) so the policy is unit-tested
     /// without a live store or a connect. Internal so a unit test can pin the decision table.
     /// </summary>
@@ -4820,20 +4820,6 @@ public sealed class DarlingWorker : BackgroundService
         }
 
         return nowUtc + jitter;
-    }
-
-    /// <summary>#4636: the next due time on a fixed grid — the previous due time plus the interval, skipping any
-    /// slots already missed so a stalled server resumes on its grid without a catch-up burst.</summary>
-    internal static DateTime ComputeNextDue(DateTime due, DateTime now, TimeSpan interval)
-    {
-        var next = due + interval;
-        if (next > now)
-        {
-            return next;
-        }
-
-        var missed = (long)Math.Floor((now - due).Ticks / (double)interval.Ticks);
-        return due + TimeSpan.FromTicks(interval.Ticks * (missed + 1));
     }
 
     /// <summary>The floor applied to the watermark read below (#4469): how far back
@@ -9609,7 +9595,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                 var interval = CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(effective.FrequencyMinutes);
                 /* #4636: advance on a fixed grid from the previous due time, not from this body's start, so a
                    late start is not carried into the next slot; a slot missed in a stall is skipped, not replayed. */
-                server.NextDue[name] = ComputeNextDue(due, now, TimeSpan.FromMinutes(interval));
+                server.NextDue[name] = CollectorCadence.NextDue(due, now, TimeSpan.FromMinutes(interval));
 
                 /* #2700: query_store is split off this sequential body rather than awaited inline. Its
                    run time is bimodal — a heavy batch runs 100-230+ seconds against a ~5-35s mean, on its
