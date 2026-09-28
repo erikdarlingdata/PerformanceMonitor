@@ -15,6 +15,7 @@ using PerformanceMonitor.Analysis;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Database;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -314,8 +315,14 @@ public partial class RecommendationsTab : UserControl
         if (string.IsNullOrEmpty(card.CopyPasteSql))
             return;
 
-        Clipboard.SetDataObject(card.CopyPasteSql, false);
-        StatusText.Text = "Fix copied to clipboard.";
+        if (ClipboardText.TrySetDataObject(card.CopyPasteSql))
+        {
+            StatusText.Text = "Fix copied to clipboard.";
+        }
+        else
+        {
+            StatusText.Text = "Couldn't copy: the clipboard is in use.";
+        }
     }
 
     /// <summary>
@@ -327,8 +334,14 @@ public partial class RecommendationsTab : UserControl
         if (sender is not FrameworkElement fe || fe.DataContext is not LiteRecommendationCardViewModel card)
             return;
 
-        Clipboard.SetDataObject(card.AskAiPrompt, false);
-        StatusText.Text = "AI prompt copied to clipboard.";
+        if (ClipboardText.TrySetDataObject(card.AskAiPrompt))
+        {
+            StatusText.Text = "AI prompt copied to clipboard.";
+        }
+        else
+        {
+            StatusText.Text = "Couldn't copy: the clipboard is in use.";
+        }
     }
 
     /// <summary>

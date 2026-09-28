@@ -31,6 +31,7 @@ public partial class PlanViewerControl : UserControl
 
     private ParsedPlan? _currentPlan;
     private PlanStatement? _currentStatement;
+    private int _allStatementsCount;
     private double _zoomLevel = 1.0;
     private const double ZoomStep = 0.15;
     private const double MinZoom = 0.1;
@@ -78,8 +79,41 @@ public partial class PlanViewerControl : UserControl
     private SolidColorBrush PropSeparatorBrush =>
         (TryFindResource("PlanPropSeparatorBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x2A, 0x2D, 0x35));
 
+    // Plan Insights per-card accent brushes (theme-token backed; see InsightCardStyle for the
+    // quiet/non-quiet state these feed).
+    private SolidColorBrush IndexAccentBrush =>
+        (TryFindResource("InsightIndexBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xFF, 0xB3, 0x47));
+    private SolidColorBrush WaitsAccentBrush =>
+        (TryFindResource("InsightWaitsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x4F, 0xA3, 0xFF));
+
+    /// <summary>
+    /// Flips one Plan Insights card between its normal and its quiet state. A card with nothing to
+    /// report drops its header to the muted foreground and dims its accent edge, so an empty panel
+    /// reads as empty instead of shouting in the panel's accent colour. Ported from
+    /// PerformanceStudio's SetInsightQuiet (erikdarlingdata/PerformanceStudio@87bad14); the
+    /// quiet/non-quiet values come from PerformanceMonitor.PlanAnalysis.InsightCardStyle.
+    /// </summary>
+    /// <param name="header">The card's header TextBlock.</param>
+    /// <param name="accentBrush">The card's own accent brush (its normal, non-empty header colour).</param>
+    /// <param name="accentEdge">The card's 3px accent-edge Border.</param>
+    /// <param name="isEmpty">Whether the card currently has nothing to report.</param>
+    private void SetInsightQuiet(TextBlock header, Brush accentBrush, Border accentEdge, bool isEmpty)
+    {
+        header.Foreground = InsightCardStyle.HeaderUsesMutedForeground(isEmpty) ? MutedBrush : accentBrush;
+        accentEdge.Opacity = InsightCardStyle.AccentOpacity(isEmpty);
+    }
+
     // Current property section for collapsible groups
     private StackPanel? _currentPropertySection;
+
+    // Properties panel row model, filter and remembered width (#4574). The width is static so a
+    // width the user drags out survives closing the panel and switching plan tabs.
+    private const double DefaultPropertiesWidth = PerformanceMonitor.PlanAnalysis.PropertyRows.DefaultPropertiesWidth;
+    private const double MinPropertiesWidth = PerformanceMonitor.PlanAnalysis.PropertyRows.MinPropertiesWidth;
+    private const double MaxPropertiesWidth = PerformanceMonitor.PlanAnalysis.PropertyRows.MaxPropertiesWidth;
+    private static double _propertiesPanelWidth = DefaultPropertiesWidth;
+    private readonly List<PropertyPanelSection> _propertySections = new();
+    private PropertyPanelSection? _currentSection;
 
     // Canvas panning
     private bool _isPanning;
@@ -94,6 +128,18 @@ public partial class PlanViewerControl : UserControl
            fires Unloaded when you switch tabs, which would permanently detach this handler.
            Hosts call Cleanup() when the plan tab/window is actually closed. */
         ThemeManager.ThemeChanged += OnThemeChanged;
+
+        // The splitter writes the dragged size straight onto the column, so that is where the
+        // remembered width (#4574) comes from - no drag tracking of our own.
+        var widthDescriptor = System.ComponentModel.DependencyPropertyDescriptor.FromProperty(
+            System.Windows.Controls.ColumnDefinition.WidthProperty, typeof(ColumnDefinition));
+        widthDescriptor?.AddValueChanged(PropertiesColumn, (_, _) =>
+        {
+            if (PropertiesPanel.Visibility != Visibility.Visible) return;
+            var width = PropertiesColumn.Width;
+            if (width.IsAbsolute && width.Value > 0)
+                _propertiesPanelWidth = width.Value;
+        });
     }
 
     /// <summary>Unsubscribes from theme changes. Hosts must call this when the plan tab/window is closed.</summary>
@@ -122,9 +168,18 @@ public partial class PlanViewerControl : UserControl
         }
     }
 
+    /// <summary>
+    /// The full query text the host passed <see cref="LoadPlan"/>, held for "Copy Query Text"'s
+    /// truncated-single-statement fallback (#4582, PerformanceStudio's <c>_queryText</c>): the same
+    /// text shown in <see cref="QueryTextExpander"/>, not re-derived from it, so the fallback still
+    /// works even if that panel's own text is edited or hidden later.
+    /// </summary>
+    public string? CapturedQueryText { get; private set; }
+
     public async System.Threading.Tasks.Task LoadPlan(string planXml, string label, string? queryText = null)
     {
         _label = label;
+        CapturedQueryText = queryText;
 
         if (!string.IsNullOrEmpty(queryText))
         {
@@ -161,9 +216,12 @@ public partial class PlanViewerControl : UserControl
 
         // #4514: includes statements nested inside a stored procedure or UDF body, so the
         // viewer's statement list shows the statements the analyzer actually found findings on.
+        // #4582: this count - not Batches.Sum - is also what "Copy Query Text" uses to decide
+        // whether the plan is single-statement, matching the grid.
         var allStatements = PlanStatements.EnumerateAll(_currentPlan)
             .Where(s => s.RootNode != null)
             .ToList();
+        _allStatementsCount = allStatements.Count;
 
         if (allStatements.Count == 0)
         {
@@ -201,6 +259,8 @@ public partial class PlanViewerControl : UserControl
         PlanCanvas.Children.Clear();
         _currentPlan = null;
         _currentStatement = null;
+        _allStatementsCount = 0;
+        CapturedQueryText = null;
         _selectedNodeBorder = null;
         EmptyStateTitle.Text = "No Plan Loaded";
         EmptyStateDetail.Visibility = Visibility.Visible;
@@ -211,6 +271,7 @@ public partial class PlanViewerControl : UserControl
         CostText.Text = "";
         CostText.Visibility = Visibility.Collapsed;
         ClosePropertiesPanel();
+        CloseMinimapPanel();
     }
 
     private static void CollectWarnings(PlanNode node, List<PlanWarning> warnings)
@@ -368,9 +429,9 @@ public partial class PlanViewerControl : UserControl
     {
         if (StatementsGrid.SelectedItem is StatementRow row)
         {
-            var text = row.Statement.StatementText;
+            var text = PlanDisplayText.CopyQueryText(row.Statement, _allStatementsCount, CapturedQueryText);
             if (!string.IsNullOrEmpty(text))
-                Clipboard.SetText(text);
+                ClipboardText.TrySetText(text);
         }
     }
 
@@ -422,15 +483,8 @@ public class StatementRow
     public PlanStatement Statement { get; set; } = null!;
 
     // Display helpers — grid binds to these, sorting uses the raw properties via SortMemberPath
-    public string CpuDisplay => FormatDuration(CpuMs);
-    public string ElapsedDisplay => FormatDuration(ElapsedMs);
-    public string UdfDisplay => UdfMs > 0 ? FormatDuration(UdfMs) : "";
+    public string CpuDisplay => MetricFormatter.FormatDuration(CpuMs);
+    public string ElapsedDisplay => MetricFormatter.FormatDuration(ElapsedMs);
+    public string UdfDisplay => UdfMs > 0 ? MetricFormatter.FormatDuration(UdfMs) : "";
     public string CostDisplay => EstCost > 0 ? $"{EstCost:F2}" : "";
-
-    private static string FormatDuration(long ms)
-    {
-        if (ms < 1000) return $"{ms}ms";
-        if (ms < 60_000) return $"{ms / 1000.0:F1}s";
-        return $"{ms / 60_000}m {(ms % 60_000) / 1000}s";
-    }
 }

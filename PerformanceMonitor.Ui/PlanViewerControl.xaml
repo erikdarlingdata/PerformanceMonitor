@@ -33,6 +33,10 @@
                     <Button x:Name="StatementsButton" Content="Statements" Click="ToggleStatements_Click"
                             Height="28" Padding="8,0" Visibility="Collapsed"
                             ToolTip="Show/hide statement list"/>
+                    <Separator Margin="12,4"/>
+                    <Button x:Name="MinimapToggleButton" Content="Minimap" Click="MinimapToggle_Click"
+                            Height="28" Padding="8,0" Margin="4,0,0,0"
+                            ToolTip="Show/hide plan minimap"/>
                 </StackPanel>
                 <TextBlock x:Name="CostText" DockPanel.Dock="Right" VerticalAlignment="Center"
                            HorizontalAlignment="Right"
@@ -61,60 +65,85 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <!-- Runtime Summary (left) -->
-                    <Border Grid.Column="0" Padding="10,4,10,8"
-                            Background="{DynamicResource BackgroundDarkBrush}"
+                    <!--
+                        Plan Insights cards: one visual system for all three panels, ported from
+                        PerformanceStudio dev (erikdarlingdata/PerformanceStudio@87bad14). Every card
+                        sits on the same neutral surface (BackgroundLightBrush); identity comes from
+                        a 3px accent edge plus the header in that accent, never a full-bleed tint,
+                        since a tinted slab shouts just as loudly when the panel has nothing to say
+                        ("No missing index suggestions" on a full colour block reads as an alert).
+                        A card with nothing to report goes quiet instead: muted header, dimmed edge
+                        (SetInsightQuiet in the code-behind). Runtime Summary keeps a blank edge, no
+                        accent, since it is the neutral centre.
+                    -->
+
+                    <!-- Runtime Summary (left, neutral centre: no accent, just the alignment gutter) -->
+                    <Border Grid.Column="0"
+                            Background="{DynamicResource BackgroundLightBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
-                        <StackPanel>
-                            <TextBlock x:Name="RuntimeSummaryTitle"
-                                       Text="Runtime Summary"
-                                       FontSize="13"
-                                       FontWeight="SemiBold"
-                                       Foreground="{DynamicResource ForegroundBrush}"
-                                       Margin="0,0,0,4"/>
-                            <StackPanel x:Name="RuntimeSummaryContent"/>
-                        </StackPanel>
+                        <DockPanel>
+                            <Border x:Name="RuntimeSummaryAccent" DockPanel.Dock="Left" Width="3"/>
+                            <StackPanel Margin="10,4,10,8">
+                                <TextBlock x:Name="RuntimeSummaryTitle"
+                                           Text="Runtime Summary"
+                                           FontSize="13"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource ForegroundBrush}"
+                                           Margin="0,0,0,4"/>
+                                <StackPanel x:Name="RuntimeSummaryContent"/>
+                            </StackPanel>
+                        </DockPanel>
                     </Border>
 
                     <!-- Missing Indexes (center) -->
-                    <Border Grid.Column="1" Padding="10,4,10,8"
-                            Background="{DynamicResource PlanMissingIndexBgBrush}"
-                            BorderBrush="{DynamicResource PlanMissingIndexBorderBrush}" BorderThickness="0,0,1,0">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                      HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel>
-                                <TextBlock x:Name="MissingIndexHeader"
-                                           Text="Missing Index Suggestions"
-                                           FontSize="13"
-                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanMissingIndexHeaderBrush}"
-                                           Margin="0,0,0,6"/>
-                                <StackPanel x:Name="MissingIndexContent"/>
-                                <TextBlock x:Name="MissingIndexEmpty"
-                                           Text="No missing index suggestions"
-                                           FontSize="12" Visibility="Collapsed"
-                                           Foreground="{DynamicResource ForegroundBrush}"/>
-                            </StackPanel>
-                        </ScrollViewer>
+                    <Border Grid.Column="1"
+                            Background="{DynamicResource BackgroundLightBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
+                        <DockPanel>
+                            <Border x:Name="MissingIndexAccent" DockPanel.Dock="Left" Width="3"
+                                    Background="{DynamicResource InsightIndexBrush}"/>
+                            <ScrollViewer Margin="10,4,10,8"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel>
+                                    <TextBlock x:Name="MissingIndexHeader"
+                                               Text="Missing Index Suggestions"
+                                               FontSize="13"
+                                               FontWeight="SemiBold" Foreground="{DynamicResource InsightIndexBrush}"
+                                               Margin="0,0,0,6"/>
+                                    <StackPanel x:Name="MissingIndexContent"/>
+                                    <TextBlock x:Name="MissingIndexEmpty"
+                                               Text="No missing index suggestions"
+                                               FontSize="12" Visibility="Collapsed"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </DockPanel>
                     </Border>
 
-                    <!-- Wait Stats (right, fills remaining space) -->
-                    <Border Grid.Column="2" Padding="10,4,10,8"
-                            Background="{DynamicResource PlanWaitStatsBgBrush}">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                      HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel>
-                                <TextBlock x:Name="WaitStatsHeader"
-                                           Text="Wait Stats"
-                                           FontSize="13"
-                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanWaitStatsHeaderBrush}"
-                                           Margin="0,0,0,6"/>
-                                <StackPanel x:Name="WaitStatsContent"/>
-                                <TextBlock x:Name="WaitStatsEmpty"
-                                           Text="No wait stats (estimated plan)"
-                                           FontSize="12" Visibility="Collapsed"
-                                           Foreground="{DynamicResource ForegroundBrush}"/>
-                            </StackPanel>
-                        </ScrollViewer>
+                    <!-- Wait Stats (right, fills remaining space; last card in the strip, no separator) -->
+                    <Border Grid.Column="2"
+                            Background="{DynamicResource BackgroundLightBrush}">
+                        <DockPanel>
+                            <Border x:Name="WaitStatsAccent" DockPanel.Dock="Left" Width="3"
+                                    Background="{DynamicResource InsightWaitsBrush}"/>
+                            <ScrollViewer Margin="10,4,10,8"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel>
+                                    <TextBlock x:Name="WaitStatsHeader"
+                                               Text="Wait Stats"
+                                               FontSize="13"
+                                               FontWeight="SemiBold" Foreground="{DynamicResource InsightWaitsBrush}"
+                                               Margin="0,0,0,6"/>
+                                    <StackPanel x:Name="WaitStatsContent"/>
+                                    <TextBlock x:Name="WaitStatsEmpty"
+                                               Text="No wait stats (estimated plan)"
+                                               FontSize="12" Visibility="Collapsed"
+                                               Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </DockPanel>
                     </Border>
                 </Grid>
             </Expander>
@@ -203,21 +232,64 @@
                           Visibility="Collapsed"/>
 
             <!-- Plan Canvas -->
-            <ScrollViewer Grid.Column="2" x:Name="PlanScrollViewer"
-                          HorizontalScrollBarVisibility="Auto"
-                          VerticalScrollBarVisibility="Auto"
-                          Background="{DynamicResource BackgroundBrush}"
-                          PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel"
-                          PreviewMouseLeftButtonDown="PlanScrollViewer_PreviewMouseLeftButtonDown"
-                          PreviewMouseMove="PlanScrollViewer_PreviewMouseMove"
-                          PreviewMouseLeftButtonUp="PlanScrollViewer_PreviewMouseLeftButtonUp">
-                <Canvas x:Name="PlanCanvas" ClipToBounds="False"
-                        HorizontalAlignment="Left" VerticalAlignment="Top">
-                    <Canvas.LayoutTransform>
-                        <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
-                    </Canvas.LayoutTransform>
-                </Canvas>
-            </ScrollViewer>
+            <Grid Grid.Column="2">
+                <ScrollViewer x:Name="PlanScrollViewer"
+                              HorizontalScrollBarVisibility="Auto"
+                              VerticalScrollBarVisibility="Auto"
+                              Background="{DynamicResource BackgroundBrush}"
+                              PreviewMouseWheel="PlanScrollViewer_PreviewMouseWheel"
+                              PreviewMouseLeftButtonDown="PlanScrollViewer_PreviewMouseLeftButtonDown"
+                              PreviewMouseMove="PlanScrollViewer_PreviewMouseMove"
+                              PreviewMouseLeftButtonUp="PlanScrollViewer_PreviewMouseLeftButtonUp"
+                              ScrollChanged="PlanScrollViewer_ScrollChanged">
+                    <Canvas x:Name="PlanCanvas" ClipToBounds="False"
+                            HorizontalAlignment="Left" VerticalAlignment="Top">
+                        <Canvas.LayoutTransform>
+                            <ScaleTransform x:Name="ZoomTransform" ScaleX="1" ScaleY="1"/>
+                        </Canvas.LayoutTransform>
+                    </Canvas>
+                </ScrollViewer>
+
+                <!-- Minimap: a corner overlay panel with a scaled-down view of the whole plan. Resizable
+                     from its header's grip (bounds 160-500px); the size is remembered across plans. -->
+                <Border x:Name="MinimapPanel" Visibility="Collapsed"
+                        HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                        Margin="0,0,12,12" Width="220" Height="220"
+                        Background="{DynamicResource BackgroundDarkBrush}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                        CornerRadius="4" ClipToBounds="True" Panel.ZIndex="100">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <!-- Header: resize grip (top-left, the corner the panel grows from since it's
+                             pinned bottom-right), title, close button. -->
+                        <DockPanel Grid.Row="0" Background="{DynamicResource BackgroundDarkBrush}">
+                            <Border x:Name="MinimapResizeGrip" DockPanel.Dock="Left"
+                                    Width="16" Height="18" Background="Transparent" Cursor="SizeNWSE"
+                                    MouseLeftButtonDown="MinimapResizeGrip_MouseLeftButtonDown"
+                                    MouseMove="MinimapResizeGrip_MouseMove"
+                                    MouseLeftButtonUp="MinimapResizeGrip_MouseLeftButtonUp"
+                                    ToolTip="Drag to resize">
+                                <Canvas Width="10" Height="10" VerticalAlignment="Center" HorizontalAlignment="Center">
+                                    <Line X1="0" Y1="4" X2="4" Y2="0" Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="1" Opacity="0.5"/>
+                                    <Line X1="0" Y1="7" X2="7" Y2="0" Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="1" Opacity="0.5"/>
+                                    <Line X1="0" Y1="10" X2="10" Y2="0" Stroke="{DynamicResource ForegroundMutedBrush}" StrokeThickness="1" Opacity="0.5"/>
+                                </Canvas>
+                            </Border>
+                            <Button DockPanel.Dock="Right" Content="&#x2715;" Click="MinimapClose_Click"
+                                    Width="18" Height="18" Padding="0" FontSize="10" VerticalAlignment="Center"
+                                    Margin="0,0,2,0" ToolTip="Close minimap"/>
+                            <TextBlock Text="Minimap" FontSize="10" VerticalAlignment="Center" Margin="2,1,0,1"
+                                       Foreground="{DynamicResource ForegroundMutedBrush}"/>
+                        </DockPanel>
+                        <Canvas x:Name="MinimapCanvas" Grid.Row="1" ClipToBounds="True"
+                                Background="Transparent"
+                                MouseLeftButtonDown="MinimapCanvas_MouseLeftButtonDown"/>
+                    </Grid>
+                </Border>
+            </Grid>
 
             <!-- Empty State -->
             <StackPanel x:Name="EmptyState" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Center">
@@ -259,6 +331,18 @@
                                            Margin="0,2,0,0"/>
                             </StackPanel>
                         </DockPanel>
+                    </Border>
+
+                    <!-- Filter. Sticky across node selections; Esc clears it. -->
+                    <Border DockPanel.Dock="Top" Padding="8,5"
+                            Background="{DynamicResource BackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <TextBox x:Name="PropertiesFilterBox"
+                                 FontSize="11" Height="24" MinHeight="0" Padding="6,1"
+                                 VerticalContentAlignment="Center"
+                                 TextChanged="PropertiesFilter_TextChanged"
+                                 KeyDown="PropertiesFilter_KeyDown"
+                                 ToolTip="Filter properties..."/>
                     </Border>
 
                     <!-- Properties Content -->

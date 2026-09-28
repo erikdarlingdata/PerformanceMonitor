@@ -53,6 +53,11 @@ public static class PlanWarningDisplay
     private static string WarningSourceTag(PlanWarning warning) =>
         warning.Source == PlanWarningSource.SqlServer ? " [SQL Server]" : "";
 
+    /// <summary>
+    /// Formats a benefit percentage the way this warning header does: a bare number, whole once it
+    /// reaches 100 and one decimal below that. <see cref="WaitRowText"/>'s wait-row benefit text uses
+    /// its own whole-number format instead, matching PerformanceStudio's wait-row display.
+    /// </summary>
     private static string FormatBenefitPercent(double pct) =>
         pct >= 100 ? $"{pct:N0}" : $"{pct:N1}";
 
