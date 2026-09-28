@@ -174,6 +174,10 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
     /// engine takes it — a test constructs its own and cannot pollute the shared one. Null (most test call
     /// sites) retries exactly the same way and counts nothing.
     /// </param>
+    /// <param name="queryStoreWriteFence">
+    /// #4659: the fence the collector runner brackets every Query Store write with. Null = the forced-plan
+    /// failure read saves and reuses nothing: every pass runs the full read (any other construction site).
+    /// </param>
     /// <param name="delay">
     /// The pause between a read's two attempts, injectable so a pin can assert the seam WAITED
     /// <see cref="AlertPassRetryDelaySeconds"/> without spending two seconds of test time doing it.
@@ -185,8 +189,10 @@ public sealed class DarlingAlertReadAdapter : IAlertReadAdapter
         Func<int, int>? blockingSnapshotCadenceMinutes = null,
         AlertReadFailureCounter? readFailures = null,
         Func<TimeSpan, CancellationToken, Task>? delay = null,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        QueryStoreWriteFence? queryStoreWriteFence = null)
     {
+        _queryStoreWriteFence = queryStoreWriteFence;
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _runningJobsCadenceMinutes = runningJobsCadenceMinutes;
         _blockingSnapshotCadenceMinutes = blockingSnapshotCadenceMinutes;
@@ -1841,19 +1847,18 @@ FROM query_store_stats AS qs
 WHERE qs.server_id = $1
 AND   qs.collection_time > $2";
 
-    /// <summary>#4659: one server's last full answer, keyed by the newest collection it was computed at. Each row
-    /// carries its older (rn = 2) collection so a later pass can drop the rows the sliding window has since excluded.</summary>
-    private sealed record ForcePlanFailuresMemo(DateTime NewestCollection, IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> Rows);
+    /// <summary>#4659: one server's last full answer, keyed by the newest collection it was computed at and by the
+    /// write-fence generation it was read under. Each row carries its older (rn = 2) collection so a later pass can
+    /// drop the rows the sliding window has since excluded.</summary>
+    private sealed record ForcePlanFailuresMemo(DateTime NewestCollection, long Generation, IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> Rows);
 
     private readonly ConcurrentDictionary<int, ForcePlanFailuresMemo> _forcePlanFailuresMemo = new();
 
-    /// <summary>
-    /// Drops one server's saved forced-plan failure answer (#4659). The Query Store backfill writes
-    /// BACKDATED collections, so a batch can change which two collections the failure delta compares
-    /// without moving the newest collection the probe looks at; the backfill calls this after each
-    /// batch it writes so the next pass re-reads.
-    /// </summary>
-    internal void InvalidateForcePlanFailures(int serverId) => _forcePlanFailuresMemo.TryRemove(serverId, out _);
+    private readonly QueryStoreWriteFence? _queryStoreWriteFence;
+
+    /// <summary>Test seam: awaited after the full read has read its rows and before the fence is checked for the
+    /// save.</summary>
+    internal Func<Task>? BeforeMemoStoreForTests { get; set; }
 
     /// <summary>Number of times the full forced-plan failure read has run on this adapter (#4659).</summary>
     internal int ForcePlanFailuresFullReads;
@@ -1886,7 +1891,11 @@ AND   qs.collection_time > $2";
     {
         var serverId = ParseServerKey(serverKey);
 
-        var windowStart = NaiveUtcNow() - ForcePlanFailureWindow;
+        /* One value, whole microseconds, for the probe, the SQL and the trim: Npgsql sends a timestamp at
+           microsecond precision, so the trim compares against exactly what the store compared against. */
+        var windowStart = FloorToMicrosecond(NaiveUtcNow() - ForcePlanFailureWindow);
+        var fence = _queryStoreWriteFence;
+        var before = fence?.Snapshot(serverId);
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
 
         DateTime? newest;
@@ -1904,7 +1913,14 @@ AND   qs.collection_time > $2";
             return new List<ForcePlanFailureInfo>();
         }
 
-        if (_forcePlanFailuresMemo.TryGetValue(serverId, out var memo) && memo.NewestCollection == newest.Value)
+        /* Reused only when no Query Store write was in flight when this pass began, the memo was read under the
+           same generation, and nothing began since. A live fan-out commits one database at a time under one
+           collection_time, so the newest collection alone cannot say a later database's rows are still to come. */
+        if (before is { Quiet: true } b
+            && _forcePlanFailuresMemo.TryGetValue(serverId, out var memo)
+            && memo.Generation == b.Generation
+            && memo.NewestCollection == newest.Value
+            && fence!.Snapshot(serverId) == (b.Generation, true))
         {
             return ReuseForWindow(memo.Rows, windowStart);
         }
@@ -1935,7 +1951,23 @@ AND   qs.collection_time > $2";
             rows.Add((info, reader.GetDateTime(8)));
         }
 
-        _forcePlanFailuresMemo[serverId] = new ForcePlanFailuresMemo(newest.Value, rows);
+        if (BeforeMemoStoreForTests is { } beforeStore)
+        {
+            await beforeStore();
+        }
+
+        /* Saved only if the fence was quiet at both ends and did not move: a write that began, committed or
+           ended during the read may or may not be in what was read. */
+        var after = fence?.Snapshot(serverId);
+        if (before is { Quiet: true } b0 && after is { Quiet: true } a0 && a0.Generation == b0.Generation)
+        {
+            _forcePlanFailuresMemo[serverId] = new ForcePlanFailuresMemo(newest.Value, b0.Generation, rows);
+        }
+        else
+        {
+            _forcePlanFailuresMemo.TryRemove(serverId, out _);
+        }
+
         return rows.Select(r => r.Info).ToList();
     }
 
@@ -1960,6 +1992,10 @@ AND   qs.collection_time > $2";
     }
 
     /* ---------------- helpers ---------------- */
+
+    /// <summary>#4659: the value truncated to whole microseconds (10 ticks), the precision a Postgres timestamp holds.</summary>
+    internal static DateTime FloorToMicrosecond(DateTime value) =>
+        DateTime.SpecifyKind(new DateTime(value.Ticks - value.Ticks % 10), value.Kind);
 
     /// <summary>Naive-UTC now, Kind-Unspecified — the product's PG timestamp discipline.</summary>
     private static DateTime NaiveUtcNow() =>

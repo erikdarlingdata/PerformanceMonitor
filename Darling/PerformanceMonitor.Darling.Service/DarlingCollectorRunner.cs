@@ -364,6 +364,9 @@ public sealed class DarlingCollectorRunner
     private readonly QueryStoreIntervalLatest _queryStoreIntervalLatest;
     private readonly QueryStoreIntervalWide _queryStoreIntervalWide;
 
+    /* #4659: told before and after every Query Store batch write (see CopyBatchOnceAsync). Null = no reader is caching. */
+    private readonly QueryStoreWriteFence? _queryStoreWriteFence;
+
     /* Feeds CollectorContext.TextByteBudgetOverride on every cycle (#2164) — the query_store collector's
        per-database text budget in MB (config_service.query_store_text_budget_mb, V59). Provider-read for
        the same reason as the two above: a store reload takes effect on the NEXT cycle without rebuilding
@@ -672,9 +675,10 @@ public sealed class DarlingCollectorRunner
     /// every cycle and therefore the pre-#2862 collector. Every existing caller and test keeps the
     /// collector it already had without naming the knob.
     /// </param>
-    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null)
+    public DarlingCollectorRunner(NpgsqlDataSource postgres, CollectorDeltaCalculator deltas, ILogger? logger = null, Func<bool>? capturePlans = null, Func<bool>? collectSchemaChanges = null, Func<int>? textBudgetMb = null, Func<bool>? compressPlanContent = null, Func<int>? procedureStatsPlanCycleInterval = null, Func<string, int, IReadOnlyList<string>>? databaseScope = null, PgLogHashKey? logHashKey = null, QueryStoreWriteFence? queryStoreWriteFence = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
+        _queryStoreWriteFence = queryStoreWriteFence;
         _deltas = deltas ?? throw new ArgumentNullException(nameof(deltas));
         _logger = logger;
         _capturePlans = capturePlans ?? (() => true);
@@ -3735,150 +3739,171 @@ public sealed class DarlingCollectorRunner
             && await _queryStoreIntervalWide.PrepareServerAsync(
                 pgConnection, server.ServerId, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
 
-        /* Only the diverting collectors and Query Store (#3953) need a transaction; everything else keeps the
-           pre-#1767 single-COPY commit and pays nothing. */
-        await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null
-            ? await pgConnection.BeginTransactionAsync(cancellationToken)
-            : null;
-
-        /* Naive-UTC storage — see PgCollectorRowWriter. */
-        var storedCollectionTime = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
-
-        /* The start phase's deadline. It is separate from the importer's because it has to be: the
-           importer does not exist until Begin returns, and the await that returns it runs under the
-           connection's CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the
-           value, the stop-versus-deadline discrimination and the fault shape; the two lines it costs here
-           are the token below and the arm that translates a breach. */
-        using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
-
-        /* #3095: which COPY phase a fault came out of, stamped onto the exception by the arm below so a
-           handler upstream can tell a start-phase failure from a data-phase one. Both render as
-           "Exception while reading from stream", so nothing about the exception itself carries this.
-
-           Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
-           mean strictly "the importer never came back", because that is the state whose two properties a
-           consumer relies on — no row started, so a COPY ... FROM STDIN cannot have committed, and no
-           delta baseline moved, since CollectorDeltaCalculator advances inside WritePayload below. A
-           fault anywhere past this line forfeits both, so it must read as Data even where it happens to
-           have sent nothing. The unsafe mislabel is the one that would report Start for a fault that had
-           already sent rows; this ordering makes that unreachable rather than unlikely.
-
-           The dimension flush and commit after the block are deliberately left unstamped: they are not the
-           COPY, and Unknown is the honest answer for them. */
-        var copyPhase = StoreCopyPhase.Start;
+        /* #4659: a Query Store batch tells the store-write fence it is about to change query_store_stats BEFORE
+           its transaction opens, and that it is done in a finally AFTER the commit (or after a rollback, a throw,
+           or a cancel). This is the one place every Query Store row is written, so the live fan-out (one
+           transaction per database under one collection_time), overlapped runs, the re-attempt on a fresh
+           connection and the backfill are all covered here and nowhere else. */
+        var fencedServerId = queryStoreDatabases is not null ? server.ServerId : (int?)null;
+        if (fencedServerId is { } beginServerId)
+        {
+            _queryStoreWriteFence?.BeginWrite(beginServerId);
+        }
 
         try
         {
-            using (var importer = await pgConnection.BeginBinaryImportAsync(
-                PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
+            /* Only the diverting collectors and Query Store (#3953) need a transaction; everything else keeps the
+               pre-#1767 single-COPY commit and pays nothing. */
+            await using var transaction = diversionPlan.Count > 0 || queryStoreDatabases is not null
+                ? await pgConnection.BeginTransactionAsync(cancellationToken)
+                : null;
+
+            /* Naive-UTC storage — see PgCollectorRowWriter. */
+            var storedCollectionTime = DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified);
+
+            /* The start phase's deadline. It is separate from the importer's because it has to be: the
+               importer does not exist until Begin returns, and the await that returns it runs under the
+               connection's CommandTimeout, which Npgsql exposes read-only. StoreCopyStartDeadline carries the
+               value, the stop-versus-deadline discrimination and the fault shape; the two lines it costs here
+               are the token below and the arm that translates a breach. */
+            using var startDeadline = StoreCopyStartDeadline.Start(cancellationToken);
+
+            /* #3095: which COPY phase a fault came out of, stamped onto the exception by the arm below so a
+               handler upstream can tell a start-phase failure from a data-phase one. Both render as
+               "Exception while reading from stream", so nothing about the exception itself carries this.
+
+               Start until Begin returns, and the transition sits INSIDE the block for that reason: Start has to
+               mean strictly "the importer never came back", because that is the state whose two properties a
+               consumer relies on — no row started, so a COPY ... FROM STDIN cannot have committed, and no
+               delta baseline moved, since CollectorDeltaCalculator advances inside WritePayload below. A
+               fault anywhere past this line forfeits both, so it must read as Data even where it happens to
+               have sent nothing. The unsafe mislabel is the one that would report Start for a fault that had
+               already sent rows; this ordering makes that unreachable rather than unlikely.
+
+               The dimension flush and commit after the block are deliberately left unstamped: they are not the
+               COPY, and Unknown is the honest answer for them. */
+            var copyPhase = StoreCopyPhase.Start;
+
+            try
             {
-                copyPhase = StoreCopyPhase.Data;
-
-                /* #2874: the COPY's own deadline — and a DIFFERENT property from every other site in this
-                   regime. NpgsqlBinaryImporter.Timeout is a TimeSpan on the importer, not the int seconds of
-                   NpgsqlCommand.CommandTimeout, and there is neither an NpgsqlCommand nor a CreateCommand here,
-                   so no regex written for either command shape can see this site. Left unset it is initialised
-                   from the connection's CommandTimeout, so this write — PgCollectorRowWriter.CopyCommandFor over
-                   every collector, every server, every cycle — inherited the same undocumented 30 s default as
-                   the rest of the regime while being invisible to every pin that closed them.
-
-                   It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
-                   and one borrowed store connection held for the duration, retried on the collector's own cadence.
-
-                   It reaches ONE of the COPY's two phases, and that is a property of the API rather than a
-                   choice. Measured against Npgsql 10.0.3: this bounds StartRowAsync / Write / CompleteAsync,
-                   and nothing above them — the importer does not exist until Begin has returned. The await
-                   that returns it is bounded by startDeadline above, which is why the two lines are separate
-                   and why both take the same constant. */
-                importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
-
-                writer.Importer = importer;
-
-                foreach (var row in rows)
+                using (var importer = await pgConnection.BeginBinaryImportAsync(
+                    PgCollectorRowWriter.CopyCommandFor(definition), startDeadline.Token))
                 {
-                    await importer.StartRowAsync(cancellationToken);
+                    copyPhase = StoreCopyPhase.Data;
 
-                    if (definition.IncludesCollectionId)
+                    /* #2874: the COPY's own deadline — and a DIFFERENT property from every other site in this
+                       regime. NpgsqlBinaryImporter.Timeout is a TimeSpan on the importer, not the int seconds of
+                       NpgsqlCommand.CommandTimeout, and there is neither an NpgsqlCommand nor a CreateCommand here,
+                       so no regex written for either command shape can see this site. Left unset it is initialised
+                       from the connection's CommandTimeout, so this write — PgCollectorRowWriter.CopyCommandFor over
+                       every collector, every server, every cycle — inherited the same undocumented 30 s default as
+                       the rest of the regime while being invisible to every pin that closed them.
+
+                       It takes the SAME constant because it is the same regime: no enclosing budget, one sweep permit
+                       and one borrowed store connection held for the duration, retried on the collector's own cadence.
+
+                       It reaches ONE of the COPY's two phases, and that is a property of the API rather than a
+                       choice. Measured against Npgsql 10.0.3: this bounds StartRowAsync / Write / CompleteAsync,
+                       and nothing above them — the importer does not exist until Begin has returned. The await
+                       that returns it is bounded by startDeadline above, which is why the two lines are separate
+                       and why both take the same constant. */
+                    importer.Timeout = TimeSpan.FromSeconds(ServiceCommandDeadlines.CollectionSweepSeconds);
+
+                    writer.Importer = importer;
+
+                    foreach (var row in rows)
                     {
-                        writer.Value(CollectionIdGenerator.Next());
+                        await importer.StartRowAsync(cancellationToken);
+
+                        if (definition.IncludesCollectionId)
+                        {
+                            writer.Value(CollectionIdGenerator.Next());
+                        }
+
+                        writer.Value(storedCollectionTime)
+                              .Value(server.ServerId)
+                              .Value(server.StorageName);
+
+                        writer.BeginPayload();
+                        definition.WritePayload(row, writer, context);
+                        writer.EndPayload(definition.PayloadColumns.Count);
+                        rowsWritten++;
                     }
 
-                    writer.Value(storedCollectionTime)
-                          .Value(server.ServerId)
-                          .Value(server.StorageName);
-
-                    writer.BeginPayload();
-                    definition.WritePayload(row, writer, context);
-                    writer.EndPayload(definition.PayloadColumns.Count);
-                    rowsWritten++;
+                    await importer.CompleteAsync(cancellationToken);
                 }
-
-                await importer.CompleteAsync(cancellationToken);
             }
-        }
-        /* The start phase's deadline, re-raised as the shape a client-side deadline has here. Npgsql
-           cancels Begin with an OperationCanceledException, and on this path that word is reserved for the
-           service stopping — the arm below excludes it from the phase stamp, and StoreWriteReattempt
-           refuses to re-attempt through one. Left in that shape a breach would be bounded and invisible.
+            /* The start phase's deadline, re-raised as the shape a client-side deadline has here. Npgsql
+               cancels Begin with an OperationCanceledException, and on this path that word is reserved for the
+               service stopping — the arm below excludes it from the phase stamp, and StoreWriteReattempt
+               refuses to re-attempt through one. Left in that shape a breach would be bounded and invisible.
 
-           The phase term in the filter is what makes this arm unable to lie, and it is not redundant with
-           Breached(). A throw from a catch arm leaves the whole try, so this fault is stamped HERE rather
-           than by the arm below — and Start is what the re-attempt gate acts on. Requiring copyPhase to
-           still hold its initial value makes the arm unreachable once the row loop has begun, whatever
-           Npgsql chooses to throw from inside it, so a data-phase fault cannot be relabelled as the
-           recoverable one. The stamp still reads the variable rather than naming a phase. */
-        catch (OperationCanceledException cancellation)
-            when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
-        {
-            var breach = StoreCopyStartDeadline.Breach(cancellation);
-            CollectorFaultCopyPhase.Stamp(breach, copyPhase);
-            throw breach;
-        }
-        /* Stamped, then rethrown bare: the fault keeps its own type, message and stack, so every
-           classification arm upstream — PostgresTargetProvider.Classify, the reconnect decision in
-           DarlingWorker's general handler, and any predicate walking the inner chain for a transport
-           fault — sees exactly what it sees today. The phase rides alongside as an independent axis.
-
-           OperationCanceledException is excluded because a stopping token is not a COPY phase: it says the
-           service is shutting down, not which protocol exchange was in flight, and a consumer must not be
-           able to read a shutdown as a recoverable start-phase stall. */
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            CollectorFaultCopyPhase.Stamp(ex, copyPhase);
-            throw;
-        }
-
-        if (transaction is not null)
-        {
-            if (diversionPlan.Count > 0)
+               The phase term in the filter is what makes this arm unable to lie, and it is not redundant with
+               Breached(). A throw from a catch arm leaves the whole try, so this fault is stamped HERE rather
+               than by the arm below — and Start is what the re-attempt gate acts on. Requiring copyPhase to
+               still hold its initial value makes the arm unreachable once the row loop has begun, whatever
+               Npgsql chooses to throw from inside it, so a data-phase fault cannot be relabelled as the
+               recoverable one. The stamp still reads the variable rather than naming a phase. */
+            catch (OperationCanceledException cancellation)
+                when (copyPhase == StoreCopyPhase.Start && startDeadline.Breached())
             {
-                await PayloadDimensionWriter.FlushAsync(
-                    pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
-                    compressPlanContent: _compressPlanContent());
+                var breach = StoreCopyStartDeadline.Breach(cancellation);
+                CollectorFaultCopyPhase.Stamp(breach, copyPhase);
+                throw breach;
+            }
+            /* Stamped, then rethrown bare: the fault keeps its own type, message and stack, so every
+               classification arm upstream — PostgresTargetProvider.Classify, the reconnect decision in
+               DarlingWorker's general handler, and any predicate walking the inner chain for a transport
+               fault — sees exactly what it sees today. The phase rides alongside as an independent axis.
+
+               OperationCanceledException is excluded because a stopping token is not a COPY phase: it says the
+               service is shutting down, not which protocol exchange was in flight, and a consumer must not be
+               able to read a shutdown as a recoverable start-phase stall. */
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                CollectorFaultCopyPhase.Stamp(ex, copyPhase);
+                throw;
             }
 
-            /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not
-               the COPY's and is never re-attempted. The apply cannot fail the batch: it rolls back to its own
-               savepoint and records the batch for replay, so raw commits either way. */
-            if (queryStoreDatabases is not null)
+            if (transaction is not null)
             {
-                var applied = await _queryStoreIntervalLatest.ApplyBatchAsync(
-                    pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
-                    skipApply: !queryStorePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
-                if (applied == QueryStoreIntervalLatest.ApplyResult.RecordedAsPending)
+                if (diversionPlan.Count > 0)
                 {
-                    context.QueryStoreIntervalMisses++;
+                    await PayloadDimensionWriter.FlushAsync(
+                        pgConnection, transaction, dimensions, storedCollectionTime, cancellationToken,
+                        compressPlanContent: _compressPlanContent());
                 }
 
-                /* #3953 (V145): the wide table's apply, under its OWN savepoint (QueryStoreIntervalWide.SavepointName),
-                   beside V143's above. A fault here rolls back only to that savepoint: V143's apply just above,
-                   already released from its own savepoint, is untouched, and raw still commits either way. */
-                await _queryStoreIntervalWide.ApplyBatchAsync(
-                    pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
-                    skipApply: !queryStoreWidePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
-            }
+                /* #3953: after the COPY and the dimension flush, in the unstamped region (#3095): a fault here is not
+                   the COPY's and is never re-attempted. The apply cannot fail the batch: it rolls back to its own
+                   savepoint and records the batch for replay, so raw commits either way. */
+                if (queryStoreDatabases is not null)
+                {
+                    var applied = await _queryStoreIntervalLatest.ApplyBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
+                        skipApply: !queryStorePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                    if (applied == QueryStoreIntervalLatest.ApplyResult.RecordedAsPending)
+                    {
+                        context.QueryStoreIntervalMisses++;
+                    }
 
-            await transaction.CommitAsync(cancellationToken);
+                    /* #3953 (V145): the wide table's apply, under its OWN savepoint (QueryStoreIntervalWide.SavepointName),
+                       beside V143's above. A fault here rolls back only to that savepoint: V143's apply just above,
+                       already released from its own savepoint, is untouched, and raw still commits either way. */
+                    await _queryStoreIntervalWide.ApplyBatchAsync(
+                        pgConnection, transaction, server.ServerId, storedCollectionTime, queryStoreDatabases,
+                        skipApply: !queryStoreWidePrepared, ServiceCommandDeadlines.CollectionSweepSeconds, cancellationToken);
+                }
+
+                await transaction.CommitAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (fencedServerId is { } endServerId)
+            {
+                _queryStoreWriteFence?.EndWrite(endServerId);
+            }
         }
 
         return rowsWritten;

@@ -910,9 +910,9 @@ public sealed class DarlingWorker : BackgroundService
        flip mid-run is picked up by each of them on its next pass with no further wiring. */
     private bool _timescaleAvailable;
 
-    /* The alert engine's read adapter, kept so the Query Store backfill can clear its saved forced-plan
-       failure answer after writing backdated rows (#4659). */
-    private DarlingAlertReadAdapter? _alertReadAdapter;
+    /* #4659: the one fence the collector runner's Query Store COPY and the alert read adapter's saved
+       forced-plan failure answer share. */
+    private readonly QueryStoreWriteFence _queryStoreWriteFence = new();
 
     /* #3915, #3944: the re-mask pass over store-log rows captured before this build, which normalizes their
        SQL and re-keys their message. The cursor is where the last hourly slice stopped; done once a slice
@@ -2395,7 +2395,9 @@ public sealed class DarlingWorker : BackgroundService
                the cadence gate reads — one source, so the scope a run collects under and the schedule it
                was dispatched under can never come from two different reloads. */
             databaseScope: (collectorName, serverId) => StoreConfigProvider.ResolveDatabaseScope(collectorName, serverId, _scheduleOverrides),
-            logHashKey: logHashKey);
+            logHashKey: logHashKey,
+            /* #4659: shared with the alert read adapter (BuildAlertEngine). */
+            queryStoreWriteFence: _queryStoreWriteFence);
         var servers = new List<ServerLoopState>();
         /* #1581 cold-start stagger: capture ONE startup instant so every initial server's first-sweep offset is
            measured from the same base — the deterministic per-server ColdStartFirstSweepDue then spreads the
@@ -2632,8 +2634,7 @@ public sealed class DarlingWorker : BackgroundService
            rather than a value so it cannot capture a stale reading. */
         var queryStoreBackfill = new QueryStoreBackfill(postgres, runner, deltas, _logger, () => config.CapturePlans,
             () => StoreConfigProvider.ClampTextBudgetMb(config.QueryStoreTextBudgetMb),
-            () => _timescaleAvailable,
-            serverId => _alertReadAdapter?.InvalidateForcePlanFailures(serverId));
+            () => _timescaleAvailable);
         var backfillLoop = RunQueryStoreBackfillLoopAsync(queryStoreBackfill, servers, () => config.QueryStoreBackfillEnabled, stoppingToken);
 
         /* The fleet concurrency gate (#1553 D2): at most N=4 per-server collection bodies open a SQL connection
@@ -5027,8 +5028,9 @@ public sealed class DarlingWorker : BackgroundService
                    name. Passed explicitly for the same reason the engine's is — a test builds its own. */
                 readFailures: AlertReadFailureCounter.Shared,
                 /* #4606: the database-state maintenance sequence's own deadlock-retry log. */
-                logger: _logger);
-        _alertReadAdapter = readAdapter;
+                logger: _logger,
+                /* #4659: the same fence the collector runner brackets every Query Store write with. */
+                queryStoreWriteFence: _queryStoreWriteFence);
 
         return new AlertEngine(
             alertSettings,
