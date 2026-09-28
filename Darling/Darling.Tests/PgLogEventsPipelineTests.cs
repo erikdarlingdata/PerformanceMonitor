@@ -369,13 +369,14 @@ public sealed class PgLogEventsPipelineTests
     }
 
     /// <summary>#4501 round 2: a forged application_name spelling ERROR ahead of a real FATAL line — still in
-    /// the error class, still kept, as FATAL.</summary>
+    /// the error class, still kept — as ERROR, the matched (outer) label, the same way K9/the line above is
+    /// kept under the label the reader actually matched rather than the label found inside the text.</summary>
     [Fact]
     public void Assemble_AForgedErrorAheadOfARealFatalLine_IsKeptAsFatal()
     {
         var line = P + "[4102] x ERROR:  FATAL:  password authentication failed\n";
         var entry = Assert.Single(PgLogEntryAssembler.Assemble(line, logTimezoneIsUtc: false, logLinePrefix: "%m [%p] %a ", out _));
-        Assert.Equal("FATAL", entry.Severity);
+        Assert.Equal("ERROR", entry.Severity);
     }
 
     /// <summary>#4501 round 2: R1 still refuses — LOG and the real ERROR do not agree (LOG is not in the

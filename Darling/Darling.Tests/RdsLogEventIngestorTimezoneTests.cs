@@ -116,18 +116,19 @@ public sealed class RdsLogEventIngestorTimezoneTests
     }
 
     /// <summary>
-    /// #4501 round 2: a K1-shaped statement line (a client quoting <c>ERROR:  </c> in text it sends) must
-    /// still reach the write over this transport. Before this fix the ingestor called the 3-arg
-    /// <c>Classify</c> overload, which applies the forgery rule with NO separator check — the fallback for a
-    /// prefix that was "not yet collected" — and refused this exact shape even though RDS's prefix is fixed
-    /// and known. Proven through <see cref="RdsLogEventIngestor.IngestAsync"/> itself, the product's own call
-    /// path, the same way the happy-path test above proves "reaches the write": the dead store turns a
-    /// non-empty batch into a throw that is not <see cref="RdsLogUnavailableException"/>.
+    /// #4501 round 2: a real server message carrying a libpq error inside it (a logical-replication worker's
+    /// own line) must still reach the write over this transport. RDS/Aurora's prefix is fixed and known
+    /// (<see cref="RdsLogEventIngestor.DefaultLogLinePrefix"/>), so passing it — rather than falling back to
+    /// the no-separator-check overload the 3-arg <c>Classify</c> call used before this fix — keeps this line
+    /// as ERROR (ERROR and FATAL agree) instead of refusing it as a forgery. Proven through
+    /// <see cref="RdsLogEventIngestor.IngestAsync"/> itself, the product's own call path, the same way the
+    /// happy-path test above proves "reaches the write": the dead store turns a non-empty batch into a throw
+    /// that is not <see cref="RdsLogUnavailableException"/>.
     /// </summary>
     [Fact]
     public async Task AK1ShapedStatementLine_StillReachesTheWrite()
     {
-        var k1 = "2026-08-26 22:25:24.100 UTC:192.0.2.10(52345):app_rw@app_db:[1549]:LOG:  statement: SELECT 'ERROR:  x'\n";
+        var k1 = "2026-08-26 22:25:24.100 UTC:192.0.2.10(52345):app_rw@app_db:[1549]:ERROR:  could not connect to the publisher: FATAL:  password authentication failed\n";
 
         await using var store = NpgsqlDataSource.Create(DeadStore);
         var logs = new RdsLogSource(_ => new FakeRds { FirstBody = k1 });

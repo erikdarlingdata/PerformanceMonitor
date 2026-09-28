@@ -1535,11 +1535,11 @@ public class StoreLogClassifierTests
         Assert.Equal(1, k9.EntriesRead);
 
         /* K10 (#4501 round 2): a forged application_name spelling ERROR ahead of a real FATAL line - still
-           in the error class, still kept, this time as FATAL. */
+           in the error class, still kept - as ERROR, the matched (outer) label, the same as K9 above. */
         var k10 = StoreLogClassifier.Classify(
             DefaultPrefix + "x ERROR:  FATAL:  password authentication failed\n");
         var k10Group = Assert.Single(k10.Groups);
-        Assert.Equal("FATAL", k10Group.Severity);
+        Assert.Equal("ERROR", k10Group.Severity);
         Assert.Equal(1, k10.EntriesRead);
     }
 
