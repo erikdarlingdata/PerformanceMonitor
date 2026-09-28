@@ -21,10 +21,32 @@ public partial class PlanViewerControl
 {
     #region Properties Panel
 
+    /// <summary>
+    /// One row of the properties panel in WPF terms: the pure <see cref="PropertyRow"/> the
+    /// filter and copy menu work from, plus every control the row occupies (so the filter can
+    /// hide them) and the shared copy menu.
+    /// </summary>
+    private sealed class PropertyPanelRow
+    {
+        public PropertyRow Model { get; init; } = new();
+        public List<FrameworkElement> Controls { get; } = new();
+        public ContextMenu? Menu { get; set; }
+    }
+
+    private sealed class PropertyPanelSection
+    {
+        public string Title { get; init; } = "";
+        public Expander Expander { get; init; } = null!;
+        public List<PropertyPanelRow> Rows { get; } = new();
+        public PropertySection Model { get; init; } = null!;
+    }
+
     private void ShowPropertiesPanel(PlanNode node)
     {
         PropertiesContent.Children.Clear();
         _currentPropertySection = null;
+        _propertySections.Clear();
+        _currentSection = null;
 
         // Header
         var headerText = node.PhysicalOp;
@@ -824,6 +846,7 @@ public partial class PlanViewerControl
                         });
                     }
                     (_currentPropertySection ?? PropertiesContent).Children.Add(warnPanel);
+                    RegisterBuiltWarningRow(planWarnHeaderText, w.Message, warnPanel);
                 }
             }
 
@@ -879,13 +902,61 @@ public partial class PlanViewerControl
                     });
                 }
                 PropertiesContent.Children.Add(warnPanel);
+                RegisterBuiltWarningRow(opWarnHeaderText, w.Message, warnPanel);
             }
         }
 
-        // Show the panel
-        PropertiesColumn.Width = new GridLength(320);
-        PropertiesSplitter.Visibility = Visibility.Visible;
-        PropertiesPanel.Visibility = Visibility.Visible;
+        // The filter box keeps its text across selections, so a rebuilt panel has to re-apply it.
+        ApplyPropertiesFilter();
+
+        // Show the panel. The width is set only when the panel is opening: setting it on every
+        // selection would throw away whatever width the user had dragged out, on every click.
+        if (PropertiesPanel.Visibility != Visibility.Visible)
+        {
+            PropertiesColumn.MinWidth = MinPropertiesWidth;
+            PropertiesColumn.MaxWidth = MaxPropertiesWidth;
+            PropertiesColumn.Width = new GridLength(
+                PerformanceMonitor.PlanAnalysis.PropertyRows.ClampWidth(_propertiesPanelWidth));
+            PropertiesSplitter.Visibility = Visibility.Visible;
+            PropertiesPanel.Visibility = Visibility.Visible;
+        }
+    }
+
+    private void PropertiesFilter_TextChanged(object sender, TextChangedEventArgs e)
+        => ApplyPropertiesFilter();
+
+    private void PropertiesFilter_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != System.Windows.Input.Key.Escape) return;
+        PropertiesFilterBox.Text = "";
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Hides every row whose label and value miss the filter text, and hides a section outright
+    /// once nothing in it is left showing. A section whose own title matches the filter keeps
+    /// all of its rows, so typing a section name jumps to that section rather than emptying it.
+    /// </summary>
+    private void ApplyPropertiesFilter()
+    {
+        var filter = PropertiesFilterBox.Text?.Trim() ?? "";
+
+        foreach (var section in _propertySections)
+        {
+            var sectionMatches = PerformanceMonitor.PlanAnalysis.PropertyRows.SectionTitleMatches(section.Title, filter);
+
+            var visibleCount = 0;
+            foreach (var row in section.Rows)
+            {
+                var visible = PerformanceMonitor.PlanAnalysis.PropertyRows.RowMatches(row.Model, filter, sectionMatches);
+                foreach (var control in row.Controls)
+                    control.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+                if (visible) visibleCount++;
+            }
+
+            section.Expander.Visibility = PerformanceMonitor.PlanAnalysis.PropertyRows.SectionVisible(visibleCount)
+                ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     /// <summary>
@@ -1016,6 +1087,8 @@ public partial class PlanViewerControl
         };
         PropertiesContent.Children.Add(expander);
         _currentPropertySection = contentPanel;
+        _currentSection = new PropertyPanelSection { Title = title, Expander = expander, Model = new PropertySection { Title = title } };
+        _propertySections.Add(_currentSection);
     }
 
     private void AddPropertyRow(string label, string value, bool isCode = false, bool indent = false)
@@ -1054,6 +1127,96 @@ public partial class PlanViewerControl
 
         var target = _currentPropertySection ?? PropertiesContent;
         target.Children.Add(grid);
+
+        if (_currentSection != null)
+        {
+            var entry = new PropertyPanelRow
+            {
+                Model = new PropertyRow { Label = label, Value = value, IsCode = isCode, SearchText = $"{label} {value}" }
+            };
+            entry.Controls.Add(grid);
+            AttachPropertyRowMenu(valueBox, entry);
+            _currentSection.Rows.Add(entry);
+            _currentSection.Model.Rows.Add(entry.Model);
+        }
+    }
+
+    /// <summary>
+    /// Wraps a warning panel built directly under <see cref="PropertiesContent"/> (the plan-level
+    /// and per-operator warning lists, which are prose panels rather than label/value grids) as a
+    /// filterable, copyable row on the section most recently opened by <see cref="AddPropertySection"/>.
+    /// </summary>
+    private void RegisterBuiltWarningRow(string header, string body, FrameworkElement panel)
+    {
+        if (_currentSection == null) return;
+
+        var text = $"  {header}\n    {body}".TrimEnd();
+        var entry = new PropertyPanelRow
+        {
+            Model = new PropertyRow { Label = header, Value = body, BlockText = text, SearchText = $"{header} {body}" }
+        };
+        entry.Controls.Add(panel);
+        AttachPropertyRowMenu(panel, entry);
+        _currentSection.Rows.Add(entry);
+        _currentSection.Model.Rows.Add(entry.Model);
+    }
+
+    /// <summary>
+    /// Gives a control the row's copy menu ('Copy value' / 'Copy name and value' / 'Copy all
+    /// properties'), replacing the stock read-only TextBox menu (greyed-out Cut/Copy, live Paste
+    /// on data nobody can edit).
+    /// </summary>
+    private void AttachPropertyRowMenu(FrameworkElement control, PropertyPanelRow entry)
+    {
+        control.ContextMenu = entry.Menu ??= BuildPropertyRowMenu(entry);
+    }
+
+    private ContextMenu BuildPropertyRowMenu(PropertyPanelRow entry)
+    {
+        var menu = new ContextMenu();
+
+        var copyValueItem = new MenuItem { Header = "Copy value" };
+        copyValueItem.Click += (_, _) => TrySetClipboardText(entry.Model.CopyValue);
+        menu.Items.Add(copyValueItem);
+
+        var copyRowItem = new MenuItem { Header = "Copy name and value" };
+        copyRowItem.Click += (_, _) => TrySetClipboardText(entry.Model.CopyLabelAndValue);
+        menu.Items.Add(copyRowItem);
+
+        menu.Items.Add(new Separator());
+
+        var copyAllItem = new MenuItem { Header = "Copy all properties" };
+        copyAllItem.Click += (_, _) => TrySetClipboardText(BuildPropertiesText());
+        menu.Items.Add(copyAllItem);
+
+        return menu;
+    }
+
+    /// <summary>
+    /// The whole panel as plain text, for "Copy all properties": rendered from the row model
+    /// (<see cref="PerformanceMonitor.PlanAnalysis.PropertyRows.BuildPropertiesText"/>), not the
+    /// visual tree, so a code value pastes back out verbatim.
+    /// </summary>
+    private string BuildPropertiesText() =>
+        PerformanceMonitor.PlanAnalysis.PropertyRows.BuildPropertiesText(
+            PropertiesHeader.Text, PropertiesSubHeader.Text, _propertySections.ConvertAll(s => s.Model));
+
+    /// <summary>
+    /// Guarded clipboard write for the copy menu: a bare <see cref="Clipboard.SetText(string)"/>
+    /// throws when another process momentarily holds the clipboard (the same transient
+    /// CLIPBRD_E_CANT_OPEN condition <see cref="ClipboardText"/> guards on the read side).
+    /// </summary>
+    private static void TrySetClipboardText(string text)
+    {
+        try
+        {
+            Clipboard.SetText(text ?? "");
+        }
+        catch (System.Runtime.InteropServices.ExternalException)
+        {
+            // Transient CLIPBRD_E_CANT_OPEN: another process holds the clipboard. No-op; the
+            // user can retry the copy.
+        }
     }
 
     private void CloseProperties_Click(object sender, RoutedEventArgs e)
@@ -1065,6 +1228,10 @@ public partial class PlanViewerControl
     {
         PropertiesPanel.Visibility = Visibility.Collapsed;
         PropertiesSplitter.Visibility = Visibility.Collapsed;
+        // Clear the open-state bounds first: MinWidth clamps the column whatever its Width says,
+        // so leaving it set would hold a strip open on a closed panel.
+        PropertiesColumn.MinWidth = 0;
+        PropertiesColumn.MaxWidth = double.PositiveInfinity;
         PropertiesColumn.Width = new GridLength(0);
 
         // Deselect node
