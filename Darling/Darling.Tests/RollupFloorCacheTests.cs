@@ -15,7 +15,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4539: the pure half of the rollup floor cache \u2014 the planner that decides which rollups' <c>min(bucket)</c>
+/// #4539: the pure half of the rollup floor cache — the planner that decides which rollups' <c>min(bucket)</c>
 /// must be re-run this cycle, and the SQL overload that only names those rollups.
 /// </summary>
 public sealed class RollupFloorCacheTests
@@ -116,7 +116,7 @@ public sealed class RollupFloorCacheTests
         Assert.Contains($"(SELECT min(bucket) FROM collect.{TimescaleSupport.QueryStoreStatsHourlyView})", sql, StringComparison.Ordinal);
         Assert.DoesNotContain($"collect.{TimescaleSupport.QueryStatsHourlyView})", sql, StringComparison.Ordinal);
 
-        /* Column count is unchanged \u2014 a non-measured present view still contributes a placeholder column,
+        /* Column count is unchanged — a non-measured present view still contributes a placeholder column,
            so the reader's ordinals never depend on which rollups happened to be measured this cycle. */
         var columns = sql["SELECT ".Length..].Split(", ");
         Assert.Equal(TimescaleSupport.RollupViews.Length + TimescaleSupport.RolledRawTables.Length, columns.Length);

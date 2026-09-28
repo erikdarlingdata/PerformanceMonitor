@@ -9185,12 +9185,12 @@ AND   ca.view_name IN ({views})";
     /// touches a compressed batch. A rollup with no chunks at all (freshly created, no data yet) reads a NULL
     /// chunk name; the caller treats that as "always measure", because an empty read is itself cheap.
     /// </summary>
-    public static string RollupOldestChunkSql(RollupAvailability availability)
+    public static string? RollupOldestChunkSql(RollupAvailability availability)
     {
         var present = RollupViews.Select(r => r.View).Where(availability.Has).ToArray();
         if (present.Length == 0)
         {
-            return null!;
+            return null;
         }
 
         var viewList = string.Join(", ", present.Select(v => $"'{v}'"));
