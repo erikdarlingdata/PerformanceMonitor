@@ -334,8 +334,8 @@ public partial class PlanViewerControl
 
     /// <summary>
     /// Double-click-to-zoom: sets the main canvas' zoom so the node takes about a third of the
-    /// viewport, scrolls to center it, and selects it (same as clicking the node directly on the
-    /// main canvas), matching PerformanceStudio's <c>ZoomToNode</c>.
+    /// viewport, selects it (same as clicking the node directly on the main canvas), then centers
+    /// it, matching PerformanceStudio's <c>ZoomToNode</c>.
     /// </summary>
     private void ZoomToMinimapNode(PlanNode node, double viewportWidth, double viewportHeight)
     {
@@ -343,12 +343,14 @@ public partial class PlanViewerControl
             PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node), viewportWidth, viewportHeight, MinZoom, MaxZoom);
         SetZoom(fitZoom);
 
-        var (offsetX, offsetY) = MinimapLayout.GetNodeCenterOffset(
-            node.X, node.Y, PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node),
-            _zoomLevel, viewportWidth, viewportHeight);
-        PlanScrollViewer.ScrollToHorizontalOffset(offsetX);
-        PlanScrollViewer.ScrollToVerticalOffset(offsetY);
-
+        // Select before centering, not after: SelectNode opens the properties panel when it wasn't
+        // already open, and that panel takes ~400px from the right of PlanScrollViewer. Centering
+        // against viewportWidth/viewportHeight (the size BEFORE that panel opens) put the node 201px
+        // right of center when the panel was closed, and left a smaller residual even when it was
+        // already open, because a zoom change alone can toggle a scrollbar and shift ViewportWidth by
+        // a few more pixels (#4622). Deferring to DispatcherPriority.Loaded and reading
+        // PlanScrollViewer.ViewportWidth/Height there, after SelectNode's layout has settled, centers
+        // on the viewport the user actually ends up looking at either way.
         foreach (var child in PlanCanvas.Children)
         {
             if (child is Border b && b.Tag is PlanNode n && n == node)
@@ -357,6 +359,15 @@ public partial class PlanViewerControl
                 break;
             }
         }
+
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            var (offsetX, offsetY) = MinimapLayout.GetNodeCenterOffset(
+                node.X, node.Y, PlanLayoutEngine.NodeWidth, PlanLayoutEngine.GetNodeHeight(node),
+                _zoomLevel, PlanScrollViewer.ViewportWidth, PlanScrollViewer.ViewportHeight);
+            PlanScrollViewer.ScrollToHorizontalOffset(offsetX);
+            PlanScrollViewer.ScrollToVerticalOffset(offsetY);
+        }), DispatcherPriority.Loaded);
     }
 
     private void PlanScrollViewer_ScrollChanged(object sender, ScrollChangedEventArgs e)
