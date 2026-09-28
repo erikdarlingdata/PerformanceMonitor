@@ -106,10 +106,8 @@ LEFT JOIN dbconfig ON true";
         try
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
-            await using var command = new NpgsqlCommand(ServerMetadataSql, connection)
-            {
-                CommandTimeout = StorageCommandDeadlines.McpReadSeconds,
-            };
+            await using var command = new NpgsqlCommand(ServerMetadataSql, connection);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
             command.Parameters.AddWithValue(serverId);
             command.Parameters.AddWithValue(databaseName ?? (object)DBNull.Value);
 
