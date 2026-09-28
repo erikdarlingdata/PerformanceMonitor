@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Darling.Service;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -126,6 +127,15 @@ public sealed class CollectorRuntimeState
     /// <c>ex.Message</c> at every <see cref="PublishRetrying"/>/<see cref="PublishStopped"/> call site.</summary>
     public static string FailureDetailFor(StartupStep step) => FailureDetailByStep[step];
 
+    /// <summary>Appends the sustained-retry phrase to <paramref name="detail"/> (#4508), so every reader of
+    /// <see cref="Snapshot.Detail"/> — the MCP/Viewer surfaces and <c>/api/ping</c> alike — sees the same
+    /// text once a step has spent its fast budget: <c>StartupFailureTriage.RetryBudget</c> seconds at the
+    /// original cadence, and is now retrying every <c>StartupFailureTriage.SustainedRetryDelay</c> seconds
+    /// with no cap. Built from those two constants and <paramref name="attempt"/>, never a literal.</summary>
+    internal static string SustainedRetryDetail(string detail, int attempt)
+        => $"{detail} \u2014 retrying every {(int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds}s, "
+            + $"attempt {attempt} (past the {(int)StartupFailureTriage.RetryBudget.TotalSeconds}s fast budget)";
+
     /// <summary>
     /// The fixed <see cref="Snapshot.Detail"/> for the one ManagedStore stand-down that is not on an
     /// exception path (#4316 round 1 B1): <c>postgres.managed = true</c> asked for the bundled runtime and
@@ -144,21 +154,30 @@ public sealed class CollectorRuntimeState
     /// <see cref="CollectorPhase.Collecting"/>, which is not about a step.</param>
     /// <param name="Detail">The step's fixed failure sentence (<see cref="FailureDetailFor"/>), the joined
     /// configuration problems, or the not-Windows sentence, never exception text (#4316); null for
-    /// <see cref="CollectorPhase.Collecting"/>.</param>
+    /// <see cref="CollectorPhase.Collecting"/>. Once <see cref="Sustained"/> is true, the sentence has the
+    /// <see cref="SustainedRetryDetail"/> phrase appended, so every reader of this field — the MCP/Viewer
+    /// surfaces and <c>/api/ping</c>'s <c>detail</c> alike — sees the same text (#4508).</param>
     /// <param name="Attempt">Which attempt is in flight, and how many the budget allows — both zero
     /// outside <see cref="CollectorPhase.Retrying"/>, where an attempt number is the only one of the two
     /// caps a reader can be shown (the wall-clock budget can end the retrying earlier).</param>
-    /// <param name="Attempts">The attempt cap the retry budget allows.</param>
+    /// <param name="Attempts">The attempt cap the retry budget allows — zero once <see cref="Sustained"/> is
+    /// true (#4508), rather than a spent cap a reader would otherwise read as "attempt 30 of 25".</param>
     /// <param name="AsOfUtc">When this phase was published — for
     /// <see cref="CollectorPhase.Collecting"/> that is when collection started, and for the two failure
     /// phases it is when the failure was last observed.</param>
+    /// <param name="Sustained">True once a <see cref="CollectorPhase.Retrying"/> step has spent its fast
+    /// budget and moved to the slower, unbounded retry (#4508) — see
+    /// <see cref="DarlingWebEndpoints.DescribePing"/> for how the ping body renders it. Always false outside
+    /// <see cref="CollectorPhase.Retrying"/>. Defaults to false so the existing terminal/collecting publishes,
+    /// which never pass it, are unaffected.</param>
     public sealed record Snapshot(
         CollectorPhase Phase,
         StartupStep? Step,
         string? Detail,
         int Attempt,
         int Attempts,
-        DateTime AsOfUtc);
+        DateTime AsOfUtc,
+        bool Sustained = false);
 
     private volatile Snapshot? _current;
 
@@ -166,10 +185,20 @@ public sealed class CollectorRuntimeState
     /// (worker only; called from each retry arm alongside its warning line). The detail is always
     /// <see cref="FailureDetailFor"/> — an exception-path retry has no other text to publish, and (#4316
     /// round 1 B1) there is no longer a <c>string</c> parameter here for a caller to put <c>ex.Message</c>
-    /// in instead.</summary>
-    public void PublishRetrying(StartupStep step, int attempt, int attempts)
+    /// in instead. <paramref name="sustained"/> is true once the fast retry budget is spent and the loop
+    /// has moved to the slower, unbounded retry (#4508); <paramref name="attempts"/> is published as zero
+    /// in that case — the cap the fast arm counted against no longer bounds anything, and publishing it
+    /// past its own value is what rendered as "attempt 30 of 25" before this. When sustained, the published
+    /// <see cref="Snapshot.Detail"/> also gets the <see cref="SustainedRetryDetail"/> phrase appended, so a
+    /// reader of the detail text — not just the structured <see cref="Snapshot.Sustained"/> flag — can tell
+    /// the retry is now unbounded.</summary>
+    public void PublishRetrying(StartupStep step, int attempt, int attempts, bool sustained = false)
         => _current = new Snapshot(
-            CollectorPhase.Retrying, step, FirstLineOf(FailureDetailFor(step)), attempt, attempts, DateTime.UtcNow);
+            CollectorPhase.Retrying, step,
+            sustained
+                ? SustainedRetryDetail(FirstLineOf(FailureDetailFor(step)), attempt)
+                : FirstLineOf(FailureDetailFor(step)),
+            attempt, sustained ? 0 : attempts, DateTime.UtcNow, sustained);
 
     /// <summary>Publishes a terminal failure of <paramref name="step"/> (worker only; called from each
     /// EXCEPTION-path collection-blocking exit, before the <c>return</c> — after the critical line, so a

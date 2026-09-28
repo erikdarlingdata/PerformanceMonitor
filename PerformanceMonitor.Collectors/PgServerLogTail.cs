@@ -317,6 +317,31 @@ tail AS (
     }
 
     /// <summary>
+    /// The target's own <c>log_line_prefix</c>, selected beside the tail body the same way
+    /// <see cref="LogTimezoneSql"/> already is (#4501): a consumer that reads each line's label passes it to
+    /// <see cref="PgLogEntryAssembler.ForgeryCheckFor"/> so the forgery rule can use the prefix's own
+    /// separator instead of the fallback. <c>true</c> as the second argument to <c>current_setting</c> is
+    /// belt-and-suspenders — <c>log_line_prefix</c> is a core GUC that always exists — but costs nothing and
+    /// matches the readiness collector's own read of the same setting.
+    /// </summary>
+    public const string LogLinePrefixSql = "pg_catalog.current_setting('log_line_prefix', true)";
+
+    /// <summary>
+    /// The current row's <see cref="LogLinePrefixSql"/> column, at <paramref name="ordinal"/>, or null when the
+    /// row is a marker row (NULL there), the setting itself is unset, or the reader carries no such column at
+    /// all — the last case is every fixture and test double built before #4501, which this keeps working:
+    /// <see cref="PgLogEntryAssembler.ForgeryCheckFor"/> treats a null prefix as "not collected" and falls back
+    /// to the rule with no separator check.
+    /// </summary>
+    public static string? LogLinePrefix(DbDataReader reader, int ordinal)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        return reader.FieldCount > ordinal && !reader.IsDBNull(ordinal)
+            ? reader.GetString(ordinal)
+            : null;
+    }
+
+    /// <summary>
     /// The count a consumer records on its collection-log row when a read skipped lines as not the server's own
     /// (#4046, <see cref="PgLogEntryAssembler.Assemble(string?, bool, out int)"/>); <see cref="ForeignZoneLinesNote"/>
     /// says what it counts.

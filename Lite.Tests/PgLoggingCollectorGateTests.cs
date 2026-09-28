@@ -197,12 +197,54 @@ public sealed class PgLoggingCollectorGateTests
             1L,
             12.5,
             "{ \"Plan\": { \"Node Type\": \"Seq Scan\", \"Relation Name\": \"dl\" } }",
+            DBNull.Value, // #4501: line_prefix not collected keeps the pre-#4501 trust-unconditionally route
         });
 
         var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
 
         var row = Assert.Single(rows);
         Assert.Equal(1L, row.QueryId);
+    }
+
+    /// <summary>
+    /// The column-3 <c>line_prefix</c> read (#4501), through <c>ReadAsync</c> itself — no pin of its own
+    /// existed for it. Under <c>'%a'</c> (no <c>%Q</c>) the captured digits are application_name, not a
+    /// query id, so they must NOT be trusted: query id 0.
+    /// </summary>
+    [Fact]
+    public async Task ReadAsync_APrefixWithNoQ_DoesNotTrustTheCapturedQueryId()
+    {
+        var reader = new FakeCollectorDataReader(new object[]
+        {
+            42L,
+            12.5,
+            "{ \"Plan\": { \"Node Type\": \"Seq Scan\", \"Relation Name\": \"dl\" } }",
+            "%m [%p] %a ",
+        });
+
+        var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(0L, row.QueryId);
+    }
+
+    /// <summary>The same column-3 read (#4501) under a prefix that DOES carry <c>%Q</c>: the captured digits
+    /// are the real query id and must be kept.</summary>
+    [Fact]
+    public async Task ReadAsync_APrefixWithQ_KeepsTheCapturedQueryId()
+    {
+        var reader = new FakeCollectorDataReader(new object[]
+        {
+            42L,
+            12.5,
+            "{ \"Plan\": { \"Node Type\": \"Seq Scan\", \"Relation Name\": \"dl\" } }",
+            "%m [%p] %Q ",
+        });
+
+        var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(42L, row.QueryId);
     }
 
     /// <summary>

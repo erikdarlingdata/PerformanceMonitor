@@ -593,6 +593,38 @@ public sealed class DarlingManagedPostgres
     public const string ConfMarkerV16 = "# Managed by PerformanceMonitor Darling (v16 checkpoint interval) -- do not remove this block";
 
     /// <summary>
+    /// The v17 marker: <c>log_line_prefix = '%m [%p] %a '</c>, adding the session's <c>application_name</c>
+    /// after the existing <c>%m [%p] </c> pair. Since #4486, every store session sets its own
+    /// <c>application_name</c> (<c>PerformanceMonitorDarling-Service</c>, <c>-Viewer</c>, and the rest), so a
+    /// prefix that renders it lets the store's own log say WHICH of this service's connections wrote each
+    /// line — the checkpoint and stall work this store's log already carries needs that to tell one session's
+    /// lines from another's.
+    ///
+    ///
+    /// <para><b>PostgreSQL's own default is <c>'%m [%p] '</c></b> — no <c>%a</c>. Darling has never set
+    /// <c>log_line_prefix</c> itself before this block, so a store this reaches gains the setting for the
+    /// first time. Two boxes already carry <c>'%m [%p] %a '</c> through <c>ALTER SYSTEM</c>
+    /// (<c>postgresql.auto.conf</c> wins over <c>postgresql.conf</c>), so this block changes nothing there.</para>
+    ///
+    /// <para><b>The risk this carries.</b> <c>application_name</c> is client-set, free text: empty, containing
+    /// spaces, brackets, colons, or text that LOOKS like a log field (<c>LOG:</c>) or another session's name.
+    /// Every reader of the store's OWN log — <see cref="StoreLogClassifier"/>, the store-log tail this class's
+    /// own start-up log reads, the <c>get_store_log</c> MCP read, and the self-hosted-target collectors that
+    /// read a store's own stderr log (<c>PgLogEntryAssembler</c>, <c>PgPlanCaptureCollector</c>) — has to keep
+    /// working with an application name sitting between the pid and the severity, including the empty one this
+    /// prefix itself renders as two spaces (<c>'%m [%p]  LOG:'</c>). Each of those readers carries its own pin
+    /// or a written argument for why the new field cannot reach it.</para>
+    ///
+    /// <para><c>log_line_prefix</c> is <c>sighup</c>-context, so a running store could take it from a reload
+    /// alone — but like the other <c>sighup</c> settings this service manages, this append runs before
+    /// <c>pg_ctl start</c>, so a service-owned start applies it on the very start that writes the block, the
+    /// v9-v11 story. Managed stores only; a bring-your-own store keeps whatever <c>log_line_prefix</c> its
+    /// owner set. A later change to this value needs a NEW marker (the v11/v14/v15/v16 precedent): this block
+    /// heals by its marker's absence, so an edited value in an already-marked file would never be seen.</para>
+    /// </summary>
+    public const string ConfMarkerV17 = "# Managed by PerformanceMonitor Darling (v17 log line prefix) -- do not remove this block";
+
+    /// <summary>
     /// Every marker this class ever appends to postgresql.conf, in append order (#4214). A generic scan that
     /// asks "is this line inside SOME managed block" (the host-profile check's per-setting source attribution)
     /// walks this list rather than naming a marker per setting — which setting a given block carries is exactly
@@ -605,7 +637,7 @@ public sealed class DarlingManagedPostgres
     [
         ConfMarker, ConfMarkerV2, ConfMarkerV3, ConfMarkerV4, ConfMarkerV5, ConfMarkerV6, ConfMarkerV7,
         ConfMarkerV8, ConfMarkerV9, ConfMarkerV10, ConfMarkerV11, ConfMarkerV12, ConfMarkerV13, ConfMarkerV14,
-        ConfMarkerV15, ConfMarkerV16,
+        ConfMarkerV15, ConfMarkerV16, ConfMarkerV17,
     ];
 
     /// <summary>
@@ -2320,6 +2352,22 @@ public sealed class DarlingManagedPostgres
         return builder.ToString();
     }
 
+    /* ===================== v17 log line prefix ===================== */
+
+    /// <summary>
+    /// The v17 block: <c>log_line_prefix = '%m [%p] %a '</c> only. See <see cref="ConfMarkerV17"/> for why
+    /// <c>%a</c>, PostgreSQL's own default, and the reader risk it carries. Carries no fingerprint or stamp
+    /// line, so the v8 and v12 staleness checks are untouched by this block.
+    /// </summary>
+    public static string BuildLogLinePrefixConfAppend()
+    {
+        var builder = new StringBuilder();
+        builder.Append('\n');
+        builder.Append(ConfMarkerV17).Append('\n');
+        builder.Append("log_line_prefix = '%m [%p] %a '\n");
+        return builder.ToString();
+    }
+
     /* ===================== v12 wal sizing (derived from data-volume headroom, #3802) ===================== */
 
     /// <summary>1 GB — the floor under the derived <c>max_wal_size</c>, and PostgreSQL's own default for it:
@@ -3740,6 +3788,19 @@ public sealed class DarlingManagedPostgres
             File.AppendAllText(confPath, BuildCheckpointIntervalConfAppend());
             _logger.LogInformation(
                 "Appended v16 checkpoint interval to postgresql.conf (checkpoint_timeout = 15min): a longer interval re-images each hot page less often, cutting write-ahead log volume. Effective on this start when the service owns it.");
+        }
+
+        /* v17: keyed on its marker's absence like v9-v11, v13, v15 and v16, and placed last so it stays the
+           block this method appends LAST on any start that fires it, matching its place at the end of
+           AllManagedConfMarkers. Carries no fingerprint or stamp line, so v8 and v12 read exactly what they
+           did before this block existed. log_line_prefix is sighup-context, but like the other sighup
+           settings this service manages, this is appended before pg_ctl start, so a service-owned start
+           applies it on the very start that writes the block. */
+        if (!conf.Contains(ConfMarkerV17, StringComparison.Ordinal))
+        {
+            File.AppendAllText(confPath, BuildLogLinePrefixConfAppend());
+            _logger.LogInformation(
+                "Appended v17 log line prefix to postgresql.conf (log_line_prefix = '%m [%p] %a '): the store's own log now names the application behind each line. Effective on this start when the service owns it.");
         }
 
         LogStatementStatisticsPreloadCoverage(dataDirectory);

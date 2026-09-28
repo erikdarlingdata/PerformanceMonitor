@@ -21,6 +21,7 @@ public static class BenefitScorer
         "Scan With Predicate",  // Rule 11
         "Non-SARGable Predicate", // Rule 12
         "Scan Cardinality Misestimate", // Rule 32
+        "Bare Scan",            // Rule 34
     };
 
     /// <summary>
@@ -76,25 +77,17 @@ public static class BenefitScorer
                     break;
 
                 case "Serial Plan": // Rule 3
-                    // Can't know how fast a parallel plan would be, but estimate:
-                    // CPU-bound: benefit up to (1 - 1/maxDOP) * 100%
-                    if (elapsedMs > 0 && stmt.QueryTimeStats != null)
+                    // Benefit = (cpu * (DOP - 1) / DOP) / elapsed * 100, assuming DOP 4 when
+                    // the plan doesn't say otherwise. No benefit for a trivial statement
+                    // (StatementSubTreeCost < 1) — it wouldn't gain anything from parallelism.
+                    if (elapsedMs > 0 && stmt.QueryTimeStats != null && stmt.StatementSubTreeCost >= 1.0)
                     {
                         var cpu = stmt.QueryTimeStats.CpuTimeMs;
-                        // Assume server max DOP — use a conservative 4 if unknown
                         var potentialDop = 4;
-                        if (cpu >= elapsedMs)
+                        if (cpu > 0)
                         {
-                            // CPU-bound: parallelism could help significantly
-                            var benefit = (1.0 - 1.0 / potentialDop) * 100;
-                            warning.MaxBenefitPercent = Math.Round(benefit, 1);
-                        }
-                        else
-                        {
-                            // Not CPU-bound: parallelism helps less
-                            var cpuRatio = (double)cpu / elapsedMs;
-                            var benefit = cpuRatio * (1.0 - 1.0 / potentialDop) * 100;
-                            warning.MaxBenefitPercent = Math.Round(Math.Min(50, benefit), 1);
+                            var benefit = ((double)cpu * (potentialDop - 1) / potentialDop) / elapsedMs * 100;
+                            warning.MaxBenefitPercent = Math.Round(Math.Min(100, benefit), 1);
                         }
                     }
                     break;
