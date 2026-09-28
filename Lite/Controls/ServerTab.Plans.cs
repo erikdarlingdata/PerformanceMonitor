@@ -255,6 +255,9 @@ public partial class ServerTab : UserControl
         var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = App.AccuracyRatioDivergenceLimit };
         try
         {
+            /* #4530: the server's edition/MAXDOP for rule 38, best-effort (null on a missing row or a
+               read failure, same as GetServerMetadataForPlanAnalysisAsync's own contract). */
+            viewer.ServerMetadata = await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId);
             /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed
                plan XML, replacing the redundant up-front XDocument.Parse validation. */
             await viewer.LoadPlan(planXml, label, queryText);

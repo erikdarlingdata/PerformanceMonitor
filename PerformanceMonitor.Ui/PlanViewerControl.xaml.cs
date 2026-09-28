@@ -170,6 +170,13 @@ public partial class PlanViewerControl : UserControl
     }
 
     /// <summary>
+    /// #4530: the server's edition/MAXDOP for rule 38, set by the caller from a store read (this app has no
+    /// live connection to the monitored server at plan-view time — see <see cref="LoadPlan"/>). <c>null</c>
+    /// when the caller has no metadata; the analyzer then falls back to rule 38's Info branch.
+    /// </summary>
+    public PerformanceMonitor.PlanAnalysis.ServerMetadata? ServerMetadata { get; set; }
+
+    /// <summary>
     /// The full query text the host passed <see cref="LoadPlan"/>, held for "Copy Query Text"'s
     /// truncated-single-statement fallback (#4582, PerformanceStudio's <c>_queryText</c>): the same
     /// text shown in <see cref="QueryTextExpander"/>, not re-derived from it, so the fallback still
@@ -194,10 +201,11 @@ public partial class PlanViewerControl : UserControl
         /* Parse + analyze off the UI thread — a multi-MB showplan is two heavy passes that would
            otherwise freeze the window for seconds. Only the render below touches the UI. A refused
            or exception-terminated parse sets ParsedPlan.ParseError instead of throwing; see below. */
+        var serverMetadata = ServerMetadata;
         _currentPlan = await System.Threading.Tasks.Task.Run(() =>
         {
             var plan = ShowPlanParser.Parse(planXml);
-            PlanAnalysisPipeline.Run(plan);
+            PlanAnalysisPipeline.Run(plan, null, serverMetadata, System.Threading.CancellationToken.None);
             return plan;
         });
 
