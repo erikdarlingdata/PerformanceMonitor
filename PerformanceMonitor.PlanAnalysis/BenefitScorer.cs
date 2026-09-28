@@ -24,6 +24,16 @@ public static class BenefitScorer
         "Bare Scan",            // Rule 34
     };
 
+    /// <summary>
+    /// #4512 follow-up: measured directly against a depth-999 tree shaped like this walk's own
+    /// recursion (<see cref="ScoreNodeTree"/>), the same way <see cref="PlanAnalyzer.Analyze"/>
+    /// was measured. It survives on a 1 MB caller thread (the plan viewer's WPF UI thread size)
+    /// down to roughly 68 KB of stack, and on a 1.5 MB caller (the Darling service's
+    /// analysis-pass thread size) with the same margin — well over 2x below either real caller
+    /// size, so the analyze-then-score step needs no dedicated thread of its own. (No caller
+    /// wires this in yet; the margin holds regardless of which thread eventually calls it,
+    /// since it is measured against caller thread SIZE, not a specific call site.)
+    /// </summary>
     public static void Score(ParsedPlan plan)
     {
         foreach (var batch in plan.Batches)

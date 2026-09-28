@@ -62,6 +62,12 @@ public static class PlanAdvisoryAggregator
                 continue; // malformed / unsupported plan XML — skip, keep the rest
             }
 
+            // #4551: a refused or exception-terminated plan carries whatever parsed before the
+            // failure (partial statements/warnings). Skip it exactly like the catch above does,
+            // so a partial parse never contributes partial counts to the aggregate.
+            if (plan.ParseError != null)
+                continue;
+
             foreach (var idx in plan.AllMissingIndexes)
             {
                 var key = $"{idx.Schema}.{idx.Table}|{idx.CreateStatement}";

@@ -26,6 +26,18 @@ public static partial class PlanAnalyzer
     // name group is a name.
     private static readonly Regex BracketedNameRegex = BracketedNameRegExp();
 
+    /// <summary>
+    /// #4512 follow-up: <c>ShowPlanParser.Parse</c> now returns trees up to <c>MaxParseDepth</c>
+    /// (1,000) levels deep, parsed on its own dedicated 32 MB thread. This walk runs on
+    /// whichever thread the CALLER is on instead — the Darling service's analysis pass
+    /// (thread-pool, ~1.5 MB), the plan viewer's WPF UI thread (1 MB), or the analyze_plan_xml
+    /// / analyze_query_plan / analyze_query_store_plan MCP tools and the web host that front
+    /// them (thread-pool). Measured directly against a depth-999 tree shaped like this walk's
+    /// own recursion (<see cref="AnalyzeNodeTree"/>/<see cref="CheckForTableVariables"/>): it
+    /// survives on a 1 MB caller thread down to roughly 130 KB of stack, and on a 1.5 MB caller
+    /// down to roughly 110 KB — both with well over 2x margin below the smallest real caller, so
+    /// unlike the parser, this walk needs no dedicated thread of its own.
+    /// </summary>
     public static void Analyze(ParsedPlan plan)
     {
         foreach (var batch in plan.Batches)

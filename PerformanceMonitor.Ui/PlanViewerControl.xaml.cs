@@ -111,14 +111,27 @@ public partial class PlanViewerControl : UserControl
             QueryTextExpander.Visibility = Visibility.Collapsed;
         }
         /* Parse + analyze off the UI thread — a multi-MB showplan is two heavy passes that would
-           otherwise freeze the window for seconds. Only the render below touches the UI. Throws
-           XmlException for malformed plan XML; callers handle it. */
+           otherwise freeze the window for seconds. Only the render below touches the UI. A refused
+           or exception-terminated parse sets ParsedPlan.ParseError instead of throwing; see below. */
         _currentPlan = await System.Threading.Tasks.Task.Run(() =>
         {
             var plan = ShowPlanParser.Parse(planXml);
             PlanAnalysisPipeline.Run(plan);
             return plan;
         });
+
+        // #4551: a refused or exception-terminated parse still returns whatever parsed before the
+        // failure. Surface the reason in the empty-state slot instead of showing the plain "No
+        // Plan Loaded" text, which would look like the caller never asked for a plan at all.
+        var parseErrorMessage = PlanDisplayText.ParseErrorMessage(_currentPlan);
+        if (parseErrorMessage != null)
+        {
+            EmptyStateTitle.Text = parseErrorMessage;
+            EmptyStateDetail.Visibility = Visibility.Collapsed;
+            EmptyState.Visibility = Visibility.Visible;
+            PlanScrollViewer.Visibility = Visibility.Collapsed;
+            return;
+        }
 
         var allStatements = _currentPlan.Batches
             .SelectMany(b => b.Statements)
@@ -127,11 +140,15 @@ public partial class PlanViewerControl : UserControl
 
         if (allStatements.Count == 0)
         {
+            EmptyStateTitle.Text = "No Plan Loaded";
+            EmptyStateDetail.Visibility = Visibility.Visible;
             EmptyState.Visibility = Visibility.Visible;
             PlanScrollViewer.Visibility = Visibility.Collapsed;
             return;
         }
 
+        EmptyStateTitle.Text = "No Plan Loaded";
+        EmptyStateDetail.Visibility = Visibility.Visible;
         EmptyState.Visibility = Visibility.Collapsed;
         PlanScrollViewer.Visibility = Visibility.Visible;
 
@@ -158,6 +175,8 @@ public partial class PlanViewerControl : UserControl
         _currentPlan = null;
         _currentStatement = null;
         _selectedNodeBorder = null;
+        EmptyStateTitle.Text = "No Plan Loaded";
+        EmptyStateDetail.Visibility = Visibility.Visible;
         EmptyState.Visibility = Visibility.Visible;
         PlanScrollViewer.Visibility = Visibility.Collapsed;
         InsightsPanel.Visibility = Visibility.Collapsed;
