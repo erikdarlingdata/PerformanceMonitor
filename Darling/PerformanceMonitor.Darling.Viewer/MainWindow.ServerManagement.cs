@@ -313,7 +313,8 @@ public partial class MainWindow
         if (failing.Count > 0)
         {
             CollectorHealthText.Text = $"Collectors: {failing.Count} erroring";
-            CollectorHealthText.Foreground = System.Windows.Media.Brushes.OrangeRed;
+            // #4635: the fixed OrangeRed (#FF4500) was 3.44:1 on Light's status bar, under WCAG AA's 4.5:1 text floor.
+            CollectorHealthText.Foreground = (TryFindResource("CriticalTextBrush") as System.Windows.Media.Brush) ?? System.Windows.Media.Brushes.OrangeRed;
             CollectorHealthText.ToolTip = "Failing: " + string.Join(", ", failing.Select(h => h.CollectorName).Distinct());
         }
         else

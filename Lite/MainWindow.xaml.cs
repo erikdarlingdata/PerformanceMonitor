@@ -748,7 +748,8 @@ public partial class MainWindow : Window
         {
             var names = string.Join(", ", health.Errors.Select(e => e.CollectorName));
             CollectorHealthText.Text = $"Collectors: {health.ErroringCollectors} erroring";
-            CollectorHealthText.Foreground = System.Windows.Media.Brushes.OrangeRed;
+            // #4635: the fixed OrangeRed (#FF4500) was 3.44:1 on Light's status bar, under WCAG AA's 4.5:1 text floor.
+            CollectorHealthText.Foreground = (TryFindResource("CriticalTextBrush") as System.Windows.Media.Brush) ?? System.Windows.Media.Brushes.OrangeRed;
             CollectorHealthText.ToolTip = $"Failing: {names}\n\n" +
                 string.Join("\n", health.Errors.Select(e =>
                     $"{e.CollectorName}: {e.ConsecutiveErrors}x consecutive - {e.LastErrorMessage}"));
@@ -760,7 +761,8 @@ public partial class MainWindow : Window
                would show OK while blocking/deadlock capture is dead. */
             var names = string.Join(", ", health.XeSessionFailures.Select(e => e.CollectorName));
             CollectorHealthText.Text = $"Capture down: {names}";
-            CollectorHealthText.Foreground = System.Windows.Media.Brushes.OrangeRed;
+            // #4635: the fixed OrangeRed (#FF4500) was 3.44:1 on Light's status bar, under WCAG AA's 4.5:1 text floor.
+            CollectorHealthText.Foreground = (TryFindResource("CriticalTextBrush") as System.Windows.Media.Brush) ?? System.Windows.Media.Brushes.OrangeRed;
             CollectorHealthText.ToolTip = string.Join("\n", health.XeSessionFailures.Select(e =>
                 $"{e.CollectorName}: {e.XeSessionMessage}"));
         }
