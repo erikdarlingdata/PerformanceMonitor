@@ -406,7 +406,10 @@ public static partial class PlanAnalyzer
             var hasTableVar = false;
             var isModification = stmt.StatementType is "INSERT" or "UPDATE" or "DELETE" or "MERGE";
             var modifiesTableVar = false;
-            CheckForTableVariables(stmt.RootNode, isModification, ref hasTableVar, ref modifiesTableVar);
+            var referencingNodeIds = new List<int>();
+            var modifyingNodeIds = new List<int>();
+            CheckForTableVariables(stmt.RootNode, isModification, ref hasTableVar, ref modifiesTableVar,
+                referencingNodeIds, modifyingNodeIds);
 
             if (hasTableVar && !modifiesTableVar)
             {
@@ -414,7 +417,8 @@ public static partial class PlanAnalyzer
                 {
                     WarningType = "Table Variable",
                     Message = "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
-                    Severity = PlanWarningSeverity.Warning
+                    Severity = PlanWarningSeverity.Warning,
+                    OriginNodeIds = referencingNodeIds
                 });
             }
 
@@ -424,28 +428,37 @@ public static partial class PlanAnalyzer
                 {
                     WarningType = "Table Variable",
                     Message = "This query modifies a table variable, which forces the entire plan to run single-threaded. SQL Server cannot use parallelism for modifications to table variables. Replace with a #temp table to allow parallel execution.",
-                    Severity = PlanWarningSeverity.Critical
+                    Severity = PlanWarningSeverity.Critical,
+                    OriginNodeIds = modifyingNodeIds
                 });
             }
         }
     }
 
+    // #4534: collects the operators it found, because this walk already knows exactly which ones
+    // touched a table variable and used to throw that away. Two lists rather than one, since the
+    // two warnings this feeds are about different operators: every operator referencing a table
+    // variable, versus only the ones modifying it (which is what forces the plan serial).
     private static void CheckForTableVariables(PlanNode node, bool isModification,
-        ref bool hasTableVar, ref bool modifiesTableVar)
+        ref bool hasTableVar, ref bool modifiesTableVar,
+        List<int>? referencingNodeIds = null, List<int>? modifyingNodeIds = null)
     {
         if (!string.IsNullOrEmpty(node.ObjectName) && node.ObjectName.StartsWith("@", StringComparison.OrdinalIgnoreCase))
         {
             hasTableVar = true;
+            referencingNodeIds?.Add(node.NodeId);
             if (isModification && (node.PhysicalOp.Contains("Insert", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Update", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Delete", StringComparison.OrdinalIgnoreCase)
                 || node.PhysicalOp.Contains("Merge", StringComparison.OrdinalIgnoreCase)))
             {
                 modifiesTableVar = true;
+                modifyingNodeIds?.Add(node.NodeId);
             }
         }
         foreach (var child in node.Children)
-            CheckForTableVariables(child, isModification, ref hasTableVar, ref modifiesTableVar);
+            CheckForTableVariables(child, isModification, ref hasTableVar, ref modifiesTableVar,
+                referencingNodeIds, modifyingNodeIds);
     }
 
     private static void AnalyzeNodeTree(PlanNode node, PlanStatement stmt)
@@ -1142,6 +1155,18 @@ public static partial class PlanAnalyzer
                 w.Severity = PlanWarningSeverity.Critical;
                 w.Message = $"Implicit conversion prevented an index seek, forcing a scan instead. Fix the data type mismatch: ensure the parameter or variable type matches the column type exactly. {w.Message}";
             }
+        }
+
+        // #4534: an operator warning's origin is the operator it is hanging off, so it is stamped
+        // here rather than at each of the many sites above that add one. A rule you have to
+        // remember at every construction site eventually gets forgotten, and the UI would quietly
+        // lose a link that existed. This only fills what a rule left empty, so a rule that already
+        // knows the operator that CAUSED the problem (rather than the one reporting it) keeps its
+        // own answer.
+        foreach (var warning in node.Warnings)
+        {
+            if (warning.OriginNodeIds.Count == 0)
+                warning.OriginNodeIds.Add(node.NodeId);
         }
     }
 

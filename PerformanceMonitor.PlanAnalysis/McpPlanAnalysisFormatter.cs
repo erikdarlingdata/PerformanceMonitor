@@ -155,7 +155,8 @@ public static class McpPlanAnalysisFormatter
                         severity = w.Severity.ToString(),
                         type = w.WarningType,
                         message = w.Message,
-                        source = w.Source.ToString()
+                        source = w.Source.ToString(),
+                        origin_node_ids = w.OriginNodeIds
                     }),
                     warning_count = allWarnings.Count,
                     critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
