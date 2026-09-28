@@ -51,7 +51,13 @@ public static class PlanWarningDisplay
     private static string WarningSourceTag(PlanWarning warning) =>
         warning.Source == PlanWarningSource.SqlServer ? " [SQL Server]" : "";
 
-    private static string FormatBenefitPercent(double pct) =>
+    /// <summary>
+    /// Formats a benefit percentage the way every viewer surface does: a bare number, whole once it
+    /// reaches 100 and one decimal below that. Internal (not private) so <see cref="WaitRowText"/>'s
+    /// wait-row benefit text — a sibling display helper, not a caller of this one — uses the exact
+    /// same rounding rather than a second copy of it.
+    /// </summary>
+    internal static string FormatBenefitPercent(double pct) =>
         pct >= 100 ? $"{pct:N0}" : $"{pct:N1}";
 
     /// <summary>
