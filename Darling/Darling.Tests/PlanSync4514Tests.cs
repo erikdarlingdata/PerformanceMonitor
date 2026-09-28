@@ -243,30 +243,6 @@ public sealed class PlanSync4514Tests
         Assert.Equal(501, all.Count);
     }
 
-    /// <summary>
-    /// Mutation proof, applied and run for real, then reverted: reverting
-    /// <see cref="PlanAnalyzer.Analyze"/> to walk <c>batch.Statements</c> directly (the
-    /// pre-port shape) turned this test RED, along with
-    /// <see cref="ProcedureBodyStatementGetsItsFinding"/>,
-    /// <see cref="EnumerateAllSurfacesTheProcedureBodyFinding"/> and
-    /// <see cref="UdfBodyStatementGetsItsFinding"/>. The parser (#4514's parser side) still
-    /// populated <c>bodyStmt.RootNode</c> — only <c>AnalyzeStatement</c>/<c>AnalyzeNodeTree</c>
-    /// never ran on it — so <c>Assert.NotEmpty(bodyStmt.RootNode!.Children.Single().Warnings)</c>
-    /// failed with "Assert.NotEmpty() Failure: Collection was empty". Reverted after recording
-    /// the RED; the build in this file is the reverted (fixed) state.
-    /// </summary>
-    [Fact]
-    public void MutationProofIsDocumentedNotCommittedAsAFailingTest()
-    {
-        // This pin exists to point at the class doc comment above, which records the mutation's
-        // RED message. It intentionally asserts the fixed (GREEN) behaviour, same as
-        // ProcedureBodyStatementGetsItsFinding, so CI never goes red because of this file.
-        var plan = ParseAndAnalyze(ExecProcedureWithNonSargableScan);
-        var topStmt = Assert.Single(Assert.Single(plan.Batches).Statements);
-        var bodyStmt = Assert.Single(topStmt.StoredProcPlan!.Statements);
-        Assert.NotEmpty(bodyStmt.RootNode!.Children.Single().Warnings);
-    }
-
     private static string ThreeLevelNestPlan()
     {
         return $"""
