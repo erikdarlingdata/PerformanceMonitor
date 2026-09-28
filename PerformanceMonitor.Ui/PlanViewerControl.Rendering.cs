@@ -371,11 +371,32 @@ public partial class PlanViewerControl
         return new WpfPath
         {
             Data = geometry,
-            Stroke = EdgeBrush,
+            Stroke = GetLinkColorBrush(child),
             StrokeThickness = thickness,
             StrokeLineJoin = PenLineJoin.Round,
             ToolTip = BuildEdgeTooltipContent(child),
             SnapsToDevicePixels = true
+        };
+    }
+
+    /// <summary>
+    /// Returns the brush for the edge feeding <paramref name="child"/>, colored by how far its actual
+    /// row count diverged from its estimate. Only actual plans get non-default colors; matches
+    /// erikdarlingdata/PerformanceStudio's <c>GetLinkColorBrush</c> exactly. The pure ratio-to-tier logic
+    /// lives in <see cref="PlanEdgeColour"/> so it can be pinned without WPF.
+    /// </summary>
+    private SolidColorBrush GetLinkColorBrush(PlanNode child)
+    {
+        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.EstimateRows, AccuracyRatioDivergenceLimit);
+        return key switch
+        {
+            PlanEdgeColourKey.LightOrange => EdgeLightOrangeBrush,
+            PlanEdgeColourKey.FluoOrange => EdgeFluoOrangeBrush,
+            PlanEdgeColourKey.FluoRed => EdgeFluoRedBrush,
+            PlanEdgeColourKey.Blue => EdgeBlueBrush,
+            PlanEdgeColourKey.LightBlue => EdgeLightBlueBrush,
+            PlanEdgeColourKey.FluoBlue => EdgeFluoBlueBrush,
+            _ => EdgeBrush,
         };
     }
 

@@ -57,6 +57,16 @@ public static class PlanWarningDisplay
         pct >= 100 ? $"{pct:N0}" : $"{pct:N1}";
 
     /// <summary>
+    /// #4572: the one place a warning's severity becomes a colour. Mirrors PerformanceStudio's
+    /// <c>WarningSeverityBrush</c> (one helper instead of the same ternary repeated at every
+    /// warning-rendering site), but keeps PM's existing literal hex values rather than PS's theme
+    /// tokens, so this change carries no visual difference.
+    /// </summary>
+    public static string WarningSeverityColorHex(PlanWarningSeverity severity) =>
+        severity == PlanWarningSeverity.Critical ? "#E57373"
+        : severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+
+    /// <summary>
     /// #4534: the text the viewer needs to turn a warning header into a link to the operator it came
     /// from. Null when <paramref name="originNodeIds"/> is empty — a finding with no known operator
     /// origin (for example one that happened before any row was read) gets no affordance, rather than
