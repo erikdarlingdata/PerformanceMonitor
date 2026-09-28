@@ -153,11 +153,14 @@ public static class ShowPlanParser
     // of racing a timer against XDocument.Parse. Invoked after each statement the loop below
     // finishes, with the running count, so a test can cancel the token from inside the callback
     // and assert exactly how many statements were seen before the walk stopped. The walk itself
-    // runs on ParseOnDedicatedThread's own Thread (see Parse above), never the test's thread, so
-    // this has to be a plain static field visible across threads — a [ThreadStatic] set from the
-    // test method would never be observed here. Tests must reset it in a finally block; nothing
-    // in product code ever sets it.
-    internal static Action<int>? OnStatementParsedForTest;
+    // runs on ParseOnDedicatedThread's own Thread (see Parse above), never the test's thread. That
+    // thread is started with Thread.Start() (never UnsafeStart()), so ExecutionContext — and this
+    // AsyncLocal — flows from whichever thread called Parse/ParseAsync into the dedicated thread.
+    // An AsyncLocal, not a plain static, keeps the hook isolated to the test that set it: other
+    // Darling.Tests classes parse plans in parallel, and a plain static field would let one test's
+    // callback observe or overwrite another's mid-parse. Tests must reset .Value in a finally
+    // block; nothing in product code ever sets it.
+    internal static readonly AsyncLocal<Action<int>?> OnStatementParsedForTest = new();
 
     private static void ParseDocument(XDocument doc, ParsedPlan plan, CancellationToken cancellationToken)
     {
@@ -187,7 +190,7 @@ public static class ShowPlanParser
                         var stmts = ParseStatementAndChildren(stmtEl, 0, cancellationToken);
                         batch.Statements.AddRange(stmts);
                         statementsParsedForTest++;
-                        OnStatementParsedForTest?.Invoke(statementsParsedForTest);
+                        OnStatementParsedForTest.Value?.Invoke(statementsParsedForTest);
                     }
                 }
                 if (batch.Statements.Count > 0)

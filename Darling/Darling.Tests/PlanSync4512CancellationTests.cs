@@ -69,7 +69,7 @@ public sealed class PlanSync4512CancellationTests
         using var cts = new CancellationTokenSource();
         var highestStatementSeen = 0;
 
-        ShowPlanParser.OnStatementParsedForTest = count =>
+        ShowPlanParser.OnStatementParsedForTest.Value = count =>
         {
             highestStatementSeen = count;
             if (count == 3)
@@ -81,7 +81,7 @@ public sealed class PlanSync4512CancellationTests
         }
         finally
         {
-            ShowPlanParser.OnStatementParsedForTest = null;
+            ShowPlanParser.OnStatementParsedForTest.Value = null;
         }
 
         Assert.True(highestStatementSeen <= 4,
