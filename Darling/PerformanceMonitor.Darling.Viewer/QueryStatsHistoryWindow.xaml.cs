@@ -246,6 +246,7 @@ public partial class QueryStatsHistoryWindow : Window
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId);
             await viewer.LoadPlan(planXml, label, _queryText);
         }
         catch (Exception ex)
@@ -284,7 +285,7 @@ public partial class QueryStatsHistoryWindow : Window
             _actualPlanCts.Token);
 
         if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, planXml, label, _queryText);
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText);
     }
 
     /// <summary>"View Cached Plan" — asks the service to read the RIGHT-CLICKED snapshot's plan from the target's
@@ -335,6 +336,7 @@ public partial class QueryStatsHistoryWindow : Window
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId);
             await viewer.LoadPlan(result.PlanXml, label, queryText);
         }
         catch (Exception ex)

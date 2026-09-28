@@ -85,6 +85,16 @@ public partial class PlanViewerControl : UserControl
         (TryFindResource("InsightIndexBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xFF, 0xB3, 0x47));
     private SolidColorBrush WaitsAccentBrush =>
         (TryFindResource("InsightWaitsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x4F, 0xA3, 0xFF));
+    private SolidColorBrush ParamsAccentBrush =>
+        (TryFindResource("InsightParamsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x7B, 0xCF, 0x7B));
+
+    // Parameters card value brushes: theme tokens shared with the rest of the viewer's alert colours.
+    private SolidColorBrush WarningBrush =>
+        (TryFindResource("WarningBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xFF, 0xD5, 0x4F));
+    private SolidColorBrush ErrorBrush =>
+        (TryFindResource("ErrorBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xE5, 0x73, 0x73));
+    private SolidColorBrush AccentBrush =>
+        (TryFindResource("AccentBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x2E, 0xAE, 0xF1));
 
     /// <summary>
     /// Flips one Plan Insights card between its normal and its quiet state. A card with nothing to
@@ -169,6 +179,13 @@ public partial class PlanViewerControl : UserControl
     }
 
     /// <summary>
+    /// #4530: the server's edition/MAXDOP for rule 38, set by the caller from a store read (this app has no
+    /// live connection to the monitored server at plan-view time — see <see cref="LoadPlan"/>). <c>null</c>
+    /// when the caller has no metadata; the analyzer then falls back to rule 38's Info branch.
+    /// </summary>
+    public PerformanceMonitor.PlanAnalysis.ServerMetadata? ServerMetadata { get; set; }
+
+    /// <summary>
     /// The full query text the host passed <see cref="LoadPlan"/>, held for "Copy Query Text"'s
     /// truncated-single-statement fallback (#4582, PerformanceStudio's <c>_queryText</c>): the same
     /// text shown in <see cref="QueryTextExpander"/>, not re-derived from it, so the fallback still
@@ -194,10 +211,11 @@ public partial class PlanViewerControl : UserControl
            otherwise freeze the window for seconds. Only the render below touches the UI. A refused
            or exception-terminated parse sets ParsedPlan.ParseError instead of throwing; see below. */
         var analyzerConfig = AnalyzerConfig;
+        var serverMetadata = ServerMetadata;
         _currentPlan = await System.Threading.Tasks.Task.Run(() =>
         {
             var plan = ShowPlanParser.Parse(planXml);
-            PlanAnalysisPipeline.Run(plan, analyzerConfig, serverMetadata: null, System.Threading.CancellationToken.None);
+            PlanAnalysisPipeline.Run(plan, analyzerConfig, serverMetadata, System.Threading.CancellationToken.None);
             return plan;
         });
 

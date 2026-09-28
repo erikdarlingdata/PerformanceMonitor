@@ -386,6 +386,7 @@ public partial class WaitDrillDownWindow : Window
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId);
             await viewer.LoadPlan(planXml, label, row.QueryText);
         }
         catch (Exception ex)
@@ -470,7 +471,7 @@ public partial class WaitDrillDownWindow : Window
             _actualPlanCts.Token);
 
         if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, planXml, label, row.QueryText);
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, row.QueryText);
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

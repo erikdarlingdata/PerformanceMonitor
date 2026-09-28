@@ -152,7 +152,9 @@ public partial class FinOpsTab : UserControl
     private PlanNavigationController? _planActions;
     private PlanNavigationController PlanActions => _planActions ??= new PlanNavigationController(
         Window.GetWindow(this)!,
-        (xml, label, qt) => Windows.PlanViewerWindow.ShowPlanAsync(Window.GetWindow(this)!, xml, label, qt),
+        async (xml, label, qt) => await Windows.PlanViewerWindow.ShowPlanAsync(
+            Window.GetWindow(this)!, xml, label, qt,
+            _dataService != null ? await _dataService.GetServerMetadataForPlanAnalysisAsync(GetSelectedServerId()) : null),
         (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
             GetSelectedConnectionString() ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
             productName: "SQL Server Performance Monitor Lite"),

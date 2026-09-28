@@ -81,7 +81,9 @@ LIMIT 1";
             if (!string.IsNullOrWhiteSpace(plan.ParseError))
                 return;
 
-            PlanAnalysisPipeline.Run(plan, App.AnalyzerConfig, serverMetadata: null, context.CancellationToken);
+            // #4530: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.CancellationToken);
+            PlanAnalysisPipeline.Run(plan, App.AnalyzerConfig, metadata, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
             // finding inside an EXEC <procedure> plan's body reaches the drill-down.
@@ -130,6 +132,53 @@ LIMIT 1";
     }
 
     /// <summary>
+    /// #4530: the drill-down's own store read for rule 38 (edition/MAXDOP), against the same DuckDB
+    /// connection pattern the collector's other reads here use. Mirrors
+    /// <c>DarlingServerMetadataReader.ReadAsync</c>; a failure or no rows returns <c>null</c>.
+    /// </summary>
+    private async Task<PerformanceMonitor.PlanAnalysis.ServerMetadata?> ReadServerMetadataForPlanAnalysisAsync(int serverId, System.Threading.CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var readLock = _duckDb.AcquireReadLock(cancellationToken);
+            using var connection = _duckDb.CreateConnection();
+            await connection.OpenAsync(cancellationToken);
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT p.edition, p.product_version, p.product_level, p.cpu_count, p.physical_memory_mb,
+       (SELECT c.value_in_use
+        FROM v_server_config AS c
+        WHERE c.server_id = $1
+        AND   c.configuration_name = 'max degree of parallelism'
+        AND   c.capture_time = (SELECT MAX(capture_time) FROM v_server_config WHERE server_id = $1)
+        LIMIT 1) AS max_dop
+FROM v_server_properties AS p
+WHERE p.server_id = $1
+ORDER BY p.collection_time DESC
+LIMIT 1";
+            cmd.Parameters.Add(new DuckDBParameter { Value = serverId });
+
+            using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken)) return null;
+
+            return new PerformanceMonitor.PlanAnalysis.ServerMetadata
+            {
+                Edition = reader.IsDBNull(0) ? null : reader.GetString(0),
+                ProductVersion = reader.IsDBNull(1) ? null : reader.GetString(1),
+                ProductLevel = reader.IsDBNull(2) ? null : reader.GetString(2),
+                CpuCount = reader.IsDBNull(3) ? 0 : reader.GetInt32(3),
+                PhysicalMemoryMB = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
+                MaxDop = reader.IsDBNull(5) ? 0 : Convert.ToInt32(Convert.ToDouble(reader.GetValue(5))),
+            };
+        }
+        catch (Exception ex) when (!AnalysisAbandon.IsExpected(ex, cancellationToken))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// WS4: re-parses the top collected query plans (the same top-10-by-cost set the fact collector
     /// summarized) and attaches the specific missing indexes / plan warnings to a MISSING_INDEX or
     /// PLAN_WARNING finding's drill-down. The fact carries only counts (Fact.Metadata is numeric),
@@ -172,7 +221,9 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, App.AnalyzerConfig, context.CancellationToken);
+            // #4530: one store read per collector call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await ReadServerMetadataForPlanAnalysisAsync(context.ServerId, context.CancellationToken);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, App.AnalyzerConfig, metadata, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {

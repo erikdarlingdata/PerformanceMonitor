@@ -279,6 +279,7 @@ public partial class QueryStoreHistoryWindow : Window
         viewer.AnalyzerConfig = ViewerSettings.CurrentAnalyzerConfig;
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_serverId);
             await viewer.LoadPlan(planXml, label, _queryText);
         }
         catch (Exception ex)
@@ -319,7 +320,7 @@ public partial class QueryStoreHistoryWindow : Window
             _actualPlanCts.Token);
 
         if (planXml != null)
-            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, planXml, label, _queryText);
+            await ViewerActualPlanFlow.OpenFloatingPlanAsync(this, _dataService, _serverId, planXml, label, _queryText);
     }
 
     // ── Column Filter Popup (mirrors WaitDrillDownWindow / ViewerServerTab.Filters.cs) ──
