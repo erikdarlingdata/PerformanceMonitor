@@ -1652,7 +1652,7 @@ public sealed class DarlingComposeTests
         Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
     }
 
-    /* ─────────────── #4605 part 2, LA-7: the query_store_interval_wide (V145) hybrid ─────────────── */
+    /* ─────────────── #4605: the query_store_interval_wide (V145) route ─────────────── */
 
     private static string CompileQueryStoreWideEligible(string planJson, string[]? servers = null)
     {

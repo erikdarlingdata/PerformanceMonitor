@@ -185,7 +185,7 @@ public static class ComposeCompiler
             return $"{PgSchemaGenerator.CollectSchema}.{sourceTable}";
         }
 
-        /* #4605 part 2, LA-7: query_store_interval_wide (V145) already holds the latest snapshot per
+        /* #4605: query_store_interval_wide (V145) already holds the latest snapshot per
            interval, every outcome — exactly what the raw ROW_NUMBER dedupe below computes — so an eligible
            run reads it directly instead of re-sorting every raw snapshot in the window. Eligibility
            (QueryStoreIntervalWide.UseTable plus clause 6, per server in scope) is decided by the runner

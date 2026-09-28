@@ -1232,7 +1232,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            relation. Probed lazily, cached per data source. */
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
 
-        /* #4605 part 2, LA-6: Query Store never takes the recent-window rollup route (it can't be exact,
+        /* #4605: Query Store never takes the recent-window rollup route (it can't be exact,
            even on the corrected hourly), so its own bounded fast path is the wide table (V145) — decided
            HERE, in the runner, before compiling, because ComposeCompiler.Compile stays pure and never opens
            a connection. Only checked for a panel that actually reads query_store_stats; every other panel
@@ -1298,7 +1298,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         }
     }
 
-    /// <summary>The #4605 part 2, LA-6 minimum window: below this, the wide table's own gate round trips
+    /// <summary>The #4605 minimum window: below this, the wide table's own gate round trips
     /// (one per server, each a fixed handful of small reads) cost more than the read they would save, so a
     /// composed Query Store panel stays raw regardless of coverage — the same pattern
     /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> already applies to the grid. A composed panel
@@ -1307,7 +1307,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     internal static readonly TimeSpan ComposeQueryStoreWideMinWindow = QueryStoreIntervalWide.GridWideMinWindow;
 
     /// <summary>
-    /// #4605 part 2, LA-6: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
+    /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
     /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
     /// runner, BEFORE <see cref="ComposeCompiler.Compile"/> runs, because the compiler stays pure and never
     /// opens a connection. Reuses the pure <see cref="QueryStoreIntervalWide.UseTable"/> decision (through

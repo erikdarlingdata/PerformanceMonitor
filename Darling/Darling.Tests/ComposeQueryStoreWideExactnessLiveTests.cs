@@ -21,7 +21,7 @@ using Xunit;
 namespace Darling.Tests;
 
 /// <summary>
-/// #4605 part 2, LA-8: the live exactness proof for the Query Store wide-table Compose route. Seeds two
+/// #4605: the live exactness proof for the Query Store wide-table Compose route. Seeds two
 /// servers and three databases through the real collector write path (<see cref="DarlingCollectorRunner.WriteBackfillBatchAsync"/>,
 /// the same call <see cref="QueryStoreIntervalWideGridLiveTests.SeedGridAsync"/> uses), then compiles and runs
 /// the SAME panel twice through the real <see cref="ComposeCompiler"/> — once with the context forced to raw
