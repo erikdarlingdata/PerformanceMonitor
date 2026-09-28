@@ -532,41 +532,13 @@ public partial class MainWindow : Window
         _overviewTimer.Start();
     }
 
-    /// <summary>
-    /// First non-option command-line argument = explicit config path, mirroring the service
-    /// (option pairs like --open-server &lt;name&gt; are skipped).
-    /// </summary>
+    /// <summary>The explicit config path from the process arguments, by the shared <see cref="ViewerArgs"/> rule.</summary>
     private static string? ExplicitConfigPathFromArgs()
-    {
-        var args = Environment.GetCommandLineArgs();
-        for (var i = 1; i < args.Length; i++)
-        {
-            if (string.Equals(args[i], "--open-server", StringComparison.OrdinalIgnoreCase))
-            {
-                i++; /* Skip the option's value too. */
-                continue;
-            }
-
-            return args[i];
-        }
-
-        return null;
-    }
+        => ViewerArgs.ExplicitConfigPath(Environment.GetCommandLineArgs().Skip(1).ToArray());
 
     /// <summary>The value following --open-server, or null when absent/dangling.</summary>
     private static string? OpenServerNameFromArgs()
-    {
-        var args = Environment.GetCommandLineArgs();
-        for (var i = 1; i < args.Length - 1; i++)
-        {
-            if (string.Equals(args[i], "--open-server", StringComparison.OrdinalIgnoreCase))
-            {
-                return args[i + 1];
-            }
-        }
-
-        return null;
-    }
+        => ViewerArgs.OpenServerName(Environment.GetCommandLineArgs().Skip(1).ToArray());
 
     private async void OnRefreshTimerTick(object? sender, EventArgs e)
     {
