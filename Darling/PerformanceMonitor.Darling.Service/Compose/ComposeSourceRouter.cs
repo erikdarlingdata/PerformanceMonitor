@@ -144,6 +144,12 @@ public static class ComposeCaggCatalog
 /// </summary>
 public static class ComposeSourceRouter
 {
+    /// <summary>Test-only observability for the mode/effective-bucket wiring (#4605 part 2, LA-3): the last
+    /// values <see cref="Resolve"/> received. Not consulted by any routing decision — <c>ComposeCompiler.Compile</c>
+    /// runs synchronously and single-threaded per call, so a test reading this right after its own call is not
+    /// contaminated by another.</summary>
+    internal static (PanelMode Mode, ComposeTimeBucket EffectiveBucket)? LastResolveInput;
+
     /// <summary>Raw is chosen only for windows whose oldest point is within this age — a day inside the 4-day raw
     /// retention, so raw never routes to an about-to-drop chunk. Aliases the shared definition (#1661); the
     /// viewer's built-in tabs route off the same value.</summary>
@@ -172,10 +178,17 @@ public static class ComposeSourceRouter
     /// decision.</para>
     /// </summary>
     public static ComposeRoute Resolve(
-        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, RollupAvailability rollups, RollupCoverage coverage)
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, RollupAvailability rollups, RollupCoverage coverage,
+        PanelMode mode, ComposeTimeBucket effectiveBucket)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(coverage);
+
+        /* mode and effectiveBucket are the pre-route bucket resolution (moved ahead of routing so the hybrid
+           rule can see them) — not yet consulted for a routing decision here; a later change adds the hybrid
+           tier that reads them. LastResolveInput exists ONLY so a test can pin that the caller (ComposeCompiler.
+           Compile) actually passes them through unchanged — it is not read by any routing decision. */
+        LastResolveInput = (mode, effectiveBucket);
 
         var cagg = ComposeCaggCatalog.For(plan.Measure.SourceTable);
         if (cagg is null)

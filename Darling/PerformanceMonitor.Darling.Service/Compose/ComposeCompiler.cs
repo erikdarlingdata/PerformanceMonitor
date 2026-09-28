@@ -206,12 +206,24 @@ public static class ComposeCompiler
             throw new ArgumentNullException(nameof(context));
         }
 
+        /* Auto resolves to a concrete grain from the window BEFORE routing (moved ahead of ComposeSourceRouter.Resolve
+           so the router can see the panel's mode and its pre-route effective bucket — #4605 part 2; the router
+           does not consult them yet). A non-Auto bucket passes through unchanged, so existing panels are
+           byte-for-byte identical. The CAGG clamp (below, after routing) is unchanged. */
+        var effectiveBucket = plan.TimeBucket;
+        if (plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries)
+        {
+            var windowSeconds = (context.EndUtc - context.StartUtc).TotalSeconds;
+            effectiveBucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds);
+        }
+
         /* Source routing: read a CAGG rollup instead of raw when the window's oldest point is past the raw
            horizon (ComposeSourceRouter). Age is measured from NowUtc, NOT EndUtc (#1606): an absolute zoomed
            window can end well in the past, and retention drops by actual wall-clock now — a purely historical
            window must reach the tier that still retains it. Fall back to raw when a value expression can't be
            remapped to the CAGG columns (CanRemap; the overlay AND-gate below). */
-        var route = ComposeSourceRouter.Resolve(plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage);
+        var route = ComposeSourceRouter.Resolve(
+            plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage, plan.Mode, effectiveBucket);
         if (route.IsCagg
             && (!ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate)
                 || (plan.Overlay is ComposeOverlay o && !ComposeCaggValueMapper.CanRemap(o.Measure, o.Aggregate))))
@@ -221,13 +233,9 @@ public static class ComposeCompiler
             route = ComposeRoute.Raw;
         }
 
-        /* Auto resolves to a concrete grain from the window before anything downstream (ceiling + date_trunc);
-           a non-Auto bucket passes through unchanged, so existing panels are byte-for-byte identical. */
-        var effectiveBucket = plan.TimeBucket;
         if (plan.Mode is PanelMode.TimeSeries or PanelMode.RankedTimeSeries)
         {
             var windowSeconds = (context.EndUtc - context.StartUtc).TotalSeconds;
-            effectiveBucket = MeasureCatalog.ResolveBucket(plan.TimeBucket, windowSeconds);
             /* A CAGG can't render finer than its own bucket — clamp the display grain up to the tier's grain
                (hourly -> at least hour, daily -> at least day) so date_trunc re-aggregates, never under-reads. */
             if (route.IsCagg)
