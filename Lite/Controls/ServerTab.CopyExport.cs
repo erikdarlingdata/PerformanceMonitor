@@ -117,7 +117,7 @@ public partial class ServerTab : UserControl
 
         /* Use SetDataObject with copy=false to avoid WPF's problematic Clipboard.Flush() operation.
            See: https://github.com/dotnet/wpf/issues/9901 */
-        Clipboard.SetDataObject(script, false);
+        ClipboardText.TrySetDataObject(script);
     }
 
     private void ExportToCsv_Click(object sender, RoutedEventArgs e) =>
