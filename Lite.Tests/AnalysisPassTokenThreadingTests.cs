@@ -312,13 +312,20 @@ public sealed class AnalysisPassTokenThreadingTests
     /// lock, the reader signals once it is about to call <c>AcquireReadLock</c> — but that signal alone
     /// fires before <c>AcquireReadLock</c> is even called, so cancelling on it alone would usually race
     /// ahead of the read-lock attempt and catch nothing but an already-cancelled first check, never a
-    /// genuine abandonment. So the test also spins on the lock's own <c>WaitingReadCount</c>, which only
-    /// turns positive once a thread is truly blocked entering it, and only once that is observed too does
-    /// the test call <c>Cancel()</c> itself. Because the writer still holds its exclusive lock at that
-    /// point — nothing releases it before the <c>finally</c> below — a positive <c>WaitingReadCount</c>
-    /// means the reader is genuinely waiting on the writer, not merely about to check a token it has not
-    /// tried yet, when the cancellation arrives. The one wall-clock number left, on the final wait, is a
-    /// generous backstop against a genuine hang, not a budget this test is trying to meet.</para>
+    /// genuine abandonment. So the test also spins on the lock's own <c>WaitingReadCount</c> — but
+    /// Lite.Tests runs its test classes in parallel, with no <c>[Collection]</c> serializing them, and
+    /// roughly twenty other analysis test files call <c>AcquireReadLock</c> on this same static
+    /// <c>s_dbLock</c>, so one of THEIR readers can tick that count positive while this test's own reader
+    /// has not even reached <c>AcquireReadLock</c> yet. <c>WaitingReadCount</c> alone cannot tell this
+    /// test's reader apart from someone else's, so the spin also captures this reader's own
+    /// <see cref="Thread"/> and waits for IT to enter <see cref="ThreadState.WaitSleepJoin"/> — a state it
+    /// can only reach after making its own check (real or regressed) and blocking inside
+    /// <c>TryEnterReadLock</c> or <c>EnterReadLock</c>. Only once both are true does the test call
+    /// <c>Cancel()</c> itself. Because the writer still holds its exclusive lock at that point — nothing
+    /// releases it before the <c>finally</c> below — and this reader's own thread is already parked past
+    /// its check, the cancellation lands on a reader that is genuinely blocked waiting on the writer, not
+    /// merely about to make a check it has not tried yet. The one wall-clock number left, on the final
+    /// wait, is a generous backstop against a genuine hang, not a budget this test is trying to meet.</para>
     /// </summary>
     [Fact]
     public async Task TheReadLockWaitIsAbandonableWhileAWriterHoldsIt()
@@ -344,11 +351,14 @@ public sealed class AnalysisPassTokenThreadingTests
                legitimately queue this writer behind another test's own hold of the same lock. */
             Assert.True(writerHasIt.Wait(TimeSpan.FromSeconds(30)), "the writer never took the lock");
 
+            Thread? readerThread = null;
+
             /* No token passed to Task.Run itself — only to AcquireReadLock below — so a thrown
                OperationCanceledException faults this task rather than putting it in the Canceled state,
                and awaiting it rethrows that same exception instead of a wrapping TaskCanceledException. */
             var reader = Task.Run(() =>
             {
+                readerThread = Thread.CurrentThread;  // published by readerIsWaiting.Set()'s barrier below
                 readerIsWaiting.Set();
                 using var read = initializer.AcquireReadLock(cts.Token);
             });
@@ -359,18 +369,27 @@ public sealed class AnalysisPassTokenThreadingTests
                poll loop inside AcquireReadLock yet — cancelling right here would usually race ahead of
                that call and throw out of the loop's very first ThrowIfCancellationRequested() check,
                which passes even for a "check once, then block uncancellably" regression that never
-               truly abandons a wait. So spin on the lock's own WaitingReadCount, which only turns
-               positive once a thread is genuinely blocked trying to enter it, and only then cancel.
-               s_dbLock is one static field shared by every DuckDbInitializer in the process, so a
-               parallel run of the rest of the suite could tick another test's blocked reader over this
-               count too — that can only make the spin resolve earlier than this test's own reader
-               blocks, never later, and this test's own writer holds the lock regardless, so it cannot
-               turn a real failure into a false pass. */
+               truly abandons a wait. Spinning on the lock's own WaitingReadCount alone does not close
+               that gap either: Lite.Tests runs its test classes in parallel with no [Collection] to
+               serialize them, s_dbLock is one static field roughly twenty analysis test files across the
+               suite call AcquireReadLock on, and any one of THEIR readers can tick WaitingReadCount to 1
+               while this test's own reader is still sitting on a ThreadPool queue and has not made its
+               own check yet. Cancelling on that count alone can land before this test's reader ever
+               checks its token — which a "check once, then block" regression survives anyway, since
+               ThrowIfCancellationRequested() sees an already-cancelled token on its one and only look.
+               So the spin also waits for THIS reader's own captured Thread to enter
+               ThreadState.WaitSleepJoin, a state it can only reach after making its check (real or
+               regressed) and blocking inside TryEnterReadLock or EnterReadLock. Only once this thread is
+               genuinely parked AND a reader is counted waiting does the test call Cancel(): a "check
+               once" regression is by then already past its one check and blocked uncancellably, so it
+               can no longer pass by accident, while the correct implementation keeps re-checking its
+               token every ReadLockPollInterval and still observes the cancellation. */
             var dbLock = (ReaderWriterLockSlim)typeof(DuckDbInitializer)
                 .GetField("s_dbLock", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
-            Assert.True(SpinWait.SpinUntil(() => dbLock.WaitingReadCount >= 1, TimeSpan.FromSeconds(30)),
-                "no reader ever blocked on the lock");
-            await Task.Delay(100); // settle margin of two poll intervals; nothing asserted on it
+            Assert.True(SpinWait.SpinUntil(
+                () => dbLock.WaitingReadCount >= 1 && (readerThread!.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                TimeSpan.FromSeconds(30)),
+                "this test's reader never blocked on the lock");
 
             /* Explicit and synchronous — Cancel() runs on this thread, not a delay-timer callback that
                needs its own ThreadPool slot, so nothing races the reader's start-up anymore. */
