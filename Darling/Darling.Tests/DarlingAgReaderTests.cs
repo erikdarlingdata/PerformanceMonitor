@@ -497,4 +497,134 @@ public sealed class DarlingAgReaderTests
         Assert.Equal(2, result.DistinctAgCount);
         Assert.Equal(2, result.AvailabilityGroupCount);
     }
+
+    /* ─────────────────────── #4474: fill by measured serialized bytes, not a fixed count ─────────────────────── */
+
+    /// <summary>A realistic wide group: 2 replicas plus <paramref name="databaseCount"/> databases, with
+    /// field widths like a real fleet's (LSN strings the shape SQL Server actually reports, endpoint URLs,
+    /// suspend reasons on the unhealthy path) rather than the thin fixture #4471's original DefaultGroupLimit=11
+    /// was sized from.</summary>
+    private static (Reader.ReplicaRow[] Replicas, Reader.DatabaseRow[] Databases) WideGroup(
+        int serverId, string agName, int databaseCount, bool critical = false)
+    {
+        var serverName = $"NODE{serverId:D3}A";
+        var replicas = new[]
+        {
+            Replica(serverId, serverName, agName, serverName, "PRIMARY"),
+            Replica(serverId, serverName, agName, $"NODE{serverId:D3}B", "SECONDARY", syncHealth: critical ? "NOT_HEALTHY" : "HEALTHY"),
+        };
+
+        var databases = new Reader.DatabaseRow[databaseCount];
+        for (var i = 0; i < databaseCount; i++)
+        {
+            databases[i] = new Reader.DatabaseRow(
+                serverId, serverName, At(1), agName, $"AppDatabase_{agName}_{i:D2}", $"NODE{serverId:D3}B", true,
+                critical && i == 0 ? "NOT SYNCHRONIZING" : "SYNCHRONIZED",
+                "00000029000A6B4C000100AE", "00000029000A6B4B00010098",
+                critical && i == 0 ? 9500L : 12L, critical && i == 0 ? 3800L : 4L, 1024L, 1024L,
+                critical && i == 0, critical && i == 0 ? "SUSPEND_FROM_USER" : null,
+                "SYNCHRONOUS_COMMIT", critical && i == 0 ? 4820L : 0L, null);
+        }
+
+        return (replicas, databases);
+    }
+
+    /// <summary>
+    /// #4474: the RUNTIME RED this branch closes. A 42-group fleet shaped like the field report (2 replicas
+    /// plus 10 databases/group, realistic field widths) overshoots the 32 KB budget by close to 2x at the OLD
+    /// fixed DefaultGroupLimit=11 count-cap — the exact failure mode a byte-measured fill replaces. This pin
+    /// asserts the NEW behavior (fits the budget, returns fewer than all 42, flags truncation) and is also the
+    /// vehicle for the mutation: reverting <c>Build</c>'s fill loop to the old <c>groups.Take(limit)</c> shape
+    /// turns this red (see the PR body for the measured before/after).
+    /// </summary>
+    [Fact]
+    public void Build_FortyTwoWideGroups_FillsToTheByteBudgetMostSevereFirst()
+    {
+        var allReplicas = new List<Reader.ReplicaRow>();
+        var allDatabases = new List<Reader.DatabaseRow>();
+        for (var i = 0; i < 42; i++)
+        {
+            var (replicas, databases) = WideGroup(i + 1, $"AG_FLEET_{i:D2}", 10);
+            allReplicas.AddRange(replicas);
+            allDatabases.AddRange(databases);
+        }
+
+        var result = Reader.Build(allReplicas, allDatabases, At(0), limit: 100);
+        var json = JsonSerializer.Serialize(result, Reader.JsonOptions);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+
+        Assert.True(bytes <= McpResponseBudget.DefaultBytes, $"response was {bytes} bytes, over the {McpResponseBudget.DefaultBytes} budget");
+        Assert.Equal(42, result.GroupsTotal);
+        Assert.True(result.GroupsReturned < 42, "a byte-fit page over a 42-group wide fleet must not return every group");
+        Assert.Equal(result.GroupsReturned, result.AvailabilityGroups.Count);
+        Assert.True(result.GroupsTruncated);
+        Assert.NotNull(result.GroupsTruncatedNote);
+        Assert.Contains("byte", result.GroupsTruncatedNote, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>#4474 (b): a small fleet (3 databases/group, well under the byte budget on its own) still gets
+    /// every group back — no regression from the byte-fit walk on the common case the old fixed cap of 11
+    /// already handled fine.</summary>
+    [Fact]
+    public void Build_SmallFleet_ReturnsEveryGroupUnderTheByteBudget()
+    {
+        var allReplicas = new List<Reader.ReplicaRow>();
+        var allDatabases = new List<Reader.DatabaseRow>();
+        for (var i = 0; i < 5; i++)
+        {
+            var (replicas, databases) = WideGroup(i + 1, $"AG_SMALL_{i:D2}", 3);
+            allReplicas.AddRange(replicas);
+            allDatabases.AddRange(databases);
+        }
+
+        var result = Reader.Build(allReplicas, allDatabases, At(0), limit: 100);
+
+        Assert.Equal(5, result.GroupsTotal);
+        Assert.Equal(5, result.GroupsReturned);
+        Assert.False(result.GroupsTruncated);
+        Assert.Null(result.GroupsTruncatedNote);
+    }
+
+    /// <summary>#4474 (c): a single group so wide it alone exceeds the budget still comes back — exactly 1
+    /// group, never 0 — with the note saying the budget, not the count, was the reason.</summary>
+    [Fact]
+    public void Build_OneOversizedGroup_ReturnsExactlyOneGroupNeverZero()
+    {
+        var (replicas, databases) = WideGroup(1, "AG_HUGE", 400);
+
+        var result = Reader.Build(replicas, databases, At(0), limit: 100);
+        var json = JsonSerializer.Serialize(result, Reader.JsonOptions);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+
+        Assert.True(bytes > McpResponseBudget.DefaultBytes, $"fixture must itself exceed the budget to prove the floor; measured {bytes}");
+        Assert.Equal(1, result.GroupsTotal);
+        Assert.Equal(1, result.GroupsReturned);
+        Assert.Single(result.AvailabilityGroups);
+        Assert.False(result.GroupsTruncated, "a single group, even oversized, is not itself a cut");
+        Assert.Null(result.GroupsTruncatedNote);
+    }
+
+    /// <summary>#4474 (d): an explicit limit smaller than what the byte budget would allow still caps at
+    /// exactly that limit — limit stays an upper bound underneath the budget, not just a suggestion the budget
+    /// walk can override upward.</summary>
+    [Fact]
+    public void Build_ExplicitLimitSmallerThanBudgetFit_CapsAtExactlyTheLimit()
+    {
+        var allReplicas = new List<Reader.ReplicaRow>();
+        var allDatabases = new List<Reader.DatabaseRow>();
+        for (var i = 0; i < 10; i++)
+        {
+            var (replicas, databases) = WideGroup(i + 1, $"AG_CAP_{i:D2}", 3);
+            allReplicas.AddRange(replicas);
+            allDatabases.AddRange(databases);
+        }
+
+        var result = Reader.Build(allReplicas, allDatabases, At(0), limit: 4);
+
+        Assert.Equal(10, result.GroupsTotal);
+        Assert.Equal(4, result.GroupsReturned);
+        Assert.Equal(4, result.AvailabilityGroups.Count);
+        Assert.True(result.GroupsTruncated);
+        Assert.Contains("top 4", result.GroupsTruncatedNote);
+    }
 }
