@@ -523,7 +523,11 @@ public sealed class DarlingMcpHostService : BackgroundService
                untyped AddSingleton(instance) overload: McpServiceParameterDiSeatCensusTests greps this
                file's source text for AddSingleton<StoreHostProfileCache> specifically. */
             builder.Services.AddSingleton<StoreHostProfileCache>(StoreHostProfileCache.Shared);
-            builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache));
+            /* #4602: the same analyzer config just registered above, so MCP's plan advisories (get_analysis_facts,
+               analyze_server, drill-down) honor a user's disabled/overridden rules the same way the worker
+               (DarlingWorker.cs) and the web endpoints (DarlingWebEndpoints.cs) already do. Before this fix the
+               MCP path silently fell back to AnalyzerConfig.Default. */
+            builder.Services.AddSingleton(new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache, config.Analyzer ?? AnalyzerConfig.Default));
             /* The HOST's logger, registered as the bare ILogger a tool method can take as a DI parameter
                (the postgres pattern one line up — service-typed params are resolved per request and never
                reach the advertised schema). Deliberately NOT the web app's own ILogger<T>: this builder
