@@ -2142,7 +2142,7 @@ WITH NO DATA";
     /// WITH NO DATA + IF NOT EXISTS, one statement.
     /// </summary>
     public const string CreateQueryStoreStatsHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_hourly
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -2159,6 +2159,21 @@ SELECT
 FROM collect.query_store_stats
 GROUP BY server_id, server_name, database_name, module_name, query_hash, bucket
 WITH NO DATA";
+
+    /// <summary>
+    /// The two group indexes #4503 KEEPS on <see cref="CreateQueryStoreStatsHourlySql"/>'s materialization
+    /// now that <c>create_group_indexes = false</c> stops TimescaleDB building all five automatically:
+    /// <c>(server_id, bucket)</c> (every reader filters server + a time range) and <c>(server_name, bucket)</c>
+    /// (measured 131 lifetime scans on the production catalog this rung read from — the only non-server_id
+    /// group index either hourly view showed any read against). Built by <see cref="KeptIndexesSql"/> so a
+    /// fresh migrate lands the EXACT shape TimescaleDB's own <c>create_group_indexes</c> would have given an
+    /// upgraded store's survivors: same key order, <c>bucket DESC</c> (not the ASC a hand-typed name would
+    /// carry), and PostgreSQL's own default name for that index, not a hand-built one — see
+    /// <see cref="KeptIndexesSql"/>'s remarks for why an unnamed <c>CREATE INDEX</c> on the view is what makes
+    /// the two identical.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsHourlyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsHourlyView, "server_id", "server_name");
 
     /// <summary>
     /// The per-DATABASE query_stats rollup (#1661). Added rather than folded into
@@ -2403,7 +2418,7 @@ WITH NO DATA";
     /// duration_us_weighted_sum / execution_count_sum across days) and MAX the peaks. Same column NAMES as the
     /// hourly, so <c>ComposeCaggValueMapper</c> reads both with no change. Explicit-<c>time_bucket</c> GROUP BY.</summary>
     public const string CreateQueryStoreStatsDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daily
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -2420,6 +2435,15 @@ SELECT
 FROM collect.query_store_stats_hourly
 GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
 WITH NO DATA";
+
+    /// <summary>
+    /// The one group index #4503 KEEPS on <see cref="CreateQueryStoreStatsDailySql"/>'s materialization:
+    /// <c>(server_id, bucket)</c>. Unlike the hourly pair, the production catalog showed no read against
+    /// <c>server_name</c> on the daily tier, so only the universal server dimension survives here. Built by
+    /// <see cref="KeptIndexesSql"/>, same reason as the hourly pair above.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsDailyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsDailyView, "server_id");
 
     /* ═══════════ the CORRECTED Query Store rollups (#1849) ═══════════
 
@@ -2563,7 +2587,7 @@ WITH NO DATA";
     /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/> reads L1 rather than this view.</para>
     /// </summary>
     public const string CreateQueryStoreStatsCorrectedHourlySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_corrected_hourly
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -2582,6 +2606,23 @@ GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bu
 WITH NO DATA";
 
     /// <summary>
+    /// The two group indexes #4503 KEEPS on <see cref="CreateQueryStoreStatsCorrectedHourlySql"/>'s
+    /// materialization: <c>(server_id, bucket)</c> for every reader's server + time-range filter, and
+    /// <c>(server_name, bucket)</c> for a scoped composer read — not the same measured-131-scan reason as
+    /// the legacy hourly view above; this materialization's own <c>server_name</c> index showed 0 lifetime
+    /// scans in the production catalog read, and is kept for the composer's scoped-panel reads instead.
+    /// <c>database_name</c>'s group index is DROPPED even though
+    /// <see cref="QueryStoreTrendRouting.BuildRollupTrendSql"/> can filter on it (<c>rollupFilter</c>): that
+    /// same read also filters <c>server_id = $1</c> plus the bucket range, so it is served by the
+    /// <c>(server_id, bucket)</c> index kept here (a composed panel filtering on <c>database_name</c> gets
+    /// the same rows via that index, just without a secondary key on the dropped column) — and the
+    /// production catalog showed ZERO lifetime scans of the real <c>database_name</c> index on this view's
+    /// chunks. See the PR body's reader table.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsCorrectedHourlyView, "server_id", "server_name");
+
+    /// <summary>
     /// The corrected composer-grain DAILY rollup (#1849) — the same columns as
     /// <see cref="CreateQueryStoreStatsCorrectedHourlySql"/> at a 1-day bucket, sourced from L1 DIRECTLY.
     ///
@@ -2594,7 +2635,7 @@ WITH NO DATA";
     /// <para>Kept indefinitely (no retention policy), like the other daily rollups.</para>
     /// </summary>
     public const string CreateQueryStoreStatsCorrectedDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_corrected_daily
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -2611,6 +2652,14 @@ SELECT
 FROM collect.query_store_stats_interval_hourly
 GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
 WITH NO DATA";
+
+    /// <summary>
+    /// The one group index #4503 KEEPS on <see cref="CreateQueryStoreStatsCorrectedDailySql"/>'s
+    /// materialization: <c>(server_id, bucket)</c>. No <c>server_name</c> pair here — the daily tier showed
+    /// no reads against it on the production catalog, unlike the two hourly views.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsCorrectedDailyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsCorrectedDailyView, "server_id");
 
     /// <summary>
     /// L2 of the corrected Query Store rollups (#1869): L1 re-deduped at the DAY grain — one row per interval
@@ -2644,7 +2693,7 @@ WITH NO DATA";
     /// (<see cref="IntervalDailyRetentionInterval"/>).</para>
     /// </summary>
     public const string CreateQueryStoreStatsIntervalDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_interval_daily
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -2672,6 +2721,17 @@ GROUP BY server_id, server_name, database_name, module_name, query_hash, query_i
 WITH NO DATA";
 
     /// <summary>
+    /// The one group index #4503 KEEPS on <see cref="CreateQueryStoreStatsIntervalDailySql"/>'s
+    /// materialization: <c>(server_id, bucket)</c>. Every OTHER group index this view's default would have
+    /// built is dropped — this is L2, "not a read target" by its own doc comment above, and the production
+    /// catalog showed zero reads on every one of its eleven group indexes including this one, but
+    /// <c>server_id</c> is kept anyway for the same universal-dimension reason every other view here keeps
+    /// it, not because a specific reader was found.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsIntervalDailyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsIntervalDailyView, "server_id");
+
+    /// <summary>
     /// The composer-grain DAILY rollup computed from the DAY-grain dedup (#1869) —
     /// <see cref="CreateQueryStoreStatsCorrectedDailySql"/>'s column set to the byte, sourced from L2 instead
     /// of L1 so an hour-straddling interval is counted ONCE.
@@ -2689,7 +2749,7 @@ WITH NO DATA";
     /// worth its cost: the daily tier is the one whose numbers persist and get compared year over year.</para>
     /// </summary>
     public const string CreateQueryStoreStatsDayGrainDailySql = @"CREATE MATERIALIZED VIEW IF NOT EXISTS collect.query_store_stats_daygrain_daily
-WITH (timescaledb.continuous) AS
+WITH (timescaledb.continuous, timescaledb.create_group_indexes = false) AS
 SELECT
     server_id,
     server_name,
@@ -2706,6 +2766,13 @@ SELECT
 FROM collect.query_store_stats_interval_daily
 GROUP BY server_id, server_name, database_name, module_name, query_hash, time_bucket('1 day', bucket)
 WITH NO DATA";
+
+    /// <summary>
+    /// The one group index #4503 KEEPS on <see cref="CreateQueryStoreStatsDayGrainDailySql"/>'s
+    /// materialization: <c>(server_id, bucket)</c>, same reasoning as the other daily rollups above.
+    /// </summary>
+    public static readonly string CreateQueryStoreStatsDayGrainDailyKeptIndexesSql =
+        KeptIndexesSql(QueryStoreStatsDayGrainDailyView, "server_id");
 
     /// <summary>
     /// The HOURLY refresh window: each hourly continuous aggregate re-materializes <c>[now - 1 day,
@@ -5483,6 +5550,16 @@ WITH NO DATA";
                 {
                     using var width = new NpgsqlCommand(SetOffGridMaterializationChunkIntervalSql(view), connection) { CommandTimeout = SetupTimeoutSeconds };
                     await width.ExecuteNonQueryAsync(cancellationToken);
+                }
+
+                /* #4503: a fresh migrate gets the SAME kept-index shape an upgraded store reaches through
+                   V152's DO block — the CREATE INDEX statements ride right after this view's own CREATE,
+                   idempotent by a catalog read rather than IF NOT EXISTS (an unnamed CREATE INDEX has no
+                   name to guard with one), so every start after the first is a read with no write. */
+                if (QueryStoreRollupKeptIndexesSql.TryGetValue(view, out var keptIndexesSql))
+                {
+                    using var keptIndexes = new NpgsqlCommand(keptIndexesSql, connection) { CommandTimeout = SetupTimeoutSeconds };
+                    await keptIndexes.ExecuteNonQueryAsync(cancellationToken);
                 }
 
                 if (policyFor is null)
@@ -9847,6 +9924,90 @@ WITH NO DATA";
     public static readonly (string CreateSql, string View, Func<string> PolicySql)[] OffGridAggregates =
     {
         (CreateCollectionHealthHourlySql, CollectionHealthHourlyView, AddCollectionHealthRefreshPolicySql),
+    };
+
+    /// <summary>
+    /// Builds the <c>DO</c> block that gives a FRESH migrate the EXACT index a store upgrading through
+    /// V152's own <c>DO</c> block reaches by keeping (rather than dropping) its surviving auto-created group
+    /// index, for one kept <paramref name="column"/> on <paramref name="view"/> — called once per kept
+    /// column, so a view keeping two (the hourly pair's <c>server_id</c> and <c>server_name</c>) gets two
+    /// separate statements concatenated by <see cref="KeptIndexesSql(string, string[])"/>.
+    ///
+    /// <para><b>Why an unnamed <c>CREATE INDEX</c> resolved onto the materialization from the catalog, not
+    /// a hand-typed name.</b> The <c>DO</c> block below issues its <c>CREATE INDEX</c> directly against the
+    /// materialization OID it just resolved (<c>v_mat_oid</c>), not against the view — TimescaleDB's own
+    /// <c>create_group_indexes</c> is what issues an unnamed index against the continuous aggregate's VIEW
+    /// and lets PostgreSQL route it to the materialization, which names it by ITS OWN default-naming rule
+    /// (<c>&lt;table&gt;_&lt;column&gt;_bucket_idx</c>, truncated to 63 bytes with PostgreSQL's own
+    /// de-duplicating suffix if that truncation collides) — the same result this code reaches, never a string this
+    /// code builds. A hand-built name matching that pattern for five of the six views would still be WRONG
+    /// for the sixth: <c>query_store_stats_interval_daily</c>'s materialization name is itself a generated
+    /// <c>_materialized_hypertable_N</c>, wider than the fixed views' own table names, so a name built from
+    /// the VIEW's name would drift from what PostgreSQL actually assigns the materialization's copy — the
+    /// exact bug #4503's PR body traces on the upgrade side (<see cref="PgMigrations"/>'s V152 remarks) and
+    /// the reason this resolves the materialization from the catalog and lets PostgreSQL name the index,
+    /// the same as an upgraded store's survivor. <c>bucket DESC</c>, never ASC, for the same reason: an
+    /// upgraded store's survivor was built DESC, and an index with a different sort order is a DIFFERENT
+    /// index to <see cref="PgSchemaGeneratorTests"/>'s fresh-vs-upgraded comparison.</para>
+    ///
+    /// <para><b>Idempotent by a catalog read, not by <c>IF NOT EXISTS</c></b> (an unnamed <c>CREATE INDEX</c>
+    /// has no name to guard with one — a second unnamed <c>CREATE INDEX</c> on the same columns would create
+    /// a SECOND index under PostgreSQL's own collision-suffixed name). The <c>DO</c> block instead reads
+    /// <c>pg_index</c>/<c>pg_attribute</c> for a two-key btree already carrying <paramref name="column"/>
+    /// then <c>bucket</c> — the same shape-matching rule <see cref="PgMigrations"/>'s V152 drop uses on the
+    /// upgrade side — and issues the <c>CREATE INDEX</c> only when that read finds nothing, so every start
+    /// after the first is a read with no write. A missing view (<c>v_mat_oid IS NULL</c>, a plain-PostgreSQL
+    /// store or one where this aggregate never enabled) is skipped rather than erroring.</para>
+    /// </summary>
+    private static string KeptIndexesSql(string view, string column) => $@"
+DO $$
+DECLARE
+    v_mat_oid regclass;
+BEGIN
+    SELECT format('%I.%I', materialization_hypertable_schema, materialization_hypertable_name)::regclass
+    INTO v_mat_oid
+    FROM timescaledb_information.continuous_aggregates
+    WHERE view_schema = 'collect' AND view_name = '{view}';
+
+    IF v_mat_oid IS NULL THEN
+        RETURN;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_index i
+        JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+        JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+        WHERE i.indrelid = v_mat_oid
+        AND   i.indnatts = 2
+        AND   a1.attname = '{column}'
+        AND   a2.attname = 'bucket'
+    ) THEN
+        EXECUTE format('CREATE INDEX ON %s ({column}, bucket DESC)', v_mat_oid);
+    END IF;
+END $$;";
+
+    /// <summary>Concatenates one <see cref="KeptIndexesSql(string, string)"/> block per kept column on <paramref name="view"/>.</summary>
+    private static string KeptIndexesSql(string view, params string[] columns) =>
+        string.Join("\n", columns.Select(column => KeptIndexesSql(view, column)));
+
+    /// <summary>
+    /// #4503: the six Query Store rollups whose <c>Create...Sql</c> now carries <c>create_group_indexes =
+    /// false</c>, mapped to the follow-on <c>KeptIndexesSql</c> <c>DO</c> block(s) that give a FRESH
+    /// store the same kept-index shape a store that upgrades through V152 reaches by resolving and keeping
+    /// (rather than dropping) its own two-key group indexes. Read by <see cref="EnsureContinuousAggregatesAsync"/>
+    /// right after each view's CREATE, so a fresh migrate and an upgraded store land the identical index —
+    /// same key order, <c>bucket DESC</c>, and the same PostgreSQL-assigned name
+    /// (<see cref="PgSchemaGeneratorTests"/>'s fresh-vs-upgraded comparison checks both).
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, string> QueryStoreRollupKeptIndexesSql = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [QueryStoreStatsHourlyView] = CreateQueryStoreStatsHourlyKeptIndexesSql,
+        [QueryStoreStatsCorrectedHourlyView] = CreateQueryStoreStatsCorrectedHourlyKeptIndexesSql,
+        [QueryStoreStatsDailyView] = CreateQueryStoreStatsDailyKeptIndexesSql,
+        [QueryStoreStatsCorrectedDailyView] = CreateQueryStoreStatsCorrectedDailyKeptIndexesSql,
+        [QueryStoreStatsIntervalDailyView] = CreateQueryStoreStatsIntervalDailyKeptIndexesSql,
+        [QueryStoreStatsDayGrainDailyView] = CreateQueryStoreStatsDayGrainDailyKeptIndexesSql,
     };
 
     /// <summary>Is <paramref name="view"/> (bare or <c>collect.</c>-qualified) one of <see cref="OffGridAggregates"/>?</summary>
