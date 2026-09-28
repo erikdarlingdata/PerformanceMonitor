@@ -65,6 +65,7 @@ LEFT JOIN maxdop ON true";
         {
             await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(ServerMetadataSql, connection);
+            command.CommandTimeout = StorageCommandDeadlines.McpReadSeconds;
             command.Parameters.AddWithValue(serverId);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
