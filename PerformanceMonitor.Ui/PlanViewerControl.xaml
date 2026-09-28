@@ -96,24 +96,31 @@
                         </ScrollViewer>
                     </Border>
 
-                    <!-- Wait Stats (right, fills remaining space) -->
+                    <!-- Wait Stats (right, fills remaining space; own collapsible card, closed by default) -->
                     <Border Grid.Column="2" Padding="10,4,10,8"
                             Background="{DynamicResource PlanWaitStatsBgBrush}">
-                        <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                      HorizontalScrollBarVisibility="Disabled">
-                            <StackPanel>
+                        <Expander x:Name="WaitStatsExpander" IsExpanded="False"
+                                  Foreground="{DynamicResource PlanWaitStatsHeaderBrush}"
+                                  Background="Transparent"
+                                  BorderThickness="0"
+                                  Padding="0">
+                            <Expander.Header>
                                 <TextBlock x:Name="WaitStatsHeader"
                                            Text="Wait Stats"
                                            FontSize="13"
-                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanWaitStatsHeaderBrush}"
-                                           Margin="0,0,0,6"/>
-                                <StackPanel x:Name="WaitStatsContent"/>
-                                <TextBlock x:Name="WaitStatsEmpty"
-                                           Text="No wait stats (estimated plan)"
-                                           FontSize="12" Visibility="Collapsed"
-                                           Foreground="{DynamicResource ForegroundBrush}"/>
-                            </StackPanel>
-                        </ScrollViewer>
+                                           FontWeight="SemiBold" Foreground="{DynamicResource PlanWaitStatsHeaderBrush}"/>
+                            </Expander.Header>
+                            <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel Margin="0,6,0,0">
+                                    <StackPanel x:Name="WaitStatsContent"/>
+                                    <TextBlock x:Name="WaitStatsEmpty"
+                                               Text="No wait stats (estimated plan)"
+                                               FontSize="12" Visibility="Collapsed"
+                                               Foreground="{DynamicResource ForegroundBrush}"/>
+                                </StackPanel>
+                            </ScrollViewer>
+                        </Expander>
                     </Border>
                 </Grid>
             </Expander>
