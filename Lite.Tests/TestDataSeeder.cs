@@ -2266,10 +2266,19 @@ VALUES ($1, $2, $3, $4, $5, 7, $6, $7, $8, 'X:\Data\file.mdf', $9, NULL, $10, $1
         // the same healthy CPU signal anchored to "now" instead of TestPeriodStart, the same
         // fix shape as #4558 but on the seed side (no hoursBack parameter exists on this read
         // path to move to the test side instead).
+        // variance: 0 -- SeedCpuUtilizationAsync's own 16 points are a flat 50 (no jitter), so
+        // matching that here keeps the combined 32-point series' stddev at exactly 0 across
+        // both time windows the FinOps engine reads (24h-from-now for the CPU right-sizing
+        // check, 7-day for reserved-capacity). Rule 14 (reserved capacity, ~line 806 in
+        // LocalDataService.FinOps.Recommendations.cs) only fires when avgCpu > 20 AND
+        // stddevCpu > 0 AND CV (stddev/avg) < 0.3; a nonzero variance here (previously 5,
+        // giving avg ~49.3%, CV ~0.04) made it fire at every hour. stddev == 0 keeps that
+        // condition false regardless of the clock. P95 stays at 50%, well clear of rule 2's
+        // "CPU over-provisioned" P95 < 30% threshold, at any hour too.
         await SeedCpuUtilizationAsync(50, 5);
         await SeedCpuUtilizationInRangeAsync(
             DateTime.UtcNow.AddHours(-3), DateTime.UtcNow.AddMinutes(-5),
-            avgCpu: 50, variance: 5, samples: 16);
+            avgCpu: 50, variance: 0, samples: 16);
         await SeedMemoryStatsAsync(totalPhysicalMb: 65_536, bufferPoolMb: 49_152, targetMb: 57_344);
         await SeedServerPropertiesAsync(cpuCount: 8, htRatio: 2, physicalMemMb: 65_536,
             edition: "Developer Edition");
