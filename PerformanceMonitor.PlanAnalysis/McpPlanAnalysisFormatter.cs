@@ -97,8 +97,10 @@ public static class McpPlanAnalysisFormatter
         var plan = ShowPlanParser.Parse(xml);
         PlanAnalyzer.Analyze(plan);
 
-        var statements = plan.Batches
-            .SelectMany(b => b.Statements)
+        // #4514: includes statements nested inside a stored procedure or UDF body, so the MCP
+        // analyze_plan_xml/analyze_query_plan/analyze_query_store_plan tools see the same
+        // findings PlanAnalyzer.Analyze actually attached, instead of only the outer EXEC.
+        var statements = PlanStatements.EnumerateAll(plan)
             .Where(s => s.RootNode != null)
             .Select(s =>
             {

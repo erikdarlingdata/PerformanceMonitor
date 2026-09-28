@@ -35,18 +35,18 @@ public static class BenefitScorer
     /// </summary>
     public static void Score(ParsedPlan plan)
     {
-        foreach (var batch in plan.Batches)
+        /* #4514: PlanAnalyzer.Analyze creates findings on statements inside a stored procedure
+           or UDF body via the same PlanStatements.EnumerateAll walk. Without it here, those
+           findings would never get a MaxBenefitPercent or wait-stat score. */
+        foreach (var stmt in PlanStatements.EnumerateAll(plan))
         {
-            foreach (var stmt in batch.Statements)
-            {
-                ScoreStatementWarnings(stmt);
+            ScoreStatementWarnings(stmt);
 
-                if (stmt.RootNode != null)
-                    ScoreNodeTree(stmt.RootNode, stmt);
+            if (stmt.RootNode != null)
+                ScoreNodeTree(stmt.RootNode, stmt);
 
-                if (stmt.WaitStats.Count > 0 && stmt.QueryTimeStats != null)
-                    ScoreWaitStats(stmt);
-            }
+            if (stmt.WaitStats.Count > 0 && stmt.QueryTimeStats != null)
+                ScoreWaitStats(stmt);
         }
     }
 

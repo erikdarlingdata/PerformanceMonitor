@@ -120,8 +120,9 @@ public partial class PlanViewerControl : UserControl
             return plan;
         });
 
-        var allStatements = _currentPlan.Batches
-            .SelectMany(b => b.Statements)
+        // #4514: includes statements nested inside a stored procedure or UDF body, so the
+        // viewer's statement list shows the statements the analyzer actually found findings on.
+        var allStatements = PlanStatements.EnumerateAll(_currentPlan)
             .Where(s => s.RootNode != null)
             .ToList();
 

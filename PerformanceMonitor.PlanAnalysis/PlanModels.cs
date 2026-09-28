@@ -19,19 +19,25 @@ public class ParsedPlan
     /// </summary>
     public string? ParseError { get; set; }
 
-    public List<MissingIndex> AllMissingIndexes => Batches
-        .SelectMany(b => b.Statements)
+    /// <summary>
+    /// #4514: descends into stored procedure and UDF bodies via the shared
+    /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> walk, so an EXEC &lt;procedure&gt;
+    /// plan whose only missing-index suggestions live in the body is no longer reported as
+    /// having none.
+    /// </summary>
+    public List<MissingIndex> AllMissingIndexes => PlanStatements.EnumerateAll(this)
         .SelectMany(s => s.MissingIndexes)
         .ToList();
 
     /// <summary>
     /// Every plan warning across all statements — statement-level (added by PlanAnalyzer) plus
     /// per-operator (parsed onto PlanNode.Warnings) — gathered by walking each statement's node
-    /// tree. Mirrors the manual gather the drill-down does, centralized here so the WS4 fact
-    /// collector and the drill-down enrichment share a single definition.
+    /// tree, including stored procedure and UDF bodies (#4514) via the shared
+    /// <see cref="PlanStatements.EnumerateAll(ParsedPlan)"/> walk. Mirrors the manual gather the
+    /// drill-down does, centralized here so the WS4 fact collector and the drill-down enrichment
+    /// share a single definition.
     /// </summary>
-    public List<PlanWarning> AllWarnings => Batches
-        .SelectMany(b => b.Statements)
+    public List<PlanWarning> AllWarnings => PlanStatements.EnumerateAll(this)
         .SelectMany(s => s.PlanWarnings.Concat(NodeWarnings(s.RootNode)))
         .ToList();
 

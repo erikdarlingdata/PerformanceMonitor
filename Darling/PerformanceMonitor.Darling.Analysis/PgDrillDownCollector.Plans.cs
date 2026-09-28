@@ -78,8 +78,9 @@ LIMIT 1";
             var plan = ShowPlanParser.Parse(planXml);
             PlanAnalyzer.Analyze(plan);
 
-            var allWarnings = plan.Batches
-                .SelectMany(b => b.Statements)
+            // #4514: includes statements nested inside a stored procedure or UDF body, so a
+            // finding inside an EXEC <procedure> plan's body reaches the drill-down.
+            var allWarnings = PlanStatements.EnumerateAll(plan)
                 .Where(s => s.RootNode != null)
                 .SelectMany(s =>
                 {

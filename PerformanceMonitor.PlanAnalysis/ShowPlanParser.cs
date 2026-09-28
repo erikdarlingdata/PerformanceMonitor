@@ -219,6 +219,13 @@ public static class ShowPlanParser
                         stmt.CursorRequestedType = cursorRequestedType;
                         stmt.CursorConcurrency = cursorConcurrency;
                         stmt.CursorForwardOnly = cursorForwardOnly;
+
+                        /* #4514: the same StoredProc/UDF descent every other statement shape
+                           gets. A cursor's operation statements are built here, through
+                           ParseQueryPlanAsStatement, and never pass through ParseStatement — so
+                           a function called by the cursor's query, whose sub-plan sits on this
+                           same Operation element beside the QueryPlan, was never read. */
+                        ParseSubPlans(stmt, opEl, depth);
                         results.Add(stmt);
                     }
                 }
@@ -289,6 +296,15 @@ public static class ShowPlanParser
             }
         }
 
+        /* #4514: sub-plans are read BEFORE the no-QueryPlan early return below, because an EXEC
+           <procedure> statement has no QueryPlan of its own — every plan lives in the body — so
+           it took that early return and never reached the sub-plan read, seventy lines further
+           down. The parser looked like it descended into procedures and in the one case that
+           matters (an EXEC with no plan of its own) never did. The same was true of a UDF call
+           whose calling statement carries no plan. Shared with the StmtCursor branch (#4514)
+           below, and depth + 1 (the #4512 fix) carries the true nesting through this boundary. */
+        ParseSubPlans(stmt, stmtEl, depth);
+
         if (queryPlanEl == null)
         {
             // Statements with no QueryPlan (e.g., DECLARE/ASSIGN, or a MULTIPLE PLAN statement
@@ -349,11 +365,27 @@ public static class ShowPlanParser
             stmt.RootNode = stmtNode;
         }
 
-        // XSD gap: UDF sub-plans. The depth argument here is the fix for #4512: before it, this
-        // descent (and the StoredProc one below) called ParseStatementAndChildren without
-        // carrying the caller's depth, so nesting silently reset to zero at every UDF/procedure
-        // boundary and MaxParseDepth could never fire across that nesting.
-        foreach (var udfEl in stmtEl.Elements(Ns + "UDF"))
+        return stmt;
+    }
+
+    /// <summary>
+    /// Reads the StoredProc/UDF sub-plan bodies hanging off <paramref name="containerEl"/> onto
+    /// <paramref name="stmt"/>. One reader shared by <see cref="ParseStatement"/> — where
+    /// StmtSimple carries the UDF/StoredProc elements directly — and the StmtCursor branch
+    /// (#4514), where a function called by the cursor's query puts the same UDF element beside
+    /// the QueryPlan under <c>CursorPlan &gt; Operation</c> instead. Before #4514 a cursor's
+    /// operation statements were built through <see cref="ParseQueryPlanAsStatement"/>, which
+    /// never read this XSD gap at all, so a function called by a cursor's query had its whole
+    /// body in the XML and the parser dropped every statement of it: not enumerated, not
+    /// analyzed, not costed.
+    /// The caller's depth carries into the body statements unchanged (#4512) — resetting it at a
+    /// sub-plan boundary would reopen the MaxParseDepth bypass this shares with the non-cursor
+    /// descent.
+    /// </summary>
+    private static void ParseSubPlans(PlanStatement stmt, XElement containerEl, int depth)
+    {
+        // XSD gap: UDF sub-plans
+        foreach (var udfEl in containerEl.Elements(Ns + "UDF"))
         {
             var udfInfo = new FunctionPlanInfo
             {
@@ -372,9 +404,8 @@ public static class ShowPlanParser
             stmt.UdfPlans.Add(udfInfo);
         }
 
-        // XSD gap: StoredProc sub-plan. See the UDF descent above: depth + 1 carries the true
-        // nesting through this boundary too.
-        var storedProcEl = stmtEl.Element(Ns + "StoredProc");
+        // XSD gap: StoredProc sub-plan
+        var storedProcEl = containerEl.Element(Ns + "StoredProc");
         if (storedProcEl != null)
         {
             var spInfo = new FunctionPlanInfo
@@ -393,8 +424,6 @@ public static class ShowPlanParser
             }
             stmt.StoredProcPlan = spInfo;
         }
-
-        return stmt;
     }
 
     /// <summary>
@@ -1845,17 +1874,18 @@ public static class ShowPlanParser
 
     private static void ComputeOperatorCosts(ParsedPlan plan)
     {
-        foreach (var batch in plan.Batches)
+        /* #4514: statements inside a stored procedure or UDF body get operator costs too — the
+           parser has always read them into UdfPlans/StoredProcPlan, but this used to walk
+           batch.Statements alone, so a body statement's operators kept EstimatedOperatorCost 0
+           and CostPercent 0 no matter their real weight in the plan. */
+        foreach (var stmt in PlanStatements.EnumerateAll(plan))
         {
-            foreach (var stmt in batch.Statements)
-            {
-                if (stmt.RootNode == null) continue;
-                var totalCost = stmt.StatementSubTreeCost > 0
-                    ? stmt.StatementSubTreeCost
-                    : stmt.RootNode.EstimatedTotalSubtreeCost;
-                if (totalCost <= 0) totalCost = 1;
-                ComputeNodeCosts(stmt.RootNode, totalCost);
-            }
+            if (stmt.RootNode == null) continue;
+            var totalCost = stmt.StatementSubTreeCost > 0
+                ? stmt.StatementSubTreeCost
+                : stmt.RootNode.EstimatedTotalSubtreeCost;
+            if (totalCost <= 0) totalCost = 1;
+            ComputeNodeCosts(stmt.RootNode, totalCost);
         }
     }
 
