@@ -430,6 +430,9 @@ public sealed class DarlingCollectorRunner
     /// </summary>
     private readonly ConcurrentDictionary<int, DateTime> _lastQueryStoreItemFailureUtc = new();
 
+    /// <summary>#4660: when the orphaned per-database state prune last succeeded, per server.</summary>
+    private readonly ConcurrentDictionary<int, DateTime> _lastOrphanStatePruneUtc = new();
+
     /* When each server's failed log_timezone read last logged at Warning (#4051 round-2 review, L-2). See
        LogTimezoneReadFailureLevel. In memory on purpose: a restart that warns once more is the right answer. */
     private readonly ConcurrentDictionary<int, DateTime> _logTimezoneReadWarnedUtc = new();
@@ -1769,7 +1772,7 @@ public sealed class DarlingCollectorRunner
         if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
             && DatabaseStateCollector.Instance.AppliesTo(server.Target))
         {
-            await PruneOrphanedQueryStoreDatabaseStateAsync(server.ServerId, cancellationToken);
+            await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(server.ServerId, cancellationToken);
         }
         else if (string.Equals(definition.Name, QueryStoreCollector.Instance.Name, StringComparison.Ordinal)
                  && server.Target.IsAzureSqlDb)
@@ -5459,7 +5462,7 @@ RETURNING s.state_key";
     /// parameters cannot span a multi-statement batch, and three narrow deletes down the primary key are
     /// easier to read than one that ORs three prefixes together.
     /// </summary>
-    internal async Task PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
+    internal async Task<bool> PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
     {
         try
         {
@@ -5492,10 +5495,29 @@ RETURNING s.state_key";
                     "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server: {Keys}",
                     serverId, pruned.Count, string.Join(", ", pruned));
             }
+
+            return true;
         }
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
+            return false;
+        }
+    }
+
+    /// <summary>#4660: the per-cycle entry: runs the prune when <see cref="OrphanStatePrune.IsDue"/> says so, and records
+    /// only a success, so a failure is retried on the next cycle.</summary>
+    internal async Task PruneOrphanedQueryStoreDatabaseStateIfDueAsync(int serverId, CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        if (!OrphanStatePrune.IsDue(_lastOrphanStatePruneUtc.TryGetValue(serverId, out var last) ? last : null, now))
+        {
+            return;
+        }
+
+        if (await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken))
+        {
+            _lastOrphanStatePruneUtc[serverId] = now;
         }
     }
 
