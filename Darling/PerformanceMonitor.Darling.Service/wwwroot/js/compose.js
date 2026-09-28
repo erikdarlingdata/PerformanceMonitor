@@ -20,7 +20,7 @@
  * inert. The chart SVG lives entirely in charts.js (one SVG_NS occurrence, the air-gap allowlist); this file has no SVG.
  */
 
-import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSend, noticeStrip, parseUtc } from "./util.js";
+import { el, mount, loadingStrip, errorStrip, emptyStrip, disclosure, fmtInt, fmtNum, apiSendRead, noticeStrip, parseUtc } from "./util.js";
 import { renderLineChart, renderBarChart, renderPieChart, renderScatterChart, CATEGORICAL_COLORS } from "./charts.js";
 import { navigateServer } from "./panels.js";
 import { getCatalog } from "./views-api.js";
@@ -266,9 +266,9 @@ export async function renderComposedInto(body, panelSpec, scope, opts = {}) {
   }
 }
 
-/** POST the composed panel to /api/compose/run with the view scope; returns the apiSend result ({sql, rows} on data). */
+/** POST the composed panel to /api/compose/run with the view scope; returns the apiSendRead result ({sql, rows} on data). */
 export function runCompose(panelSpec, scope, zoom = null) {
-  return apiSend("POST", "/api/compose/run", buildRunBody(panelSpec, scope, zoom));
+  return apiSendRead("POST", "/api/compose/run", buildRunBody(panelSpec, scope, zoom));
 }
 
 /** Build the /api/compose/run body from a panel spec + scope (a per-panel `hours` or `range` overrides the

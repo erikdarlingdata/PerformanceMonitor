@@ -332,9 +332,10 @@ export function buildQuery(params) {
 
 /* In-flight read counter (#4191): every apiGet/readTool call counts itself while its fetch is outstanding, so
    the poll loop (app.js refresh()) can tell whether the page it is about to re-render has already settled
-   before firing a whole new set of the same reads on top of it. apiGetFleet and apiSend are deliberately NOT
-   counted here — the fleet read is the one request every caller already shares regardless of render (#3895),
-   and a mutation is not a "page read" a poll tick should wait out. */
+   before firing a whole new set of the same reads on top of it. apiSendRead (a read that must travel as a POST,
+   the composed-panel run) IS counted, so a slow panel holds the poll off and the refresh back-off measures it.
+   apiGetFleet and apiSend are deliberately NOT counted here — the fleet read is the one request every caller
+   already shares regardless of render (#3895), and a mutation is not a "page read" a poll tick should wait out. */
 let inFlightReads = 0;
 
 /** True while at least one apiGet/readTool call is outstanding — see the counter comment above. */
@@ -428,6 +429,18 @@ export async function apiSend(method, path, body) {
     return { kind: "error", message: "Network error: " + (e && e.message ? e.message : String(e)) };
   }
   return classifyResponse(resp);
+}
+
+/** #4666: a READ that has to travel as a POST (the composed-panel run, /api/compose/run). Counted in inFlightReads
+    exactly like apiGet, so the poll's overlap guard (#4191) waits it out and the refresh back-off measures the render
+    that contains it. Mutations (saves, deletes, alert validate/test) keep using apiSend, uncounted. */
+export async function apiSendRead(method, path, body) {
+  inFlightReads++;
+  try {
+    return await apiSend(method, path, body);
+  } finally {
+    inFlightReads--;
+  }
 }
 
 /* Session-expired takeover (#4187). A module-level one-shot latch: the FIRST read that reports the session is
