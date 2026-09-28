@@ -451,23 +451,33 @@ public sealed class ComposeSourceRouterTests
         Assert.Equal("query_stats_hourly", route.CaggRelation);
     }
 
-    /// <summary>#4605 part 2: <see cref="ComposeSourceRouter.Resolve"/> now takes the panel's mode and
-    /// its pre-route effective bucket as explicit parameters (moved ahead of routing in
-    /// <c>ComposeCompiler.Compile</c>). Pins that the values actually arrive unchanged — a Ranked plan carries
-    /// no bucket; a TimeSeries/Hour plan carries Hour — via <see cref="ComposeSourceRouter.LastResolveInput"/>,
-    /// the test-only observability hook. This does not assert any routing behaviour change.</summary>
-    [Theory]
-    [InlineData(PanelMode.Ranked, ComposeTimeBucket.None)]
-    [InlineData(PanelMode.TimeSeries, ComposeTimeBucket.Hour)]
-    public void Resolve_ReceivesModeAndEffectiveBucket(PanelMode mode, ComposeTimeBucket effectiveBucket)
+    private static string CompileHybridFixture(string panelJson)
     {
-        var route = ComposeSourceRouter.Resolve(
-            Plan("query_worker_us", mode), Now, Now.AddDays(-2), Now, RollupAvailability.All, RollupCoverage.Unknown,
-            mode, effectiveBucket);
+        var (plan, parseError) = ComposeSpec.TryParsePanel((System.Text.Json.Nodes.JsonObject)System.Text.Json.Nodes.JsonNode.Parse(panelJson)!, []);
+        Assert.True(parseError is null, parseError);
 
-        /* Recent window still routes raw regardless of mode/bucket — the router doesn't act on them yet. */
-        Assert.Equal(ComposeSourceTier.Raw, route.Tier);
-        Assert.Equal((mode, effectiveBucket), ComposeSourceRouter.LastResolveInput);
+        var end = Now;
+        var coverage = HybridCoverage(QuerySuccessorHourly, floor: Now.AddDays(-5), provenFrom: Now.AddHours(-23), ceiling: Now.AddHours(-1));
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan!, new ComposeRunContext(null, end.AddHours(-12), end, ComposeRunContext.NoVariables, RollupAvailability.All, end, coverage));
+        Assert.True(error is null, error);
+        return compiled!.Sql;
+    }
+
+    /// <summary>#4605 part 2: <c>ComposeCompiler.Compile</c> hands the panel's mode and its pre-route effective
+    /// bucket to routing. Through the compiled SQL: a Ranked SUM panel takes the hourly-plus-raw-edges union; the
+    /// same measure as a minute-grain TimeSeries stays raw; as an hour-grain TimeSeries it takes the union again.
+    /// A router handed the wrong mode or bucket would flip one of these.</summary>
+    [Theory]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}", true)]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"minute\",\"viz\":\"line\"}", false)]
+    [InlineData("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"timeBucket\":\"hour\",\"viz\":\"line\"}", true)]
+    public void Compile_PassesModeAndEffectiveBucketIntoRouting(string panelJson, bool hybrid)
+    {
+        var sql = CompileHybridFixture(panelJson);
+
+        Assert.Equal(hybrid, sql.Contains("UNION ALL", StringComparison.Ordinal));
+        Assert.Equal(hybrid, sql.Contains(ComposeRoute.HybridMidAlias + ".bucket", StringComparison.Ordinal));
     }
 
     /* ─────────────── #4605 part 2: the SUM/MAX hybrid (query_stats/procedure_stats only) ─────────────── */
