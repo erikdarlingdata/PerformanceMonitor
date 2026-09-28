@@ -13,6 +13,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using PerformanceMonitor.PlanAnalysis;
 
 using WpfPath = System.Windows.Shapes.Path;
@@ -43,6 +44,12 @@ public partial class PlanViewerControl
     private double _minimapResizeStartWidth;
     private double _minimapResizeStartHeight;
 
+    // #4622: set while a zero-size-canvas retry is queued via RenderMinimap's DispatcherPriority.Loaded
+    // deferral, so a canvas that is still unsized when the retry runs gives up instead of re-queuing
+    // itself forever (which would starve input). Cleared once the retry runs, and on close, so the
+    // next real trigger (open, resize, statement render) always gets a fresh attempt.
+    private bool _minimapRenderDeferred;
+
     private void MinimapToggle_Click(object sender, RoutedEventArgs e)
     {
         if (_minimapVisible)
@@ -69,6 +76,7 @@ public partial class PlanViewerControl
     {
         _minimapVisible = false;
         _minimapResizing = false;
+        _minimapRenderDeferred = false;
         MinimapPanel.Visibility = Visibility.Collapsed;
     }
 
@@ -84,7 +92,26 @@ public partial class PlanViewerControl
 
         var canvasW = MinimapCanvas.ActualWidth;
         var canvasH = MinimapCanvas.ActualHeight;
-        if (canvasW <= 0 || canvasH <= 0) return;
+        if (canvasW <= 0 || canvasH <= 0)
+        {
+            // First open: MinimapPanel starts Collapsed, so this first call lands before WPF has
+            // measured MinimapCanvas, and ActualWidth/ActualHeight are still 0 -- a bare return here
+            // left the panel empty until the user dragged the resize grip or closed/reopened it,
+            // because nothing else re-renders it (#4622). Re-post one retry at DispatcherPriority.Loaded,
+            // after the pending layout pass has sized the canvas, matching PerformanceStudio's Avalonia
+            // port. The flag caps it at a single retry: if the canvas is still unsized when that runs
+            // (e.g. the tab is hidden), give up instead of re-queuing forever, which would starve input.
+            if (!_minimapRenderDeferred)
+            {
+                _minimapRenderDeferred = true;
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    RenderMinimap();
+                    _minimapRenderDeferred = false;
+                }), DispatcherPriority.Loaded);
+            }
+            return;
+        }
 
         var scale = MinimapLayout.GetScale(canvasW, canvasH, PlanCanvas.Width, PlanCanvas.Height);
 
