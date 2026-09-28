@@ -18,7 +18,7 @@ namespace Darling.Tests;
 /// #4605 live pin: the <c>temp_file_limit</c> backstop actually cancels a spilling read at the database, and
 /// the resulting SQLSTATE 53400 classifies through <see cref="ReadOutcomeClassifier"/> as
 /// <see cref="ReadOutcome.Limit"/> \u2014 through the product's own renderer
-/// (<see cref="DarlingManagedRoles.BuildComposeStatementTimeoutSql"/>), not a hand-typed copy of the ALTER
+/// (<see cref="DarlingManagedRoles.BuildComposeTempFileLimitSql"/>), not a hand-typed copy of the ALTER
 /// ROLE statement, so a change to the renderer that dropped the temp_file_limit line would fail this test
 /// too.
 /// </summary>
@@ -60,7 +60,7 @@ public sealed class ComposeTempFileLimitLiveTests
             /* The renderer's own output for viewer/mcp, with the role names substituted for our throwaway
                role via a straight text replace -- the SQL SHAPE (statement_timeout, log_min_duration_statement,
                temp_file_limit) is exactly what BuildComposeStatementTimeoutSql emits for the real roles. */
-            var rendered = DarlingManagedRoles.BuildComposeStatementTimeoutSql(60)
+            var rendered = (DarlingManagedRoles.BuildComposeStatementTimeoutSql(60) + "\n" + DarlingManagedRoles.BuildComposeTempFileLimitSql())
                 .Replace("viewer", roleName, StringComparison.Ordinal)
                 .Replace("mcp", roleName, StringComparison.Ordinal);
             await using (var applyRendered = new NpgsqlCommand(rendered, admin))

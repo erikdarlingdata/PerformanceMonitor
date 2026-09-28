@@ -51,25 +51,41 @@ public sealed class ComposeStatementTimeoutReloadTests
 
         /* And the batch carries the pair exactly once — an embed that also left the old inline copy behind
            would still satisfy Contains, while writing the ceiling twice. The slow-statement line (#3899) rides
-           the same renderer, and is written once too. */
+           the same renderer, and is written once too. temp_file_limit (#4605, #4610) rides its OWN renderer,
+           unconditionally, so it is asserted separately from the timeout-derived pair above. */
         Assert.Equal(2, Regex.Matches(batch, @"SET statement_timeout = '").Count);
         Assert.Equal(2, Regex.Matches(batch, @"SET log_min_duration_statement = '").Count);
         Assert.Equal(2, Regex.Matches(batch, @"SET temp_file_limit = '").Count);
     }
 
     /// <summary>
-    /// #4605: the on-disk-spill backstop rides the SAME single renderer as statement_timeout, on both compose
-    /// identities and never admin -- so provisioning and the control-plane reload can never disagree about
-    /// the temp_file_limit ceiling either, the exact drift the renderer already exists to prevent for
-    /// statement_timeout.
+    /// #4605, #4610: the on-disk-spill backstop rides its OWN renderer, on both compose identities and never
+    /// admin -- a CONSTANT, unlike statement_timeout, so it does not derive from the compose timeout and
+    /// cannot be dropped by an unreadable one.
     /// </summary>
     [Fact]
     public void TheRenderer_SetsTempFileLimitOnBothComposeRoles_AndNotAdmin()
     {
-        var sql = DarlingManagedRoles.BuildComposeStatementTimeoutSql(60);
+        var sql = DarlingManagedRoles.BuildComposeTempFileLimitSql();
 
         Assert.Contains($"ALTER ROLE viewer SET temp_file_limit = '{ComposeLimits.TempFileLimit}';", sql, StringComparison.Ordinal);
         Assert.Contains($"ALTER ROLE mcp    SET temp_file_limit = '{ComposeLimits.TempFileLimit}';", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// #4610: an unreadable compose timeout must not drop the on-disk-spill backstop too. temp_file_limit
+    /// is a CONSTANT, not derived from the timeout, so the batch carries both lines even when the caller
+    /// passes <c>null</c> for the compose timeout.
+    /// </summary>
+    [Fact]
+    public void TheProvisioningBatch_EmitsTempFileLimit_EvenWhenTheComposeTimeoutIsUnreadable()
+    {
+        var batch = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp,
+            composeStatementTimeoutSeconds: null);
+
+        Assert.Contains($"ALTER ROLE viewer SET temp_file_limit = '{ComposeLimits.TempFileLimit}';", batch, StringComparison.Ordinal);
+        Assert.Contains($"ALTER ROLE mcp    SET temp_file_limit = '{ComposeLimits.TempFileLimit}';", batch, StringComparison.Ordinal);
     }
 
     /// <summary>
