@@ -219,7 +219,7 @@ public sealed class PgLoggingCollectorGateTests
             42L,
             12.5,
             "{ \"Plan\": { \"Node Type\": \"Seq Scan\", \"Relation Name\": \"dl\" } }",
-            "%a",
+            "%m [%p] %a ",
         });
 
         var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
@@ -238,7 +238,7 @@ public sealed class PgLoggingCollectorGateTests
             42L,
             12.5,
             "{ \"Plan\": { \"Node Type\": \"Seq Scan\", \"Relation Name\": \"dl\" } }",
-            "%Q",
+            "%m [%p] %Q ",
         });
 
         var rows = await PgPlanCaptureCollector.Instance.ReadAsync(reader, MakeContext(), CancellationToken.None);
