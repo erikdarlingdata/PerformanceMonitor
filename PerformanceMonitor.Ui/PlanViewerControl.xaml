@@ -70,7 +70,8 @@
                             Background="{DynamicResource BackgroundDarkBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                         <StackPanel>
-                            <TextBlock Text="Runtime Summary"
+                            <TextBlock x:Name="RuntimeSummaryTitle"
+                                       Text="Runtime Summary"
                                        FontSize="13"
                                        FontWeight="SemiBold"
                                        Foreground="{DynamicResource ForegroundBrush}"
@@ -305,6 +306,18 @@
                                            Margin="0,2,0,0"/>
                             </StackPanel>
                         </DockPanel>
+                    </Border>
+
+                    <!-- Filter. Sticky across node selections; Esc clears it. -->
+                    <Border DockPanel.Dock="Top" Padding="8,5"
+                            Background="{DynamicResource BackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                        <TextBox x:Name="PropertiesFilterBox"
+                                 FontSize="11" Height="24" MinHeight="0" Padding="6,1"
+                                 VerticalContentAlignment="Center"
+                                 TextChanged="PropertiesFilter_TextChanged"
+                                 KeyDown="PropertiesFilter_KeyDown"
+                                 ToolTip="Filter properties..."/>
                     </Border>
 
                     <!-- Properties Content -->

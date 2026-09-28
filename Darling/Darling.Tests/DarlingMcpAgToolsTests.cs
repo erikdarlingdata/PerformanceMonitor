@@ -566,13 +566,43 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)",
             Assert.Equal("AG_ZZZ_CRITICAL", groups[0].GetProperty("ag_name").GetString());
             Assert.Equal("Critical", groups[0].GetProperty("severity").GetString());
 
-            /* limit >= total: no cut at all. */
+            /* #4474: an explicit limit >= total is an UPPER BOUND, not a promise -- the byte budget still
+               applies underneath it, so this fleet's wide rows can still get byte-cut even though the caller
+               asked for every group. Assert what the tool actually promises (truthful counts, the budget's
+               wording when it is the one that cut, AG_ZZZ_CRITICAL still first), not a hard-coded group count. */
             var uncappedJson = await DarlingMcpAgTools.GetAgHealth(postgres, ServerName, limit: TotalGroupCount);
             using var uncappedDoc = JsonDocument.Parse(uncappedJson);
             var uncappedRoot = uncappedDoc.RootElement;
-            Assert.Equal(TotalGroupCount, uncappedRoot.GetProperty("availability_groups").GetArrayLength());
-            Assert.False(uncappedRoot.GetProperty("groups_truncated").GetBoolean());
-            Assert.Equal(JsonValueKind.Null, uncappedRoot.GetProperty("groups_truncated_note").ValueKind);
+            var uncappedGroups = uncappedRoot.GetProperty("availability_groups").EnumerateArray().ToList();
+            var uncappedReturned = uncappedRoot.GetProperty("groups_returned").GetInt32();
+
+            Assert.Equal(TotalGroupCount, uncappedRoot.GetProperty("groups_total").GetInt32());
+            Assert.Equal(uncappedGroups.Count, uncappedReturned);
+            Assert.InRange(uncappedReturned, 1, TotalGroupCount);
+
+            var uncappedTruncated = uncappedReturned < TotalGroupCount;
+            Assert.Equal(uncappedTruncated, uncappedRoot.GetProperty("groups_truncated").GetBoolean());
+
+            if (uncappedTruncated)
+            {
+                var note = uncappedRoot.GetProperty("groups_truncated_note").GetString();
+                Assert.NotNull(note);
+                Assert.Contains($"{McpResponseBudget.DefaultBytes:#,0}-byte response budget", note);
+                Assert.DoesNotContain("raise limit", note);
+
+                /* uncappedJson IS the tool's own serialized response text -- the same UTF-8 byte count
+                   DarlingAgReader.Build's byte-fit walk measures (envelope + paged groups), so this checks
+                   the budget on the identical measure Build enforced it against. */
+                var uncappedBytes = System.Text.Encoding.UTF8.GetByteCount(uncappedJson);
+                Assert.True(uncappedBytes <= McpResponseBudget.DefaultBytes,
+                    $"a budget-truncated response must itself fit the budget; measured {uncappedBytes}");
+            }
+            else
+            {
+                Assert.Equal(JsonValueKind.Null, uncappedRoot.GetProperty("groups_truncated_note").ValueKind);
+            }
+
+            Assert.Equal("AG_ZZZ_CRITICAL", uncappedGroups[0].GetProperty("ag_name").GetString());
 
             bodySucceeded = true;
         }
