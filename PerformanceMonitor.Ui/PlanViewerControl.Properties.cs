@@ -1658,6 +1658,7 @@ public partial class PlanViewerControl
         var rows = ServerContextCard.Rows(ServerMetadata);
         if (rows.Count == 0)
         {
+            ServerContextEmpty.Text = ServerContextCard.EmptyText;
             ServerContextEmpty.Visibility = Visibility.Visible;
             SetInsightQuiet(ServerContextHeader, ServerAccentBrush, ServerContextAccent, isEmpty: true);
             return;
