@@ -428,6 +428,54 @@ public static partial class PlanAnalyzer
                 });
             }
         }
+
+        // Rule 36: Dynamic cursor. Dynamic cursors can prevent index usage
+        // because they must tolerate underlying data changes between fetches, forcing
+        // scans and extra work per fetch. Switching to FAST_FORWARD, STATIC, or KEYSET
+        // often delivers a dramatic improvement.
+        if (string.Equals(stmt.CursorActualType, "Dynamic", StringComparison.OrdinalIgnoreCase))
+        {
+            var cursorLabel = string.IsNullOrEmpty(stmt.CursorName) ? "Cursor" : $"Cursor \"{stmt.CursorName}\"";
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "Dynamic Cursor",
+                Message = $"{cursorLabel} is a dynamic cursor. Dynamic cursors tolerate underlying data changes between fetches, which prevents many index uses and forces extra work per fetch. If you don't need that semantic, switching to FAST_FORWARD (or STATIC / KEYSET, depending on requirements) typically gives a large performance improvement.",
+                Severity = PlanWarningSeverity.Warning
+            });
+        }
+
+        // Rule 37: CURSOR declaration without LOCAL. Default cursor scope
+        // is GLOBAL in SQL Server, which puts cursors in a shared namespace and can
+        // bloat the plan cache (Erik's writeup:
+        // https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/).
+        if (!string.IsNullOrEmpty(stmt.StatementText))
+        {
+            var maskedText = MaskCommentsAndLiterals(stmt.StatementText); // #4524
+
+            // DECLARE <name> [INSENSITIVE|SCROLL] CURSOR [qualifier(s)] FOR ...
+            // In the T-SQL extended syntax, LOCAL/GLOBAL appear AFTER the CURSOR
+            // keyword (only INSENSITIVE/SCROLL are legal before it), so the LOCAL
+            // qualifier must be looked for between CURSOR and the FOR that introduces
+            // the SELECT. Capturing tokens *before* CURSOR never sees LOCAL and would
+            // fire on every cursor, including ones already declared LOCAL.
+            var cursorDeclMatch = Regex.Match(
+                maskedText,
+                @"\bDECLARE\s+\w+\s+(?:INSENSITIVE\s+|SCROLL\s+)*CURSOR\b(.*?)\bFOR\b",
+                RegexOptions.IgnoreCase | RegexOptions.Singleline);
+            if (cursorDeclMatch.Success)
+            {
+                var qualifiers = cursorDeclMatch.Groups[1].Value;
+                if (!Regex.IsMatch(qualifiers, @"\bLOCAL\b", RegexOptions.IgnoreCase))
+                {
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        WarningType = "Cursor Missing LOCAL",
+                        Message = "CURSOR declaration is missing the LOCAL keyword. Default cursor scope is GLOBAL, which puts the cursor in a shared namespace and can bloat the plan cache (see https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/). Adding LOCAL is cheap and usually right.",
+                        Severity = PlanWarningSeverity.Warning
+                    });
+                }
+            }
+        }
     }
 
     private static void CheckForTableVariables(PlanNode node, bool isModification,
@@ -777,7 +825,16 @@ public static partial class PlanAnalyzer
             var message = "Scan with residual predicate — SQL Server is reading every row and filtering after the fact.";
             if (!string.IsNullOrEmpty(details.Summary))
                 message += $" {details.Summary}";
-            message += " Check that you have appropriate indexes.";
+
+            // If the statement is executing a dynamic cursor, that's usually
+            // the reason an index didn't get used. Call it out so the user looks there
+            // first rather than hunting for a missing index.
+            var isDynamicCursor = string.Equals(stmt.CursorActualType, "Dynamic",
+                StringComparison.OrdinalIgnoreCase);
+            if (isDynamicCursor)
+                message += " This query is running inside a dynamic cursor, which can prevent index usage; changing the cursor type (FAST_FORWARD / STATIC / KEYSET) often fixes scans like this without any indexing change.";
+            else
+                message += " Check that you have appropriate indexes.";
 
             // I/O waits specifically confirm the scan is hitting disk — elevate
             if (HasSignificantIoWaits(stmt.WaitStats) && details.CostPct >= 50
