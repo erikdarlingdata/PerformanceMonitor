@@ -578,6 +578,49 @@ public static partial class PlanAnalyzer
             }
         }
 
+        // Rule 38: Standard Edition DOP 2 limitation with batch mode. SQL Server Standard Edition
+        // limits DOP to 2 when batch mode operators are present, ported from
+        // erikdarlingdata/PerformanceStudio dev (85492a1) src/PlanViewer.Core/Services/PlanAnalyzer.Statement.cs:411-445.
+        if (!cfg.IsRuleDisabled(38) && stmt.DegreeOfParallelism == 2 && stmt.RootNode != null
+            && HasBatchModeNode(stmt.RootNode))
+        {
+            // Suppress when the user explicitly set MAXDOP 2 as a query hint — the DOP
+            // cap is intentional, not the Standard Edition batch-mode limitation.
+            var hasMaxdop2Hint = !string.IsNullOrEmpty(stmt.StatementText)
+                && Regex.IsMatch(MaskCommentsAndLiterals(stmt.StatementText), @"MAXDOP\s+2\b", RegexOptions.IgnoreCase); // #4524
+
+            if (!hasMaxdop2Hint)
+            {
+                var editionKnown = !string.IsNullOrEmpty(serverMetadata?.Edition);
+                if (editionKnown
+                    && serverMetadata!.Edition!.Contains("Standard", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Server context confirms Standard Edition — check MAXDOP
+                    if (serverMetadata.MaxDop > 2)
+                    {
+                        stmt.PlanWarnings.Add(new PlanWarning
+                        {
+                            RuleNumber = 38,
+                            WarningType = "Standard Edition DOP Limitation",
+                            Message = $"DOP is limited to 2 because SQL Server Standard Edition caps parallelism at 2 when batch mode operators are present, even though MAXDOP is set to {serverMetadata.MaxDop}. Developer or Enterprise Edition would allow higher DOP in the same conditions.",
+                            Severity = PlanWarningSeverity.Warning
+                        });
+                    }
+                }
+                else if (!editionKnown)
+                {
+                    // No server context, or edition unknown (e.g. collection failure) — suspect the limitation
+                    stmt.PlanWarnings.Add(new PlanWarning
+                    {
+                        RuleNumber = 38,
+                        WarningType = "Standard Edition DOP Limitation",
+                        Message = "DOP is limited to 2 and the plan uses batch mode operators. This may be caused by the SQL Server Standard Edition limitation, which caps parallelism at 2 when batch mode is in use. If this server runs Standard Edition, Developer or Enterprise Edition would allow higher DOP.",
+                        Severity = PlanWarningSeverity.Info
+                    });
+                }
+            }
+        }
+
         // Rule 39: the plan's copy of the query text hit SQL Server's showplan cap.
         // Everything downstream that reads this text — advice, Copy Query Text, Open in Query
         // Editor — is working from a query that stops mid-statement.
@@ -1521,6 +1564,24 @@ public static partial class PlanAnalyzer
         return node.PhysicalOp.Contains("Scan", StringComparison.OrdinalIgnoreCase) &&
                !node.PhysicalOp.Contains("Spool", StringComparison.OrdinalIgnoreCase) &&
                !node.PhysicalOp.Contains("Constant", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// True when a node, or any of its descendants, ran in batch execution mode. Ported from
+    /// erikdarlingdata/PerformanceStudio dev (85492a1) src/PlanViewer.Core/Services/PlanAnalyzer.Detection.cs:38-49,
+    /// for rule 38 (Standard Edition DOP 2 limitation).
+    /// </summary>
+    private static bool HasBatchModeNode(PlanNode node)
+    {
+        var mode = node.ActualExecutionMode ?? node.ExecutionMode;
+        if (string.Equals(mode, "Batch", StringComparison.OrdinalIgnoreCase))
+            return true;
+        foreach (var child in node.Children)
+        {
+            if (HasBatchModeNode(child))
+                return true;
+        }
+        return false;
     }
 
     /// <summary>
