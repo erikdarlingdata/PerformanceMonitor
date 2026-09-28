@@ -248,13 +248,33 @@ internal static class DarlingAgReader
            told to raise it if what actually cut the page was the byte budget (or the other way around) — #4474's
            whole point is that the two can now disagree. budgetCut wins the wording when both are true, since
            raising limit alone would not change the outcome. */
-        var groupsTruncatedNote = groupsTruncated
-            ? budgetCut
-                ? $"TRUNCATED: {totalGroupCount} groups were in scope; only {pagedGroups.Count} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget (most severe first, then by the largest lag/queue depth). Scope by server_name to see the rest."
-                : $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {pagedGroups.Count} (most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
-            : null;
+        string? BuildNote(int returnedCount) =>
+            groupsTruncated
+                ? budgetCut
+                    ? $"TRUNCATED: {totalGroupCount} groups were in scope; only {returnedCount} fit the {McpResponseBudget.DefaultBytes:#,0}-byte response budget (most severe first, then by the largest lag/queue depth). Scope by server_name to see the rest."
+                    : $"TRUNCATED: {totalGroupCount} groups were in scope; only the top {returnedCount} (most severe first, then by the largest lag/queue depth) are returned. Scope by server_name, or raise limit, to see the rest."
+                : null;
 
-        return BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+        var groupsTruncatedNote = BuildNote(pagedGroups.Count);
+        var result = BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+
+        /* The fill loop above measures each candidate group against an envelope with NO note (a null,
+           untruncated shell) — but the note itself (and the groups_truncated flag) are only known once the
+           fill decides whether it truncated, so a note that names actual byte counts can itself push the
+           final result over budget. Re-measure the REAL result — the one actually serialized and returned —
+           and drop the last group (rebuilding the note with the new, smaller count each time, since the note's
+           own text changes with the count) while it's still over budget and more than one group remains. This
+           is a tail correction only: the per-group fill above still serializes each candidate exactly once. */
+        while (SerializedByteCount(result) > McpResponseBudget.DefaultBytes && pagedGroups.Count > 1)
+        {
+            pagedGroups.RemoveAt(pagedGroups.Count - 1);
+            groupsTruncated = true;
+            budgetCut = true;
+            groupsTruncatedNote = BuildNote(pagedGroups.Count);
+            result = BuildResult(nowUtc, groups, pagedGroups, totalGroupCount, groupsTruncated, groupsTruncatedNote);
+        }
+
+        return result;
     }
 
     /// <summary>Assembles the <see cref="AgHealthResult"/> envelope around a (possibly paged) group list —

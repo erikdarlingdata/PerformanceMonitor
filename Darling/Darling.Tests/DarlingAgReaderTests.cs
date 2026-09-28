@@ -604,6 +604,45 @@ public sealed class DarlingAgReaderTests
         Assert.Null(result.GroupsTruncatedNote);
     }
 
+    /// <summary>
+    /// #4568: the tail-correction pin. This fixture's 12-group page fits the byte budget WITHOUT the
+    /// <c>groups_truncated_note</c> field (32,638 bytes, measured off a bare envelope the same way the old
+    /// fill loop measured it) but goes OVER budget once the real, final note text is counted (32,810 bytes) —
+    /// exactly the gap #4568 found: the fill loop's stopping point ignored the note it was about to add. Asserts
+    /// the ACTUAL RETURNED response (the one a caller receives) fits the budget regardless. RED before the tail
+    /// correction, because the fill loop's page (12 groups) is the one returned unmodified.
+    /// </summary>
+
+
+    [Fact]
+    public void Build_NoteItselfWouldPushPastBudget_TailCorrectionDropsAGroupToFit()
+    {
+        var allReplicas = new List<Reader.ReplicaRow>();
+        var allDatabases = new List<Reader.DatabaseRow>();
+        for (var i = 0; i < 20; i++)
+        {
+            /* The single extra 'X' in every name (over the #4474 fixture's shape) is what makes the note's
+               own byte cost tip a page that fits without the note over budget with it — see the PR body for
+               the measured before/after this fixture was tuned from. */
+            var (replicas, databases) = WideGroup(i + 1, $"AG_TAIL_{i:D2}XX", 3);
+            allReplicas.AddRange(replicas);
+            allDatabases.AddRange(databases);
+        }
+
+        var result = Reader.Build(allReplicas, allDatabases, At(0), limit: 21);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(result, Reader.JsonOptions));
+
+        Assert.True(result.GroupsTruncated);
+        Assert.NotNull(result.GroupsTruncatedNote);
+        Assert.True(bytes <= McpResponseBudget.DefaultBytes,
+            $"the response actually returned (note included) must itself fit the budget; measured {bytes}");
+        Assert.Equal(result.GroupsReturned, result.AvailabilityGroups.Count);
+        /* The note's own group count must match what's actually returned -- the tail correction rebuilds the
+           note after every group it drops, so a stale count (naming a page one group larger than what's back)
+           would mean the correction dropped a group without re-wording the note that describes it. */
+        Assert.Contains($"only {result.GroupsReturned} fit", result.GroupsTruncatedNote);
+    }
+
     /// <summary>#4474 (d): an explicit limit smaller than what the byte budget would allow still caps at
     /// exactly that limit — limit stays an upper bound underneath the budget, not just a suggestion the budget
     /// walk can override upward.</summary>
