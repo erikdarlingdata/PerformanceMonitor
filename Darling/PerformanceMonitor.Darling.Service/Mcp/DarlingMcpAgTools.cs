@@ -34,13 +34,17 @@ namespace PerformanceMonitor.Darling.Service.Mcp;
 public sealed class DarlingMcpAgTools
 {
     /// <summary>
-    /// #4471: the fleet-wide page cap on groups (one card per reporting server's view of one AG), the same shape
-    /// as <c>get_analysis_findings</c>' <c>limit</c>. An uncapped fleet-wide call on a production fleet (43
-    /// servers, several AGs with many databases) measured 265,794 characters — over 8x the shared
-    /// <see cref="McpResponseBudget.DefaultBytes"/> (32 KB). On a 43-server/3-AG/2-replica/3-database fixture
-    /// (~2.7 KB/group, close to that reported shape), 11 groups measured 30,115 bytes and 12 measured 32,812 —
-    /// so 11 is the largest default that stays under budget on that shape; see <c>DarlingMcpAgToolsTests</c> for
-    /// the before/after this was set from.
+    /// #4471/#4474: the fleet-wide page cap ARGUMENT default on groups (one card per reporting server's view of
+    /// one AG), the same shape as <c>get_analysis_findings</c>' <c>limit</c>. It no longer decides how many
+    /// groups come back on its own: <see cref="DarlingAgReader.Build"/> fills the page most-severe-first while
+    /// the SERIALIZED response stays under the shared <see cref="McpResponseBudget.DefaultBytes"/> (32 KB),
+    /// stopping before the group that would cross it (always keeping at least one group, even an oversized one).
+    /// A fixed count could not do that: #4471 sized 11 from a 2.7 KB/group fixture, and a real 42-group
+    /// production fleet (2 replicas plus 6-14 databases per group, ~6 KB/group) measured 63,333 characters at
+    /// that cap — about 2x over budget, because real groups ran more than double the fixture's assumed size.
+    /// This constant now only bounds <c>limit</c>'s own default and range (1-1000, see <see cref="McpHelpers.MaxTop"/>);
+    /// the byte budget still applies underneath it. See <c>DarlingMcpAgToolsTests</c> / <c>DarlingAgReaderTests</c>
+    /// for the measured before/after.
     /// </summary>
     public const int DefaultGroupLimit = 11;
 
@@ -66,17 +70,17 @@ public sealed class DarlingMcpAgTools
         "movement is suspended). Each group carries its collection_time: the collectors write NO row for a server " +
         "with no AGs, so a server whose AGs were dropped keeps returning its last non-empty snapshot until then — " +
         "an old collection_time on a group is that case, not a live reading. Returns an empty result on a fleet " +
-        "with no Availability Groups. limit pages the groups, MOST SEVERE FIRST then by the largest " +
-        "secondary_lag_seconds/queue depth in the group, so the cap never hides a problem — an uncapped fleet-wide " +
+        "with no Availability Groups. Groups come back MOST SEVERE FIRST then by the largest " +
+        "secondary_lag_seconds/queue depth in the group, so a cut never hides a problem — an uncapped fleet-wide " +
         "call measured 265,794 characters on a 43-server production fleet with several many-database AGs, well " +
-        "over an MCP client's typical per-result limit. Default 11 groups; groups_truncated (with " +
-        "groups_truncated_note) flags when the scope held more than that — groups_total says how many, " +
-        "groups_returned says how many came back, and the fix is to scope by server_name (one server's view is " +
-        "rarely more than a handful of groups) or raise limit for the rest.")]
+        "over an MCP client's typical per-result limit. Default: as many groups as fit ~32 KB, most-severe-first, " +
+        "tracking each group's actual width instead of a fixed count; limit is an upper bound on top of that. " +
+        "groups_truncated (with groups_truncated_note) flags when the scope held more than came back — " +
+        "groups_total/groups_returned say how many, and the fix is to scope by server_name or raise limit.")]
     public static async Task<string> GetAgHealth(
         NpgsqlDataSource postgres,
         [Description("Server name or display name to limit the topology to one monitored server's view. Optional — omit for the whole fleet.")] string? server_name = null,
-        [Description("Maximum groups to return, most severe first, then by the largest lag/queue depth in the group. Default 11, range 1-1000. groups_truncated flags a cut here.")] int limit = DefaultGroupLimit,
+        [Description("Upper bound on groups, most severe first. Default/range 11/1-1000; also capped to ~32 KB, whichever is smaller. groups_truncated flags either cut.")] int limit = DefaultGroupLimit,
         CancellationToken cancellationToken = default)
     {
         var limitError = McpHelpers.ValidateTop(limit);

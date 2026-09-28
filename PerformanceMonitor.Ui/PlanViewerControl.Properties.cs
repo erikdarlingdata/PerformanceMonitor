@@ -1157,6 +1157,12 @@ public partial class PlanViewerControl
     {
         RuntimeSummaryContent.Children.Clear();
 
+        // #4570: title, row order, memory-grant colors/spill flag match
+        // erikdarlingdata/PerformanceStudio@40ade29 and @5731ae9; the row list itself is built by
+        // the shared, pure PlanDisplayText.BuildRuntimeSummaryRows so it can be pinned on macOS
+        // (this control is net10.0-windows-only and can't run a unit test there).
+        RuntimeSummaryTitle.Text = PlanDisplayText.RuntimeSummaryTitle(statement);
+
         var labelBrush = MutedBrush;
         var valueBrush = TooltipFgBrush;
 
@@ -1165,7 +1171,7 @@ public partial class PlanViewerControl
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         int rowIndex = 0;
 
-        void AddRow(string label, string value)
+        void AddRow(string label, string value, string? colorKey)
         {
             grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
@@ -1185,7 +1191,7 @@ public partial class PlanViewerControl
             {
                 Text = value,
                 FontSize = 11,
-                Foreground = valueBrush,
+                Foreground = colorKey == null ? valueBrush : (Brush)FindResource(colorKey),
                 Margin = new Thickness(0, 1, 0, 1)
             };
             Grid.SetRow(valueText, rowIndex);
@@ -1195,79 +1201,10 @@ public partial class PlanViewerControl
             rowIndex++;
         }
 
-        if (statement.QueryTimeStats != null)
-        {
-            AddRow("Elapsed", $"{statement.QueryTimeStats.ElapsedTimeMs:N0}ms");
-            // CPU:Elapsed row: matches erikdarlingdata/PerformanceStudio@28d4c74 (position right after
-            // Elapsed, and CPU with external-wait time subtracted via BenefitScorer.IsExternalWait).
-            var cpuElapsedRatio = PlanDisplayText.CpuElapsedRatio(statement);
-            if (cpuElapsedRatio != null)
-                AddRow("CPU:Elapsed", cpuElapsedRatio.Value.ToString("N2"));
-            AddRow("CPU", $"{statement.QueryTimeStats.CpuTimeMs:N0}ms");
-            if (statement.QueryUdfCpuTimeMs > 0)
-                AddRow("UDF CPU", $"{statement.QueryUdfCpuTimeMs:N0}ms");
-            if (statement.QueryUdfElapsedTimeMs > 0)
-                AddRow("UDF elapsed", $"{statement.QueryUdfElapsedTimeMs:N0}ms");
-        }
-
-        if (statement.MemoryGrant != null)
-        {
-            var mg = statement.MemoryGrant;
-            AddRow("Memory grant", $"{FormatMemoryGrantKB(mg.GrantedMemoryKB)} granted, {FormatMemoryGrantKB(mg.MaxUsedMemoryKB)} used");
-            if (mg.GrantWaitTimeMs > 0)
-                AddRow("Grant wait", $"{mg.GrantWaitTimeMs:N0}ms");
-        }
-
-        if (statement.DegreeOfParallelism > 0)
-            AddRow("DOP", statement.DegreeOfParallelism.ToString());
-        else if (statement.NonParallelPlanReason != null)
-            AddRow("Serial", statement.NonParallelPlanReason);
-
-        if (statement.ThreadStats != null)
-        {
-            var ts = statement.ThreadStats;
-            AddRow("Branches", ts.Branches.ToString());
-            var totalReserved = ts.Reservations.Sum(r => r.ReservedThreads);
-            if (totalReserved > 0)
-            {
-                var threadText = ts.UsedThreads == totalReserved
-                    ? $"{ts.UsedThreads} used ({totalReserved} reserved)"
-                    : $"{ts.UsedThreads} used of {totalReserved} reserved ({totalReserved - ts.UsedThreads} inactive)";
-                AddRow("Threads", threadText);
-            }
-            else
-            {
-                AddRow("Threads", $"{ts.UsedThreads} used");
-            }
-        }
-
-        if (statement.CardinalityEstimationModelVersion > 0)
-            AddRow("CE model", statement.CardinalityEstimationModelVersion.ToString());
-
-        if (statement.CompileTimeMs > 0)
-            AddRow("Compile time", $"{statement.CompileTimeMs:N0}ms");
-        if (statement.CachedPlanSizeKB > 0)
-            AddRow("Cached plan size", $"{statement.CachedPlanSizeKB:N0} KB");
-
-        if (!string.IsNullOrEmpty(statement.StatementOptmLevel))
-            AddRow("Optimization", statement.StatementOptmLevel);
-        if (!string.IsNullOrEmpty(statement.StatementOptmEarlyAbortReason))
-            AddRow("Early abort", statement.StatementOptmEarlyAbortReason);
+        foreach (var row in PlanDisplayText.BuildRuntimeSummaryRows(statement))
+            AddRow(row.Label, row.Value, row.ColorKey);
 
         RuntimeSummaryContent.Children.Add(grid);
-    }
-
-    /// <summary>
-    /// Formats a memory value given in KB to a human-readable string.
-    /// Under 1,024 KB: show KB. 1,024-1,048,576 KB: show MB (1 decimal). Over 1,048,576 KB: show GB (2 decimals).
-    /// </summary>
-    private static string FormatMemoryGrantKB(long kb)
-    {
-        if (kb < 1024)
-            return $"{kb:N0} KB";
-        if (kb < 1024 * 1024)
-            return $"{kb / 1024.0:N1} MB";
-        return $"{kb / (1024.0 * 1024.0):N2} GB";
     }
 
     private void UpdateInsightsHeader()
