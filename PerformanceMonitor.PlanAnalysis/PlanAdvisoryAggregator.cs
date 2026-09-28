@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace PerformanceMonitor.PlanAnalysis;
 
@@ -26,9 +27,9 @@ public static class PlanAdvisoryAggregator
         List<PlanWarning> Warnings);
 
     /// <summary>Parses the plans and returns aggregate counts for the WS4 facts.</summary>
-    public static Summary Summarize(IEnumerable<string> planXmls)
+    public static Summary Summarize(IEnumerable<string> planXmls, CancellationToken cancellationToken = default)
     {
-        var details = Extract(planXmls);
+        var details = Extract(planXmls, cancellationToken);
         var maxImpact = details.MissingIndexes.Count > 0
             ? details.MissingIndexes.Max(i => i.Impact)
             : 0.0;
@@ -41,23 +42,25 @@ public static class PlanAdvisoryAggregator
     /// CREATE text, keeping the highest-impact instance of a duplicate suggestion) and all
     /// actionable warnings across the set.
     /// </summary>
-    public static Details Extract(IEnumerable<string> planXmls)
+    public static Details Extract(IEnumerable<string> planXmls, CancellationToken cancellationToken = default)
     {
         var byKey = new Dictionary<string, MissingIndex>(StringComparer.OrdinalIgnoreCase);
         var warnings = new List<PlanWarning>();
 
         foreach (var xml in planXmls)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             if (string.IsNullOrWhiteSpace(xml))
                 continue;
 
             ParsedPlan plan;
             try
             {
-                plan = ShowPlanParser.Parse(xml);
-                PlanAnalysisPipeline.Run(plan);
+                plan = ShowPlanParser.Parse(xml, cancellationToken);
+                PlanAnalysisPipeline.Run(plan, cancellationToken);
             }
-            catch
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 continue; // malformed / unsupported plan XML — skip, keep the rest
             }
