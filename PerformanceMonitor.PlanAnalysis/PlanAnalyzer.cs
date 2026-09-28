@@ -636,7 +636,7 @@ public static partial class PlanAnalyzer
         // Rule 1: Filter operators — rows survived the tree just to be discarded
         // Quantify the impact by summing child subtree cost (reads, CPU, time).
         // Suppress when the filter's child subtree is trivial (low I/O, fast, cheap).
-        if (node.PhysicalOp == "Filter" && !string.IsNullOrEmpty(node.Predicate)
+        if (!cfg.IsRuleDisabled(1) && node.PhysicalOp == "Filter" && !string.IsNullOrEmpty(node.Predicate)
             && node.Children.Count > 0)
         {
             // Gate: skip trivial filters based on actual stats or estimated cost
@@ -666,6 +666,7 @@ public static partial class PlanAnalyzer
 
                 node.Warnings.Add(new PlanWarning
                 {
+                    RuleNumber = 1,
                     WarningType = "Filter Operator",
                     Message = message,
                     Severity = PlanWarningSeverity.Warning
@@ -674,7 +675,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 2: Eager Index Spools — optimizer building temporary indexes on the fly
-        if (node.LogicalOp == "Eager Spool" &&
+        if (!cfg.IsRuleDisabled(2) && node.LogicalOp == "Eager Spool" &&
             node.PhysicalOp.Contains("Index", StringComparison.OrdinalIgnoreCase))
         {
             var message = "SQL Server is building a temporary index in TempDB at runtime because no suitable permanent index exists. This is expensive — it builds the index from scratch on every execution. Create a permanent index on the underlying table to eliminate this operator entirely.";
@@ -683,6 +684,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 2,
                 WarningType = "Eager Index Spool",
                 Message = message,
                 Severity = PlanWarningSeverity.Critical
@@ -690,10 +692,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 4: UDF timing — any node spending time in UDFs (actual plans)
-        if (node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0)
+        if (!cfg.IsRuleDisabled(4) && (node.UdfCpuTimeMs > 0 || node.UdfElapsedTimeMs > 0))
         {
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 4,
                 WarningType = "UDF Execution",
                 Message = $"Scalar UDF executing on this operator ({node.UdfElapsedTimeMs:N0}ms elapsed, {node.UdfCpuTimeMs:N0}ms CPU). Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = node.UdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -708,7 +711,7 @@ public static partial class PlanAnalyzer
         // - Nodes whose only parents are Parallelism/Top/Sort (no spill) are skipped
         // An operator that never executed returned zero rows because it never ran, so its
         // zero is no evidence that the estimate was wrong.
-        if (node.HasActualStats && node.EstimateRows > 0
+        if (!cfg.IsRuleDisabled(5) && node.HasActualStats && node.EstimateRows > 0
             && node.ActualExecutions > 0
             && !node.Lookup) // Key lookups are point lookups (1 row per execution) — per-execution estimate is misleading
         {
@@ -722,6 +725,7 @@ public static partial class PlanAnalyzer
                 {
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 5,
                         WarningType = "Row Estimate Mismatch",
                         Message = $"Estimated {node.EstimateRows:N0} rows but actual 0 rows returned. SQL Server allocated resources for rows that never materialized.",
                         Severity = PlanWarningSeverity.Warning
@@ -746,6 +750,7 @@ public static partial class PlanAnalyzer
                             : $"Actual {node.ActualRows:N0}";
                         node.Warnings.Add(new PlanWarning
                         {
+                            RuleNumber = 5,
                             WarningType = "Row Estimate Mismatch",
                             Message = $"Estimated {node.EstimateRows:N0} vs {actualDisplay} — {factor:F0}x {direction}. {harm}",
                             Severity = factor >= 100 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -764,12 +769,13 @@ public static partial class PlanAnalyzer
                 or "CLRUserDefinedFunctionRequiresDataAccess"
                 or "CouldNotGenerateValidParallelPlan")
             && stmt.PlanWarnings.Any(w => w.WarningType == "Serial Plan");
-        if (!serialPlanCoversUdf)
+        if (!cfg.IsRuleDisabled(6) && !serialPlanCoversUdf)
         foreach (var udf in node.ScalarUdfs)
         {
             var type = udf.IsClrFunction ? "CLR" : "T-SQL";
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 6,
                 WarningType = "Scalar UDF",
                 Message = $"Scalar {type} UDF: {udf.FunctionName}. Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = PlanWarningSeverity.Warning
@@ -780,6 +786,9 @@ public static partial class PlanAnalyzer
         // based on what percentage of statement elapsed time the spill accounts for.
         // Exchange spills on Parallelism operators get special handling since their
         // timing is unreliable but the write count tells the story.
+        // Guard only: this rule changes the severity of SQL Server's own spill warnings
+        // rather than adding a new PlanWarning, so it carries no RuleNumber stamp.
+        if (!cfg.IsRuleDisabled(7))
         foreach (var w in node.Warnings.ToList())
         {
             if (w.SpillDetails == null)
@@ -830,7 +839,7 @@ public static partial class PlanAnalyzer
         // Rule 8: Parallel thread skew (actual plans with per-thread stats)
         // Only warn when there are enough rows to meaningfully distribute across threads
         // Filter out thread 0 (coordinator) which typically does 0 rows in parallel operators
-        if (node.PerThreadStats.Count > 1)
+        if (!cfg.IsRuleDisabled(8) && node.PerThreadStats.Count > 1)
         {
             var workerThreads = node.PerThreadStats.Where(t => t.ThreadId > 0).ToList();
             if (workerThreads.Count < 2) workerThreads = node.PerThreadStats; // fallback
@@ -864,6 +873,7 @@ public static partial class PlanAnalyzer
 
                     node.Warnings.Add(new PlanWarning
                     {
+                        RuleNumber = 8,
                         WarningType = "Parallel Skew",
                         Message = message,
                         Severity = severity
@@ -874,7 +884,7 @@ public static partial class PlanAnalyzer
 
         // Rule 10: Key Lookup / RID Lookup with residual predicate
         // Check RID Lookup first — it's more specific (PhysicalOp) and also has Lookup=true
-        if (node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
+        if (!cfg.IsRuleDisabled(10) && node.PhysicalOp.StartsWith("RID Lookup", StringComparison.OrdinalIgnoreCase))
         {
             var message = "RID Lookup — this table is a heap (no clustered index). SQL Server found rows via a nonclustered index but had to follow row identifiers back to unordered heap pages. Heap lookups are more expensive than key lookups because pages are not sorted and may have forwarding pointers. Add a clustered index to the table.";
             if (!string.IsNullOrEmpty(node.Predicate))
@@ -882,12 +892,13 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 10,
                 WarningType = "RID Lookup",
                 Message = message,
                 Severity = PlanWarningSeverity.Warning
             });
         }
-        else if (node.Lookup)
+        else if (!cfg.IsRuleDisabled(10) && node.Lookup)
         {
             var lookupMsg = "Key Lookup — SQL Server found rows via a nonclustered index but had to go back to the clustered index for additional columns.";
 
@@ -908,6 +919,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 10,
                 WarningType = "Key Lookup",
                 Message = lookupMsg,
                 Severity = PlanWarningSeverity.Critical
@@ -916,8 +928,7 @@ public static partial class PlanAnalyzer
 
         // Rule 12: Non-SARGable predicate on scan
         // Skip for 0-execution nodes — the operator never ran, so the warning is academic
-        var nonSargableReason = (node.HasActualStats && node.ActualExecutions == 0)
-            ? null : DetectNonSargablePredicate(node);
+        var nonSargableReason = GetNonSargableReason(node, cfg);
         if (nonSargableReason != null)
         {
             var nonSargableAdvice = nonSargableReason switch
@@ -938,6 +949,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 12,
                 WarningType = "Non-SARGable Predicate",
                 Message = $"{nonSargableAdvice}\nPredicate: {Truncate(node.Predicate!, 200)}",
                 Severity = PlanWarningSeverity.Warning
@@ -947,7 +959,7 @@ public static partial class PlanAnalyzer
         // Rule 11: Scan with residual predicate (skip if non-SARGable already flagged)
         // A PROBE() alone is just a bitmap filter — not a real residual predicate.
         // Skip for 0-execution nodes — the operator never ran
-        if (nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
+        if (!cfg.IsRuleDisabled(11) && nonSargableReason == null && IsRowstoreScan(node) && !string.IsNullOrEmpty(node.Predicate) &&
             !IsProbeOnly(node.Predicate) && !(node.HasActualStats && node.ActualExecutions == 0))
         {
             var displayPredicate = StripProbeExpressions(node.Predicate);
@@ -981,6 +993,7 @@ public static partial class PlanAnalyzer
 
             node.Warnings.Add(new PlanWarning
             {
+                RuleNumber = 11,
                 WarningType = "Scan With Predicate",
                 Message = message,
                 Severity = severity
@@ -1530,6 +1543,15 @@ public static partial class PlanAnalyzer
     /// </summary>
     private static bool IsTableVariable(PlanNode node) =>
         !string.IsNullOrEmpty(node.ObjectName) && node.ObjectName.StartsWith('@');
+
+    /// <summary>
+    /// Shared by Rule 12 (emits the warning) and Rule 11 (which suppresses its residual-
+    /// predicate warning when a non-SARGable predicate was already flagged). Pure function
+    /// of node + cfg, so both rules can compute it independently.
+    /// </summary>
+    private static string? GetNonSargableReason(PlanNode node, AnalyzerConfig cfg) =>
+        cfg.IsRuleDisabled(12) || (node.HasActualStats && node.ActualExecutions == 0)
+            ? null : DetectNonSargablePredicate(node);
 
     /// <summary>
     /// Detects non-SARGable patterns in scan predicates.
