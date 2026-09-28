@@ -95,7 +95,7 @@ public static class McpPlanAnalysisFormatter
     public static string BuildAnalysisResult(string xml, string? serverName, string source, string? identifier)
     {
         var plan = ShowPlanParser.Parse(xml);
-        PlanAnalyzer.Analyze(plan);
+        PlanAnalysisPipeline.Run(plan);
 
         // #4514: includes statements nested inside a stored procedure or UDF body, so the MCP
         // analyze_plan_xml/analyze_query_plan/analyze_query_store_plan tools see the same
@@ -152,13 +152,20 @@ public static class McpPlanAnalysisFormatter
                     query_hash = s.QueryHash,
                     query_plan_hash = s.QueryPlanHash,
                     has_actual_stats = hasActuals,
-                    warnings = allWarnings.Select(w => new
-                    {
-                        severity = w.Severity.ToString(),
-                        type = w.WarningType,
-                        message = w.Message,
-                        source = w.Source.ToString()
-                    }),
+                    /* #4546: ordered by max_benefit_percent descending, nulls (unscored findings) last —
+                       same ordering PerformanceStudio's viewer and advice builder apply, so the highest-payoff
+                       finding for this statement is always first regardless of parse order. */
+                    warnings = allWarnings
+                        .OrderByDescending(w => w.MaxBenefitPercent ?? -1)
+                        .Select(w => new
+                        {
+                            severity = w.Severity.ToString(),
+                            type = w.WarningType,
+                            message = w.Message,
+                            source = w.Source.ToString(),
+                            origin_node_ids = w.OriginNodeIds,
+                            max_benefit_percent = w.MaxBenefitPercent
+                        }),
                     warning_count = allWarnings.Count,
                     critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),
                     /* #3653 A15/A16: impact is labelled for what it is (MissingIndexImpactBasis). #3805: the
@@ -218,6 +225,10 @@ public static class McpPlanAnalysisFormatter
             server = serverName,
             source,
             identifier,
+            /* #4551: a refused or exception-terminated plan still returns whatever parsed before the
+               failure, so statement_count/statements below can be 0 or partial. parse_error surfaces the
+               reason instead of letting a partial result look complete; null when the plan parsed fine. */
+            parse_error = plan.ParseError,
             statement_count = statements.Count,
             total_warnings = totalWarnings,
             total_critical = totalCritical,

@@ -184,6 +184,40 @@ public sealed class PlanSync4512Tests
     }
 
     /// <summary>
+    /// #4551: <see cref="ShowPlanParser"/>'s <c>ScopedDescendants</c> walked its own children
+    /// recursively, with no depth guard of its own — <c>MaxParseDepth</c> bounds
+    /// <c>ParseRelOp</c>/<c>ParseStatementAndChildren</c>, not this helper. A plan whose single
+    /// operator holds a very deep run of non-RelOp elements (a <c>Hash</c> with 100,000 nested
+    /// children here) could overflow the stack before that depth check ever ran. The walk is now
+    /// iterative, so this parses to completion — or fails closed with <c>ParseError</c> — on a
+    /// 1 MB caller thread instead of crashing the process.
+    /// </summary>
+    [Fact]
+    public void DeeplyNestedNonRelOpChildrenDoNotCrashTheScopedWalk()
+    {
+        var xml = DeepNonRelOpPlan(100_000);
+
+        var plan = ParseOnOneMegabyteStackThread(xml);
+
+        Assert.Null(plan!.ParseError);
+    }
+
+    /// <summary>
+    /// #4551: <c>XDocument.Parse</c>'s catch block used to swallow every exception and leave
+    /// <see cref="ParsedPlan.ParseError"/> null, so malformed plan XML parsed to an empty,
+    /// silently wrong result instead of a reported failure. It now catches <c>XmlException</c>
+    /// specifically and records a message.
+    /// </summary>
+    [Fact]
+    public void MalformedXmlSetsAReadableParseError()
+    {
+        var plan = ShowPlanParser.Parse("<ShowPlanXML><unclosed>");
+
+        Assert.NotNull(plan.ParseError);
+        Assert.StartsWith("The plan XML could not be read", plan.ParseError);
+    }
+
+    /// <summary>
     /// A RelOp's children live inside its own operator element (<c>NestedLoops</c> here), not
     /// directly under the RelOp itself — <see cref="ShowPlanParser"/>'s <c>FindChildRelOps</c>
     /// looks past that wrapper for its recursion, so the depth bomb has to shape it the same way.
@@ -197,6 +231,27 @@ public sealed class PlanSync4512Tests
         xml.Append("<RelOp NodeId=\"0\" PhysicalOp=\"Constant Scan\" LogicalOp=\"Constant Scan\" />");
         for (var level = 0; level < depth; level++)
             xml.Append("</NestedLoops></RelOp>");
+        xml.Append("</QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>");
+        return xml.ToString();
+    }
+
+    /// <summary>
+    /// One <c>Hash</c> operator holding <paramref name="depth"/> nested non-RelOp elements below
+    /// it — the shape <c>ScopedDescendants</c> walks when it looks past a physical-op wrapper for
+    /// a tagged descendant (see the call sites at, for example, seek predicates and object
+    /// references). No RelOp appears below the outer one, so this exercises the scoped walk's
+    /// own recursion rather than <c>MaxParseDepth</c>.
+    /// </summary>
+    private static string DeepNonRelOpPlan(int depth)
+    {
+        var xml = new StringBuilder($"<ShowPlanXML {Ns}><BatchSequence><Batch><Statements>");
+        xml.Append("<StmtSimple StatementText=\"SELECT 1\" StatementType=\"SELECT\"><QueryPlan>");
+        xml.Append("<RelOp NodeId=\"0\" PhysicalOp=\"Hash Match\" LogicalOp=\"Inner Join\"><Hash>");
+        for (var level = 0; level < depth; level++)
+            xml.Append("<Wrap>");
+        for (var level = 0; level < depth; level++)
+            xml.Append("</Wrap>");
+        xml.Append("</Hash></RelOp>");
         xml.Append("</QueryPlan></StmtSimple></Statements></Batch></BatchSequence></ShowPlanXML>");
         return xml.ToString();
     }

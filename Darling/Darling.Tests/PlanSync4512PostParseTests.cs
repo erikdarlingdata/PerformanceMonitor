@@ -102,10 +102,10 @@ public sealed class PlanSync4512PostParseTests
     }
 
     /// <summary>
-    /// Runs parse + analyze + score + layout on a thread built with exactly the stack size the
-    /// docs on <see cref="PlanAnalyzer.Analyze"/> claim as the measured floor for a 1 MB caller
-    /// (roughly 130 KB) plus a safety margin, proving the walks are not living on borrowed
-    /// margin from a coincidentally larger CI thread.
+    /// Runs parse + analyze + score + layout on a thread built with exactly the stack size of a
+    /// real caller (1 MB, the plan viewer's WPF UI thread size, or 1.5 MB, the Darling service's
+    /// analysis-pass thread size), proving the walks are not living on borrowed margin from a
+    /// coincidentally larger CI thread.
     /// </summary>
     private static (PlanStatement? statement, string? error) RunOnStackThread(int depth, long stackBytes)
     {
