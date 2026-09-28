@@ -531,7 +531,7 @@ public class AnalysisService
     /// callers' unobserved envelope keeps describing exactly the point-in-time facts it names.</para>
     /// </summary>
     public async Task<(List<Fact> Facts, WindowCoverage? Coverage, CollectionCaveatState Caveats)> CollectAndScoreFactsAsync(
-        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null)
+        int serverId, string serverName, int hoursBack = 4, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var timeRangeStart = timeRangeEnd.AddHours(-hoursBack);
@@ -542,7 +542,8 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = timeRangeStart,
             TimeRangeEnd = timeRangeEnd,
-            AsOfUtc = asOfUtc
+            AsOfUtc = asOfUtc,
+            CancellationToken = cancellationToken
         };
 
         try
@@ -560,8 +561,10 @@ public class AnalysisService
             _scorer.ScoreAll(facts);
             return (facts, context.Coverage, CollectionCaveatState.From(context));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault. */
             AppLogger.Error("AnalysisService", $"Fact collection or anomaly detection failed for {serverName}: {ex.Message}");
             return ([], null, CollectionCaveatState.From(context));
         }
@@ -574,7 +577,7 @@ public class AnalysisService
     /// already, so the full pass was paying for, and this skips, every other family plus the detector's
     /// baseline reads.
     /// </summary>
-    public async Task<List<Fact>> CollectConfigAuditFactsAsync(int serverId, string serverName, DateTime? asOfUtc = null)
+    public async Task<List<Fact>> CollectConfigAuditFactsAsync(int serverId, string serverName, DateTime? asOfUtc = null, CancellationToken cancellationToken = default)
     {
         var timeRangeEnd = asOfUtc ?? DateTime.UtcNow;
         var context = new AnalysisContext
@@ -583,15 +586,18 @@ public class AnalysisService
             ServerName = serverName,
             TimeRangeStart = timeRangeEnd.AddHours(-1),
             TimeRangeEnd = timeRangeEnd,
-            AsOfUtc = asOfUtc
+            AsOfUtc = asOfUtc,
+            CancellationToken = cancellationToken
         };
 
         try
         {
             return await _collector.CollectConfigAuditFactsAsync(context);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault. */
             AppLogger.Error("AnalysisService", $"Config-audit fact collection failed for {serverName}: {ex.Message}");
             return [];
         }
@@ -618,14 +624,16 @@ public class AnalysisService
     public async Task<(List<Fact> BaselineFacts, List<Fact> ComparisonFacts, WindowCoverage? BaselineCoverage, WindowCoverage? ComparisonCoverage, IReadOnlyDictionary<string, BaselineBucket> Dispersion)> ComparePeriodsAsync(
         int serverId, string serverName,
         DateTime baselineStart, DateTime baselineEnd,
-        DateTime comparisonStart, DateTime comparisonEnd)
+        DateTime comparisonStart, DateTime comparisonEnd,
+        CancellationToken cancellationToken = default)
     {
         var baselineContext = new AnalysisContext
         {
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = baselineStart,
-            TimeRangeEnd = baselineEnd
+            TimeRangeEnd = baselineEnd,
+            CancellationToken = cancellationToken
         };
 
         var comparisonContext = new AnalysisContext
@@ -633,7 +641,8 @@ public class AnalysisService
             ServerId = serverId,
             ServerName = serverName,
             TimeRangeStart = comparisonStart,
-            TimeRangeEnd = comparisonEnd
+            TimeRangeEnd = comparisonEnd,
+            CancellationToken = cancellationToken
         };
 
         try
@@ -644,12 +653,14 @@ public class AnalysisService
             _scorer.ScoreAll(baselineFacts);
             _scorer.ScoreAll(comparisonFacts);
 
-            var dispersion = await LookUpDispersionAsync(serverId, serverName, baselineFacts, comparisonFacts, comparisonStart);
+            var dispersion = await LookUpDispersionAsync(serverId, serverName, baselineFacts, comparisonFacts, comparisonStart, cancellationToken);
 
             return (baselineFacts, comparisonFacts, baselineContext.Coverage, comparisonContext.Coverage, dispersion);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault. */
             AppLogger.Error("AnalysisService", $"Period comparison failed for {serverName}: {ex.Message}");
             return ([], [], null, null, new Dictionary<string, BaselineBucket>());
         }
@@ -661,16 +672,18 @@ public class AnalysisService
     /// degrades to "no dispersion" rather than failing the comparison.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, BaselineBucket>> LookUpDispersionAsync(
-        int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart)
+        int serverId, string serverName, List<Fact> baselineFacts, List<Fact> comparisonFacts, DateTime comparisonStart, CancellationToken cancellationToken = default)
     {
         var dispersion = new Dictionary<string, BaselineBucket>(StringComparer.Ordinal);
         try
         {
             foreach (var metric in ComparisonBanding.DispersionMetricsFor(baselineFacts, comparisonFacts))
-                dispersion[metric] = await _baselineProvider.GetBaselineAsync(serverId, metric, comparisonStart);
+                dispersion[metric] = await _baselineProvider.GetBaselineAsync(serverId, metric, comparisonStart, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            /* #4203: cancellation (an abandoned MCP read) must reach the caller as OperationCanceledException,
+               not be swallowed into an empty result and logged as a fault. */
             AppLogger.Warn("AnalysisService", $"Baseline dispersion lookup failed for {serverName}; compare_analysis bands every key by the absolute rule: {ex.Message}");
             dispersion.Clear();
         }
@@ -953,7 +966,8 @@ ORDER BY event_time";
             var (before, after, beforeCoverage, afterCoverage, dispersion) = await ComparePeriodsAsync(
                 context.ServerId, context.ServerName,
                 windows.BeforeStart, windows.BeforeEnd,
-                windows.AfterStart, windows.AfterEnd);
+                windows.AfterStart, windows.AfterEnd,
+                context.CancellationToken);
 
             /* Both coverages null is ComparePeriodsAsync's own catch (collection threw); an empty compare
                over OBSERVED windows is the "nothing moved" answer and is banded like any other. */
