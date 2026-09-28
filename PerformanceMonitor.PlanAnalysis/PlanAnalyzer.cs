@@ -135,7 +135,8 @@ public static partial class PlanAnalyzer
         // Skip: cost < 1 (CTFP is an integer so cost < 1 can never go parallel),
         // TRIVIAL optimization (can't go parallel anyway),
         // and 0ms actual elapsed time (not worth flagging).
-        if (!string.IsNullOrEmpty(stmt.NonParallelPlanReason)
+        if (!cfg.IsRuleDisabled(3)
+            && !string.IsNullOrEmpty(stmt.NonParallelPlanReason)
             && stmt.StatementSubTreeCost >= 1.0
             && stmt.StatementOptmLevel != "TRIVIAL"
             && !(stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs == 0))
@@ -213,6 +214,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 3,
                         WarningType = "Serial Plan",
                         Message = $"Query running serially: {reason}.",
                         Severity = PlanWarningSeverity.Warning
@@ -222,6 +224,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 3,
                         WarningType = "Serial Plan",
                         Message = $"Query running serially: {reason}. MAXDOP 1 may be set at the server, database, resource governor, or query level (query text was truncated).",
                         Severity = PlanWarningSeverity.Info
@@ -233,6 +236,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 3,
                     WarningType = "Serial Plan",
                     Message = $"Query running serially: {reason}.",
                     Severity = isActionable ? PlanWarningSeverity.Warning : PlanWarningSeverity.Info
@@ -241,7 +245,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 9: Memory grant issues (statement-level)
-        if (stmt.MemoryGrant != null)
+        if (!cfg.IsRuleDisabled(9) && stmt.MemoryGrant != null)
         {
             var grant = stmt.MemoryGrant;
 
@@ -262,6 +266,7 @@ public static partial class PlanAnalyzer
 
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 9,
                         WarningType = "Excessive Memory Grant",
                         Message = message,
                         Severity = PlanWarningSeverity.Warning
@@ -274,6 +279,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 9,
                     WarningType = "Memory Grant Wait",
                     Message = $"Query waited {grant.GrantWaitTimeMs:N0}ms for a memory grant before it could start running. Other queries were using all available workspace memory.",
                     Severity = grant.GrantWaitTimeMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -301,6 +307,7 @@ public static partial class PlanAnalyzer
 
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 9,
                     WarningType = "Large Memory Grant",
                     Message = $"Query granted {grantMB:F0} MB of memory.{guidance}",
                     Severity = grantMB >= 4096 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -309,10 +316,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 18: Compile memory exceeded (early abort)
-        if (stmt.StatementOptmEarlyAbortReason == "MemoryLimitExceeded")
+        if (!cfg.IsRuleDisabled(18) && stmt.StatementOptmEarlyAbortReason == "MemoryLimitExceeded")
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 18,
                 WarningType = "Compile Memory Exceeded",
                 Message = "Optimization was aborted early because the compile memory limit was exceeded. The plan is likely suboptimal. Simplify the query by breaking it into smaller steps using #temp tables.",
                 Severity = PlanWarningSeverity.Critical
@@ -320,10 +328,11 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 19: High compile CPU
-        if (stmt.CompileCPUMs >= 1000)
+        if (!cfg.IsRuleDisabled(19) && stmt.CompileCPUMs >= 1000)
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 19,
                 WarningType = "High Compile CPU",
                 Message = $"Query took {stmt.CompileCPUMs:N0}ms of CPU just to compile a plan (before any data was read). Simplify the query by breaking it into smaller steps using #temp tables.",
                 Severity = stmt.CompileCPUMs >= 5000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -332,10 +341,11 @@ public static partial class PlanAnalyzer
 
         // Rule 4 (statement-level): UDF execution timing from QueryTimeStats
         // Some plans report UDF timing only at the statement level, not per-node.
-        if (stmt.QueryUdfCpuTimeMs > 0 || stmt.QueryUdfElapsedTimeMs > 0)
+        if (!cfg.IsRuleDisabled(4) && (stmt.QueryUdfCpuTimeMs > 0 || stmt.QueryUdfElapsedTimeMs > 0))
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 4,
                 WarningType = "UDF Execution",
                 Message = $"Scalar UDF cost in this statement: {stmt.QueryUdfElapsedTimeMs:N0}ms elapsed, {stmt.QueryUdfCpuTimeMs:N0}ms CPU. Scalar UDFs run once per row and prevent parallelism. Options: rewrite as an inline table-valued function, assign the result to a variable if only one row is needed, dump results to a #temp table and apply the UDF to the final result set, or on SQL Server 2019+ check if the UDF is eligible for automatic scalar UDF inlining.",
                 Severity = stmt.QueryUdfElapsedTimeMs >= 1000 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
@@ -346,7 +356,7 @@ public static partial class PlanAnalyzer
         // Parameters with no CompiledValue are likely local variables — the optimizer
         // cannot sniff their values and uses density-based ("unknown") estimates.
         // Skip statements with cost < 1 (can't go parallel, estimate quality rarely matters).
-        if (stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
+        if (!cfg.IsRuleDisabled(20) && stmt.Parameters.Count > 0 && stmt.StatementSubTreeCost >= 1.0)
         {
             var unsnifffedParams = stmt.Parameters
                 .Where(p => string.IsNullOrEmpty(p.CompiledValue))
@@ -361,6 +371,7 @@ public static partial class PlanAnalyzer
                     var names = string.Join(", ", unsnifffedParams.Select(p => p.Name));
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 20,
                         WarningType = "Local Variables",
                         Message = $"Local variables detected: {names}. SQL Server cannot sniff local variable values at compile time, so it uses average density estimates instead of your actual values. Test with OPTION (RECOMPILE) to see if the plan improves. For a permanent fix, use dynamic SQL or a stored procedure to pass the values as parameters instead of local variables.",
                         Severity = PlanWarningSeverity.Warning
@@ -376,11 +387,12 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
-        if (!string.IsNullOrEmpty(stmt.StatementText) &&
+        if (!cfg.IsRuleDisabled(27) && !string.IsNullOrEmpty(stmt.StatementText) &&
             OptimizeForUnknownRegExp().IsMatch(MaskCommentsAndLiterals(stmt.StatementText))) // #4524
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 27,
                 WarningType = "Optimize For Unknown",
                 Message = "OPTIMIZE FOR UNKNOWN uses average density estimates instead of sniffed parameter values. This can help when parameter sniffing causes plan instability, but may produce suboptimal plans for skewed data distributions.",
                 Severity = PlanWarningSeverity.Warning
@@ -436,6 +448,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 30: Missing index quality evaluation
+        if (!cfg.IsRuleDisabled(30))
         {
             // Detect duplicate suggestions for the same table
             var tableSuggestionCount = stmt.MissingIndexes
@@ -454,6 +467,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Low Impact Index",
                         Message = $"Missing index suggestion for {mi.Table} has only {mi.Impact:F0}% estimated impact. Low-impact indexes add maintenance overhead (insert/update/delete cost) that may not justify the modest query improvement.",
                         Severity = PlanWarningSeverity.Info
@@ -465,6 +479,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Wide Index Suggestion",
                         Message = $"Missing index suggestion for {mi.Table} has {includeCount} INCLUDE columns. This is a \"kitchen sink\" index — SQL Server suggests covering every column the query touches, but the resulting index would be very wide and expensive to maintain. Evaluate which columns are actually needed, or consider a narrower index with fewer includes.",
                         Severity = PlanWarningSeverity.Warning
@@ -475,6 +490,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Wide Index Suggestion",
                         Message = $"Missing index suggestion for {mi.Table} has {keyCount} key columns ({mi.EqualityColumns.Count} equality + {mi.InequalityColumns.Count} inequality). Wide key columns increase index size and maintenance cost. Evaluate whether all key columns are needed for seek predicates.",
                         Severity = PlanWarningSeverity.Warning
@@ -486,6 +502,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 30,
                         WarningType = "Duplicate Index Suggestions",
                         Message = $"{count} missing index suggestions target {mi.Table}. Multiple suggestions for the same table often overlap — consolidate into fewer, broader indexes rather than creating all of them.",
                         Severity = PlanWarningSeverity.Warning
@@ -497,7 +514,7 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 22 (statement-level): Table variable warnings
-        if (stmt.RootNode != null)
+        if (!cfg.IsRuleDisabled(22) && stmt.RootNode != null)
         {
             var hasTableVar = false;
             var isModification = stmt.StatementType is "INSERT" or "UPDATE" or "DELETE" or "MERGE";
@@ -511,6 +528,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 22,
                     WarningType = "Table Variable",
                     Message = "Table variable detected. Table variables lack column-level statistics, which causes bad row estimates, join choices, and memory grant decisions. Replace with a #temp table.",
                     Severity = PlanWarningSeverity.Warning,
@@ -522,6 +540,7 @@ public static partial class PlanAnalyzer
             {
                 stmt.PlanWarnings.Add(new PlanWarning
                 {
+                    RuleNumber = 22,
                     WarningType = "Table Variable",
                     Message = "This query modifies a table variable, which forces the entire plan to run single-threaded. SQL Server cannot use parallelism for modifications to table variables. Replace with a #temp table to allow parallel execution.",
                     Severity = PlanWarningSeverity.Critical,
@@ -534,11 +553,12 @@ public static partial class PlanAnalyzer
         // because they must tolerate underlying data changes between fetches, forcing
         // scans and extra work per fetch. Switching to FAST_FORWARD, STATIC, or KEYSET
         // often delivers a dramatic improvement.
-        if (string.Equals(stmt.CursorActualType, "Dynamic", StringComparison.OrdinalIgnoreCase))
+        if (!cfg.IsRuleDisabled(36) && string.Equals(stmt.CursorActualType, "Dynamic", StringComparison.OrdinalIgnoreCase))
         {
             var cursorLabel = string.IsNullOrEmpty(stmt.CursorName) ? "Cursor" : $"Cursor \"{stmt.CursorName}\"";
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 36,
                 WarningType = "Dynamic Cursor",
                 Message = $"{cursorLabel} is a dynamic cursor. Dynamic cursors tolerate underlying data changes between fetches, which prevents many index uses and forces extra work per fetch. If you don't need that semantic, switching to FAST_FORWARD (or STATIC / KEYSET, depending on requirements) typically gives a large performance improvement.",
                 Severity = PlanWarningSeverity.Warning
@@ -549,7 +569,7 @@ public static partial class PlanAnalyzer
         // is GLOBAL in SQL Server, which puts cursors in a shared namespace and can
         // bloat the plan cache (Erik's writeup:
         // https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/).
-        if (!string.IsNullOrEmpty(stmt.StatementText))
+        if (!cfg.IsRuleDisabled(37) && !string.IsNullOrEmpty(stmt.StatementText))
         {
             var maskedText = MaskCommentsAndLiterals(stmt.StatementText); // #4524
 
@@ -570,6 +590,7 @@ public static partial class PlanAnalyzer
                 {
                     stmt.PlanWarnings.Add(new PlanWarning
                     {
+                        RuleNumber = 37,
                         WarningType = "Cursor Missing LOCAL",
                         Message = "CURSOR declaration is missing the LOCAL keyword. Default cursor scope is GLOBAL, which puts the cursor in a shared namespace and can bloat the plan cache (see https://erikdarling.com/cursor-declarations-that-use-openjson-can-bloat-your-plan-cache/). Adding LOCAL is cheap and usually right.",
                         Severity = PlanWarningSeverity.Warning
@@ -624,10 +645,11 @@ public static partial class PlanAnalyzer
         // Rule 39: the plan's copy of the query text hit SQL Server's showplan cap.
         // Everything downstream that reads this text — advice, Copy Query Text, Open in Query
         // Editor — is working from a query that stops mid-statement.
-        if (stmt.IsTextTruncated)
+        if (!cfg.IsRuleDisabled(39) && stmt.IsTextTruncated)
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
+                RuleNumber = 39,
                 WarningType = "Truncated Query Text",
                 Message =
                     "SQL Server truncated this query's text at 4,000 characters when it wrote the plan, "
