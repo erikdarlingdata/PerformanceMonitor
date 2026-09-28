@@ -44,8 +44,6 @@ public static partial class PlanAnalyzer
 
     private static readonly Regex CaseInPredicateRegex = CaseInPredicateRegExp();
 
-    // Matches CTE definitions: WITH name AS ( or , name AS (
-    private static readonly Regex CteDefinitionRegex = CteDefinitionRegExp();
 
     private static readonly Regex IsNullCoalesceRegex = IsNullCoalesceRegExp();
 
@@ -353,11 +351,9 @@ public static partial class PlanAnalyzer
             }
         }
 
-        // Rule 21: CTE referenced multiple times
-        if (!string.IsNullOrEmpty(stmt.StatementText))
-        {
-            DetectMultiReferenceCte(stmt);
-        }
+        // Rule 21 (CTE referenced multiple times) removed: for actual plans, SQL Server
+        // runtime stats show exactly where time was spent, so a statement-text-pattern
+        // warning about CTE reuse is guessing.
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
         if (!string.IsNullOrEmpty(stmt.StatementText) &&
@@ -371,53 +367,9 @@ public static partial class PlanAnalyzer
             });
         }
 
-        // Rule 25: Ineffective parallelism — DOP-aware efficiency scoring
-        // Efficiency = (speedup - 1) / (DOP - 1) * 100
-        // where speedup = CPU / Elapsed. At DOP 1 speedup=1 (0%), at DOP=speedup (100%).
-        // Rule 31: Parallel wait bottleneck — elapsed >> CPU means threads waiting, not working.
-        if (stmt.DegreeOfParallelism > 1 && stmt.QueryTimeStats != null)
-        {
-            var cpu = stmt.QueryTimeStats.CpuTimeMs;
-            var elapsed = stmt.QueryTimeStats.ElapsedTimeMs;
-            var dop = stmt.DegreeOfParallelism;
-
-            if (elapsed >= 1000 && cpu > 0)
-            {
-                var speedup = (double)cpu / elapsed;
-                var efficiency = Math.Max(0.0, Math.Min(100.0, (speedup - 1.0) / (dop - 1.0) * 100.0));
-
-                // Build targeted advice from wait stats if available
-                var waitAdvice = GetWaitStatsAdvice(stmt.WaitStats);
-
-                if (speedup < 0.5)
-                {
-                    // CPU well below Elapsed: threads are waiting, not doing CPU work
-                    var waitPct = (1.0 - speedup) * 100;
-                    var advice = waitAdvice ?? "Common causes include spills to tempdb, physical I/O reads, lock or latch contention, and memory grant waits.";
-                    stmt.PlanWarnings.Add(new PlanWarning
-                    {
-                        WarningType = "Parallel Wait Bottleneck",
-                        Message = $"Parallel plan (DOP {dop}, {efficiency:N0}% efficient) with elapsed time ({elapsed:N0}ms) exceeding CPU time ({cpu:N0}ms). " +
-                                  $"Approximately {waitPct:N0}% of elapsed time was spent waiting rather than on CPU. " +
-                                  advice,
-                        Severity = PlanWarningSeverity.Warning
-                    });
-                }
-                else if (efficiency < 40)
-                {
-                    // CPU >= Elapsed but well below DOP potential — parallelism is ineffective
-                    var advice = waitAdvice ?? "Look for parallel thread skew, blocking exchanges, or serial zones in the plan that prevent effective parallel execution.";
-                    stmt.PlanWarnings.Add(new PlanWarning
-                    {
-                        WarningType = "Ineffective Parallelism",
-                        Message = $"Parallel plan (DOP {dop}) is only {efficiency:N0}% efficient — CPU time ({cpu:N0}ms) vs elapsed time ({elapsed:N0}ms). " +
-                                  $"At DOP {dop}, ideal CPU time would be ~{elapsed * dop:N0}ms. " +
-                                  advice,
-                        Severity = efficiency < 20 ? PlanWarningSeverity.Critical : PlanWarningSeverity.Warning
-                    });
-                }
-            }
-        }
+        // Rules 25 (Ineffective Parallelism) and 31 (Parallel Wait Bottleneck) were removed.
+        // The CPU:Elapsed ratio is now shown in the runtime summary, and wait stats speak
+        // for themselves — no need for meta-warnings guessing at causes.
 
         // Rule 30: Missing index quality evaluation
         {
@@ -1648,41 +1600,6 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
-    /// Detects CTEs that are referenced more than once in the statement text.
-    /// Each reference re-executes the CTE since SQL Server does not materialize them.
-    /// </summary>
-    private static void DetectMultiReferenceCte(PlanStatement stmt)
-    {
-        var text = stmt.StatementText;
-        var cteMatches = CteDefinitionRegex.Matches(text);
-        if (cteMatches.Count == 0)
-            return;
-
-        foreach (Match match in cteMatches)
-        {
-            var cteName = match.Groups[1].Value;
-            if (string.IsNullOrEmpty(cteName))
-                continue;
-
-            // Count references as FROM/JOIN targets after the CTE definition
-            var refPattern = new Regex(
-                $@"\b(FROM|JOIN)\s+{Regex.Escape(cteName)}\b",
-                RegexOptions.IgnoreCase);
-            var refCount = refPattern.Count(text);
-
-            if (refCount > 1)
-            {
-                stmt.PlanWarnings.Add(new PlanWarning
-                {
-                    WarningType = "CTE Multiple References",
-                    Message = $"CTE \"{cteName}\" is referenced {refCount} times. SQL Server re-executes the entire CTE each time — it does not materialize the results. Materialize into a #temp table instead.",
-                    Severity = PlanWarningSeverity.Warning
-                });
-            }
-        }
-    }
-
-    /// <summary>
     /// True when a lookup branch under an OR expansion's Concatenation builds its seek value from
     /// another input. A join OR does: in ON u.Id = p.OwnerUserId OR u.Id = p.LastEditorUserId the
     /// branches produce [Posts].[OwnerUserId] and [Posts].[LastEditorUserId], once per outer row.
@@ -2340,98 +2257,6 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
-    /// Returns targeted advice based on statement-level wait stats, or null if no waits.
-    /// When the dominant wait type is clear, gives specific guidance instead of generic advice.
-    /// </summary>
-    private static string? GetWaitStatsAdvice(List<WaitStatInfo> waits)
-    {
-        if (waits.Count == 0)
-            return null;
-
-        var totalMs = waits.Sum(w => w.WaitTimeMs);
-        if (totalMs == 0)
-            return null;
-
-        var top = waits.OrderByDescending(w => w.WaitTimeMs).First();
-        var topPct = (double)top.WaitTimeMs / totalMs * 100;
-
-        // Single dominant wait — give targeted advice
-        if (topPct >= 80)
-            return DescribeWaitType(top.WaitType, topPct);
-
-        // Multiple waits — summarize the top contributors instead of guessing
-        var topWaits = waits.OrderByDescending(w => w.WaitTimeMs).Take(3)
-            .Select(w => $"{w.WaitType} ({(double)w.WaitTimeMs / totalMs * 100:N0}%)")
-            .ToList();
-        return $"Top waits: {string.Join(", ", topWaits)}.";
-    }
-
-    /// <summary>
-    /// Maps a wait type to a human-readable description with percentage context.
-    /// Covers all wait types observed in real execution plan files.
-    /// </summary>
-    private static string DescribeWaitType(string rawWaitType, double topPct)
-    {
-        var waitType = rawWaitType.ToUpperInvariant();
-        return waitType switch
-        {
-            // I/O: reading/writing data pages from disk
-            _ when waitType.StartsWith("PAGEIOLATCH", StringComparison.Ordinal) =>
-                $"I/O bound — {topPct:N0}% of wait time is {rawWaitType}. Data is being read from disk rather than memory. Consider adding indexes to reduce I/O, or investigate memory pressure.",
-            _ when waitType.Contains("IO_COMPLETION", StringComparison.Ordinal) =>
-                $"I/O bound — {topPct:N0}% of wait time is {rawWaitType}. Non-buffer I/O such as sort/hash spills to TempDB or eager writes.",
-
-            // CPU: thread yielding its scheduler quantum
-            _ when waitType == "SOS_SCHEDULER_YIELD" =>
-                $"CPU bound — {topPct:N0}% of wait time is {rawWaitType}. The query is consuming significant CPU. Look for expensive operators (scans, sorts, hash builds) that could be eliminated or reduced.",
-
-            // Parallelism: exchange and synchronization waits
-            _ when waitType.StartsWith("CXPACKET", StringComparison.Ordinal) || waitType.StartsWith("CXCONSUMER", StringComparison.Ordinal) =>
-                $"Parallel thread skew — {topPct:N0}% of wait time is {rawWaitType}. Work is unevenly distributed across parallel threads.",
-            _ when waitType.StartsWith("CXSYNC", StringComparison.Ordinal) =>
-                $"Parallel synchronization — {topPct:N0}% of wait time is {rawWaitType}. Threads are waiting at exchange operators to synchronize parallel execution.",
-
-            // Hash operations
-            _ when waitType.StartsWith("HT", StringComparison.Ordinal) =>
-                $"Hash operation — {topPct:N0}% of wait time is {rawWaitType}. Time spent building, repartitioning, or cleaning up hash tables. Large hash builds may indicate missing indexes or bad row estimates.",
-
-            // Sort/bitmap batch operations
-            _ when waitType == "BPSORT" =>
-                $"Batch sort — {topPct:N0}% of wait time is {rawWaitType}. Time spent in batch-mode sort operations.",
-            _ when waitType == "BMPBUILD" =>
-                $"Bitmap build — {topPct:N0}% of wait time is {rawWaitType}. Time spent building bitmap filters for hash joins.",
-
-            // Memory allocation
-            _ when waitType.Contains("MEMORY_ALLOCATION_EXT", StringComparison.Ordinal) =>
-                $"Memory allocation — {topPct:N0}% of wait time is {rawWaitType}. Frequent memory allocations during query execution.",
-
-            // Latch contention (non-I/O)
-            _ when waitType.StartsWith("PAGELATCH", StringComparison.Ordinal) =>
-                $"Page latch contention — {topPct:N0}% of wait time is {rawWaitType}. In-memory page contention, often on TempDB or hot pages.",
-            _ when waitType.StartsWith("LATCH_", StringComparison.Ordinal) =>
-                $"Latch contention — {topPct:N0}% of wait time is {rawWaitType}.",
-
-            // Lock contention
-            _ when waitType.StartsWith("LCK_", StringComparison.Ordinal) =>
-                $"Lock contention — {topPct:N0}% of wait time is {rawWaitType}. Other sessions are holding locks that this query needs.",
-
-            // Log writes
-            _ when waitType == "LOGBUFFER" =>
-                $"Log write — {topPct:N0}% of wait time is {rawWaitType}. Waiting for transaction log buffer flushes, typically from data modifications.",
-
-            // Network
-            _ when waitType == "ASYNC_NETWORK_IO" =>
-                $"Network bound — {topPct:N0}% of wait time is {rawWaitType}. The client application is not consuming results fast enough.",
-
-            // Physical page cache
-            _ when waitType == "SOS_PHYS_PAGE_CACHE" =>
-                $"Physical page cache — {topPct:N0}% of wait time is {rawWaitType}. Contention on the physical memory page allocator.",
-
-            _ => $"Dominant wait is {rawWaitType} ({topPct:N0}% of wait time)."
-        };
-    }
-
-    /// <summary>
     /// Returns true if the statement has significant I/O waits (PAGEIOLATCH_*, IO_COMPLETION).
     /// Used for severity elevation decisions where I/O specifically indicates disk access.
     /// Thresholds: I/O waits >= 20% of total wait time AND >= 100ms absolute.
@@ -2938,8 +2763,6 @@ public static partial class PlanAnalyzer
     private static partial Regex LeadingWildcardLikeRegExp();
     [GeneratedRegex(@"\bCASE\s+(WHEN\b|$)", RegexOptions.IgnoreCase)]
     private static partial Regex CaseInPredicateRegExp();
-    [GeneratedRegex(@"(?:\bWITH\s+|\,\s*)(\w+)\s+AS\s*\(", RegexOptions.IgnoreCase)]
-    private static partial Regex CteDefinitionRegExp();
     [GeneratedRegex(@"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase)]
     private static partial Regex IsNullCoalesceRegExp();
     [GeneratedRegex(@"\bCONVERT_IMPLICIT\s*\(", RegexOptions.IgnoreCase)]

@@ -1177,6 +1177,11 @@ public partial class PlanViewerControl
         {
             AddRow("Elapsed", $"{statement.QueryTimeStats.ElapsedTimeMs:N0}ms");
             AddRow("CPU", $"{statement.QueryTimeStats.CpuTimeMs:N0}ms");
+            if (statement.QueryTimeStats.ElapsedTimeMs > 0)
+            {
+                var cpuElapsedRatio = (double)statement.QueryTimeStats.CpuTimeMs / statement.QueryTimeStats.ElapsedTimeMs;
+                AddRow("CPU:Elapsed", cpuElapsedRatio.ToString("N2"));
+            }
             if (statement.QueryUdfCpuTimeMs > 0)
                 AddRow("UDF CPU", $"{statement.QueryUdfCpuTimeMs:N0}ms");
             if (statement.QueryUdfElapsedTimeMs > 0)
