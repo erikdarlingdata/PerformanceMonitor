@@ -237,5 +237,18 @@
   // Read by Mcp\McpSettings, not by the alert-settings loader. Enabling it from the Settings
   // window is the supported route: that path also opens the firewall and restarts the host.
   "mcp_enabled": false,
-  "mcp_port": 5151
+  "mcp_port": 5151,
+
+  // ---- Plan analysis (#4535) ------------------------------------------------------------------------------
+  // NO UI. Per-rule overrides for the plan analyzer (the analyze_query_plan / analyze_procedure_plan /
+  // analyze_query_store_plan / analyze_plan_xml MCP tools, and the plan viewer window). Omit the key
+  // entirely for today's behavior: every rule runs at its built-in severity. "disabled" takes a rule
+  // number and drops that rule's findings; "severity_overrides" maps a rule number to a replacement
+  // severity string. Example: hide rule 20 (Local Variables) and downgrade rule 5 to "Low":
+  // "analyzer": {
+  //   "rules": {
+  //     "disabled": [20],
+  //     "severity_overrides": { "5": "Low" }
+  //   }
+  // }
 }

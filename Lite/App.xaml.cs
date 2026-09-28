@@ -89,9 +89,6 @@ public partial class App : Application
     public static string ArchiveDirectory { get; private set; } = string.Empty;
 
     /// <summary>
-    /// Gets the default time range in hours for new server tabs.
-    /// </summary>
-    /// <summary>
     /// #4535: the plan analyzer's per-rule config, read from settings.json's optional "analyzer" key
     /// (the same shape darling.json's "analyzer" section takes) alongside the other UI defaults
     /// <see cref="LoadDefaultTimeRange"/> reads. Never null; a missing key or malformed settings.json
@@ -100,6 +97,9 @@ public partial class App : Application
     public static PerformanceMonitor.PlanAnalysis.AnalyzerConfig AnalyzerConfig { get; set; } =
         PerformanceMonitor.PlanAnalysis.AnalyzerConfig.Default;
 
+    /// <summary>
+    /// Gets the default time range in hours for new server tabs.
+    /// </summary>
     public static int DefaultTimeRangeHours { get; set; } = 4;
 
     /// <summary>
