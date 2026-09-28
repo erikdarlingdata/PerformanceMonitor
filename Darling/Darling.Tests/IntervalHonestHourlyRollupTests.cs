@@ -386,8 +386,8 @@ public sealed class IntervalHonestHourlyRollupTests
 
         /* Compose. */
         var plan = ComposePlan("query_worker_us");
-        var dayOneRoute = ComposeSourceRouter.Resolve(plan, Now, windowStart, RollupAvailability.All, dayOne, PanelMode.TimeSeries, ComposeTimeBucket.None);
-        var coveredRoute = ComposeSourceRouter.Resolve(plan, Now, windowStart, RollupAvailability.All, covered, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var dayOneRoute = ComposeSourceRouter.Resolve(plan, Now, windowStart, Now, RollupAvailability.All, dayOne, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var coveredRoute = ComposeSourceRouter.Resolve(plan, Now, windowStart, Now, RollupAvailability.All, covered, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, dayOneRoute.Tier);
         Assert.Equal(legacy, dayOneRoute.CaggRelation);
         Assert.Equal(ComposeSourceTier.Hourly, coveredRoute.Tier);
@@ -399,7 +399,7 @@ public sealed class IntervalHonestHourlyRollupTests
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { [legacy] = DaysAgo(80), [TimescaleSupport.QueryStatsDailyView] = DaysAgo(110) },
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_stats"] = DaysAgo(4) },
             RollupAvailability.WithoutIntervalHourlies);
-        Assert.Equal(legacy, ComposeSourceRouter.Resolve(plan, Now, windowStart, RollupAvailability.WithoutIntervalHourlies, olderService, PanelMode.TimeSeries, ComposeTimeBucket.None).CaggRelation);
+        Assert.Equal(legacy, ComposeSourceRouter.Resolve(plan, Now, windowStart, Now, RollupAvailability.WithoutIntervalHourlies, olderService, PanelMode.TimeSeries, ComposeTimeBucket.None).CaggRelation);
         Assert.Equal(legacy, DarlingTrendReader.ResolveQueryDurationTrendRoute(windowStart, RollupAvailability.WithoutIntervalHourlies, olderService, Now).HourlyView);
 
         /* The MCP duration-trend route carries the resolved relation. */

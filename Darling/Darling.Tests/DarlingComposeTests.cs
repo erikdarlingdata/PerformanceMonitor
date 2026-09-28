@@ -2871,6 +2871,35 @@ public sealed class DarlingComposeTests
         Assert.Equal(ComposeSourceTier.Raw, compiled.Route.Tier);
     }
 
+    /// <summary>
+    /// #4605 part 2: a hybrid-eligible panel (SUM, Ranked, query_stats, a window and successor coverage that
+    /// would satisfy every <c>TryHybrid</c> gate) still compiles to today's raw SQL — the compiler keeps the
+    /// route's tier for later but recompiles it as <see cref="ComposeRoute.Raw"/> until the raw-edge union
+    /// exists. No existing SQL/route pin changes; this only proves the fallback fires.
+    /// </summary>
+    [Fact]
+    public void Compile_HybridEligiblePanel_StillCompilesRaw()
+    {
+        var plan = ValidPlan("{\"source\":\"query_stats\",\"measure\":\"query_worker_us\",\"aggregate\":\"sum\",\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}");
+        var now = WindowEnd;
+        var windowStart = now.AddHours(-12);
+        var successorView = TimescaleSupport.SuccessorOf("query_stats_hourly")!;
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = now.AddDays(-5) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = now.AddHours(-1) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = now.AddHours(-23) });
+
+        var (compiled, error) = ComposeCompiler.Compile(
+            plan, new ComposeRunContext(null, windowStart, now, ComposeRunContext.NoVariables, RollupAvailability.All, now, coverage));
+
+        Assert.True(error is null, error);
+        Assert.Contains("FROM collect.query_stats AS f", compiled!.Sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("_hourly", compiled.Sql, StringComparison.Ordinal);
+        Assert.Equal(ComposeSourceTier.Raw, compiled.Route.Tier);
+    }
+
     /// <summary>The compiled result carries the route it took — the runner's input for the notice.</summary>
     [Fact]
     public void Compile_CarriesTheRouteItTook()

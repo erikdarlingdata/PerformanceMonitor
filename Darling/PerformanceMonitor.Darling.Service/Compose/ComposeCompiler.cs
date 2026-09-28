@@ -223,7 +223,13 @@ public static class ComposeCompiler
            window must reach the tier that still retains it. Fall back to raw when a value expression can't be
            remapped to the CAGG columns (CanRemap; the overlay AND-gate below). */
         var route = ComposeSourceRouter.Resolve(
-            plan, context.NowUtc, context.StartUtc, context.Rollups, context.Coverage, plan.Mode, effectiveBucket);
+            plan, context.NowUtc, context.StartUtc, context.EndUtc, context.Rollups, context.Coverage, plan.Mode, effectiveBucket);
+        if (route.Tier == ComposeSourceTier.HourlyRawEdges)
+        {
+            /* #4605: the hybrid's raw-edge union is added separately; until then the panel reads raw. */
+            route = ComposeRoute.Raw;
+        }
+
         if (route.IsCagg
             && (!ComposeCaggValueMapper.CanRemap(plan.Measure, plan.Aggregate)
                 || (plan.Overlay is ComposeOverlay o && !ComposeCaggValueMapper.CanRemap(o.Measure, o.Aggregate))))

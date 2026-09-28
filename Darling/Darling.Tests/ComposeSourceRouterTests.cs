@@ -30,22 +30,26 @@ public sealed class ComposeSourceRouterTests
     private static PanelPlan Plan(
         string measureKey,
         PanelMode mode = PanelMode.TimeSeries,
-        IReadOnlyList<ComposeDimension>? groupBy = null) =>
+        IReadOnlyList<ComposeDimension>? groupBy = null,
+        ComposeAggregate aggregate = ComposeAggregate.Sum,
+        ComposeOverlay? overlay = null) =>
         new()
         {
             Measure = Measure(measureKey),
+            Aggregate = aggregate,
             Unit = "ms",
             Mode = mode,
             Filters = Array.Empty<ComposeFilter>(),
             GroupBy = groupBy ?? Array.Empty<ComposeDimension>(),
             Viz = "line",
+            Overlay = overlay,
         };
 
     [Fact]
     public void RecentWindow_RoutesRaw()
     {
         /* oldest point 2 days old — inside the 3-day raw route max → raw. */
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-2), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-2), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Raw, route.Tier);
         Assert.False(route.IsCagg);
         Assert.Null(route.CaggRelation);
@@ -54,7 +58,7 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void MidWindow_RoutesHourlyCagg()
     {
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-10), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-10), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
         Assert.Equal("query_stats_hourly", route.CaggRelation);
     }
@@ -62,7 +66,7 @@ public sealed class ComposeSourceRouterTests
     [Fact]
     public void OldWindow_RoutesDailyCagg()
     {
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal("query_stats_daily", route.CaggRelation);
     }
@@ -73,7 +77,7 @@ public sealed class ComposeSourceRouterTests
         /* A 5-day-SPAN window that is 120→115 days OLD must route by age (120d → daily), NOT by span (5d → hourly):
            the hourly chunks for that range were already dropped, so span-based routing would return empty.
            (30 days was past the hourly horizon when this was written; since #1937 old means past 90.) */
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
     }
 
@@ -82,7 +86,7 @@ public sealed class ComposeSourceRouterTests
     {
         /* Ranked panels resolve no display grain at all — the v1-killer case. Age-based routing still works:
            a 120-day "top N" reaches the daily CAGG instead of truncating at raw's 4 days. */
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us", PanelMode.Ranked), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.Ranked, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us", PanelMode.Ranked), Now, Now.AddDays(-120), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.Ranked, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
     }
 
@@ -90,7 +94,7 @@ public sealed class ComposeSourceRouterTests
     public void NoCaggTable_AlwaysRaw()
     {
         /* wait_stats has no CAGG → raw even for a 40-day window (routing is a no-op for the ~30 non-CAGG tables). */
-        var route = ComposeSourceRouter.Resolve(Plan("wait_time_ms"), Now, Now.AddDays(-40), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("wait_time_ms"), Now, Now.AddDays(-40), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Raw, route.Tier);
     }
 
@@ -102,7 +106,7 @@ public sealed class ComposeSourceRouterTests
         var objectName = MeasureCatalog.Dimension("query_stats", "object_name")!;
         var plan = Plan("query_worker_us", groupBy: new[] { objectName });
         Assert.True(plan.UsesModuleJoin);
-        var route = ComposeSourceRouter.Resolve(plan, Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(plan, Now, Now.AddDays(-120), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal("query_stats_daily", route.CaggRelation);
     }
@@ -111,7 +115,7 @@ public sealed class ComposeSourceRouterTests
     public void CoveredDimension_QueryHash_Routes()
     {
         var queryHash = MeasureCatalog.Dimension("query_stats", "query_hash")!;
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us", groupBy: new[] { queryHash }), Now, Now.AddDays(-10), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us", groupBy: new[] { queryHash }), Now, Now.AddDays(-10), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
     }
 
@@ -119,7 +123,7 @@ public sealed class ComposeSourceRouterTests
     public void ServerDimension_IsUniversallyCovered()
     {
         var server = MeasureCatalog.ServerDimension("query_stats");
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us", groupBy: new[] { server }), Now, Now.AddDays(-10), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us", groupBy: new[] { server }), Now, Now.AddDays(-10), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
     }
 
@@ -128,7 +132,7 @@ public sealed class ComposeSourceRouterTests
     {
         /* schema_name was added to the procedure_stats CAGG in the reshape (#1624) → it now routes. */
         var schemaName = MeasureCatalog.Dimension("procedure_stats", "schema_name")!;
-        var route = ComposeSourceRouter.Resolve(Plan("proc_worker_us", groupBy: new[] { schemaName }), Now, Now.AddDays(-10), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("proc_worker_us", groupBy: new[] { schemaName }), Now, Now.AddDays(-10), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
         Assert.Equal("procedure_stats_hourly", route.CaggRelation);
     }
@@ -138,7 +142,7 @@ public sealed class ComposeSourceRouterTests
     {
         /* query_store_stats routes by module_name/query_hash (the reshaped composer dims), and since #1849
            the primary pair is the CORRECTED one — same dims, same column names, deduped values. */
-        var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
         Assert.Equal("query_store_stats_corrected_hourly", route.CaggRelation);
     }
@@ -149,7 +153,7 @@ public sealed class ComposeSourceRouterTests
         /* A 120-day window routes to the daily tier, not the 90d-capped (#1937) hourly — and to the CORRECTED daily
            since #1849. With no coverage evidence the corrected pair wins: the legacy fallback is comparative
            and fires only where legacy is MEASURED to reach further back. */
-        var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-120), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal("query_store_stats_corrected_daily", route.CaggRelation);
     }
@@ -178,7 +182,7 @@ public sealed class ComposeSourceRouterTests
     public void OldWindow_NoRollupsInStore_RoutesRaw(int ageDays)
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("query_worker_us"), Now, Now.AddDays(-ageDays), RollupAvailability.None, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+            Plan("query_worker_us"), Now, Now.AddDays(-ageDays), Now, RollupAvailability.None, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Raw, route.Tier);
     }
 
@@ -192,10 +196,10 @@ public sealed class ComposeSourceRouterTests
     {
         var partial = RollupAvailability.All with { QueryGrainHourly = false };
 
-        var queryRoute = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-10), partial, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var queryRoute = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-10), Now, partial, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Raw, queryRoute.Tier);
 
-        var procedureRoute = ComposeSourceRouter.Resolve(Plan("proc_elapsed_us"), Now, Now.AddDays(-10), partial, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var procedureRoute = ComposeSourceRouter.Resolve(Plan("proc_elapsed_us"), Now, Now.AddDays(-10), Now, partial, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, procedureRoute.Tier);
         Assert.Equal("procedure_stats_hourly", procedureRoute.CaggRelation);
 
@@ -203,13 +207,13 @@ public sealed class ComposeSourceRouterTests
            the table on raw — the corrected pair still answers. Clearing only the legacy hourly must therefore
            still route, and route to the CORRECTED view. */
         var qsLegacyGone = RollupAvailability.All with { QueryStoreGrainHourly = false };
-        var qsLegacyGoneRoute = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), qsLegacyGone, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var qsLegacyGoneRoute = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), Now, qsLegacyGone, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, qsLegacyGoneRoute.Tier);
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, qsLegacyGoneRoute.CaggRelation);
 
         /* Both families' hourly views gone IS the degrade-to-raw case. */
         var qsPartial = RollupAvailability.All with { QueryStoreGrainHourly = false, QueryStoreCorrectedHourly = false };
-        var qsRoute = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), qsPartial, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var qsRoute = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), Now, qsPartial, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Raw, qsRoute.Tier);
     }
 
@@ -226,10 +230,10 @@ public sealed class ComposeSourceRouterTests
     {
         var old = RollupAvailability.WithoutCorrectedQueryStore;
 
-        var hourly = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), old, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var hourly = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-10), Now, old, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(TimescaleSupport.QueryStoreStatsHourlyView, hourly.CaggRelation);
 
-        var daily = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-120), old, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var daily = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-120), Now, old, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, daily.CaggRelation);
     }
 
@@ -259,11 +263,11 @@ public sealed class ComposeSourceRouterTests
             new Dictionary<string, DateTime>(StringComparer.Ordinal) { ["query_store_stats"] = Now.AddDays(-4) });
 
         /* Inside the corrected coverage → corrected, deduped. */
-        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-4), RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-4), Now, RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, inside.CaggRelation);
 
         /* Past it → the legacy pair, which is the only tier holding that history. */
-        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-100), RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-100), Now, RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, beyond.CaggRelation);
     }
 
@@ -289,7 +293,7 @@ public sealed class ComposeSourceRouterTests
 
         foreach (var age in new[] { 4, 10, 25, 29 })
         {
-            var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-age), RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
+            var route = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-age), Now, RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
             Assert.True(
                 route.CaggRelation is TimescaleSupport.QueryStoreStatsCorrectedHourlyView
                     or TimescaleSupport.QueryStoreStatsCorrectedDailyView,
@@ -323,7 +327,7 @@ public sealed class ComposeSourceRouterTests
     public void QueryStore_DayGrainDailyCoversTheWindow_WinsOverTheCorrectedDaily()
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-100), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 120), PanelMode.TimeSeries, ComposeTimeBucket.None);
+            Plan("qs_executions"), Now, Now.AddDays(-100), Now, RollupAvailability.All, QueryStoreLadder(dayGrainDays: 120), PanelMode.TimeSeries, ComposeTimeBucket.None);
 
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
@@ -343,15 +347,15 @@ public sealed class ComposeSourceRouterTests
         var coverage = QueryStoreLadder(dayGrainDays: 100);
 
         /* Inside the day-grain coverage → the exactly-counted view. */
-        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-95), RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var inside = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-95), Now, RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, inside.CaggRelation);
 
         /* Past it but inside the corrected daily → the corrected daily, NOT the legacy pair below it. */
-        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-110), RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var beyond = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-110), Now, RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, beyond.CaggRelation);
 
         /* Past BOTH → the superseded daily, the only relation holding it. The full three-rung ladder. */
-        var ancient = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-300), RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var ancient = ComposeSourceRouter.Resolve(Plan("qs_executions"), Now, Now.AddDays(-300), Now, RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDailyView, ancient.CaggRelation);
     }
 
@@ -385,7 +389,7 @@ public sealed class ComposeSourceRouterTests
 
         /* -200 days: past every floor on the ladder, so nothing COVERS it and only depth can decide. */
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-200), RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
+            Plan("qs_executions"), Now, Now.AddDays(-200), Now, RollupAvailability.All, coverage, PanelMode.TimeSeries, ComposeTimeBucket.None);
 
         Assert.Equal(ComposeSourceTier.Daily, route.Tier);
         Assert.Equal(TimescaleSupport.QueryStoreStatsDayGrainDailyView, route.CaggRelation);
@@ -400,7 +404,7 @@ public sealed class ComposeSourceRouterTests
     public void QueryStore_HourlyAgeWindow_IsUntouchedByTheDayGrainDaily()
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-10), RollupAvailability.All, QueryStoreLadder(dayGrainDays: 120), PanelMode.TimeSeries, ComposeTimeBucket.None);
+            Plan("qs_executions"), Now, Now.AddDays(-10), Now, RollupAvailability.All, QueryStoreLadder(dayGrainDays: 120), PanelMode.TimeSeries, ComposeTimeBucket.None);
 
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedHourlyView, route.CaggRelation);
@@ -416,7 +420,7 @@ public sealed class ComposeSourceRouterTests
     public void QueryStore_DayGrainDailyAbsent_KeepsRoutingToTheCorrectedDaily()
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-100),
+            Plan("qs_executions"), Now, Now.AddDays(-100), Now,
             RollupAvailability.WithoutDayGrainQueryStore, QueryStoreLadder(dayGrainDays: 120), PanelMode.TimeSeries, ComposeTimeBucket.None);
 
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, route.CaggRelation);
@@ -431,7 +435,7 @@ public sealed class ComposeSourceRouterTests
     public void QueryStore_NoCoverageEvidence_LeavesTheCorrectedDailyInPlace()
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("qs_executions"), Now, Now.AddDays(-120), RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+            Plan("qs_executions"), Now, Now.AddDays(-120), Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
 
         Assert.Equal(TimescaleSupport.QueryStoreStatsCorrectedDailyView, route.CaggRelation);
     }
@@ -442,7 +446,7 @@ public sealed class ComposeSourceRouterTests
     public void DailyAgeWindow_DailyMissing_FallsToHourly()
     {
         var partial = RollupAvailability.All with { QueryGrainDaily = false };
-        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), partial, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
+        var route = ComposeSourceRouter.Resolve(Plan("query_worker_us"), Now, Now.AddDays(-120), Now, partial, RollupCoverage.Unknown, PanelMode.TimeSeries, ComposeTimeBucket.None);
         Assert.Equal(ComposeSourceTier.Hourly, route.Tier);
         Assert.Equal("query_stats_hourly", route.CaggRelation);
     }
@@ -458,11 +462,134 @@ public sealed class ComposeSourceRouterTests
     public void Resolve_ReceivesModeAndEffectiveBucket(PanelMode mode, ComposeTimeBucket effectiveBucket)
     {
         var route = ComposeSourceRouter.Resolve(
-            Plan("query_worker_us", mode), Now, Now.AddDays(-2), RollupAvailability.All, RollupCoverage.Unknown,
+            Plan("query_worker_us", mode), Now, Now.AddDays(-2), Now, RollupAvailability.All, RollupCoverage.Unknown,
             mode, effectiveBucket);
 
         /* Recent window still routes raw regardless of mode/bucket — the router doesn't act on them yet. */
         Assert.Equal(ComposeSourceTier.Raw, route.Tier);
         Assert.Equal((mode, effectiveBucket), ComposeSourceRouter.LastResolveInput);
+    }
+
+    /* ─────────────── #4605 part 2: the SUM/MAX hybrid (query_stats/procedure_stats only) ─────────────── */
+
+    /// <summary>Builds hybrid coverage for the successor hourly (<paramref name="successorView"/>): a
+    /// materialized floor, a proven-contiguous-from instant, and a ceiling, so every <see cref="TryHybrid"/>
+    /// gate but the one under test passes.</summary>
+    private static RollupCoverage HybridCoverage(
+        string successorView, DateTime floor, DateTime provenFrom, DateTime? ceiling) => new(
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = floor },
+        new Dictionary<string, DateTime>(StringComparer.Ordinal),
+        RollupAvailability.All,
+        ceiling is DateTime c
+            ? new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = c }
+            : new Dictionary<string, DateTime>(StringComparer.Ordinal),
+        new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = provenFrom });
+
+    private static readonly string QuerySuccessorHourly = TimescaleSupport.SuccessorOf("query_stats_hourly")!;
+
+    /// <summary>
+    /// WATCHED (mutation): drop any of <see cref="ComposeSourceRouter"/>'s hybrid gates and this goes red. A
+    /// Ranked SUM <c>query_stats</c> panel whose 12-hour window would otherwise fall to raw (2 days is inside
+    /// raw's reach, so age alone never routes it to a rollup) reads the successor hourly for the window's
+    /// whole-hour middle instead, once the successor is proven contiguous from before the window and has
+    /// materialized a ceiling inside it.
+    /// </summary>
+    [Fact]
+    public void RecentWindow_SumRanked_WithSuccessorCoverage_RoutesHybrid()
+    {
+        var windowStart = Now.AddHours(-12);
+        var ceiling = Now.AddHours(-1);
+        var coverage = HybridCoverage(QuerySuccessorHourly, floor: Now.AddDays(-5), provenFrom: Now.AddHours(-23), ceiling);
+
+        var route = ComposeSourceRouter.Resolve(
+            Plan("query_worker_us", PanelMode.Ranked, aggregate: ComposeAggregate.Sum),
+            Now, windowStart, Now, RollupAvailability.All, coverage, PanelMode.Ranked, ComposeTimeBucket.None);
+
+        Assert.Equal(ComposeSourceTier.HourlyRawEdges, route.Tier);
+        Assert.False(route.IsCagg);
+        Assert.Equal(CeilHour(windowStart), route.EdgeStartUtc);
+        Assert.Equal(FloorHour(ceiling), route.EdgeEndUtc);
+    }
+
+    private static DateTime CeilHour(DateTime value) =>
+        value == FloorHour(value) ? value : FloorHour(value).AddHours(1);
+
+    private static DateTime FloorHour(DateTime value) =>
+        new(value.Year, value.Month, value.Day, value.Hour, 0, 0, value.Kind);
+
+    /// <summary>Every gate that must fail the hybrid and leave the panel on raw, one at a time — everything
+    /// else about the fixture is otherwise hybrid-eligible.</summary>
+    [Fact]
+    public void HybridGates_EachFailureAlone_StaysRaw()
+    {
+        var windowStart = Now.AddHours(-12);
+        var ceiling = Now.AddHours(-1);
+
+        /* Avg is not SUM/MAX. */
+        var avgRoute = ComposeSourceRouter.Resolve(
+            Plan("query_worker_us", PanelMode.Ranked, aggregate: ComposeAggregate.Avg),
+            Now, windowStart, Now, RollupAvailability.All,
+            HybridCoverage(QuerySuccessorHourly, Now.AddDays(-5), Now.AddHours(-23), ceiling),
+            PanelMode.Ranked, ComposeTimeBucket.None);
+        Assert.Equal(ComposeSourceTier.Raw, avgRoute.Tier);
+
+        /* query_store_stats always has a legacy pair — TryHybrid is never even reached for it. */
+        var qsRoute = ComposeSourceRouter.Resolve(
+            Plan("qs_executions", PanelMode.Ranked, aggregate: ComposeAggregate.Sum),
+            Now, windowStart, Now, RollupAvailability.All, RollupCoverage.Unknown, PanelMode.Ranked, ComposeTimeBucket.None);
+        Assert.Equal(ComposeSourceTier.Raw, qsRoute.Tier);
+
+        /* Minute-grain TimeSeries — neither Ranked/Scalar nor Hour/Day effective bucket. */
+        var minuteRoute = ComposeSourceRouter.Resolve(
+            Plan("query_worker_us", PanelMode.TimeSeries, aggregate: ComposeAggregate.Sum),
+            Now, windowStart, Now, RollupAvailability.All,
+            HybridCoverage(QuerySuccessorHourly, Now.AddDays(-5), Now.AddHours(-23), ceiling),
+            PanelMode.TimeSeries, ComposeTimeBucket.Minute);
+        Assert.Equal(ComposeSourceTier.Raw, minuteRoute.Tier);
+
+        /* Null ceiling — nothing measured to have materialized. */
+        var nullCeilingRoute = ComposeSourceRouter.Resolve(
+            Plan("query_worker_us", PanelMode.Ranked, aggregate: ComposeAggregate.Sum),
+            Now, windowStart, Now, RollupAvailability.All,
+            HybridCoverage(QuerySuccessorHourly, Now.AddDays(-5), Now.AddHours(-23), ceiling: null),
+            PanelMode.Ranked, ComposeTimeBucket.None);
+        Assert.Equal(ComposeSourceTier.Raw, nullCeilingRoute.Tier);
+
+        /* Null proven-from — the refresh job was never proved to cover the window whole. */
+        var coverageNoProven = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [QuerySuccessorHourly] = Now.AddDays(-5) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [QuerySuccessorHourly] = ceiling },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal));
+        var nullProvenRoute = ComposeSourceRouter.Resolve(
+            Plan("query_worker_us", PanelMode.Ranked, aggregate: ComposeAggregate.Sum),
+            Now, windowStart, Now, RollupAvailability.All, coverageNoProven, PanelMode.Ranked, ComposeTimeBucket.None);
+        Assert.Equal(ComposeSourceTier.Raw, nullProvenRoute.Tier);
+
+        /* Proven-from later than hStart — a 2-day window, proven only from 1 day back. */
+        var window2Day = Now.AddDays(-2);
+        var provenTooLateRoute = ComposeSourceRouter.Resolve(
+            Plan("query_worker_us", PanelMode.Ranked, aggregate: ComposeAggregate.Sum),
+            Now, window2Day, Now, RollupAvailability.All,
+            HybridCoverage(QuerySuccessorHourly, Now.AddDays(-5), provenFrom: Now.AddDays(-1), ceiling),
+            PanelMode.Ranked, ComposeTimeBucket.None);
+        Assert.Equal(ComposeSourceTier.Raw, provenTooLateRoute.Tier);
+
+        /* Successor floor later than hStart. */
+        var floorTooLateRoute = ComposeSourceRouter.Resolve(
+            Plan("query_worker_us", PanelMode.Ranked, aggregate: ComposeAggregate.Sum),
+            Now, windowStart, Now, RollupAvailability.All,
+            HybridCoverage(QuerySuccessorHourly, floor: Now.AddHours(-6), provenFrom: Now.AddHours(-23), ceiling),
+            PanelMode.Ranked, ComposeTimeBucket.None);
+        Assert.Equal(ComposeSourceTier.Raw, floorTooLateRoute.Tier);
+
+        /* Under 1 hour of middle: window start and ceiling round to the same or adjacent hour boundary. */
+        var shortWindowRoute = ComposeSourceRouter.Resolve(
+            Plan("query_worker_us", PanelMode.Ranked, aggregate: ComposeAggregate.Sum),
+            Now, Now.AddMinutes(-30), Now, RollupAvailability.All,
+            HybridCoverage(QuerySuccessorHourly, Now.AddDays(-5), Now.AddHours(-23), ceiling: Now.AddMinutes(-10)),
+            PanelMode.Ranked, ComposeTimeBucket.None);
+        Assert.Equal(ComposeSourceTier.Raw, shortWindowRoute.Tier);
     }
 }

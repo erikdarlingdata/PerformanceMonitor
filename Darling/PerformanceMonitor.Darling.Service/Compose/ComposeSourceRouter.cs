@@ -24,6 +24,12 @@ public enum ComposeSourceTier
 
     /// <summary>The daily continuous aggregate (<c>collect.&lt;table&gt;_daily</c>).</summary>
     Daily,
+
+    /// <summary>#4605: a SUM/MAX panel whose window's middle is answered by the interval-honest hourly
+    /// successor alone, with raw covering the two edge slivers the successor cannot yet prove. Not a rollup
+    /// read on its own (<see cref="ComposeRoute.IsCagg"/> is false): the compiler still reads raw until the
+    /// union that stitches the three pieces is added.</summary>
+    HourlyRawEdges,
 }
 
 /// <summary>
@@ -31,12 +37,17 @@ public enum ComposeSourceTier
 /// carries no relation (the compiler keeps its existing <c>SourceTable</c> + prefix-time-column path); a CAGG tier
 /// names the rollup view, whose time column is always the <c>bucket</c> the CAGG produced.
 /// </summary>
-public sealed record ComposeRoute(ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null)
+public sealed record ComposeRoute(
+    ComposeSourceTier Tier, string? CaggRelation, string? CaggFromClause = null,
+    DateTime? EdgeStartUtc = null, DateTime? EdgeEndUtc = null)
 {
     /// <summary>The raw route — the compiler's unchanged behaviour.</summary>
     public static readonly ComposeRoute Raw = new(ComposeSourceTier.Raw, null);
 
-    public bool IsCagg => Tier != ComposeSourceTier.Raw;
+    /// <summary>#4605: <see cref="ComposeSourceTier.HourlyRawEdges"/> is not a rollup read by itself — the
+    /// compiler still compiles raw for it until the stitching union exists — so only <c>Hourly</c>/<c>Daily</c>
+    /// count as reading a CAGG.</summary>
+    public bool IsCagg => Tier is ComposeSourceTier.Hourly or ComposeSourceTier.Daily;
 
     /// <summary>Every CAGG's time dimension is the <c>time_bucket(...) AS bucket</c> column.</summary>
     public const string CaggTimeColumn = "bucket";
@@ -178,8 +189,8 @@ public static class ComposeSourceRouter
     /// decision.</para>
     /// </summary>
     public static ComposeRoute Resolve(
-        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, RollupAvailability rollups, RollupCoverage coverage,
-        PanelMode mode, ComposeTimeBucket effectiveBucket)
+        PanelPlan plan, DateTime nowUtc, DateTime windowStartUtc, DateTime windowEndUtc, RollupAvailability rollups,
+        RollupCoverage coverage, PanelMode mode, ComposeTimeBucket effectiveBucket)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(coverage);
@@ -232,6 +243,15 @@ public static class ComposeSourceRouter
 
         if (!cagg.HasLegacyPair)
         {
+            if (primary.Route.Tier == ComposeSourceTier.Raw)
+            {
+                var hybrid = TryHybrid(plan, windowStartUtc, windowEndUtc, rollups, coverage, mode, effectiveBucket);
+                if (hybrid is not null)
+                {
+                    return hybrid;
+                }
+            }
+
             return primary.Route;
         }
 
@@ -375,4 +395,85 @@ public static class ComposeSourceRouter
                 tierCoverage.DailyFloorUtc),
         };
     }
+
+    /// <summary>
+    /// #4605: the SUM/MAX hybrid — a panel whose window's oldest point would otherwise fall to raw (recent
+    /// enough that <see cref="ResolveFamily"/> chose <see cref="ComposeSourceTier.Raw"/>) can still read the
+    /// interval-honest hourly successor for the window's whole-hour MIDDLE, leaving only the two edge slivers
+    /// (before the first whole hour, after the last one the successor has proven) on raw. Returns null unless
+    /// every one of the gates below holds; a null answer leaves the caller's raw route untouched.
+    ///
+    /// <para>Only <c>query_stats</c>/<c>procedure_stats</c> qualify (query_store_stats keeps its own
+    /// corrected/legacy comparison above and never reaches here — it always has a legacy pair). SUM is exact
+    /// over any partition of the window; MAX is exact only against the SUCCESSOR alone, never the legacy
+    /// hourly, which is why this never reads <see cref="ComposeCaggInfo.LegacyHourlyView"/>.</para>
+    /// </summary>
+    private static ComposeRoute? TryHybrid(
+        PanelPlan plan, DateTime windowStartUtc, DateTime windowEndUtc, RollupAvailability rollups,
+        RollupCoverage coverage, PanelMode mode, ComposeTimeBucket effectiveBucket)
+    {
+        if (plan.Measure.SourceTable is not ("query_stats" or "procedure_stats"))
+        {
+            return null;
+        }
+
+        if (mode is not (PanelMode.Ranked or PanelMode.Scalar)
+            && effectiveBucket is not (ComposeTimeBucket.Hour or ComposeTimeBucket.Day))
+        {
+            return null;
+        }
+
+        if (!IsHybridEligible(plan.Aggregate) || (plan.Overlay is ComposeOverlay overlay && !IsHybridEligible(overlay.Aggregate)))
+        {
+            return null;
+        }
+
+        var cagg = ComposeCaggCatalog.For(plan.Measure.SourceTable)!;
+        var successor = TimescaleSupport.SuccessorOf(cagg.HourlyView) ?? cagg.HourlyView;
+        if (!rollups.Has(successor))
+        {
+            return null;
+        }
+
+        var ceiling = coverage.CeilingOf(successor);
+        if (ceiling is null)
+        {
+            return null;
+        }
+
+        var hStart = CeilHour(windowStartUtc);
+        var hEnd = Min(FloorHour(windowEndUtc), ceiling.Value);
+        if (hEnd - hStart < TimeSpan.FromHours(1))
+        {
+            return null;
+        }
+
+        if (coverage.ProvenContiguousFromOf(successor) is not DateTime provenFrom || provenFrom > hStart)
+        {
+            return null;
+        }
+
+        if (coverage.FloorOf(successor) is not DateTime floor || floor > hStart)
+        {
+            return null;
+        }
+
+        return new ComposeRoute(
+            ComposeSourceTier.HourlyRawEdges,
+            successor,
+            coverage.StitchedRelationSql(cagg.HourlyView, ComposeRoute.FactAlias, hStart, RollupCoverage.StitchTier.Hourly),
+            hStart,
+            hEnd);
+    }
+
+    private static bool IsHybridEligible(ComposeAggregate aggregate) =>
+        aggregate is ComposeAggregate.Sum or ComposeAggregate.Max;
+
+    private static DateTime CeilHour(DateTime value) =>
+        value == FloorHour(value) ? value : FloorHour(value).AddHours(1);
+
+    private static DateTime FloorHour(DateTime value) =>
+        new(value.Year, value.Month, value.Day, value.Hour, 0, 0, value.Kind);
+
+    private static DateTime Min(DateTime a, DateTime b) => a < b ? a : b;
 }
