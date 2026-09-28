@@ -98,10 +98,25 @@ public static class McpPlanAnalysisFormatter
         string? serverName,
         string source,
         string? identifier,
+        CancellationToken cancellationToken = default) =>
+        BuildAnalysisResult(xml, serverName, source, identifier, null, cancellationToken);
+
+    /// <summary>
+    /// #4530: the <see cref="ServerMetadata"/> overload. Passing the resolved server's metadata through
+    /// lets rule 38 (Standard Edition DOP 2 limitation) give its Warning instead of its uninformative Info
+    /// branch. The 5-argument overload forwards <c>null</c>, which <see cref="PlanAnalysisPipeline.Run"/>
+    /// treats the same as no metadata available.
+    /// </summary>
+    public static string BuildAnalysisResult(
+        string xml,
+        string? serverName,
+        string source,
+        string? identifier,
+        ServerMetadata? serverMetadata,
         CancellationToken cancellationToken = default)
     {
         var plan = ShowPlanParser.Parse(xml, cancellationToken);
-        PlanAnalysisPipeline.Run(plan, cancellationToken);
+        PlanAnalysisPipeline.Run(plan, null, serverMetadata, cancellationToken);
 
         // #4514: includes statements nested inside a stored procedure or UDF body, so the MCP
         // analyze_plan_xml/analyze_query_plan/analyze_query_store_plan tools see the same
@@ -170,7 +185,10 @@ public static class McpPlanAnalysisFormatter
                             message = w.Message,
                             source = w.Source.ToString(),
                             origin_node_ids = w.OriginNodeIds,
-                            max_benefit_percent = w.MaxBenefitPercent
+                            max_benefit_percent = w.MaxBenefitPercent,
+                            // #4566: PerformanceStudio dev (85492a1) src/PlanViewer.Core/Output/ResultMapper.cs:255,
+                            // JSON name "is_legacy".
+                            is_legacy = w.IsLegacy
                         }),
                     warning_count = allWarnings.Count,
                     critical_count = allWarnings.Count(w => w.Severity == PlanWarningSeverity.Critical),

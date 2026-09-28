@@ -23,6 +23,9 @@
          (HealthSeverity) and the readonly_reason decode (QueryStoreReadonlyReason), both of which are
          Common's single copies. Referencing Common is cheaper than restating either one here. -->
     <ProjectReference Include="..\..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
+    <!-- DarlingServerMetadataReader (#4530): the store-backed ServerMetadata read plan-analysis rule 38
+         needs, so the WPF viewer's store reads and the MCP surface's share the same statement. -->
+    <ProjectReference Include="..\..\PerformanceMonitor.PlanAnalysis\PerformanceMonitor.PlanAnalysis.csproj" />
   </ItemGroup>
 
   <ItemGroup>

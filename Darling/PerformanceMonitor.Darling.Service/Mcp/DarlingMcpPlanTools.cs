@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using Npgsql;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.PlanAnalysis;
 
 #pragma warning disable CA1707 // MCP tools use snake_case naming convention
@@ -71,7 +72,10 @@ public sealed class DarlingMcpPlanTools
                         "unavailable",
                         $"No stored plan found for query_hash '{query_hash}'{DbSuffix(database_name)}. The plan collector may not have captured a plan for this query, or the row has aged out of the store.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, cancellationToken);
+            // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP. Non-fatal
+            // (null on a miss or a read failure) — the analyzer then falls back to its Info branch.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -107,7 +111,9 @@ public sealed class DarlingMcpPlanTools
                         "unavailable",
                         $"No stored plan found for sql_handle '{sql_handle}'. The plan collector may not have captured a plan for this procedure, or the row has aged out of the store.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle, cancellationToken);
+            // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", sql_handle, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -141,7 +147,9 @@ public sealed class DarlingMcpPlanTools
                         $"No stored Query Store plan found for query_id {query_id} in database '{database_name}'{PlanSuffix(plan_id)}. Query Store plan capture may be disabled for this database, or the plan has been purged.");
 
             var identifier = plan_id is null ? $"{database_name}:{query_id}" : $"{database_name}:{query_id}:{plan_id}";
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier, cancellationToken);
+            // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(postgres, resolved.ServerId, cancellationToken);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", identifier, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

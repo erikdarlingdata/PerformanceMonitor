@@ -41,7 +41,9 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for query_hash '{query_hash}'. The query may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, cancellationToken);
+            // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_stats", query_hash, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -77,7 +79,9 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for plan_handle '{plan_handle}'. The procedure may have been evicted from the plan cache since the last collection.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle, cancellationToken);
+            // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "procedure_stats", plan_handle, metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -125,7 +129,9 @@ public sealed class McpPlanTools
                         "unavailable",
                         $"No plan found for plan_id {plan_id} in database '{database_name}'. Query Store may not be enabled or the plan may have been purged.");
 
-            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", cancellationToken);
+            // #4530: one store read per call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await dataService.GetServerMetadataForPlanAnalysisAsync(resolved.ServerId);
+            return McpPlanAnalysisFormatter.BuildAnalysisResult(xml, resolved.ServerName, "query_store", $"{database_name}:{plan_id}", metadata, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

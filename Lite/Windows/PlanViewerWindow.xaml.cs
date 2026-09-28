@@ -43,10 +43,17 @@ public partial class PlanViewerWindow : Window
     }
 
     /// <summary>Loads a plan into this window's viewer. Throws <see cref="System.Xml.XmlException"/> for invalid XML.</summary>
-    public async Task LoadPlanAsync(string planXml, string label, string? queryText)
+    /// <param name="serverMetadata">
+    /// #4530: the server's edition/MAXDOP for plan-analysis rule 38, set by the caller from a store read
+    /// (this window has no live connection to the monitored server). Null keeps rule 38 on its Info branch,
+    /// same as before #4530.
+    /// </param>
+    public async Task LoadPlanAsync(
+        string planXml, string label, string? queryText, PerformanceMonitor.PlanAnalysis.ServerMetadata? serverMetadata = null)
     {
         if (!string.IsNullOrWhiteSpace(label))
             Title = label.Length > 80 ? label[..80] : label;
+        Viewer.ServerMetadata = serverMetadata;
         await Viewer.LoadPlan(planXml, label, queryText);
     }
 
@@ -54,13 +61,15 @@ public partial class PlanViewerWindow : Window
     /// Opens a new, owned, non-modal plan window and loads the plan. A new window per call lets the user
     /// compare plans side by side; owned so it stays usable above a modal host window.
     /// </summary>
-    public static async Task ShowPlanAsync(Window owner, string planXml, string label, string? queryText)
+    public static async Task ShowPlanAsync(
+        Window owner, string planXml, string label, string? queryText,
+        PerformanceMonitor.PlanAnalysis.ServerMetadata? serverMetadata = null)
     {
         var window = new PlanViewerWindow { Owner = owner };
         window.Show();
         try
         {
-            await window.LoadPlanAsync(planXml, label, queryText);
+            await window.LoadPlanAsync(planXml, label, queryText, serverMetadata);
         }
         catch (System.Xml.XmlException ex)
         {

@@ -56,7 +56,8 @@ public partial class QueryStoreHistoryWindow : Window
 
         _planActions = new PlanNavigationController(
             this,
-            (xml, label, qt) => PlanViewerWindow.ShowPlanAsync(this, xml, label, qt),
+            async (xml, label, qt) => await PlanViewerWindow.ShowPlanAsync(
+                this, xml, label, qt, await _dataService.GetServerMetadataForPlanAnalysisAsync(_serverId)),
             (db, qt, est, iso, ct) => ActualPlanExecutor.ExecuteForActualPlanAsync(
                 _connectionString ?? "", db, qt, est, iso, isAzureSqlDb: false, timeoutSeconds: 0, ct,
                 productName: "SQL Server Performance Monitor Lite"),
