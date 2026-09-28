@@ -156,7 +156,7 @@ public sealed class DarlingCollectorToggleVerbLivePostgresTests
                that closed this test's connection cannot turn into a throw-from-finally that replaces the real
                exception. The temp config folder is file teardown and needs no store. */
             await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, CleanupAsync);
-            try { Directory.Delete(directory, recursive: true); } catch (IOException) { }
+            try { Directory.Delete(directory, recursive: true); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
     }
 

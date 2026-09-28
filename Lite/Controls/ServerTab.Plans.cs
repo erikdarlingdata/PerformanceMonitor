@@ -252,7 +252,7 @@ public partial class ServerTab : UserControl
     private async Task OpenPlanTab(string planXml, string label, string? queryText = null)
     {
         HidePlanLoading();
-        var viewer = new PlanViewerControl();
+        var viewer = new PlanViewerControl { AccuracyRatioDivergenceLimit = App.AccuracyRatioDivergenceLimit };
         try
         {
             /* LoadPlan parses+analyzes off the UI thread; it throws XmlException for malformed

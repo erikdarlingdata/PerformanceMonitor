@@ -42,9 +42,10 @@ public sealed class ManagedConfUpgradePathTests : IDisposable
         {
             Directory.Delete(_dataDir, recursive: true);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Best-effort cleanup; leftover temp dirs don't fail the run.
+            // Best-effort cleanup; leftover temp dirs don't fail the run (a file the OS still
+            // maps surfaces as UnauthorizedAccessException on Windows).
         }
     }
 
