@@ -172,6 +172,8 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// it still bounded anything.</param>
     /// <param name="Detail">The failure message, as the service's own log line reports it; omitted when there is none.</param>
     /// <param name="SinceUtc">When this state began — collection start, or when the failure was last observed.</param>
+    /// <param name="Sustained">True once the step has spent its 120 s fast budget and retries with no cap (#4508); omitted otherwise.</param>
+    /// <param name="RetryEverySeconds">The sustained retry interval, <c>StartupFailureTriage.SustainedRetryDelay</c>; omitted outside that state.</param>
     internal sealed record PingReport(
         [property: JsonIgnore] int HttpStatus,
         [property: JsonPropertyName("status")] string Status,
@@ -180,7 +182,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         [property: JsonPropertyName("attempt")] int? Attempt,
         [property: JsonPropertyName("attempts")] int? Attempts,
         [property: JsonPropertyName("detail")] string? Detail,
-        [property: JsonPropertyName("since")] DateTime? SinceUtc);
+        [property: JsonPropertyName("since")] DateTime? SinceUtc,
+        [property: JsonPropertyName("sustained")] bool? Sustained,
+        [property: JsonPropertyName("retryEverySeconds")] int? RetryEverySeconds);
 
     /// <summary>Omits the null members so each ping state carries only the fields that mean something in it —
     /// a <c>degraded</c> body has an attempt count and an <c>ok</c> body does not, rather than every body
@@ -230,30 +234,32 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         if (snapshot is null)
         {
-            return new PingReport(StatusCodes.Status200OK, "starting", false, null, null, null, null, null);
+            return new PingReport(StatusCodes.Status200OK, "starting", false, null, null, null, null, null, null, null);
         }
 
         return snapshot.Phase switch
         {
             CollectorRuntimeState.CollectorPhase.Collecting =>
-                new PingReport(StatusCodes.Status200OK, "ok", true, null, null, null, null, snapshot.AsOfUtc),
+                new PingReport(StatusCodes.Status200OK, "ok", true, null, null, null, null, snapshot.AsOfUtc, null, null),
 
             CollectorRuntimeState.CollectorPhase.Retrying =>
                 new PingReport(
                     StatusCodes.Status503ServiceUnavailable, "degraded", false, DescribeStartupStep(snapshot.Step),
-                    snapshot.Attempt, snapshot.Sustained ? null : snapshot.Attempts, snapshot.Detail, snapshot.AsOfUtc),
+                    snapshot.Attempt, snapshot.Sustained ? null : snapshot.Attempts, snapshot.Detail, snapshot.AsOfUtc,
+                    snapshot.Sustained ? true : null,
+                    snapshot.Sustained ? (int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds : null),
 
             CollectorRuntimeState.CollectorPhase.Stopped =>
                 new PingReport(
                     StatusCodes.Status503ServiceUnavailable, "stopped", false, DescribeStartupStep(snapshot.Step),
-                    null, null, snapshot.Detail, snapshot.AsOfUtc),
+                    null, null, snapshot.Detail, snapshot.AsOfUtc, null, null),
 
             /* Default-deny to the loudest answer: a phase this method does not know about is a phase whose
                health it cannot vouch for, and the whole point of the route is that it does not report healthy
                on a state it has not reasoned about. */
             _ => new PingReport(
                 StatusCodes.Status503ServiceUnavailable, "stopped", false, DescribeStartupStep(snapshot.Step),
-                null, null, snapshot.Detail, snapshot.AsOfUtc),
+                null, null, snapshot.Detail, snapshot.AsOfUtc, null, null),
         };
     }
 

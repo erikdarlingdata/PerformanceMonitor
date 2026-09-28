@@ -90,7 +90,8 @@ public sealed class CollectorRuntimeStateTests
     {
         var sustained = DarlingWebEndpoints.DescribePing(new CollectorRuntimeState.Snapshot(
             CollectorRuntimeState.CollectorPhase.Retrying, CollectorRuntimeState.StartupStep.Store,
-            "Connection refused", Attempt: 30, Attempts: 0, AsOfUtc: DateTime.UtcNow, Sustained: true));
+            "Connection refused \u2014 retrying every 60s, attempt 30 (past the 120s fast budget)",
+            Attempt: 30, Attempts: 0, AsOfUtc: DateTime.UtcNow, Sustained: true));
         Assert.Equal(503, sustained.HttpStatus);
         Assert.Equal("degraded", sustained.Status);
         Assert.Equal(30, sustained.Attempt);
@@ -99,6 +100,9 @@ public sealed class CollectorRuntimeStateTests
         var sustainedBody = JsonSerializer.Serialize(sustained, DarlingWebEndpoints.PingJsonOptions);
         Assert.Contains("\"attempt\":30", sustainedBody, StringComparison.Ordinal);
         Assert.DoesNotContain("\"attempts\"", sustainedBody, StringComparison.Ordinal);
+        Assert.Contains("\"sustained\":true", sustainedBody, StringComparison.Ordinal);
+        Assert.Contains("\"retryEverySeconds\":60", sustainedBody, StringComparison.Ordinal);
+        Assert.Contains("retrying every 60s, attempt 30 (past the 120s fast budget)", sustained.Detail, StringComparison.Ordinal);
 
         var fast = DarlingWebEndpoints.DescribePing(new CollectorRuntimeState.Snapshot(
             CollectorRuntimeState.CollectorPhase.Retrying, CollectorRuntimeState.StartupStep.Store,
@@ -107,6 +111,22 @@ public sealed class CollectorRuntimeStateTests
 
         var fastBody = JsonSerializer.Serialize(fast, DarlingWebEndpoints.PingJsonOptions);
         Assert.Contains("\"attempts\":25", fastBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"sustained\"", fastBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"retryEverySeconds\"", fastBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("retrying every", fast.Detail, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4508: <c>PublishRetrying(..., sustained: true)</c> appends the sustained-retry phrase to the
+    /// snapshot's <c>Detail</c>, so the MCP/Viewer readers of <c>Detail</c> see the same text the ping body's
+    /// <c>detail</c> field carries.</summary>
+    [Fact]
+    public void PublishRetrying_Sustained_AppendsRetryPhraseToDetail()
+    {
+        var state = new CollectorRuntimeState();
+        state.PublishRetrying(CollectorRuntimeState.StartupStep.Store, attempt: 30, attempts: 25, sustained: true);
+        var snapshot = state.Read();
+        Assert.NotNull(snapshot);
+        Assert.EndsWith("retrying every 60s, attempt 30 (past the 120s fast budget)", snapshot!.Detail, StringComparison.Ordinal);
     }
 
     /// <summary>Every publish stamps UTC, because the ping body reports it as an instant and a local-time
