@@ -649,7 +649,7 @@ RETURNING state_key";
     /// query_store cycle for one server — the same trigger and the same placement as Darling's, so the two
     /// cannot drift on WHEN they prune either.
     /// </summary>
-    protected async Task PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
+    protected async Task<bool> PruneOrphanedQueryStoreDatabaseStateAsync(int serverId, CancellationToken cancellationToken)
     {
         try
         {
@@ -685,10 +685,32 @@ RETURNING state_key";
                     "[server_id {ServerId}] pruned {Count} query_store state row(s) for database(s) no longer on the server: {Keys}",
                     serverId, pruned.Count, string.Join(", ", pruned));
             }
+
+            return true;
         }
         catch (Exception ex)
         {
             _logger?.LogDebug(ex, "Pruning orphaned query_store database state failed; next cycle retries");
+            return false;
+        }
+    }
+
+    /// <summary>#4660: when the orphaned per-database state prune last succeeded, per server.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<int, DateTime> _lastOrphanStatePruneUtc = new();
+
+    /// <summary>#4660: the per-cycle entry: runs the prune when <see cref="OrphanStatePrune.IsDue"/> says so, and records
+    /// only a success, so a failure is retried on the next cycle.</summary>
+    protected async Task PruneOrphanedQueryStoreDatabaseStateIfDueAsync(int serverId, CancellationToken cancellationToken)
+    {
+        var now = DateTime.UtcNow;
+        if (!OrphanStatePrune.IsDue(_lastOrphanStatePruneUtc.TryGetValue(serverId, out var last) ? last : null, now))
+        {
+            return;
+        }
+
+        if (await PruneOrphanedQueryStoreDatabaseStateAsync(serverId, cancellationToken))
+        {
+            _lastOrphanStatePruneUtc[serverId] = now;
         }
     }
 

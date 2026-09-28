@@ -192,7 +192,7 @@ public sealed class QueryStoreStatePruneTests
             var source = File.ReadAllText(host);
             var name = Path.GetFileName(host);
 
-            var call = source.IndexOf("await PruneOrphanedQueryStoreDatabaseStateAsync(", StringComparison.Ordinal);
+            var call = source.IndexOf("await PruneOrphanedQueryStoreDatabaseStateIfDueAsync(", StringComparison.Ordinal);
             Assert.True(call >= 0, $"{name} must prune orphaned per-database query_store state");
 
             /* The 400 characters immediately BEFORE the call — the `if` that guards it. Checking the whole

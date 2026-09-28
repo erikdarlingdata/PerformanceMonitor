@@ -2196,6 +2196,16 @@ public static class MeasureCatalog
         return false;
     }
 
+    /// <summary>
+    /// The picker label suffix for a measure (#4653): " (ratio)" only for a measure that really divides — a
+    /// <see cref="MeasureKind.Ratio"/> in <see cref="MeasureRatioMode.Sum"/>, <see cref="MeasureRatioMode.Avg"/> or
+    /// <see cref="MeasureRatioMode.Weighted"/> mode. A <see cref="MeasureRatioMode.WeightedSum"/> measure is a window
+    /// TOTAL that rides the Ratio kind only because its aggregation is part of its definition (#2732), and a scalar is
+    /// no ratio at all: both get no suffix.
+    /// </summary>
+    public static string LabelSuffix(ComposeMeasure measure) =>
+        measure.Kind == MeasureKind.Ratio && measure.RatioMode != MeasureRatioMode.WeightedSum ? " (ratio)" : "";
+
     public static string WireName(ComposeAggregate value) => s_aggWire.First(x => x.Value == value).Wire;
 
     public static bool TryParseTimeBucket(string? wire, out ComposeTimeBucket value)

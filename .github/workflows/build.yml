@@ -130,6 +130,10 @@ jobs:
             dashboard:
               - 'deprecated/Dashboard/**/!(*.md)'
               - 'deprecated/Dashboard.Tests/**/!(*.md)'
+              # ThemeParityTests compares the Dashboard's theme files with Lite's, so a change to Lite's
+              # themes alone must run it too. #4658 changed a Lite theme color, its CI skipped the test,
+              # and the next run that included it failed on dev (#4668).
+              - 'Lite/Themes/**/!(*.md)'
             lite:
               - 'Lite/**/!(*.md)'
               - 'Lite.Tests/**/!(*.md)'
@@ -378,8 +382,10 @@ jobs:
       # compiler warnings and three broken ThemeParityTests accumulated unnoticed (#1643). Deprecated means
       # bug-fix-only, not unverified: it still compiles warning-free and its tests still guard cross-app
       # parity (the theme palettes it checks are LITE's too).
+      # installer_core too: the Dashboard references Installer.Core, and the filter's own comment says a
+      # change there rebuilds both products, which only held for the CLI Installer until now.
       - name: Build Dashboard.Tests
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet build deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-restore
 
       - name: Build Darling
@@ -409,7 +415,7 @@ jobs:
         run: dotnet run --project deprecated/Installer.Tests/Installer.Tests.csproj -c Release --no-build -- -class- "Installer.Tests.VersionDetectionTests" -class- "Installer.Tests.IdempotencyTests" -class- "Installer.Tests.AdversarialTests"
 
       - name: Run Dashboard tests
-        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
+        if: steps.filter.outputs.dashboard == 'true' || steps.filter.outputs.core == 'true' || steps.filter.outputs.installer_core == 'true' || steps.filter.outputs.root == 'true' || github.event_name == 'release'
         run: dotnet run --project deprecated/Dashboard.Tests/Dashboard.Tests.csproj -c Release --no-build
 
       - name: Run Darling tests
