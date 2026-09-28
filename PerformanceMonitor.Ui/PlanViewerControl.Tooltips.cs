@@ -181,8 +181,7 @@ public partial class PlanViewerControl
 
                 foreach (var (type, severity, count) in distinct)
                 {
-                    var warnColor = severity == PlanWarningSeverity.Critical ? "#E57373"
-                        : severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(severity);
                     var label = count > 1 ? $"\u26A0 {type} ({count})" : $"\u26A0 {type}";
                     stack.Children.Add(new TextBlock
                     {
@@ -198,8 +197,7 @@ public partial class PlanViewerControl
                 // Individual node: show full warning messages
                 foreach (var w in warnings)
                 {
-                    var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
-                        : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
+                    var warnColor = PlanWarningDisplay.WarningSeverityColorHex(w.Severity);
                     stack.Children.Add(new TextBlock
                     {
                         Text = $"\u26A0 {w.WarningType}: {w.Message}",
