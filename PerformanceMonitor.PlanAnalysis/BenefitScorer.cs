@@ -36,8 +36,74 @@ public static class BenefitScorer
 
                 if (stmt.WaitStats.Count > 0 && stmt.QueryTimeStats != null)
                     ScoreWaitStats(stmt);
+
+                if (stmt.WaitStats.Count > 0)
+                    EmitWaitStatWarnings(stmt);
             }
         }
+    }
+
+    /// <summary>
+    /// Emits a PlanWarning per wait stat entry, merging the per-wait benefit % from
+    /// ScoreWaitStats with display flags and the curated description from WaitStatsConfig.
+    /// The existing wait-stats card/chart stays as a complementary view.
+    /// </summary>
+    private static void EmitWaitStatWarnings(PlanStatement stmt)
+    {
+        // Lookup benefit % by wait type (populated by ScoreWaitStats)
+        var benefitByType = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        foreach (var wb in stmt.WaitBenefits)
+            benefitByType[wb.WaitType] = wb.MaxBenefitPercent;
+
+        foreach (var wait in stmt.WaitStats)
+        {
+            if (wait.WaitTimeMs <= 0) continue;
+
+            double? benefitPct = benefitByType.TryGetValue(wait.WaitType, out var b) ? b : null;
+
+            var msg = new System.Text.StringBuilder();
+            msg.Append(wait.WaitType);
+            msg.Append(" Observed ").Append(wait.WaitTimeMs.ToString("N0")).Append(" ms");
+            if (wait.WaitCount > 0)
+                msg.Append(" across ").Append(wait.WaitCount.ToString("N0")).Append(" wait").Append(wait.WaitCount == 1 ? "" : "s");
+            msg.Append('.');
+
+            if (WaitStatsConfig.ShowAverageWaitTime(wait.WaitType) && wait.WaitCount > 0)
+            {
+                var effLatency = (double)wait.WaitTimeMs / wait.WaitCount;
+                msg.Append(" Effective latency: ")
+                   .Append(FormatWaitLatency(effLatency))
+                   .Append(" per wait.");
+            }
+
+            var description = WaitStatsConfig.Description(wait.WaitType);
+            if (!string.IsNullOrEmpty(description))
+                msg.Append(' ').Append(description);
+
+            var severity = benefitPct switch
+            {
+                >= 50 => PlanWarningSeverity.Critical,
+                >= 10 => PlanWarningSeverity.Warning,
+                _ => PlanWarningSeverity.Info,
+            };
+
+            stmt.PlanWarnings.Add(new PlanWarning
+            {
+                WarningType = "Wait: " + wait.WaitType,
+                Message = msg.ToString(),
+                Severity = severity,
+                MaxBenefitPercent = benefitPct,
+                ActionableFix = null
+            });
+        }
+    }
+
+    private static string FormatWaitLatency(double ms)
+    {
+        if (ms >= 1000) return $"{ms / 1000:N2} s";
+        if (ms >= 10) return $"{ms:N0} ms";
+        if (ms >= 1) return $"{ms:N1} ms";
+        return $"{ms * 1000:N0} \u00b5s";
     }
 
     private static void ScoreStatementWarnings(PlanStatement stmt)
