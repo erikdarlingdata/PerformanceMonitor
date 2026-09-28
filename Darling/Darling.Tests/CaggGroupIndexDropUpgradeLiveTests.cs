@@ -127,7 +127,8 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
             /* Capture every reader's rows BEFORE the V152 step. */
             var before = await CaptureReaderRowsAsync(connection, ct);
 
-            /* The upgrade: apply every rung above V151, which is exactly V152 on this build. */
+            /* The upgrade: apply every rung above V151 — V152 plus whichever later rungs this build
+               also carries (V153 (#4608) as of this build's top). */
             var applied = await PgMigrations.MigrateAsync(connection, ct);
             Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= RungVersion), applied);
 
@@ -188,7 +189,7 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
     /// the captured exception.</para>
     /// </summary>
     [Fact]
-    public async Task ARunningRollupRefreshHoldingTheMaterializationLockForEightSeconds_IsWaitedOut_AndTheMigrationReaches152()
+    public async Task ARunningRollupRefreshHoldingTheMaterializationLockForEightSeconds_IsWaitedOut_AndTheMigrationReachesTheTop()
     {
         var baseConnectionString = ConnectionString;
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -260,9 +261,14 @@ public sealed class CaggGroupIndexDropUpgradeLiveTests
             Assert.Equal(PgMigrations.Scripts.Count(m => m.Version >= RungVersion), applied);
             Assert.True(elapsed >= TimeSpan.FromSeconds(7), $"expected the migration to have waited out the lock (~8s hold); it finished in {elapsed}");
 
+            /* The final version is the build's TOP rung, not the literal 152 — a later rung (V153, #4608)
+               may also apply once the wait is over. V152's OWN effect (the group index drop on this
+               materialization) is what this pin is actually about, so assert that directly below rather
+               than pinning the final version to a rung number that will drift again the next time a rung
+               is added above this one. */
             using (var version = new NpgsqlCommand("SELECT MAX(version) FROM darling_schema_version", connection))
             {
-                Assert.Equal(RungVersion, Convert.ToInt32(await version.ExecuteScalarAsync(ct)));
+                Assert.Equal(StorageVersion.SchemaVersion, Convert.ToInt32(await version.ExecuteScalarAsync(ct)));
             }
 
             var indexes = await IndexColumnsAsync(connection, matSchema, matTable, ct);

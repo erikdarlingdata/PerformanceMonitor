@@ -243,6 +243,8 @@ public sealed class CaggGroupIndexDropLiveTests
                 await dropColumn.ExecuteNonQueryAsync(ct);
             }
 
+            await DropArtifactsOfLaterRungsAsync(connection, 150, ct);
+
             var version = await ProbedVersionAsync(connection, ct);
             Assert.Equal(150, version);
 
@@ -289,6 +291,8 @@ public sealed class CaggGroupIndexDropLiveTests
                 await rollback.ExecuteNonQueryAsync(ct);
             }
 
+            await DropArtifactsOfLaterRungsAsync(connection, 151, ct);
+
             var v151Shape = TimescaleSupport.CreateQueryStoreStatsHourlySql.Replace(
                 ", timescaledb.create_group_indexes = false", string.Empty, StringComparison.Ordinal);
             await using (var create = new NpgsqlCommand(v151Shape, connection))
@@ -304,6 +308,26 @@ public sealed class CaggGroupIndexDropLiveTests
         finally
         {
             await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (_, _) => { });
+        }
+    }
+
+    /// <summary>Removes the on-disk artifacts of every rung ABOVE <paramref name="simulatedVersion"/> so a
+    /// version-stamp rollback (<c>DELETE FROM darling_schema_version WHERE version >= N + 1</c>) actually
+    /// simulates an older store for the schema PROBE too, not just the version row — a later rung's own
+    /// sentinel object would otherwise still be on disk and make the probe map past the simulated version.
+    /// A future rung that adds a new probe sentinel must add its artifact's removal here.</summary>
+    private static async Task DropArtifactsOfLaterRungsAsync(NpgsqlConnection connection, int simulatedVersion, CancellationToken ct)
+    {
+        if (simulatedVersion < 153)
+        {
+            /* V153 (#4608) — the interval tables' first_execution_time indexes. */
+            await using var dropLatest = new NpgsqlCommand(
+                "DROP INDEX IF EXISTS collect.idx_query_store_interval_latest_first_exec", connection);
+            await dropLatest.ExecuteNonQueryAsync(ct);
+
+            await using var dropWide = new NpgsqlCommand(
+                "DROP INDEX IF EXISTS collect.idx_query_store_interval_wide_first_exec", connection);
+            await dropWide.ExecuteNonQueryAsync(ct);
         }
     }
 
