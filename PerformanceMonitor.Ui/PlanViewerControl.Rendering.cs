@@ -266,9 +266,11 @@ public partial class PlanViewerControl
             // Actual rows per execution vs Estimated rows (accuracy %) — red if off by 10x+.
             // EstimateRows is per-execution, so normalize ActualRows by ActualExecutions before
             // comparing (otherwise multi-execution operators, e.g. an NL inner side, always look off).
+            // PlanRowAccuracy is the one place that does this, so the edge color (GetLinkColorBrush,
+            // below) can't disagree with this label (#4627).
             var estRows = node.EstimateRows;
-            var actualRowsPerExec = node.ActualExecutions > 0 ? node.ActualRows / (double)node.ActualExecutions : node.ActualRows;
-            var accuracyRatio = estRows > 0 ? actualRowsPerExec / estRows : (actualRowsPerExec > 0 ? double.MaxValue : 1.0);
+            var actualRowsPerExec = PlanRowAccuracy.ActualRowsPerExecution(node.ActualRows, node.ActualExecutions);
+            var accuracyRatio = PlanRowAccuracy.Ratio(actualRowsPerExec, estRows);
             var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? Brushes.OrangeRed : fgBrush;
             var accuracy = estRows > 0
                 ? $" ({accuracyRatio * 100:F0}%)"
@@ -385,13 +387,13 @@ public partial class PlanViewerControl
 
     /// <summary>
     /// Returns the brush for the edge feeding <paramref name="child"/>, colored by how far its actual
-    /// row count diverged from its estimate. Only actual plans get non-default colors; matches
-    /// erikdarlingdata/PerformanceStudio's <c>GetLinkColorBrush</c> exactly. The pure ratio-to-tier logic
-    /// lives in <see cref="PlanEdgeColour"/> so it can be pinned without WPF.
+    /// row count diverged from its estimate, on the same per-execution basis as the node label above
+    /// (#4627). Only actual plans get non-default colors. The pure ratio-to-tier logic lives in
+    /// <see cref="PlanEdgeColour"/> so it can be pinned without WPF.
     /// </summary>
     private SolidColorBrush GetLinkColorBrush(PlanNode child)
     {
-        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.EstimateRows, AccuracyRatioDivergenceLimit);
+        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.ActualExecutions, child.EstimateRows, AccuracyRatioDivergenceLimit);
         return key switch
         {
             PlanEdgeColourKey.LightOrange => EdgeLightOrangeBrush,
