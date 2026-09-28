@@ -15,8 +15,8 @@ namespace Darling.Tests;
 /// Sets <see cref="PgSettingRedactor.MatchTimeoutForTest"/> to a generous 10s for the current async flow and
 /// restores the PRIOR value (not null) on <see cref="Dispose"/>. <c>MatchTimeoutForTest</c> is
 /// <c>AsyncLocal</c>-backed: a value set in an async test body before an <c>await</c> flows into everything
-/// that await reaches, and cannot leak into other tests. For exact-output assertions only; never for a test
-/// that exercises the timeout path.
+/// that await reaches, and cannot leak into other tests. For tests whose redacted output must come from the
+/// rules, not from a whole-value timeout mask; never for a test that exercises the regex timeout path.
 /// </summary>
 internal sealed class GenerousRedactorTimeout : IDisposable
 {

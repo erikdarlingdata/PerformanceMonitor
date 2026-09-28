@@ -29,17 +29,17 @@ namespace Darling.Tests;
 /// own hypertable/compression shape on <c>collect.pg_server_config</c>, which the shared fixture must never
 /// inherit from a test.</para>
 ///
-/// <para>Every method whose assertions depend on the EXACT text <see cref="PgSettingScrub.RunAsync"/> writes —
-/// a specific control value surviving byte-identical, a specific masked shape — opens the scope with
-/// <see cref="GenerousRedactorTimeout"/> before its first await (test-only flake fix, PR #4663, same seam as
-/// <see cref="PgSettingRedactorTests"/>'s <c>RedactUnderGenerousTimeout</c>): on the production 100ms
-/// <c>PgSettingRedactor.MatchTimeoutForTest</c>, a loaded runner's scheduling delay, not real backtracking,
-/// can mask a value WHOLE and break that exact-output check. Two methods deliberately do NOT open it:
-/// <see cref="TheScrubMasksEveryRedactorRuleShape"/> only checks that the raw secret is gone and the row
-/// count/marker moved, both true whether a value is masked in part or in whole, so a spurious timeout there
-/// cannot fail it; <see cref="TheScrubTimesOutOnOneServer_AndStillRedactsTheOther"/> tests a DIFFERENT,
-/// database-side command timeout (<c>TestOnlyUpdateCommandTimeoutSecondsOverride</c>), not the redactor's own
-/// regex match timeout, and its own assertions already tolerate either masked shape.</para>
+/// <para>Every method opens <see cref="GenerousRedactorTimeout"/> before its first await (test-only flake fix,
+/// PR #4663, the same seam <see cref="PgSettingRedactorTests"/>'s <c>RedactUnderGenerousTimeout</c> uses). On
+/// the production 100ms regex match timeout, a loaded runner's scheduling delay, not real backtracking, can
+/// mask a value WHOLE. That breaks the methods that check exact text <see cref="PgSettingScrub.RunAsync"/>
+/// writes: a control value surviving byte-identical, or a specific masked shape. It also weakens the two whose
+/// assertions would still pass. <see cref="TheScrubMasksEveryRedactorRuleShape"/> checks only that the raw
+/// secret is gone, and a whole-value mask removes it too, so a spurious timeout would hide a rule that stopped
+/// matching. <see cref="TheScrubTimesOutOnOneServer_AndStillRedactsTheOther"/> forces a DIFFERENT,
+/// database-side command timeout (<c>TestOnlyUpdateCommandTimeoutSecondsOverride</c>, which the scope leaves
+/// alone) and counts the log lines that mention "timeout"; a redactor timeout adds a warning line of its own,
+/// and that count holds only because the warning happens to say "timed out".</para>
 /// </summary>
 public sealed class PgSettingScrubLiveTests
 {
@@ -562,6 +562,7 @@ public sealed class PgSettingScrubLiveTests
             "Set DARLING_TEST_PG … to run the per-rule scrub test");
 
         var ct = TestContext.Current.CancellationToken;
+        using var generousTimeout = GenerousRedactorTimeout.Begin(); // #4663: see class remarks.
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         await using var connection = new NpgsqlConnection(scratch.ConnectionString);
@@ -642,6 +643,7 @@ public sealed class PgSettingScrubLiveTests
             "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4348 timeout+reconnect pin (it mints its own scratch database).");
 
         var ct = TestContext.Current.CancellationToken;
+        using var generousTimeout = GenerousRedactorTimeout.Begin(); // #4663: see class remarks.
 
         await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
         try
