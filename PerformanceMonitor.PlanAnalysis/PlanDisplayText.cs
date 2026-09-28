@@ -26,6 +26,13 @@ public static class PlanDisplayText
         plan.ParseError == null ? null : $"This plan couldn't be parsed: {plan.ParseError}";
 
     /// <summary>
+    /// The Wait Stats card's header tooltip, matching erikdarlingdata/PerformanceStudio's desktop viewer:
+    /// shown only when there are waits to describe.
+    /// </summary>
+    public static string? WaitStatsHeaderTooltip(int waitCount, long totalWaitMs) =>
+        waitCount > 0 ? $"{totalWaitMs:N0} ms of waits across {waitCount} wait types" : null;
+
+    /// <summary>
     /// The CPU:Elapsed ratio shown in the runtime summary, matching
     /// erikdarlingdata/PerformanceStudio@28d4c74's row: CPU time with external-wait time
     /// (<see cref="BenefitScorer.IsExternalWait"/>) subtracted, divided by elapsed time.
