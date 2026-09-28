@@ -70,6 +70,30 @@ public partial class PlanViewerControl : UserControl
     private SolidColorBrush PropSeparatorBrush =>
         (TryFindResource("PlanPropSeparatorBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x2A, 0x2D, 0x35));
 
+    // Plan Insights per-card accent brushes (theme-token backed; see InsightCardStyle for the
+    // quiet/non-quiet state these feed).
+    private SolidColorBrush IndexAccentBrush =>
+        (TryFindResource("InsightIndexBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xFF, 0xB3, 0x47));
+    private SolidColorBrush WaitsAccentBrush =>
+        (TryFindResource("InsightWaitsBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x4F, 0xA3, 0xFF));
+
+    /// <summary>
+    /// Flips one Plan Insights card between its normal and its quiet state. A card with nothing to
+    /// report drops its header to the muted foreground and dims its accent edge, so an empty panel
+    /// reads as empty instead of shouting in the panel's accent colour. Ported from
+    /// PerformanceStudio's SetInsightQuiet (erikdarlingdata/PerformanceStudio@87bad14); the
+    /// quiet/non-quiet values come from PerformanceMonitor.PlanAnalysis.InsightCardStyle.
+    /// </summary>
+    /// <param name="header">The card's header TextBlock.</param>
+    /// <param name="accentBrush">The card's own accent brush (its normal, non-empty header colour).</param>
+    /// <param name="accentEdge">The card's 3px accent-edge Border.</param>
+    /// <param name="isEmpty">Whether the card currently has nothing to report.</param>
+    private void SetInsightQuiet(TextBlock header, Brush accentBrush, Border accentEdge, bool isEmpty)
+    {
+        header.Foreground = InsightCardStyle.HeaderUsesMutedForeground(isEmpty) ? MutedBrush : accentBrush;
+        accentEdge.Opacity = InsightCardStyle.AccentOpacity(isEmpty);
+    }
+
     // Current property section for collapsible groups
     private StackPanel? _currentPropertySection;
 

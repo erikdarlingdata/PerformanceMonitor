@@ -1302,46 +1302,58 @@ public partial class PlanViewerControl
             }
 
             MissingIndexEmpty.Visibility = Visibility.Collapsed;
+            SetInsightQuiet(MissingIndexHeader, IndexAccentBrush, MissingIndexAccent, isEmpty: false);
         }
         else
         {
             MissingIndexHeader.Text = "Missing Index Suggestions";
             MissingIndexEmpty.Visibility = Visibility.Visible;
+            SetInsightQuiet(MissingIndexHeader, IndexAccentBrush, MissingIndexAccent, isEmpty: true);
         }
     }
 
-    private void ShowWaitStats(List<WaitStatInfo> waits, bool isActualPlan)
+    private void ShowWaitStats(List<WaitStatInfo> waits, List<PlanWarning> statementWarnings, bool isActualPlan)
     {
         WaitStatsContent.Children.Clear();
 
         if (waits.Count == 0)
         {
             WaitStatsHeader.Text = "Wait Stats";
+            // The populated branch below hangs the previous statement's total on this tooltip;
+            // without clearing it here, an empty statement would still answer a hover with a stale count.
+            // PlanDisplayText.WaitStatsHeaderTooltip returns null for a zero wait count, so this clears it.
             WaitStatsHeader.ToolTip = PlanDisplayText.WaitStatsHeaderTooltip(0, 0);
             WaitStatsEmpty.Text = isActualPlan
                 ? "No wait stats recorded"
                 : "No wait stats (estimated plan)";
             WaitStatsEmpty.Visibility = Visibility.Visible;
+            SetInsightQuiet(WaitStatsHeader, WaitsAccentBrush, WaitStatsAccent, isEmpty: true);
             return;
         }
 
         WaitStatsEmpty.Visibility = Visibility.Collapsed;
+        SetInsightQuiet(WaitStatsHeader, WaitsAccentBrush, WaitStatsAccent, isEmpty: false);
 
         var sorted = waits.OrderByDescending(w => w.WaitTimeMs).ToList();
         var maxWait = sorted[0].WaitTimeMs;
         var totalWait = sorted.Sum(w => w.WaitTimeMs);
 
+        // The header ellipsizes in a narrow card, so the total it carries goes on a tooltip too.
         WaitStatsHeader.Text = $"  Wait Stats \u2014 {totalWait:N0}ms total";
         WaitStatsHeader.ToolTip = PlanDisplayText.WaitStatsHeaderTooltip(sorted.Count, totalWait);
 
-        var longestName = sorted.Max(w => w.WaitType.Length);
-        var nameColWidth = longestName * 6.5 + 10;
-
-        var maxBarWidth = 300;
-
+        /* Ported from PerformanceStudio (erikdarlingdata/PerformanceStudio@78a3370, refined @80de6fc):
+           the wait type and the duration are both star columns; the bar and the trailing "up to N%"
+           benefit are Auto. Star columns take whatever is left after the Auto ones and shrink to zero
+           if they must, so the two text columns ellipsize (each with its full value on a tooltip) and
+           nothing overflows the card — this control's ScrollViewer has horizontal scrolling disabled,
+           so an Auto column that wants more than it's given would otherwise clip mid-word or force a
+           sideways scrollbar back on. Star-sizing the name also left-aligns every bar into a column,
+           which is what makes them comparable at a glance. */
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(nameColWidth) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(maxBarWidth + 16) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         for (int i = 0; i < sorted.Count; i++)
@@ -1351,23 +1363,31 @@ public partial class PlanViewerControl
         {
             var w = sorted[i];
             var barFraction = maxWait > 0 ? (double)w.WaitTimeMs / maxWait : 0;
-            var color = GetWaitCategoryColor(GetWaitCategory(w.WaitType));
+            var category = GetWaitCategory(w.WaitType);
+            var color = GetWaitCategoryColor(category);
 
+            // Wait type name, colored by category, capped at 150px with an ellipsis so one long
+            // type cannot widen (or clip) the row; the full name is always on the tooltip.
             var nameText = new TextBlock
             {
                 Text = w.WaitType,
                 FontSize = 12,
                 Foreground = TooltipFgBrush,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                MaxWidth = 150,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 2, 10, 2)
+                Margin = new Thickness(0, 2, 10, 2),
+                Background = Brushes.Transparent
             };
+            nameText.ToolTip = $"{w.WaitType} \u2014 {category} wait";
             Grid.SetRow(nameText, i);
             Grid.SetColumn(nameText, 0);
             grid.Children.Add(nameText);
 
+            // Bar: the category color at a fixed width, a compact proportional indicator.
             var colorBar = new Border
             {
-                Width = Math.Max(4, barFraction * maxBarWidth),
+                Width = Math.Max(4, barFraction * 60),
                 Height = 14,
                 Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)),
                 CornerRadius = new CornerRadius(2),
@@ -1379,17 +1399,42 @@ public partial class PlanViewerControl
             Grid.SetColumn(colorBar, 1);
             grid.Children.Add(colorBar);
 
+            // Duration text: the other flexible column, so this is what gives when the strip is narrow.
             var durationText = new TextBlock
             {
                 Text = $"{w.WaitTimeMs:N0}ms ({w.WaitCount:N0} waits)",
                 FontSize = 12,
                 Foreground = TooltipFgBrush,
+                TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 2, 0, 2)
+                Margin = new Thickness(0, 2, 8, 2),
+                Background = Brushes.Transparent
             };
+            durationText.ToolTip = $"{w.WaitTimeMs:N0} ms across {w.WaitCount:N0} waits";
             Grid.SetRow(durationText, i);
             Grid.SetColumn(durationText, 2);
             grid.Children.Add(durationText);
+
+            // Benefit % (if the analyzer scored one for this wait type) — Auto so it is never the
+            // thing that gets clipped.
+            var benefitText = WaitRowText.Benefit(w.WaitType, statementWarnings);
+            if (benefitText != null)
+            {
+                var benefitBlock = new TextBlock
+                {
+                    Text = benefitText,
+                    FontSize = 11,
+                    Foreground = MutedBrush,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 2, 0, 2),
+                    Background = Brushes.Transparent
+                };
+                benefitBlock.ToolTip =
+                    $"{benefitText.Replace("up to", "Up to", StringComparison.Ordinal)} of this statement's runtime could be recovered by removing {w.WaitType} waits";
+                Grid.SetRow(benefitBlock, i);
+                Grid.SetColumn(benefitBlock, 3);
+                grid.Children.Add(benefitBlock);
+            }
         }
 
         WaitStatsContent.Children.Add(grid);
@@ -1457,6 +1502,7 @@ public partial class PlanViewerControl
             AddRow(row.Label, row.Value, row.ColorKey);
 
         RuntimeSummaryContent.Children.Add(grid);
+        SetInsightQuiet(RuntimeSummaryTitle, TooltipFgBrush, RuntimeSummaryAccent, isEmpty: false);
     }
 
     private void UpdateInsightsHeader()
