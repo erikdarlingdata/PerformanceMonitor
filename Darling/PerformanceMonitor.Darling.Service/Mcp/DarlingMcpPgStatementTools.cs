@@ -243,6 +243,7 @@ public sealed class DarlingMcpPgStatementTools
     /// </summary>
     internal static object BuildEvictions(DarlingPgStatementReader.PgEvictionInfo? info)
     {
+        var note = PgStatementEvictionNote.Build(info);
         if (info is null || !info.Known || info.EvictionPasses is null)
         {
             return new
@@ -250,21 +251,11 @@ public sealed class DarlingMcpPgStatementTools
                 known = false,
                 eviction_passes_in_window = (long?)null,
                 max_entries = info?.MaxEntries,
-                note = "Eviction count unknown for this target (pg_stat_statements_info is absent: PostgreSQL before 14, "
-                     + "or the extension is below 1.9; ALTER EXTENSION pg_stat_statements UPDATE adds it).",
+                note,
             };
         }
 
         var passes = info.EvictionPasses.Value;
-        string? note = null;
-        if (passes > 0)
-        {
-            var current = info.MaxEntries is { } max ? ", currently " + max.ToString(CultureInfo.InvariantCulture) : "";
-            note = "pg_stat_statements evicted entries " + passes.ToString(CultureInfo.InvariantCulture)
-                 + " time(s) in this window (each pass drops about 5% of pg_stat_statements.max" + current
-                 + "), so a rarely-run statement may be missing and a statement re-admitted after an eviction counts only from then: "
-                 + "the totals here can under-report. Raising pg_stat_statements.max (a postmaster setting, restart required) reduces this.";
-        }
 
         return new
         {
