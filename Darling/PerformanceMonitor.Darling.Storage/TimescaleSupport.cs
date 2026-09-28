@@ -9184,6 +9184,14 @@ AND   ca.view_name IN ({views})";
     /// not moved. Single-digit milliseconds measured against two hypertables' chunk catalogs — nothing here
     /// touches a compressed batch. A rollup with no chunks at all (freshly created, no data yet) reads a NULL
     /// chunk name; the caller treats that as "always measure", because an empty read is itself cheap.
+    ///
+    /// <para>Also reads the aggregate's <b>materialization hypertable identity</b> (its schema-qualified
+    /// name from the continuous-aggregate catalog, which is stable metadata rather than a scan). A DROP and
+    /// re-CREATE of the continuous aggregate mints a brand-new materialization hypertable, and by coincidence
+    /// its first chunk can land with the SAME generated chunk name a previous incarnation once had (Timescale
+    /// names chunks from a sequence that is not scoped per-hypertable in every version) — the oldest-chunk name
+    /// alone is not a reliable identity across a drop/re-create. The hypertable identity is, so the planner
+    /// must treat EITHER one changing as a reason to re-measure.</para>
     /// </summary>
     public static string? RollupOldestChunkSql(RollupAvailability availability)
     {
@@ -9198,7 +9206,8 @@ AND   ca.view_name IN ({views})";
 SELECT
     ca.view_name,
     oldest.chunk_name,
-    oldest.range_start
+    oldest.range_start,
+    ca.materialization_hypertable_schema || '.' || ca.materialization_hypertable_name AS materialization_hypertable
 FROM timescaledb_information.continuous_aggregates AS ca
 LEFT JOIN LATERAL (
     SELECT c.chunk_name, c.range_start
@@ -9213,8 +9222,8 @@ WHERE ca.view_schema = 'collect'
     }
 
     /// <summary>
-    /// #4539: the per-<see cref="NpgsqlDataSource"/> rollup floor cache — keyed on the data source rather than
-    /// held statically, so two stores' caches (two <see cref="NpgsqlDataSource"/> instances, one per store)
+    /// #4539/#4553: the per-<see cref="NpgsqlDataSource"/> rollup floor cache — keyed on the data source rather
+    /// than held statically, so two stores' caches (two <see cref="NpgsqlDataSource"/> instances, one per store)
     /// never cross-pollute, and a disposed data source's entry is collected with it rather than leaking
     /// forever. <see cref="ConditionalWeakTable{TKey,TValue}"/> for exactly that lifetime, and its own
     /// dictionary value is a plain (thread-unsynchronized) <see cref="Dictionary{TKey,TValue}"/> guarded by a
@@ -9222,51 +9231,140 @@ WHERE ca.view_schema = 'collect'
     /// two calls can race on the same data source.</summary>
     private static readonly ConditionalWeakTable<NpgsqlDataSource, RollupFloorCache> RollupFloorCaches = new();
 
-    /// <summary>One data source's cached rollup floors, keyed by view name. The chunk identity is the oldest
-    /// chunk's name (NULL when the rollup currently has no chunks at all) — see <see cref="RollupFloorsToMeasure"/>
-    /// for how a change in it forces a re-measure.</summary>
+    /// <summary>
+    /// #4553: bounds how long a cached rollup floor may be reused even when its oldest chunk's identity has
+    /// not changed. A retention DELETE that runs against the oldest materialization chunk (raw data aging out
+    /// past its retention while the chunk itself is left in place) can move the true floor LATER without
+    /// changing the chunk's identity at all — the cache has no catalog signal for that. Re-measuring on a
+    /// timer, independent of the chunk-identity check, bounds the staleness to at most this long. An hour
+    /// still cuts the expensive re-sort from every five-minute probe cycle to at most once an hour.
+    /// </summary>
+    internal static readonly TimeSpan RollupFloorMaxReuse = TimeSpan.FromHours(1);
+
+    /// <summary>One data source's cached rollup floors, keyed by view name.</summary>
     private sealed class RollupFloorCache
     {
         public readonly object Lock = new();
-        public readonly Dictionary<string, (string? ChunkName, DateTime Floor)> ByView = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, RollupFloorCacheEntry> ByView = new(StringComparer.Ordinal);
     }
 
     /// <summary>
-    /// #4539 pure planner: which of <paramref name="availability"/>'s present views must have <c>min(bucket)</c>
-    /// re-run, given <paramref name="cached"/>'s last-measured chunk identities and <paramref name="oldestNow"/>'s
-    /// freshly-read ones. A view is measured when it has no cache entry yet, OR its oldest-chunk identity
-    /// differs from what is cached, OR it currently has no chunk at all (an empty read costs nothing, so there
-    /// is no reason to trust a stale cache entry over it). Otherwise its cached floor is reused. An absent view
-    /// (not in <paramref name="availability"/>) is never in the returned set — it was never a candidate to
-    /// measure in the first place, since <see cref="RollupCoverageProbeSql(RollupAvailability,IReadOnlySet{string}?)"/>
+    /// #4553: one view's cached floor and the identity it was measured against — the oldest chunk's name AND
+    /// the materialization hypertable's own identity (schema-qualified name), because a DROP and re-CREATE of
+    /// the continuous aggregate mints a new materialization hypertable whose first chunk can, by coincidence,
+    /// land with the same generated chunk name a previous incarnation once had. Either identity changing means
+    /// the cached floor no longer describes the relation actually being read. <see cref="MeasuredAtUtc"/> backs
+    /// <see cref="RollupFloorMaxReuse"/>.
+    /// </summary>
+    internal readonly record struct RollupFloorCacheEntry(string? ChunkName, string? MaterializationHypertable, DateTime Floor, DateTime MeasuredAtUtc);
+
+    /// <summary>The oldest-chunk catalog read's per-view identity, before any floor has been attached to it.</summary>
+    internal readonly record struct RollupChunkIdentity(string? ChunkName, string? MaterializationHypertable);
+
+    /// <summary>
+    /// #4539/#4553 pure planner: which of <paramref name="availability"/>'s present views must have
+    /// <c>min(bucket)</c> re-run, given <paramref name="cached"/>'s last-measured identities and
+    /// <paramref name="oldestNow"/>'s freshly-read ones. A view is measured when it has no cache entry yet, OR
+    /// either half of its identity (oldest-chunk name, materialization hypertable) differs from what is
+    /// cached, OR it currently has no chunk at all (an empty read costs nothing, so there is no reason to
+    /// trust a stale cache entry over it), OR the cached entry is older than <paramref name="now"/> minus
+    /// <see cref="RollupFloorMaxReuse"/> (the TTL safety net — see <see cref="RollupFloorMaxReuse"/> for why
+    /// identity alone is not always enough). Otherwise its cached floor is reused. An absent view (not in
+    /// <paramref name="availability"/>) is never in the returned set — it was never a candidate to measure in
+    /// the first place, since <see cref="RollupCoverageProbeSql(RollupAvailability,IReadOnlySet{string}?)"/>
     /// already contributes <c>NULL::timestamp</c> for it regardless.
     /// </summary>
     internal static IReadOnlySet<string> RollupFloorsToMeasure(
-        IReadOnlyDictionary<string, (string? ChunkName, DateTime Floor)> cached,
-        IReadOnlyDictionary<string, string?> oldestNow,
-        RollupAvailability availability)
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> cached,
+        IReadOnlyDictionary<string, RollupChunkIdentity> oldestNow,
+        RollupAvailability availability,
+        DateTime now)
     {
         var measure = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var (view, chunkName) in oldestNow)
+        foreach (var (view, identity) in oldestNow)
         {
             if (!availability.Has(view))
             {
                 continue;
             }
 
-            if (chunkName is null)
+            if (identity.ChunkName is null)
             {
                 measure.Add(view);
                 continue;
             }
 
-            if (!cached.TryGetValue(view, out var entry) || !string.Equals(entry.ChunkName, chunkName, StringComparison.Ordinal))
+            if (!cached.TryGetValue(view, out var entry)
+                || !string.Equals(entry.ChunkName, identity.ChunkName, StringComparison.Ordinal)
+                || !string.Equals(entry.MaterializationHypertable, identity.MaterializationHypertable, StringComparison.Ordinal)
+                || now - entry.MeasuredAtUtc >= RollupFloorMaxReuse)
             {
                 measure.Add(view);
             }
         }
 
         return measure;
+    }
+
+    /// <summary>
+    /// #4553 pure: the floor-merge half of <see cref="DetectRollupCoverageAsync"/>, split out so the
+    /// NULL-reuse bug (a view measured this cycle that came back empty must NOT fall back to its stale cached
+    /// floor) has a unit test with no database involved. <paramref name="measuredThisCycle"/> holds ONE entry
+    /// per view that was actually named in this cycle's probe SQL — its value is the fresh <c>min(bucket)</c>,
+    /// or <c>null</c> when that view is present but currently empty. A view absent from
+    /// <paramref name="measuredThisCycle"/> was not measured this cycle at all (its cached identity matched),
+    /// and its cached floor is carried forward unchanged — UNLESS the rollup itself is no longer present, in
+    /// which case its stale entry is dropped rather than carried forward.
+    ///
+    /// <para>The returned <c>NewCacheEntries</c> is the COMPLETE replacement for the cache's <c>ByView</c> —
+    /// the caller must overwrite, not merge, or an evicted view's stale entry would survive under whatever key
+    /// this function chose not to re-emit.</para>
+    /// </summary>
+    internal static (IReadOnlyDictionary<string, DateTime> Floors, IReadOnlyDictionary<string, RollupFloorCacheEntry> NewCacheEntries) MergeRollupFloors(
+        IReadOnlyDictionary<string, DateTime?> measuredThisCycle,
+        IReadOnlyDictionary<string, RollupFloorCacheEntry> cached,
+        IReadOnlyDictionary<string, RollupChunkIdentity> oldestNow,
+        RollupAvailability availability,
+        DateTime now)
+    {
+        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        var newEntries = new Dictionary<string, RollupFloorCacheEntry>(StringComparer.Ordinal);
+
+        foreach (var (view, measuredFloor) in measuredThisCycle)
+        {
+            if (measuredFloor is DateTime floor)
+            {
+                floors[view] = floor;
+                if (oldestNow.TryGetValue(view, out var identity))
+                {
+                    newEntries[view] = new RollupFloorCacheEntry(identity.ChunkName, identity.MaterializationHypertable, floor, now);
+                }
+            }
+
+            /* Measured this cycle and came back NULL (empty, or no chunks): no floor, and — because this view
+               is skipped here — no entry in newEntries either. That is the eviction: the caller replaces the
+               whole cache with newEntries, so a view left out of it is gone. */
+        }
+
+        foreach (var (view, entry) in cached)
+        {
+            if (measuredThisCycle.ContainsKey(view))
+            {
+                /* Already resolved above, whether it kept or lost its floor this cycle. */
+                continue;
+            }
+
+            if (!availability.Has(view))
+            {
+                /* The rollup itself is gone — drop the stale entry rather than carry it forward forever. */
+                continue;
+            }
+
+            floors[view] = entry.Floor;
+            newEntries[view] = entry;
+        }
+
+        return (floors, newEntries);
     }
 
     /// <summary>
@@ -9292,8 +9390,17 @@ WHERE ca.view_schema = 'collect'
     /// read (a plain-PostgreSQL store, or any other failure) falls back to measuring every present rollup, the
     /// same as before this cache existed.</para>
     /// </summary>
-    public static async Task<RollupCoverage> DetectRollupCoverageAsync(
+    public static Task<RollupCoverage> DetectRollupCoverageAsync(
         NpgsqlDataSource dataSource, RollupAvailability availability, CancellationToken cancellationToken = default)
+        => DetectRollupCoverageAsync(dataSource, availability, DateTime.UtcNow, cancellationToken);
+
+    /// <summary>
+    /// #4553: the same probe as the three-argument overload, with the wall clock <paramref name="now"/> is
+    /// measured against injectable for the TTL check (<see cref="RollupFloorMaxReuse"/>) rather than always
+    /// reading <see cref="DateTime.UtcNow"/> — so a live test can force a TTL expiry without sleeping an hour.
+    /// </summary>
+    internal static async Task<RollupCoverage> DetectRollupCoverageAsync(
+        NpgsqlDataSource dataSource, RollupAvailability availability, DateTime now, CancellationToken cancellationToken = default)
     {
         if (dataSource is null)
         {
@@ -9302,11 +9409,11 @@ WHERE ca.view_schema = 'collect'
 
         var cache = RollupFloorCaches.GetOrCreateValue(dataSource);
         IReadOnlySet<string>? measure = null;
-        Dictionary<string, string?>? oldestNow = null;
-        Dictionary<string, (string? ChunkName, DateTime Floor)> cachedSnapshot;
+        Dictionary<string, RollupChunkIdentity>? oldestNow = null;
+        Dictionary<string, RollupFloorCacheEntry> cachedSnapshot;
         lock (cache.Lock)
         {
-            cachedSnapshot = new Dictionary<string, (string? ChunkName, DateTime Floor)>(cache.ByView, StringComparer.Ordinal);
+            cachedSnapshot = new Dictionary<string, RollupFloorCacheEntry>(cache.ByView, StringComparer.Ordinal);
         }
 
         var oldestChunkSql = RollupOldestChunkSql(availability);
@@ -9314,7 +9421,7 @@ WHERE ca.view_schema = 'collect'
         {
             try
             {
-                var chunksNow = new Dictionary<string, string?>(StringComparer.Ordinal);
+                var chunksNow = new Dictionary<string, RollupChunkIdentity>(StringComparer.Ordinal);
                 await using var chunkCommand = dataSource.CreateCommand(oldestChunkSql);
                 chunkCommand.CommandTimeout = JobCatalogReadTimeoutSeconds;
                 await using var chunkReader = await chunkCommand.ExecuteReaderAsync(cancellationToken);
@@ -9322,10 +9429,11 @@ WHERE ca.view_schema = 'collect'
                 {
                     var view = chunkReader.GetString(0);
                     var chunkName = await chunkReader.IsDBNullAsync(1, cancellationToken) ? null : chunkReader.GetString(1);
-                    chunksNow[view] = chunkName;
+                    var materializationHypertable = await chunkReader.IsDBNullAsync(3, cancellationToken) ? null : chunkReader.GetString(3);
+                    chunksNow[view] = new RollupChunkIdentity(chunkName, materializationHypertable);
                 }
 
-                var toMeasure = new HashSet<string>(RollupFloorsToMeasure(cachedSnapshot, chunksNow, availability), StringComparer.Ordinal);
+                var toMeasure = new HashSet<string>(RollupFloorsToMeasure(cachedSnapshot, chunksNow, availability, now), StringComparer.Ordinal);
 
                 /* Every present view this catalog read never saw (should not happen, but a partial read from a
                    mid-build store is exactly what #1664 exists to tolerate) is measured too — the safe default
@@ -9356,22 +9464,6 @@ WHERE ca.view_schema = 'collect'
             return RollupCoverage.Unknown;
         }
 
-        var floors = new Dictionary<string, DateTime>(StringComparer.Ordinal);
-        for (var i = 0; i < RollupViews.Length; i++)
-        {
-            var view = RollupViews[i].View;
-            if (!await reader.IsDBNullAsync(i, cancellationToken))
-            {
-                var measured = reader.GetDateTime(i);
-                floors[view] = measured;
-            }
-            else if (measure is not null && availability.Has(view) && cachedSnapshot.TryGetValue(view, out var reused))
-            {
-                /* Not measured this cycle (its oldest chunk is unchanged) — reuse the last-measured floor. */
-                floors[view] = reused.Floor;
-            }
-        }
-
         var rawOldest = new Dictionary<string, DateTime>(StringComparer.Ordinal);
         for (var i = 0; i < RolledRawTables.Length; i++)
         {
@@ -9382,21 +9474,43 @@ WHERE ca.view_schema = 'collect'
             }
         }
 
-        if (measure is not null && oldestNow is not null)
+        if (measure is null || oldestNow is null)
         {
-            lock (cache.Lock)
+            /* The catalog read failed or found no rollups at all — every present view was measured this cycle
+               (RollupCoverageProbeSql(availability, measure: null) names all of them), so there is nothing to
+               reuse from the cache and nothing new to remember either. */
+            var floorsWithoutCache = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+            for (var i = 0; i < RollupViews.Length; i++)
             {
-                foreach (var (view, floor) in floors)
+                if (!await reader.IsDBNullAsync(i, cancellationToken))
                 {
-                    if (!oldestNow.TryGetValue(view, out var chunkName))
-                    {
-                        /* No chunk-catalog evidence for this view this cycle — do not overwrite whatever
-                           identity is already cached (there may be none) with a guess. */
-                        continue;
-                    }
-
-                    cache.ByView[view] = (chunkName, floor);
+                    floorsWithoutCache[RollupViews[i].View] = reader.GetDateTime(i);
                 }
+            }
+
+            return new RollupCoverage(floorsWithoutCache, rawOldest, availability);
+        }
+
+        var measuredThisCycle = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+        for (var i = 0; i < RollupViews.Length; i++)
+        {
+            var view = RollupViews[i].View;
+            if (!measure.Contains(view))
+            {
+                continue;
+            }
+
+            measuredThisCycle[view] = await reader.IsDBNullAsync(i, cancellationToken) ? (DateTime?)null : reader.GetDateTime(i);
+        }
+
+        var (floors, newEntries) = MergeRollupFloors(measuredThisCycle, cachedSnapshot, oldestNow, availability, now);
+
+        lock (cache.Lock)
+        {
+            cache.ByView.Clear();
+            foreach (var (view, entry) in newEntries)
+            {
+                cache.ByView[view] = entry;
             }
         }
 
