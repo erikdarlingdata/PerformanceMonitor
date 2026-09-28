@@ -11,6 +11,14 @@ public class ParsedPlan
     public bool ClusteredMode { get; set; }
     public List<PlanBatch> Batches { get; set; } = new();
 
+    /// <summary>
+    /// Set when the tree walk in <see cref="ShowPlanParser.Parse"/> throws (including its own
+    /// recursion-depth and size guards against hostile plan XML). Callers get a plan object
+    /// with an empty or partial <see cref="Batches"/> list and this message, instead of the
+    /// exception itself.
+    /// </summary>
+    public string? ParseError { get; set; }
+
     public List<MissingIndex> AllMissingIndexes => Batches
         .SelectMany(b => b.Statements)
         .SelectMany(s => s.MissingIndexes)
