@@ -65,9 +65,6 @@ public static class PlanAdvisoryAggregator
             // #4551: a refused or exception-terminated plan carries whatever parsed before the
             // failure (partial statements/warnings). Skip it exactly like the catch above does,
             // so a partial parse never contributes partial counts to the aggregate.
-            // #4551: a refused or exception-terminated plan carries whatever parsed before the
-            // failure (partial statements/warnings). Skip it exactly like the catch above does,
-            // so a partial parse never contributes partial counts to the aggregate.
             if (plan.ParseError != null)
                 continue;
 
