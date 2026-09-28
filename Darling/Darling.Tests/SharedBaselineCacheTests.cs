@@ -136,15 +136,15 @@ public sealed class SharedBaselineCacheTests
 
         var worker = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
         Assert.Matches(@"BaselineCache baselineCache\s*[,)]", worker);
-        Assert.Contains("new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache)", worker, StringComparison.Ordinal);
+        Assert.Contains("new DarlingAnalysisService(_postgres!, planFetcher, _logger, _baselineCache, _analyzerConfig)", worker, StringComparison.Ordinal);
 
         var mcp = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpHostService.cs");
         Assert.Contains("new DarlingAnalysisService(postgres, planFetcher, _logger, _baselineCache)", mcp, StringComparison.Ordinal);
 
         var web = Code("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingWebHostService.cs");
-        Assert.Contains("DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency);", web, StringComparison.Ordinal);
+        Assert.Contains("DarlingWebEndpoints.MapAll(app, postgres, _collectorState, _logger, _baselineCache, postgresConfig, _readLatency, analyzerConfig);", web, StringComparison.Ordinal);
         var endpoints = Code("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
-        Assert.Contains("new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache)", endpoints, StringComparison.Ordinal);
+        Assert.Contains("new DarlingAnalysisService(postgres, logger: logger, baselineCache: baselineCache, analyzerConfig: analyzerConfig)", endpoints, StringComparison.Ordinal);
 
         /* And no other production site builds an analysis service at all (a new one must be wired, or say why not). */
         var sites = new[] { worker, mcp, endpoints }.Sum(code => CountOf(code, "new DarlingAnalysisService("));
