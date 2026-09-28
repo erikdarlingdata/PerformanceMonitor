@@ -190,7 +190,8 @@ END $$;";
     /// and it leaves the read gate's floor scan unindexed too. The index serves both call sites from one
     /// object, which is why it is the winner here.</para>
     /// </summary>
-    private const string V153Sql = @"
+    private static readonly string V153Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
 CREATE INDEX IF NOT EXISTS idx_query_store_interval_latest_first_exec
 ON collect.query_store_interval_latest (first_execution_time);
 

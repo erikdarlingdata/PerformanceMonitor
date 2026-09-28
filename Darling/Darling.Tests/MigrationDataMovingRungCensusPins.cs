@@ -185,6 +185,25 @@ public sealed class MigrationDataMovingRungCensusPins
             + "decompressed relation an empty shell (one 8 KB page per compressed chunk, V142's own measured "
             + "property) - so a store many times today's size would still build both in low seconds, nowhere "
             + "near a MigrationCommandTimeoutSeconds window, and this rung does not move the multiple"),
+        new(
+            153,
+            SetsTheFloor: false,
+            "two CREATE INDEXes over the populated collect.query_store_interval_latest (created V143) and "
+            + "collect.query_store_interval_wide (created V145) tables (#4608) - real collected series, "
+            + "V104's/V142's/V150's shape rather than a same-rung freebie, but plain (uncompressed) heaps "
+            + "rather than compressed hypertables, so every row is a real page rather than V142's/V150's "
+            + "empty-shell compressed chunks. Measured on a rig seeded at generate_series scale with the "
+            + "same maintenance_work_mem (2047 MB) and max_parallel_maintenance_workers (2) the field store "
+            + "runs: the _latest index built in 1.41 s at 5M rows, 3.61 s at 10M, and 8.13 s at 20M rows "
+            + "(near-linear, ~0.28-0.41 ms/row); the _wide index built in 3.52 s at 9M rows. Both tables are "
+            + "kept to 15 and 9 days by the purge this rung speeds up, and the field store measured 18.3M "
+            + "(_latest) / 9.3M (_wide) rows at those horizons on 2026-09-28 - a full-horizon store (roughly "
+            + "6-7x today's rows, ~110M/~65M) projects to roughly 45-55 s per table, nowhere near the 280 s "
+            + "MigrationCommandTimeoutSeconds window this rung's SET LOCAL lock_timeout leaves. V143/V145 "
+            + "are new in 3.9.0 (v3.8.0 was schema 125), so every store upgrading from a released version "
+            + "creates both tables EMPTY in this same migrate run and builds both indexes instantly; only a "
+            + "nightly-build store already holds rows, and only for the few days since it picked up V143/V145 "
+            + "- nowhere near either horizon in practice"),
     ];
 
     /// <summary>
