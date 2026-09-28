@@ -55,6 +55,7 @@ public partial class MainWindow
             MainWindowPlanViewerTab.IsSelected = true;
             PlanViewerController.AddNewEmptyPlanSubTab();
         }
+        ApplyStoreUnavailableShell();
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => MainWindowPlanTabControl.Focus()));
     }
 
@@ -104,6 +105,8 @@ public partial class MainWindow
             MainTabs.Visibility = Visibility.Collapsed;
             EmptyStatePanel.Visibility = Visibility.Visible;
         }
+
+        ApplyStoreUnavailableShell();
     }
 
     private void MainWindowPlanViewer_DragOver(object sender, DragEventArgs e) =>
