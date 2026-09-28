@@ -51,7 +51,7 @@ namespace Darling.Tests;
 /// </list>
 /// So the check that closes the defect class is a COUNT the plan predicts —
 /// <see cref="PredictedParameterCount"/>, two for the window plus a server scope plus one per filter plus
-/// one for a ranked mode's <c>topN</c> — compared against what the compiler bound. An extra bind raises the
+/// one for a ranked mode's <c>topN</c>, plus two for the hourly-plus-raw-edges route's edge bounds — compared against what the compiler bound. An extra bind raises the
 /// actual and leaves the prediction where it was, whichever spelling it took.
 /// <see cref="TheThreeChecks_SeeDifferentHalvesOfADuplicateBind"/> pins all three verdicts against both
 /// spellings side by side, so the reasoning cannot be re-derived wrongly from either one alone.</para>
@@ -142,15 +142,18 @@ public sealed class ComposeParameterCoverageTests
     /// restated as a function of the author's intent rather than read back off the compiler's own output.
     /// Two for the naive-UTC window, one more when the run names servers, one per filter (every
     /// <c>BuildFilterClause</c> arm binds exactly one value, whether a text array or a scalar), and one for
-    /// <c>topN</c> in the two ranked modes.
+    /// <c>topN</c> in the two ranked modes, and two more (the raw edges' start and end) when the panel's
+    /// route is the hybrid <c>HourlyRawEdges</c> tier (#4605). The route decision is the author's intent
+    /// here — the caller says which tier the panel was routed to; it is not read back off the bound set.
     ///
     /// <para>An extra bind anywhere raises what the compiler produced and leaves this where it was, which is
     /// what makes it see the spelling coverage cannot. It is deliberately NOT derived from
     /// <c>Parameters.Count</c> — a prediction taken from the thing it is checking agrees with it always.</para>
     /// </summary>
-    internal static int PredictedParameterCount(PanelPlan plan, bool serverScoped) =>
+    internal static int PredictedParameterCount(PanelPlan plan, bool serverScoped, bool hybrid = false) =>
         2
         + (serverScoped ? 1 : 0)
+        + (hybrid ? 2 : 0)
         + plan.Filters.Count
         + (plan.Mode is PanelMode.Ranked or PanelMode.RankedTimeSeries ? 1 : 0);
 
@@ -311,11 +314,11 @@ public sealed class ComposeParameterCoverageTests
     /// <summary>
     /// <see cref="PredictedParameterCount"/> restates a rule that lives in another file, so it can be
     /// outgrown. This counts the <c>ParamList</c> call sites in <c>ComposeCompiler.cs</c> and pins the
-    /// total: fifteen, which is the three window/scope binds and one <c>topN</c> per ranked arm in
-    /// <c>Compile</c>, the seven <c>BuildFilterClause</c> operator arms, and the three window/scope binds in
+    /// total: seventeen, which is the three window/scope binds and one <c>topN</c> per ranked arm in
+    /// <c>Compile</c>, the two hybrid edge binds in <c>Compile</c> when the route is HourlyRawEdges, the seven <c>BuildFilterClause</c> operator arms, and the three window/scope binds in
     /// <c>CompileAnnotation</c>.
     ///
-    /// <para>A sixteenth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
+    /// <para>An eighteenth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
     /// whether the prediction grows with it — rather than in the sweep, where it would read as a compiler
     /// bug. Comments and string literals are stripped first, because this file's reasoning names
     /// <c>p.AddTextArray</c> in prose.</para>
@@ -334,7 +337,7 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        Assert.Equal(15, sites);
+        Assert.Equal(17, sites);
     }
 
     /// <summary>
@@ -507,6 +510,29 @@ public sealed class ComposeParameterCoverageTests
             variables: new Dictionary<string, string?>(StringComparer.Ordinal) { ["waits"] = "PAGEIOLATCH_SH" },
             declaredVariables: ["waits"]);
 
+        /* #4605: hybrid-routed panels (hourly middle + raw edges) bind two extra timestamps. SUM and MAX on
+           query_stats, SUM on procedure_stats, fleet and scoped, so the sweep reaches the edge binds. */
+        foreach (var (hybridSource, hybridMeasure, hybridAggregate) in new[]
+        {
+            ("query_stats", "query_worker_us", "sum"),
+            ("query_stats", "query_worker_us", "max"),
+            ("procedure_stats", "proc_worker_us", "sum"),
+        })
+        {
+            foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+            {
+                Add(
+                    corpus,
+                    $"{{\"source\":\"{hybridSource}\",\"measure\":\"{hybridMeasure}\",\"aggregate\":\"{hybridAggregate}\","
+                    + "\"topN\":10,\"groupBy\":[\"database_name\"],\"viz\":\"bar\"}",
+                    servers,
+                    hybridMeasure,
+                    hybridCoverageSource: hybridSource);
+            }
+        }
+
+        Assert.Contains(corpus, c => c.Compiled.Route.Tier == ComposeSourceTier.HourlyRawEdges);
+
         foreach (var source in MeasureCatalog.AnnotationSources)
         {
             foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
@@ -544,7 +570,8 @@ public sealed class ComposeParameterCoverageTests
         string measureKey,
         string? filterOp = null,
         IReadOnlyDictionary<string, string?>? variables = null,
-        string[]? declaredVariables = null)
+        string[]? declaredVariables = null,
+        string? hybridCoverageSource = null)
     {
         var (plan, parseError) = ComposeSpec.TryParsePanel(
             (JsonObject)JsonNode.Parse(json)!,
@@ -557,7 +584,7 @@ public sealed class ComposeParameterCoverageTests
             return;
         }
 
-        var (compiled, compileError) = ComposeCompiler.Compile(plan!, Context(servers, variables));
+        var (compiled, compileError) = ComposeCompiler.Compile(plan!, Context(servers, variables, hybridCoverageSource));
         if (compileError is not null)
         {
             return;
@@ -565,9 +592,10 @@ public sealed class ComposeParameterCoverageTests
 
         corpus.Add(new Statement(
             $"{measureKey} {plan!.Mode} ({(servers is null ? "fleet" : "scoped")})"
-            + (filterOp is null ? "" : $" filter:{filterOp}"),
+            + (filterOp is null ? "" : $" filter:{filterOp}")
+            + (hybridCoverageSource is null ? "" : " hybrid"),
             compiled!,
-            PredictedParameterCount(plan, servers is not null),
+            PredictedParameterCount(plan, servers is not null, hybrid: hybridCoverageSource is not null),
             plan.Mode,
             servers is not null,
             measureKey,
@@ -578,15 +606,40 @@ public sealed class ComposeParameterCoverageTests
 
     private static ComposeRunContext Context(
         IReadOnlyList<string>? servers,
-        IReadOnlyDictionary<string, string?>? variables) =>
-        new(
+        IReadOnlyDictionary<string, string?>? variables,
+        string? hybridCoverageSource = null)
+    {
+        if (hybridCoverageSource is null)
+        {
+            return new(
+                servers,
+                WindowStart,
+                WindowEnd,
+                variables ?? ComposeRunContext.NoVariables,
+                RollupAvailability.All,
+                WindowEnd,
+                RollupCoverage.Unknown);
+        }
+
+        /* The hybrid shape: a 12-hour window inside raw's reach, with the successor hourly proven contiguous
+           from before the window and a materialized ceiling inside it (the same coverage the router and
+           compose tests build). */
+        var successorView = TimescaleSupport.SuccessorOf(hybridCoverageSource + "_hourly")!;
+        var coverage = new RollupCoverage(
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = WindowEnd.AddDays(-5) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal),
+            RollupAvailability.All,
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = WindowEnd.AddHours(-1) },
+            new Dictionary<string, DateTime>(StringComparer.Ordinal) { [successorView] = WindowEnd.AddHours(-23) });
+        return new(
             servers,
-            WindowStart,
+            WindowEnd.AddHours(-12),
             WindowEnd,
             variables ?? ComposeRunContext.NoVariables,
             RollupAvailability.All,
             WindowEnd,
-            RollupCoverage.Unknown);
+            coverage);
+    }
 
     /// <summary>The repository root, from this file's own compile-time path — the same anchor
     /// <c>StartupCommandTimeoutTests</c> and <c>ServerLocalReadFrameDisciplineTests</c> use, so the source
