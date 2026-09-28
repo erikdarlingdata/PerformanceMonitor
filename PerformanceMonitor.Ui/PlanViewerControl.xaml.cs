@@ -201,6 +201,7 @@ public partial class PlanViewerControl : UserControl
         CostText.Text = "";
         CostText.Visibility = Visibility.Collapsed;
         ClosePropertiesPanel();
+        CloseMinimapPanel();
     }
 
     private static void CollectWarnings(PlanNode node, List<PlanWarning> warnings)

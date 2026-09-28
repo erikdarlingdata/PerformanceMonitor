@@ -167,6 +167,7 @@ public partial class PlanViewerControl
         ZoomTransform.ScaleX = _zoomLevel;
         ZoomTransform.ScaleY = _zoomLevel;
         ZoomLevelText.Text = $"{(int)(_zoomLevel * 100)}%";
+        UpdateMinimapViewportBox();
     }
 
     private void PlanScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
