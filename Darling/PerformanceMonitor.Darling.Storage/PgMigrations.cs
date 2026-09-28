@@ -42,6 +42,116 @@ public static class PgMigrations
         public string Sql { get; }
     }
 
+    /// <summary>
+    /// V152 (#4503) — drops the auto-created per-column GROUP BY index TimescaleDB builds on six Query Store
+    /// rollups' materialization hypertables, on every store that upgrades through this rung, the same way
+    /// #3597 did for <see cref="TimescaleSupport.QueryStoreStatsIntervalHourlyView"/>'s materialization at
+    /// CREATE time. A production catalog read found the same shape repeated on
+    /// <see cref="TimescaleSupport.QueryStoreStatsHourlyView"/>, <see cref="TimescaleSupport.QueryStoreStatsCorrectedHourlyView"/>,
+    /// <see cref="TimescaleSupport.QueryStoreStatsDailyView"/>, <see cref="TimescaleSupport.QueryStoreStatsCorrectedDailyView"/>,
+    /// <see cref="TimescaleSupport.QueryStoreStatsIntervalDailyView"/> and
+    /// <see cref="TimescaleSupport.QueryStoreStatsDayGrainDailyView"/>: five group indexes apiece
+    /// (<c>database_name</c>, <c>module_name</c>, <c>query_hash</c>, <c>server_id</c>, <c>server_name</c>, each
+    /// paired with <c>bucket DESC</c>) on the first five, eleven on the interval-daily view, and lifetime
+    /// <c>idx_scan</c> of ZERO on every one of them except <c>server_id</c> (kept) and <c>server_name</c> (kept
+    /// on the two hourly views only, where reads measurably use it) — the reader check this rung's PR body
+    /// carries in full.
+    ///
+    /// <para><b>Resolved by view name and by the indexed COLUMN, never by a string-built index name
+    /// (#4503).</b> A continuous aggregate's materialization hypertable id is assigned at CREATE time and
+    /// differs per store — the production catalog this rung read from happened to number them
+    /// 103/106/109/110/112/113, but a fresh or differently-ordered store would not; that part was already
+    /// handled by resolving <c>materialization_hypertable_name</c> from
+    /// <c>timescaledb_information.continuous_aggregates</c>. What was NOT safe is building the auto-created
+    /// index's NAME as a string and passing it to <c>DROP INDEX IF EXISTS</c>: PostgreSQL truncates an
+    /// identifier at 63 bytes with no hash suffix, and
+    /// <c>_materialized_hypertable_112_runtime_stats_interval_id_bucket_idx</c> is 68 characters, so the name
+    /// actually on disk is the 63-byte truncation, not the string this rung would have built — the DROP
+    /// would have silently no-op'd against a name nothing wears, leaving the real index in place. The
+    /// <c>DO</c> block below never builds that name: for each view it resolves the materialization's OID,
+    /// then reads <c>pg_index</c>/<c>pg_attribute</c> directly for a two-key btree whose FIRST key column is
+    /// one of that view's drop-list columns and whose SECOND key column is <c>bucket</c> — the exact shape
+    /// <c>create_group_indexes</c>'s default builds — and drops whatever index actually carries that shape,
+    /// by its real (possibly-truncated) name via <c>::regclass</c>. A single-column index (the kept
+    /// <c>bucket_idx</c>) and a two-key index whose kept column ISN'T in the drop list both fail the match
+    /// and are never touched. A plain-PostgreSQL store, which has never created the extension, has no
+    /// <c>timescaledb_information</c> catalog to read at all, so the whole block returns before the loop —
+    /// a no-op there, not a per-view skip. A TimescaleDB store missing one of the six CAGGs (one that never
+    /// enabled a given rollup) skips just that view rather than erroring, and re-running the block after the
+    /// indexes are already gone is a no-op — the catalog read finds nothing to drop.</para>
+    ///
+    /// <para><b><c>SET LOCAL lock_timeout</c>, derived from <see cref="MigrationCommandTimeoutSeconds"/>.</b>
+    /// <c>DROP INDEX</c> takes <c>AccessExclusiveLock</c> on the materialization hypertable and on every one
+    /// of its chunks, across six hypertables in one transaction, while a background refresh policy can hold
+    /// the same lock for as long as its own run takes — measured around 264 s on the hourly rollups, well
+    /// past a flat 5 s. Rather than fail the rung on the very refresh it is racing, the lock_timeout here is
+    /// set to <see cref="MigrationCommandTimeoutSeconds"/> minus a 20 s margin (280 s): long enough to wait
+    /// out one whole refresh cycle, but still short enough that the server's own clean, retryable
+    /// <c>55P03</c> always fires before the client-side <see cref="MigrationCommandTimeoutSeconds"/> command
+    /// timeout would cancel the statement out from under it — if a refresh somehow outlasts even that, the
+    /// failure is still retryable (lock-not-available is already in the retryable set the service's startup
+    /// triage carries), so the next start retries the same rung, still at V151, rather than blocking
+    /// collection. This is a per-STATEMENT wait inside one rung, smaller by construction than
+    /// <see cref="MigrationLockWaitTimeoutSeconds"/>, the whole-SESSION budget a sibling migrator polls
+    /// against; V152 spending up to 280 s of its own command timeout still leaves that budget's other
+    /// multiples for the rest of the ladder.</para>
+    /// </summary>
+    private static readonly string V152Sql = @"
+SET LOCAL lock_timeout = '" + (MigrationCommandTimeoutSeconds - 20) + @"s';
+DO $$
+DECLARE
+    v_view text;
+    v_drop_cols text[];
+    v_mat_schema text;
+    v_mat_table text;
+    v_mat_oid regclass;
+    r record;
+BEGIN
+    /* timescaledb_information only exists once the extension has been created, and this runs on stores
+       where it never was -- reaching it unconditionally raises 42P01. Probed with to_regclass (NULL rather
+       than an error when absent); no extension means there are no continuous aggregates and so no rollup
+       group indexes to drop, which makes this rung a no-op there. The per-view read below goes through
+       EXECUTE so the timescaledb_information reference is parsed only when it runs. */
+    IF to_regclass('timescaledb_information.continuous_aggregates') IS NULL THEN
+        RETURN;
+    END IF;
+
+    FOR v_view, v_drop_cols IN VALUES
+        ('query_store_stats_hourly',          ARRAY['database_name', 'module_name', 'query_hash']),
+        ('query_store_stats_corrected_hourly', ARRAY['database_name', 'module_name', 'query_hash']),
+        ('query_store_stats_daily',           ARRAY['database_name', 'module_name', 'query_hash', 'server_name']),
+        ('query_store_stats_corrected_daily',  ARRAY['database_name', 'module_name', 'query_hash', 'server_name']),
+        ('query_store_stats_interval_daily',   ARRAY['database_name', 'execution_type_desc', 'first_execution_time', 'module_name', 'plan_id', 'query_hash', 'query_id', 'replica_role', 'runtime_stats_interval_id', 'server_name']),
+        ('query_store_stats_daygrain_daily',   ARRAY['database_name', 'module_name', 'query_hash', 'server_name'])
+    LOOP
+        EXECUTE 'SELECT materialization_hypertable_schema, materialization_hypertable_name
+                 FROM timescaledb_information.continuous_aggregates
+                 WHERE view_schema = ''collect'' AND view_name = $1'
+        INTO v_mat_schema, v_mat_table
+        USING v_view;
+
+        IF v_mat_table IS NULL THEN
+            CONTINUE;
+        END IF;
+
+        v_mat_oid := format('%I.%I', v_mat_schema, v_mat_table)::regclass;
+
+        FOR r IN
+            SELECT i.indexrelid::regclass AS idx
+            FROM pg_index i
+            JOIN pg_attribute a1 ON a1.attrelid = i.indrelid AND a1.attnum = i.indkey[0]
+            JOIN pg_attribute a2 ON a2.attrelid = i.indrelid AND a2.attnum = i.indkey[1]
+            WHERE i.indrelid = v_mat_oid
+            AND   i.indnkeyatts = 2
+            AND   NOT i.indisunique
+            AND   a1.attname = ANY (v_drop_cols)
+            AND   a2.attname = 'bucket'
+        LOOP
+            EXECUTE format('DROP INDEX IF EXISTS %s', r.idx);
+        END LOOP;
+    END LOOP;
+END $$;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -231,6 +341,7 @@ public static class PgMigrations
         new Migration(149, "query-store-liveness-hot-touch", V149Sql),
         new Migration(150, "collection-log-watermark-and-job-history-indexes", V150Sql),
         new Migration(151, "ag-group-id", V151Sql),
+        new Migration(152, "drop-unread-cagg-group-indexes", V152Sql),
     };
 
     /// <summary>
