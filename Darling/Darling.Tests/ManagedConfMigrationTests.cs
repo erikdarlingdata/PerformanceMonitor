@@ -58,6 +58,17 @@ public sealed class ManagedConfMigrationTests
     }
 
     [Fact]
+    public void ClassifyLines_UntouchedV17Block_IsOurs()
+    {
+        var conf = DarlingManagedPostgres.BuildLogLinePrefixConfAppend();
+        var lines = ClassifyLines(conf);
+
+        var prefix = FindByText(lines, "log_line_prefix");
+        Assert.Equal(ConfLineClassification.Ours, prefix.Classification);
+        Assert.Equal(DarlingManagedPostgres.ConfMarkerV17, prefix.BlockMarker);
+    }
+
+    [Fact]
     public void ClassifyLines_UntouchedV13PreloadLine_IsOurs()
     {
         var conf = DarlingManagedPostgres.BuildStatementStatisticsConfAppend(effectivePreloadList: null);

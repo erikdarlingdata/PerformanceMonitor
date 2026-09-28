@@ -428,8 +428,8 @@ public sealed class DarlingManagedPostgresTests
            silent failure this shape invites. Eleven blocks as of #3175; twelve as of #3802 (v12 WAL sizing);
            thirteen as of #3899 (v13 statement statistics); fourteen as of #3909 (v14 PostgreSQL 17
            maintenance_work_mem limit); fifteen as of #4246 (v15 WAL compression); sixteen as of #4246 (v16
-           checkpoint interval). */
-        Assert.Equal(16, markers.Length);
+           checkpoint interval); seventeen as of v17 (log line prefix). */
+        Assert.Equal(17, markers.Length);
 
         Assert.Equal(markers.Length, markers.Select(m => m.Value).Distinct(StringComparer.Ordinal).Count());
 
@@ -2490,6 +2490,74 @@ public sealed class DarlingManagedPostgresTests
             var second = File.ReadAllText(confPath);
             Assert.Equal(1, CountOccurrences(second, DarlingManagedPostgres.ConfMarkerV16));
             Assert.Equal("15min", LastSettingValue(second, "checkpoint_timeout"));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /* ===================== v17 log line prefix ===================== */
+
+    /// <summary>
+    /// The v17 block: <c>log_line_prefix = '%m [%p] %a '</c> only. See
+    /// <see cref="DarlingManagedPostgres.ConfMarkerV17"/> for why <c>%a</c> and the reader risk it carries.
+    /// </summary>
+    [Fact]
+    public void LogLinePrefixConfAppend_PinsV17Marker_AndSetsLogLinePrefix()
+    {
+        var block = DarlingManagedPostgres.BuildLogLinePrefixConfAppend();
+
+        Assert.Contains(DarlingManagedPostgres.ConfMarkerV17, block, StringComparison.Ordinal);
+        Assert.Equal("'%m [%p] %a '", LastSettingValue(block, "log_line_prefix"));
+
+        /* No fingerprint or stamp line, or the v8/v12 staleness checks would misread what they scan. */
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfHardwareFingerprintPrefix, block, StringComparison.Ordinal);
+        Assert.DoesNotContain(DarlingManagedPostgres.ConfWalSizingStampPrefix, block, StringComparison.Ordinal);
+
+        /* v12 (#3802) is still the only thing that ever sets these: this block leaves the disk-derived
+           ceiling exactly where it is. */
+        Assert.Null(LastSettingValue(block, "max_wal_size"));
+        Assert.Null(LastSettingValue(block, "min_wal_size"));
+        Assert.Null(LastSettingValue(block, "checkpoint_completion_target"));
+    }
+
+    /// <summary>The generic per-setting source scan (#4214) walks every marker in this list; a block absent
+    /// from it would be invisible to that scan even though it is live.</summary>
+    [Fact]
+    public void ConfMarkerV17_IsInAllManagedConfMarkers()
+        => Assert.Contains(DarlingManagedPostgres.ConfMarkerV17, DarlingManagedPostgres.AllManagedConfMarkers);
+
+    /// <summary>
+    /// The heal on real files: a cluster whose conf carries every earlier marker but not v17 gains exactly one
+    /// v17 block, with <c>log_line_prefix</c> live in the file, and a second start appends nothing more -- the
+    /// same once-only shape v9-v11, v13, v15 and v16 prove elsewhere (<see
+    /// cref="EnsureConfAppended_AppendsV16Once_AndNotAgainOnANextStart"/>), exercised here through the real
+    /// <see cref="DarlingManagedPostgres.EnsureConfAppended"/> rather than string concatenation.
+    /// </summary>
+    [Fact]
+    public void EnsureConfAppended_AppendsV17Once_AndNotAgainOnANextStart()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-v17-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            var confPath = Path.Combine(dataDirectory, "postgresql.conf");
+            File.WriteAllText(confPath, DarlingManagedPostgres.BuildConfAppend(5994));
+
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5994, DataDirectory = dataDirectory }, NullLogger.Instance);
+
+            pg.EnsureConfAppended(dataDirectory);
+            var first = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(first, DarlingManagedPostgres.ConfMarkerV17));
+            Assert.Equal("'%m [%p] %a '", LastSettingValue(first, "log_line_prefix"));
+
+            pg.EnsureConfAppended(dataDirectory);
+            var second = File.ReadAllText(confPath);
+            Assert.Equal(1, CountOccurrences(second, DarlingManagedPostgres.ConfMarkerV17));
+            Assert.Equal("'%m [%p] %a '", LastSettingValue(second, "log_line_prefix"));
         }
         finally
         {
