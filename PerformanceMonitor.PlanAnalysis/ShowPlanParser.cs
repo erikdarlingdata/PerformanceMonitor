@@ -716,6 +716,7 @@ public static class ShowPlanParser
                 var index = objEl.Attribute("Index")?.Value?.Replace("[", "").Replace("]", "");
 
                 node.DatabaseName = db;
+                node.SchemaName = schema;
                 node.IndexName = index;
 
                 var shortParts = new List<string>();

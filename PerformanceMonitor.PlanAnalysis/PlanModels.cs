@@ -198,6 +198,7 @@ public class PlanNode
 
     // Detail properties (for tooltip/properties panel)
     public string? DatabaseName { get; set; }
+    public string? SchemaName { get; set; }
     public string? ObjectName { get; set; }
     public string? FullObjectName { get; set; }
     public string? IndexName { get; set; }

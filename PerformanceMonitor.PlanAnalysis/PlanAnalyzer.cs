@@ -524,7 +524,10 @@ public static partial class PlanAnalyzer
         // - A parent join may have chosen the wrong strategy
         // - Root nodes with no parent to harm are skipped
         // - Nodes whose only parents are Parallelism/Top/Sort (no spill) are skipped
+        // An operator that never executed returned zero rows because it never ran, so its
+        // zero is no evidence that the estimate was wrong.
         if (node.HasActualStats && node.EstimateRows > 0
+            && node.ActualExecutions > 0
             && !node.Lookup) // Key lookups are point lookups (1 row per execution) — per-execution estimate is misleading
         {
             if (node.ActualRows == 0)
@@ -546,7 +549,7 @@ public static partial class PlanAnalyzer
             else
             {
                 // Compare per-execution actuals to estimates (SQL Server estimates are per-execution)
-                var executions = node.ActualExecutions > 0 ? node.ActualExecutions : 1;
+                var executions = node.ActualExecutions;
                 var actualPerExec = (double)node.ActualRows / executions;
                 var ratio = actualPerExec / node.EstimateRows;
                 if (ratio >= 10.0 || ratio <= 0.1)
@@ -1010,7 +1013,12 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 23: Table-valued functions
-        if (node.LogicalOp == "Table-valued function")
+        // A function the engine supplies runs as the same operator: STRING_SPLIT, OPENJSON,
+        // GENERATE_SERIES, and every DMV and DMF. Its Object names no database and no schema,
+        // and a function a user wrote always has both. The advice below is about code the
+        // user can rewrite, so the engine's own functions are skipped.
+        var isEngineFunction = string.IsNullOrEmpty(node.DatabaseName) && string.IsNullOrEmpty(node.SchemaName);
+        if (node.LogicalOp == "Table-valued function" && !isEngineFunction)
         {
             var funcName = node.ObjectName ?? node.PhysicalOp;
             node.Warnings.Add(new PlanWarning
