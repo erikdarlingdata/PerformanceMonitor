@@ -76,6 +76,10 @@ LIMIT 1";
         try
         {
             var plan = ShowPlanParser.Parse(planXml);
+            // #4551: a refused or exception-terminated plan carries only what parsed before the
+            // failure; skip it exactly like a caught parse exception, so a partial plan never
+            // contributes a partial drill-down.
+            if (plan.ParseError != null) return;
             PlanAnalyzer.Analyze(plan);
 
             var allWarnings = plan.Batches
