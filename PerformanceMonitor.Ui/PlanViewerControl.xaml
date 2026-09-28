@@ -97,7 +97,6 @@
                                                Margin="0,0,0,6"/>
                                     <StackPanel x:Name="ServerContextContent"/>
                                     <TextBlock x:Name="ServerContextEmpty"
-                                               Text="Run Repro Script to capture server context"
                                                FontSize="12" Visibility="Collapsed"
                                                Foreground="{DynamicResource ForegroundMutedBrush}"/>
                                 </StackPanel>
