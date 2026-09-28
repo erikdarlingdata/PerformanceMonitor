@@ -57,6 +57,7 @@ public partial class ViewerServerTab
         var viewer = new PlanViewerControl();
         try
         {
+            viewer.ServerMetadata = await _dataService.GetPlanAnalysisServerMetadataAsync(_server.ServerId);
             await viewer.LoadPlan(planXml, label, queryText);
         }
         catch (System.Xml.XmlException ex)

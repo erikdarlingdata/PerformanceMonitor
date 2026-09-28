@@ -102,11 +102,15 @@ public static class ViewerActualPlanFlow
     /// via <see cref="GraphViewerWindow"/> — the plan host the history / drill-down windows use (they have no
     /// Plan Viewer tab). The Top Queries surface opens into its tab instead, so it does not call this.
     /// </summary>
-    public static async Task OpenFloatingPlanAsync(Window owner, string planXml, string label, string? queryText)
+    public static async Task OpenFloatingPlanAsync(
+        Window owner, ViewerDataService dataService, int serverId, string planXml, string label, string? queryText)
     {
         var viewer = new PlanViewerControl();
         try
         {
+            /* #4530: best-effort — a failed metadata read leaves ServerMetadata null, same as the pre-#4530
+               behaviour, so a viewer with no store row for this server still opens the plan. */
+            viewer.ServerMetadata = await dataService.GetPlanAnalysisServerMetadataAsync(serverId);
             await viewer.LoadPlan(planXml, label, queryText);
         }
         catch (Exception ex)
