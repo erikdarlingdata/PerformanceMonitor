@@ -526,7 +526,8 @@ public sealed partial class ViewerDataService
         int serverId, DateTime startUtc, DateTime endUtc, IReadOnlyList<string>? databaseNames = null,
         DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
-        var route = await QueryStoreTrendRouting.ResolveAsync(_dataSource, cancellationToken);
+        var (_, coverage) = await GetRollupAvailabilityAsync(cancellationToken);
+        var route = await QueryStoreTrendRouting.ResolveAsync(coverage, _dataSource, cancellationToken);
         List<QueryTrendPoint> points;
         if (route.UseRollup)
         {

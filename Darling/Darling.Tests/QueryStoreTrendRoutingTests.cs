@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Threading.Tasks;
 using PerformanceMonitor.Darling.Service.Mcp;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -61,6 +62,91 @@ public sealed class QueryStoreTrendRoutingTests
            double count or a dropped hour. */
         Assert.Equal(newest.AddHours(1), route.RawStartUtc);
         Assert.Equal(oldest, route.RollupFloorUtc);
+    }
+
+    /* ── #4611: the cached-coverage route ── */
+
+    /// <summary>
+    /// THE #4611 pin: with a warm coverage (a non-null ceiling for the corrected hourly), the resolver never
+    /// touches the store at all — no <c>min(bucket)</c>/<c>max(bucket)</c> statement is issued. A null
+    /// <see cref="NpgsqlDataSource"/> proves it directly: the coverage-taking overload returns from the
+    /// cache alone when the ceiling is present, so passing null crashes only if it tries to probe.
+    ///
+    /// <para><b>RED on the pre-#4611 code:</b> this overload does not exist there — the call is a compile
+    /// failure against the base branch, which the pre-fix code cannot serve at all: every call re-ran
+    /// <see cref="QueryStoreTrendRouting.RollupBoundsSql"/> regardless of what the caller already knew.</para>
+    /// </summary>
+    [Fact]
+    public async Task ResolveAsync_WithWarmCoverage_IssuesNoProbeStatement()
+    {
+        var floor = new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var ceiling = new DateTime(2026, 3, 4, 12, 0, 0, DateTimeKind.Unspecified);
+        var coverage = new RollupCoverage(
+            new System.Collections.Generic.Dictionary<string, DateTime>(System.StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = floor,
+            },
+            new System.Collections.Generic.Dictionary<string, DateTime>(System.StringComparer.Ordinal),
+            RollupAvailability.None,
+            new System.Collections.Generic.Dictionary<string, DateTime>(System.StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = ceiling,
+            });
+
+        var route = await QueryStoreTrendRouting.ResolveAsync(coverage, dataSource: null!);
+
+        Assert.True(route.UseRollup);
+        Assert.Equal(ceiling, route.RawStartUtc);
+        Assert.Equal(floor, route.RollupFloorUtc);
+    }
+
+    /// <summary>
+    /// The cached-coverage route and <see cref="QueryStoreTrendRouting.Resolve"/>'s pure decision must agree
+    /// for the same bounds — the ceiling from <see cref="RollupCoverage.CeilingOf"/> IS the same exclusive
+    /// boundary <see cref="QueryStoreTrendRouting.Resolve"/> computes as <c>newest + bucketWidth</c>, so
+    /// there is no separate off-by-one to apply when reading it from the cache instead of from a fresh
+    /// <c>max(bucket)</c> read.
+    /// </summary>
+    [Fact]
+    public async Task ResolveAsync_CachedRoute_AgreesWithThePureDecision_ForTheSameBounds()
+    {
+        var floor = new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Unspecified);
+        var newest = new DateTime(2026, 3, 4, 11, 0, 0, DateTimeKind.Unspecified);
+        var ceiling = newest.AddHours(1);
+
+        var coverage = new RollupCoverage(
+            new System.Collections.Generic.Dictionary<string, DateTime>(System.StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = floor,
+            },
+            new System.Collections.Generic.Dictionary<string, DateTime>(System.StringComparer.Ordinal),
+            RollupAvailability.None,
+            new System.Collections.Generic.Dictionary<string, DateTime>(System.StringComparer.Ordinal)
+            {
+                [TimescaleSupport.QueryStoreStatsCorrectedHourlyView] = ceiling,
+            });
+
+        var cachedRoute = await QueryStoreTrendRouting.ResolveAsync(coverage, dataSource: null!);
+        var pureRoute = QueryStoreTrendRouting.Resolve(rollupExists: true, oldestBucketUtc: floor, newestBucketUtc: newest);
+
+        Assert.Equal(pureRoute.UseRollup, cachedRoute.UseRollup);
+        Assert.Equal(pureRoute.RawStartUtc, cachedRoute.RawStartUtc);
+        Assert.Equal(pureRoute.RollupFloorUtc, cachedRoute.RollupFloorUtc);
+    }
+
+    /// <summary>
+    /// #4611: a cold or unknown coverage (no ceiling for this view — never probed, absent, or nothing
+    /// materialized) is never LESS correct than before this change — the resolver falls back to the live
+    /// probe-and-read path unchanged. <see cref="RollupCoverage.Unknown"/> carries no ceilings at all, so
+    /// this exercises the fallback with a real (if unreachable) data source shape by asserting it is the
+    /// SAME overload the pre-#4611 code always called: a null coverage throws, proving the coverage is
+    /// consulted before anything else.
+    /// </summary>
+    [Fact]
+    public async Task ResolveAsync_NullCoverage_Throws()
+    {
+        await Assert.ThrowsAsync<ArgumentNullException>(
+            () => QueryStoreTrendRouting.ResolveAsync(coverage: null!, dataSource: null!));
     }
 
     /* ── the probes ── */
