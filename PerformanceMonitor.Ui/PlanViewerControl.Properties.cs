@@ -1036,12 +1036,14 @@ public partial class PlanViewerControl
         });
         if (breakdown.IsSkewed)
         {
+            // #4629: was the fixed OrangeBrush (#FFB347, 1.78:1 on Light's white — under WCAG AA).
+            // WarningBrush is the same theme token the app's other warning text already uses.
             header.Children.Add(new TextBlock
             {
                 Text = breakdown.SkewSuffix,
                 FontWeight = FontWeights.SemiBold,
                 FontSize = 11,
-                Foreground = OrangeBrush,
+                Foreground = WarningBrush,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(6, 0, 0, 0)
             });
@@ -1263,10 +1265,11 @@ public partial class PlanViewerControl
                     Foreground = MutedBrush,
                     FontSize = 12
                 });
+                // #4629: was the fixed OrangeBrush; see the skew-text comment above.
                 headerRow.Children.Add(new TextBlock
                 {
                     Text = $"{mi.Impact:F1}%",
-                    Foreground = OrangeBrush,
+                    Foreground = WarningBrush,
                     FontSize = 12
                 });
                 itemPanel.Children.Add(headerRow);

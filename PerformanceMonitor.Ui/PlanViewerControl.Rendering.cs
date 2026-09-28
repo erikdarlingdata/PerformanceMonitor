@@ -220,9 +220,11 @@ public partial class PlanViewerControl
             HorizontalAlignment = HorizontalAlignment.Center
         });
 
-        // Cost percentage
-        var costColor = node.CostPercent >= 50 ? Brushes.OrangeRed
-            : node.CostPercent >= 25 ? Brushes.Orange
+        // Cost percentage. #4629: the fixed Brushes.OrangeRed/Brushes.Orange both failed WCAG AA on
+        // Light (3.44:1 / 1.97:1 on white); CriticalOrangeBrush/WarningBrush are theme resources tuned
+        // per theme instead.
+        var costColor = node.CostPercent >= 50 ? CriticalOrangeBrush
+            : node.CostPercent >= 25 ? WarningBrush
             : (Brush)FindResource("ForegroundBrush");
 
         stack.Children.Add(new TextBlock
@@ -241,7 +243,7 @@ public partial class PlanViewerControl
 
             // Elapsed time — red if >= 1 second
             var elapsedSec = node.ActualElapsedMs / 1000.0;
-            var elapsedBrush = elapsedSec >= 1.0 ? Brushes.OrangeRed : fgBrush;
+            var elapsedBrush = elapsedSec >= 1.0 ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
                 Text = $"{elapsedSec:F3}s",
@@ -253,7 +255,7 @@ public partial class PlanViewerControl
 
             // CPU time — red if >= 1 second
             var cpuSec = node.ActualCPUMs / 1000.0;
-            var cpuBrush = cpuSec >= 1.0 ? Brushes.OrangeRed : fgBrush;
+            var cpuBrush = cpuSec >= 1.0 ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
                 Text = $"CPU: {cpuSec:F3}s",
@@ -271,7 +273,7 @@ public partial class PlanViewerControl
             var estRows = node.EstimateRows;
             var actualRowsPerExec = PlanRowAccuracy.ActualRowsPerExecution(node.ActualRows, node.ActualExecutions);
             var accuracyRatio = PlanRowAccuracy.Ratio(actualRowsPerExec, estRows);
-            var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? Brushes.OrangeRed : fgBrush;
+            var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? CriticalOrangeBrush : fgBrush;
             var accuracy = estRows > 0
                 ? $" ({accuracyRatio * 100:F0}%)"
                 : "";
@@ -303,7 +305,10 @@ public partial class PlanViewerControl
             });
         }
 
-        // Total warning count badge on root node
+        // Total warning count badge on root node. #4629: was the fixed OrangeBrush (#FFB347), 1.78:1
+        // on Light's white node background — well under WCAG AA's 4.5:1 floor for text. WarningBrush
+        // is the theme token Light/Dark/CoolBreeze each already tune to pass 4.5:1 on their own
+        // backgrounds, so the badge keeps its orange/warning meaning in every theme.
         if (totalWarningCount > 0)
         {
             var badgeRow = new StackPanel
@@ -316,7 +321,7 @@ public partial class PlanViewerControl
             {
                 Text = "\u26A0",
                 FontSize = 13,
-                Foreground = OrangeBrush,
+                Foreground = WarningBrush,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 4, 0)
             });
@@ -325,7 +330,7 @@ public partial class PlanViewerControl
                 Text = $"{totalWarningCount} warning{(totalWarningCount == 1 ? "" : "s")}",
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
-                Foreground = OrangeBrush,
+                Foreground = WarningBrush,
                 VerticalAlignment = VerticalAlignment.Center
             });
             stack.Children.Add(badgeRow);

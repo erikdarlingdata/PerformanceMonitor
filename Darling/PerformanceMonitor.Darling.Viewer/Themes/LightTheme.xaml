@@ -46,6 +46,12 @@
          price is the ink that sits ON it: the old #1A1A1A badge ink measured 6.57:1 on the bright amber and
          measures 3.25:1 here, so text on a status fill now takes StatusForegroundBrush (below). -->
     <Color x:Key="WarningColor">#AE4F08</Color>
+    <!-- #4629: the plan viewer's "critical" text tier (cost >= 50%, elapsed/CPU >= 1s, a row
+         estimate off by 10x+) used a fixed Brushes.OrangeRed (#FF4500) that measured 3.44:1 on
+         Light's white node background and 4.46:1 on Dark's #22252b node background, both under
+         WCAG AA's 4.5:1 floor for text. This is a more-severe-than-WarningColor red-orange, tuned
+         per theme so it clears 4.5:1 on every page/card/node background in this theme. -->
+    <Color x:Key="PlanCriticalOrangeColor">#A83A0D</Color>
     <Color x:Key="ErrorColor">#C62828</Color>
     <!-- #3609: was #2eaef1 — the AccentColor itself, 2.32:1 on BackgroundColor and 2.49:1 on the card. The
          accent is fine as a FILL (its ink is AccentForegroundColor, 6.79:1 — #3577), but Info is a marker and
@@ -89,6 +95,7 @@
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
+    <SolidColorBrush x:Key="PlanCriticalOrangeBrush" Color="{StaticResource PlanCriticalOrangeColor}"/>
     <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
          Darker on light themes so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
     <SolidColorBrush x:Key="WarningTextBrush" Color="#92400E"/>

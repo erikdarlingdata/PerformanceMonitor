@@ -38,6 +38,12 @@
     <!-- Status Colors (Material Design 300 — softer against dark backgrounds) -->
     <Color x:Key="SuccessColor">#81C784</Color>
     <Color x:Key="WarningColor">#FFD54F</Color>
+    <!-- #4629: the plan viewer's "critical" text tier (cost >= 50%, elapsed/CPU >= 1s, a row
+         estimate off by 10x+) used a fixed Brushes.OrangeRed (#FF4500) that measured 3.44:1 on
+         Light's white node background and 4.46:1 on Dark's #22252b node background, both under
+         WCAG AA's 4.5:1 floor for text. This is a more-severe-than-WarningColor red-orange, tuned
+         per theme so it clears 4.5:1 on every page/card/node background in this theme. -->
+    <Color x:Key="PlanCriticalOrangeColor">#FF7043</Color>
     <Color x:Key="ErrorColor">#E57373</Color>
     <Color x:Key="InfoColor">#2eaef1</Color>
 
@@ -74,6 +80,7 @@
 
     <SolidColorBrush x:Key="SuccessBrush" Color="{StaticResource SuccessColor}"/>
     <SolidColorBrush x:Key="WarningBrush" Color="{StaticResource WarningColor}"/>
+    <SolidColorBrush x:Key="PlanCriticalOrangeBrush" Color="{StaticResource PlanCriticalOrangeColor}"/>
     <!-- Legible warning amber for content text/borders (block-chain longest-wait, flag banner).
          Tuned per theme so it clears >=4.5:1 as TEXT on content backgrounds; any control may adopt it. -->
     <SolidColorBrush x:Key="WarningTextBrush" Color="#FFB347"/>

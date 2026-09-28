@@ -47,7 +47,6 @@ public partial class PlanViewerControl : UserControl
     // Brushes — accent/neutral tones that suit every theme
     private static readonly SolidColorBrush SelectionBrush = new(Color.FromRgb(0x4F, 0xA3, 0xFF));
     private static readonly SolidColorBrush EdgeBrush = new(Color.FromRgb(0x6B, 0x72, 0x80));
-    private static readonly SolidColorBrush OrangeBrush = new(Color.FromRgb(0xFF, 0xB3, 0x47));
 
     // Edge accuracy-ratio colors, matching erikdarlingdata/PerformanceStudio's PlanViewerControl exactly.
     private static readonly SolidColorBrush EdgeLightOrangeBrush = new(Color.FromRgb(0xFF, 0xB7, 0x4D));
@@ -97,6 +96,17 @@ public partial class PlanViewerControl : UserControl
         (TryFindResource("ErrorBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xE5, 0x73, 0x73));
     private SolidColorBrush AccentBrush =>
         (TryFindResource("AccentBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0x2E, 0xAE, 0xF1));
+
+    /// <summary>
+    /// #4629: the "critical" tier of plan-viewer text that used to be the fixed <c>Brushes.OrangeRed</c>
+    /// (cost &gt;= 50%, elapsed/CPU &gt;= 1s, row estimate off by 10x+) — 3.44:1 on the Light theme's
+    /// white node background, under WCAG AA's 4.5:1 floor for text (and 4.46:1 on Dark's node
+    /// background, just under it too). <c>PlanCriticalOrangeBrush</c> is a theme resource so Light and
+    /// Dark each get their own AA-passing shade while keeping the same red-orange, more-severe-than-
+    /// <see cref="WarningBrush"/> meaning.
+    /// </summary>
+    private SolidColorBrush CriticalOrangeBrush =>
+        (TryFindResource("PlanCriticalOrangeBrush") as SolidColorBrush) ?? new SolidColorBrush(Color.FromRgb(0xFF, 0x70, 0x43));
 
     /// <summary>
     /// Flips one Plan Insights card between its normal and its quiet state. A card with nothing to
