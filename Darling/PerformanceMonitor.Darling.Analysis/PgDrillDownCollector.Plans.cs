@@ -82,7 +82,9 @@ LIMIT 1";
             if (!string.IsNullOrWhiteSpace(plan.ParseError))
                 return;
 
-            PlanAnalysisPipeline.Run(plan, context.CancellationToken);
+            // #4530: one store read per drill-down call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, context.CancellationToken);
+            PlanAnalysisPipeline.Run(plan, null, metadata, context.CancellationToken);
 
             // #4514: includes statements nested inside a stored procedure or UDF body, so a
             // finding inside an EXEC <procedure> plan's body reaches the drill-down.
@@ -182,7 +184,9 @@ LIMIT 10";
             if (planXmls.Count == 0)
                 return;
 
-            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, context.CancellationToken);
+            // #4530: one store read per collector call so rule 38 can see the server's edition/MAXDOP.
+            var metadata = await DarlingServerMetadataReader.ReadAsync(_postgres, context.ServerId, context.CancellationToken);
+            var details = PlanAdvisoryAggregator.ExtractCancellable(planXmls, metadata, context.CancellationToken);
 
             if (pathKeys.Contains("MISSING_INDEX") && details.MissingIndexes.Count > 0)
             {
