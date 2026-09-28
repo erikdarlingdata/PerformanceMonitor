@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -1770,6 +1771,11 @@ ORDER BY l.database_name";
     /// <c>per_collection</c>'s GROUP BY and already carried by the covering index: no new <c>qs.</c> column,
     /// so the access path below is untouched (the access-path pins re-derive the list from this text).</para>
     ///
+    /// <para><b>The older sighting's <c>collection_time</c> is the ninth column (#4659)</b>, <c>prior_observed_at</c>:
+    /// <c>p.collection_time</c>, another <c>per_collection</c> GROUP BY key, so no new <c>qs.</c> reference. It lets
+    /// a pass reuse the previous answer while the server's newest collection is unchanged: the window's lower
+    /// edge can only drop a row whose older collection it passes.</para>
+    ///
     /// <para><b>The access path is a covering index, and the column list here is what it covers (#3573).</b>
     /// <c>PgTableTuning.ForcePlanFailuresIndexName</c> is <c>(server_id, collection_time DESC) INCLUDE</c>
     /// every other column this statement touches, so it runs as an Index Only Scan over one server's two
@@ -1814,7 +1820,8 @@ SELECT
     n.reason,
     n.failures - p.failures AS failure_delta,
     n.failures AS total_failures,
-    n.collection_time AS observed_at
+    n.collection_time AS observed_at,
+    p.collection_time AS prior_observed_at
 FROM ranked AS n
 JOIN ranked AS p
   ON  p.database_name = n.database_name
@@ -1825,6 +1832,30 @@ WHERE n.rn = 1
 AND   n.forced = 1
 AND   n.failures > p.failures
 ORDER BY n.database_name, n.query_id, n.plan_id";
+
+    /// <summary>#4659's probe: the server's newest collection inside the window. An Index Only Scan on the same
+    /// covering index (<c>server_id, collection_time DESC</c>) that reads one tuple.</summary>
+    public const string ForcePlanFailuresNewestCollectionSql = @"
+SELECT MAX(qs.collection_time)
+FROM query_store_stats AS qs
+WHERE qs.server_id = $1
+AND   qs.collection_time > $2";
+
+    /// <summary>#4659: one server's last full answer, keyed by the newest collection it was computed at. Each row
+    /// carries its older (rn = 2) collection so a later pass can drop the rows the sliding window has since excluded.</summary>
+    private sealed record ForcePlanFailuresMemo(DateTime NewestCollection, IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> Rows);
+
+    private readonly ConcurrentDictionary<int, ForcePlanFailuresMemo> _forcePlanFailuresMemo = new();
+
+    /// <summary>Number of times the full forced-plan failure read has run on this adapter (#4659).</summary>
+    internal int ForcePlanFailuresFullReads;
+
+    /// <summary>#4659, PURE: the previous answer at a later window start. Exactly the full read's answer while the
+    /// server's newest collection is unchanged: the window's lower edge can only remove a plan whose older
+    /// collection it passes, never add one.</summary>
+    internal static List<ForcePlanFailureInfo> ReuseForWindow(
+        IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
+        rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
 
     public Task<List<ForcePlanFailureInfo>> GetForcePlanFailuresAsync(
         string serverKey, CancellationToken cancellationToken = default)
@@ -1847,16 +1878,38 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
     {
         var serverId = ParseServerKey(serverKey);
 
-        var items = new List<ForcePlanFailureInfo>();
+        var windowStart = NaiveUtcNow() - ForcePlanFailureWindow;
         await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+
+        DateTime? newest;
+        using (var probe = new NpgsqlCommand(ForcePlanFailuresNewestCollectionSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds })
+        {
+            probe.Parameters.AddWithValue(serverId);
+            probe.Parameters.AddWithValue(windowStart);
+            var scalar = await probe.ExecuteScalarAsync(cancellationToken);
+            newest = scalar is DateTime stamp ? stamp : null;
+        }
+
+        if (newest is null)
+        {
+            _forcePlanFailuresMemo.TryRemove(serverId, out _);
+            return new List<ForcePlanFailureInfo>();
+        }
+
+        if (_forcePlanFailuresMemo.TryGetValue(serverId, out var memo) && memo.NewestCollection == newest.Value)
+        {
+            return ReuseForWindow(memo.Rows, windowStart);
+        }
+
+        Interlocked.Increment(ref ForcePlanFailuresFullReads);
+        var rows = new List<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)>();
         using var command = new NpgsqlCommand(ForcePlanFailuresSql, connection) { CommandTimeout = AlertPassCommandTimeoutSeconds };
         command.Parameters.AddWithValue(serverId);
-        command.Parameters.AddWithValue(NaiveUtcNow() - ForcePlanFailureWindow);
-
+        command.Parameters.AddWithValue(windowStart);
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            items.Add(new ForcePlanFailureInfo
+            var info = new ForcePlanFailureInfo
             {
                 DatabaseName = reader.IsDBNull(0) ? "" : reader.GetString(0),
                 QueryId = reader.IsDBNull(1) ? 0 : reader.GetInt64(1),
@@ -1870,10 +1923,12 @@ ORDER BY n.database_name, n.query_id, n.plan_id";
                    The engine only ever compares one plan's stamps with each other, so the Kind is honesty
                    rather than arithmetic. */
                 ObservedAtUtc = reader.IsDBNull(7) ? null : DateTime.SpecifyKind(reader.GetDateTime(7), DateTimeKind.Utc)
-            });
+            };
+            rows.Add((info, reader.GetDateTime(8)));
         }
 
-        return items;
+        _forcePlanFailuresMemo[serverId] = new ForcePlanFailuresMemo(newest.Value, rows);
+        return rows.Select(r => r.Info).ToList();
     }
 
     private int ResolveRunningJobsCadence(int serverId) =>
