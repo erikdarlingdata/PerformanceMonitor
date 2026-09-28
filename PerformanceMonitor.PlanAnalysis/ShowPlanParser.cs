@@ -320,7 +320,8 @@ public static class ShowPlanParser
                            ParseQueryPlanAsStatement, and never pass through ParseStatement — so
                            a function called by the cursor's query, whose sub-plan sits on this
                            same Operation element beside the QueryPlan, was never read. */
-                        ParseSubPlans(stmt, opEl, depth, cancellationToken);                        results.Add(stmt);
+                        ParseSubPlans(stmt, opEl, depth, cancellationToken);
+                        results.Add(stmt);
                     }
                 }
             }
@@ -476,7 +477,8 @@ public static class ShowPlanParser
     /// sub-plan boundary would reopen the MaxParseDepth bypass this shares with the non-cursor
     /// descent.
     /// </summary>
-    private static void ParseSubPlans(PlanStatement stmt, XElement containerEl, int depth, CancellationToken cancellationToken)    {
+    private static void ParseSubPlans(PlanStatement stmt, XElement containerEl, int depth, CancellationToken cancellationToken)
+    {
         // XSD gap: UDF sub-plans
         foreach (var udfEl in containerEl.Elements(Ns + "UDF"))
         {
