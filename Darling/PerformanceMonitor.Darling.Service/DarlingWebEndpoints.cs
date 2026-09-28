@@ -26,6 +26,7 @@ using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Service.Hosting;
 using PerformanceMonitor.Darling.Service.Mcp;
+using PerformanceMonitor.Darling.Storage;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -1247,7 +1248,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            relation. Probed lazily, cached per data source. */
         var (rollups, coverage) = await ComposeStoreAvailability.GetRollupsAsync(postgres, cancellationToken);
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage);
+        /* #4605: Query Store never takes the recent-window rollup route (it can't be exact,
+           even on the corrected hourly), so its own bounded fast path is the wide table (V145) — decided
+           HERE, in the runner, before compiling, because ComposeCompiler.Compile stays pure and never opens
+           a connection. Only checked for a panel that actually reads query_store_stats; every other panel
+           pays nothing extra. */
+        var queryStoreWideEligible = plan!.Measure.SourceTable == "query_store_stats"
+            && await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken);
+
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -1302,6 +1311,102 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return ComposeRunOutcome.ServerError($"Error running query: {ex.Message}");
+        }
+    }
+
+    /// <summary>The #4605 minimum window: below this, the wide table's own gate round trips
+    /// (one per server, each a fixed handful of small reads) cost more than the read they would save, so a
+    /// composed Query Store panel stays raw regardless of coverage — the same pattern
+    /// <see cref="QueryStoreIntervalWide.GridWideMinWindow"/> already applies to the grid. A composed panel
+    /// may span the WHOLE FLEET rather than one server, so this site keeps its own constant rather than
+    /// sharing the grid's; it starts at the grid's own measured 12h pending a composer-specific measurement.</summary>
+    internal static readonly TimeSpan ComposeQueryStoreWideMinWindow = QueryStoreIntervalWide.GridWideMinWindow;
+
+    /// <summary>#4617: named so the MCP read census (<see cref="Darling.Tests.McpReadCommandTimeoutTests"/>)
+    /// recognises the <c>NpgsqlCommand(string, connection)</c> construction below as a store read rather
+    /// than an unrecognised receiver.</summary>
+    private const string QueryStoreWideSchemaVersionSql = "SELECT COALESCE(MAX(version), 0) FROM darling_schema_version";
+
+    /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
+    private const string QueryStoreWideServerIdsSql =
+        "SELECT server_id FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
+
+    /// <summary>
+    /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
+    /// may read <c>collect.query_store_interval_wide</c> (V145) instead of deduping raw — decided here, in the
+    /// runner, BEFORE <see cref="ComposeCompiler.Compile"/> runs, because the compiler stays pure and never
+    /// opens a connection. Reuses the pure <see cref="QueryStoreIntervalWide.UseTable"/> decision (through
+    /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>, which also runs clause 6 — no legacy row in the
+    /// window — and the literal-end-before-applied_through refusal) for EVERY server in scope: a fleet panel
+    /// (null/empty <paramref name="serverScope"/>) must pass for every server the store has rows for, or the
+    /// hybrid would silently under-read a server whose table coverage lags. Any fault, a schema below V145, or
+    /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
+    /// the same rule #3953 already applies to the single-server reads.
+    /// </summary>
+    private static async Task<bool> ResolveQueryStoreWideEligibleAsync(
+        NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
+        DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken)
+    {
+        if (end - start < ComposeQueryStoreWideMinWindow)
+        {
+            return false;
+        }
+
+        try
+        {
+            await using var connection = await postgres.OpenConnectionAsync(cancellationToken);
+
+            int schemaVersion;
+            await using (var probe = new NpgsqlCommand(QueryStoreWideSchemaVersionSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                schemaVersion = (int)(await probe.ExecuteScalarAsync(cancellationToken))!;
+            }
+
+            if (schemaVersion < 145)
+            {
+                return false;
+            }
+
+            var serverIds = new List<int>();
+            await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
+            {
+                servers.Parameters.Add(new NpgsqlParameter
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Array | NpgsqlTypes.NpgsqlDbType.Text,
+                    Value = serverScope is { Count: > 0 } ? (object)serverScope.ToArray() : DBNull.Value,
+                });
+                await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    serverIds.Add(reader.GetInt32(0));
+                }
+            }
+
+            if (serverIds.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var serverId in serverIds)
+            {
+                var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+                    connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
+                    McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
+                if (!useTable)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* #4508/#4283 census: never carry ex.Message into a web-surface trace; the exception's type name
+               alone is enough to distinguish a fault here (this check never answers an HTTP response either
+               way, but the census sweeps every ex.Message in this file regardless of destination). */
+            System.Diagnostics.Trace.TraceWarning($"#4605 compose Query Store wide-table eligibility check failed; reading raw: {ex.GetType().Name}");
+            return false;
         }
     }
 
