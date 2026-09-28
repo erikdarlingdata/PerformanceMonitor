@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using PerformanceMonitor.Darling.Service;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -148,17 +149,24 @@ public sealed class CollectorRuntimeState
     /// <param name="Attempt">Which attempt is in flight, and how many the budget allows — both zero
     /// outside <see cref="CollectorPhase.Retrying"/>, where an attempt number is the only one of the two
     /// caps a reader can be shown (the wall-clock budget can end the retrying earlier).</param>
-    /// <param name="Attempts">The attempt cap the retry budget allows.</param>
+    /// <param name="Attempts">The attempt cap the retry budget allows — zero once <see cref="Sustained"/> is
+    /// true (#4508), rather than a spent cap a reader would otherwise read as "attempt 30 of 25".</param>
     /// <param name="AsOfUtc">When this phase was published — for
     /// <see cref="CollectorPhase.Collecting"/> that is when collection started, and for the two failure
     /// phases it is when the failure was last observed.</param>
+    /// <param name="Sustained">True once a <see cref="CollectorPhase.Retrying"/> step has spent its fast
+    /// budget and moved to the slower, unbounded retry (#4508) — see <see cref="AttemptStatusText"/> for the
+    /// rendered sentence this distinguishes. Always false outside <see cref="CollectorPhase.Retrying"/>.
+    /// Defaults to false so the existing terminal/collecting publishes, which never pass it, are
+    /// unaffected.</param>
     public sealed record Snapshot(
         CollectorPhase Phase,
         StartupStep? Step,
         string? Detail,
         int Attempt,
         int Attempts,
-        DateTime AsOfUtc);
+        DateTime AsOfUtc,
+        bool Sustained = false);
 
     private volatile Snapshot? _current;
 
@@ -166,10 +174,25 @@ public sealed class CollectorRuntimeState
     /// (worker only; called from each retry arm alongside its warning line). The detail is always
     /// <see cref="FailureDetailFor"/> — an exception-path retry has no other text to publish, and (#4316
     /// round 1 B1) there is no longer a <c>string</c> parameter here for a caller to put <c>ex.Message</c>
-    /// in instead.</summary>
-    public void PublishRetrying(StartupStep step, int attempt, int attempts)
+    /// in instead. <paramref name="sustained"/> is true once the fast retry budget is spent and the loop
+    /// has moved to the slower, unbounded retry (#4508); <paramref name="attempts"/> is published as zero
+    /// in that case — the cap the fast arm counted against no longer bounds anything, and publishing it
+    /// past its own value is what rendered as "attempt 30 of 25" before this.</summary>
+    public void PublishRetrying(StartupStep step, int attempt, int attempts, bool sustained = false)
         => _current = new Snapshot(
-            CollectorPhase.Retrying, step, FirstLineOf(FailureDetailFor(step)), attempt, attempts, DateTime.UtcNow);
+            CollectorPhase.Retrying, step, FirstLineOf(FailureDetailFor(step)), attempt,
+            sustained ? 0 : attempts, DateTime.UtcNow, sustained);
+
+    /// <summary>The rendered attempt sentence for a <see cref="CollectorPhase.Retrying"/> snapshot (#4508):
+    /// "attempt 7 of 25" inside the fast budget, or "retrying every 60s, attempt 30 (past the 120s fast
+    /// budget)" once <see cref="Snapshot.Sustained"/> is true. Neither form claims a cap the sustained arm
+    /// does not have — the old text kept naming the spent fast-budget cap ("attempt 30 of 25"), which reads
+    /// as still bounded by it, when the whole point of the sustained arm is that it is not.</summary>
+    public static string AttemptStatusText(Snapshot snapshot)
+        => snapshot.Sustained
+            ? $"retrying every {(int)StartupFailureTriage.SustainedRetryDelay.TotalSeconds}s, attempt "
+                + $"{snapshot.Attempt} (past the {(int)StartupFailureTriage.RetryBudget.TotalSeconds}s fast budget)"
+            : $"attempt {snapshot.Attempt} of {snapshot.Attempts}";
 
     /// <summary>Publishes a terminal failure of <paramref name="step"/> (worker only; called from each
     /// EXCEPTION-path collection-blocking exit, before the <c>return</c> — after the critical line, so a

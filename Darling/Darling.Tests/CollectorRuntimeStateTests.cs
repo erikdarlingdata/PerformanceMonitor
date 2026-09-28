@@ -401,10 +401,10 @@ public sealed class CollectorRuntimeStateTests
 
         var calls = Regex.Matches(code, @"_collectorState\.PublishRetrying\((?<args>[^)]*)\)").ToList();
         Assert.True(
-            calls.Count == 4,
-            $"expected a retry publish on each of the three collection-blocking startup steps (config load, "
-            + $"managed-Postgres bootstrap, store connect/migrate) plus the store site's #4508 sustained-retry "
-            + $"arm (fast budget spent, still retryable); found {calls.Count}.");
+            calls.Count == 6,
+            $"expected a fast-arm retry publish on each of the three collection-blocking startup steps "
+            + $"(config load, managed-Postgres bootstrap, store connect/migrate) plus each of their #4508 "
+            + $"sustained-retry arms (fast budget spent, still retryable); found {calls.Count}.");
 
         foreach (var call in calls)
         {
@@ -446,7 +446,13 @@ public sealed class CollectorRuntimeStateTests
     [Fact]
     public void NoNonPrivatePublishMethod_TakesAParameterOutsideTheApprovedTypes()
     {
-        var approvedParameterTypes = new[] { typeof(CollectorRuntimeState.StartupStep), typeof(int), typeof(DarlingConfig) };
+        /* bool joined the allowlist for #4508's sustained flag on PublishRetrying — it can only ever be true
+           or false, so unlike a string or a list it has no seat for exception text or a problem list to hide
+           in. */
+        var approvedParameterTypes = new[]
+        {
+            typeof(CollectorRuntimeState.StartupStep), typeof(int), typeof(DarlingConfig), typeof(bool),
+        };
 
         var publishMethods = typeof(CollectorRuntimeState)
             .GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly)

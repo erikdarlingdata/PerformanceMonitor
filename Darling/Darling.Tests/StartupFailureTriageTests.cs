@@ -585,12 +585,13 @@ public class StartupFailureTriageTests
            DarlingWorker - #2997 added a per-run clock to the collector fault arms, hundreds of lines and
            one concern away - which tells nobody whether a fourth retry site appeared. Suffixed, the pin
            measures the thing its own sentence claims. */
-        /* Four IsRetryable(ex) sites, not three, since #4508: the store site's sustained-retry arm (fast
-           budget spent, still retryable) re-checks the classifier rather than assuming the fast arm's
-           filter already proved it — see TheStoreSustainedRetryArm_LogsCriticalOnceThenWarningPerRetry.
-           Still exactly three stopwatches: the sustained arm reuses storeRetryBudget rather than starting
-           a fourth. */
-        Assert.Equal(4, CountOf(source, "StartupFailureTriage.IsRetryable(ex)"));
+        /* Six IsRetryable(ex) sites, not three, since #4508: each of the three sites now has its own
+           sustained-retry arm (fast budget spent, still retryable) that re-checks the classifier rather
+           than assuming the fast arm's filter already proved it — see
+           TheStoreSustainedRetryArm_LogsCriticalOnceThenWarningPerRetry. Still exactly three stopwatches:
+           every sustained arm reuses its own site's fast-arm budget rather than starting a fourth (or
+           fifth, or sixth). */
+        Assert.Equal(6, CountOf(source, "StartupFailureTriage.IsRetryable(ex)"));
         Assert.Equal(3, CountOf(source, "RetryBudget = System.Diagnostics.Stopwatch.StartNew();"));
     }
 
