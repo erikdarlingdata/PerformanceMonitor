@@ -818,7 +818,7 @@ public partial class PlanViewerControl
                     var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
                     warnPanel.Children.Add(new TextBlock
                     {
-                        Text = $"\u26A0 {w.WarningType}",
+                        Text = $"\u26A0 {w.WarningType}{WarningSourceTag(w)}",
                         FontWeight = FontWeights.SemiBold,
                         FontSize = 11,
                         Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
@@ -859,7 +859,7 @@ public partial class PlanViewerControl
                 var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
                 warnPanel.Children.Add(new TextBlock
                 {
-                    Text = $"\u26A0 {w.WarningType}",
+                    Text = $"\u26A0 {w.WarningType}{WarningSourceTag(w)}",
                     FontWeight = FontWeights.SemiBold,
                     FontSize = 11,
                     Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
@@ -1117,6 +1117,14 @@ public partial class PlanViewerControl
 
     // Wait category + color come from the shared ChartPalette (PerformanceStudio's ~21-category
     // taxonomy + palette), with a light-theme override for the near-invisible pale colors (D3).
+    /// <summary>
+    /// #4520: marks the warnings SQL Server itself wrote into the plan, so they are not read as one of
+    /// the analyzer's inferences. Only the engine's are tagged — they are the minority, and a badge on
+    /// every warning would carry no information.
+    /// </summary>
+    private static string WarningSourceTag(PlanWarning warning) =>
+        warning.Source == PlanWarningSource.SqlServer ? " [SQL Server]" : "";
+
     private static string GetWaitCategory(string waitType) => ChartPalette.WaitCategory(waitType);
 
     private static string GetWaitCategoryColor(string category)

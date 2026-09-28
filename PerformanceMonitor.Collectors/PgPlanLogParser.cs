@@ -88,6 +88,49 @@ public static class PgPlanLogParser
         + @"[ :](-?\d+) LOG:  duration: ([0-9.]+) ms  plan:\s*\n((?:\t[^\n]*\n)+)",
         RegexOptions.Compiled | RegexOptions.Multiline);
 
+    /* Every log_line_prefix escape (%-something), used to find the FIRST one after %p — the escape that
+       actually renders the token this parser's (-?\d+) group captured (#4501). */
+    private static readonly Regex s_anyEscapeToken = new("%.", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Whether the all-digit token <see cref="s_planBlock"/> captures right after the bracketed pid is a
+    /// real <c>%Q</c> query id, decided from the target's own <paramref name="logLinePrefix"/> (#4501).
+    ///
+    /// <para><b>The bug this closes.</b> The captured digits are the text <c>log_line_prefix</c> renders in
+    /// that position, whatever escape put it there. Under the v17 managed default
+    /// <c>'%m [%p] %a '</c> that escape is <c>%a</c> — <c>application_name</c> — and an ALL-DIGIT
+    /// application name (a connection pooler that names sessions by worker number, for one) reads as a
+    /// plausible query id and joins the plan to whatever statement happens to own that id in
+    /// <c>pg_statement_stats</c>, which is wrong attribution rather than an obviously-bad one.</para>
+    ///
+    /// <para>True only when the escape immediately after <c>%p</c> — skipping any literal separator text,
+    /// the same way it renders on the wire — is <c>%Q</c> itself. False for every other escape in that
+    /// position, including the three client-controlled fields <see cref="PgLogEntryAssembler.ForgeryCheckFor"/>
+    /// already treats as forgeable (<c>%a</c>/<c>%u</c>/<c>%d</c>), and for a prefix with no <c>%p</c> at
+    /// all (nothing here can reason about a position that does not exist). A null prefix (not collected)
+    /// returns true, keeping this parser's pre-#4501 behaviour: read the token as the query id
+    /// unconditionally.</para>
+    /// </summary>
+    internal static bool PrefixCarriesQueryIdAfterPid(string? logLinePrefix)
+    {
+        if (logLinePrefix is null)
+        {
+            return true;
+        }
+
+        var pidIndex = logLinePrefix.IndexOf("%p", StringComparison.Ordinal);
+
+        if (pidIndex < 0)
+        {
+            return false;
+        }
+
+        var afterPid = logLinePrefix[(pidIndex + 2)..];
+        var nextEscape = s_anyEscapeToken.Match(afterPid);
+
+        return nextEscape.Success && string.Equals(nextEscape.Value, "%Q", StringComparison.Ordinal);
+    }
+
     /* Condition fields, where a bare number is a VALUE rather than part of a name. Enumerated rather than
        inferred: wrong in the safe direction leaves a number in a filter, wrong the other way rewrites an
        object's name. */
@@ -126,8 +169,16 @@ public static class PgPlanLogParser
     /// deferred. <see cref="PgDeadlockLogParser"/> carries the arithmetic and the transport split; the
     /// short version is that the RDS log API keeps a resume marker and does not have this failure, while
     /// the <c>pg_read_file</c> tail has no marker and does.</para>
+    ///
+    /// <para><paramref name="logLinePrefix"/> (#4501) is the target's own collected <c>log_line_prefix</c>:
+    /// the all-digit token this parser's block regex captures right after the pid is trusted as the real
+    /// <c>%Q</c> query id only when <see cref="PrefixCarriesQueryIdAfterPid"/> says that escape is what
+    /// actually renders there. A prefix that puts a client-controlled field there instead (<c>%a</c> under
+    /// the v17 managed default, or <c>%u</c>/<c>%d</c>) attaches NO query id — an all-digit application
+    /// name is not this statement's identity — and a null prefix (not collected) keeps this parser's
+    /// pre-#4501 behaviour of reading the token unconditionally.</para>
     /// </summary>
-    public static List<ParsedPlan> Extract(string? logBody)
+    public static List<ParsedPlan> Extract(string? logBody, string? logLinePrefix = null)
     {
         var plans = new List<ParsedPlan>();
 
@@ -136,9 +187,11 @@ public static class PgPlanLogParser
             return plans;
         }
 
+        var trustQueryId = PrefixCarriesQueryIdAfterPid(logLinePrefix);
+
         foreach (Match match in s_planBlock.Matches(logBody))
         {
-            if (!long.TryParse(match.Groups[1].Value, out var queryId)
+            if (!long.TryParse(match.Groups[1].Value, out var capturedQueryId)
                 || !double.TryParse(match.Groups[2].Value,
                        System.Globalization.NumberStyles.Float,
                        System.Globalization.CultureInfo.InvariantCulture,
@@ -146,6 +199,8 @@ public static class PgPlanLogParser
             {
                 continue;
             }
+
+            var queryId = trustQueryId ? capturedQueryId : 0;
 
             var parsed = FromBlock(queryId, durationMs, match.Groups[3].Value.Replace("\t", string.Empty));
 

@@ -214,6 +214,7 @@ public class PlanNode
 
     // Detail properties (for tooltip/properties panel)
     public string? DatabaseName { get; set; }
+    public string? SchemaName { get; set; }
     public string? ObjectName { get; set; }
     public string? FullObjectName { get; set; }
     public string? IndexName { get; set; }
@@ -411,6 +412,17 @@ public class PlanWarning
     public SpillDetail? SpillDetails { get; set; }
 
     /// <summary>
+    /// Who says so — SQL Server itself, or the analyzer. Defaults to <see cref="PlanWarningSource.Analyzer"/>
+    /// because the analyzer builds the large majority of warnings. Everything the parser lifts out of
+    /// the plan's own &lt;Warnings&gt; element is stamped <see cref="PlanWarningSource.SqlServer"/> in one
+    /// place, at the single return of ShowPlanParser.ParseWarningsFromElement, so a new engine warning
+    /// cannot be added and forgotten. A warning the engine wrote into the plan is a record of what
+    /// happened when the query ran; an analyzer rule is an inference from plan shape, and an inference
+    /// can be wrong about a particular plan in a way the engine's own record cannot be.
+    /// </summary>
+    public PlanWarningSource Source { get; set; } = PlanWarningSource.Analyzer;
+
+    /// <summary>
     /// Maximum percentage of elapsed time that could be saved by addressing this finding.
     /// null = not quantifiable, 0 = calculated as negligible.
     /// </summary>
@@ -423,6 +435,16 @@ public class PlanWarning
 }
 
 public enum PlanWarningSeverity { Info, Warning, Critical }
+
+/// <summary>Where a <see cref="PlanWarning"/> came from. See <see cref="PlanWarning.Source"/>.</summary>
+public enum PlanWarningSource
+{
+    /// <summary>An inference of the analyzer's, from the shape of the plan.</summary>
+    Analyzer,
+
+    /// <summary>Read out of the plan's own &lt;Warnings&gt; element — the engine's record, not the analyzer's.</summary>
+    SqlServer
+}
 
 public class MemoryGrantInfo
 {
