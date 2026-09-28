@@ -1302,11 +1302,13 @@ public partial class PlanViewerControl
             }
 
             MissingIndexEmpty.Visibility = Visibility.Collapsed;
+            SetInsightQuiet(MissingIndexHeader, IndexAccentBrush, MissingIndexAccent, isEmpty: false);
         }
         else
         {
             MissingIndexHeader.Text = "Missing Index Suggestions";
             MissingIndexEmpty.Visibility = Visibility.Visible;
+            SetInsightQuiet(MissingIndexHeader, IndexAccentBrush, MissingIndexAccent, isEmpty: true);
         }
     }
 
@@ -1325,10 +1327,12 @@ public partial class PlanViewerControl
                 ? "No wait stats recorded"
                 : "No wait stats (estimated plan)";
             WaitStatsEmpty.Visibility = Visibility.Visible;
+            SetInsightQuiet(WaitStatsHeader, WaitsAccentBrush, WaitStatsAccent, isEmpty: true);
             return;
         }
 
         WaitStatsEmpty.Visibility = Visibility.Collapsed;
+        SetInsightQuiet(WaitStatsHeader, WaitsAccentBrush, WaitStatsAccent, isEmpty: false);
 
         var sorted = waits.OrderByDescending(w => w.WaitTimeMs).ToList();
         var maxWait = sorted[0].WaitTimeMs;
@@ -1498,6 +1502,7 @@ public partial class PlanViewerControl
             AddRow(row.Label, row.Value, row.ColorKey);
 
         RuntimeSummaryContent.Children.Add(grid);
+        SetInsightQuiet(RuntimeSummaryTitle, TooltipFgBrush, RuntimeSummaryAccent, isEmpty: false);
     }
 
     private void UpdateInsightsHeader()
