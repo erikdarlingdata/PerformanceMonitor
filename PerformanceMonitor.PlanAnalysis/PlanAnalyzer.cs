@@ -110,7 +110,7 @@ public static partial class PlanAnalyzer
             // SQL Server truncates StatementText at ~4,000 characters in plan XML.
             if (stmt.NonParallelPlanReason == "MaxDOPSetToOne")
             {
-                var text = stmt.StatementText ?? "";
+                var text = MaskCommentsAndLiterals(stmt.StatementText); // #4524
                 var hasMaxdop1InText = Regex.IsMatch(text, @"MAXDOP\s+1\b", RegexOptions.IgnoreCase);
                 var isTruncated = text.Length >= 3990;
 
@@ -252,7 +252,8 @@ public static partial class PlanAnalyzer
 
             if (unsnifffedParams.Count > 0)
             {
-                var hasRecompile = (stmt.StatementText ?? "").Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
+                var hasRecompile = MaskCommentsAndLiterals(stmt.StatementText) // #4524
+                    .Contains("RECOMPILE", StringComparison.OrdinalIgnoreCase);
                 if (!hasRecompile)
                 {
                     var names = string.Join(", ", unsnifffedParams.Select(p => p.Name));
@@ -274,7 +275,7 @@ public static partial class PlanAnalyzer
 
         // Rule 27: OPTIMIZE FOR UNKNOWN in statement text
         if (!string.IsNullOrEmpty(stmt.StatementText) &&
-            OptimizeForUnknownRegExp().IsMatch(stmt.StatementText))
+            OptimizeForUnknownRegExp().IsMatch(MaskCommentsAndLiterals(stmt.StatementText))) // #4524
         {
             stmt.PlanWarnings.Add(new PlanWarning
             {
@@ -1135,7 +1136,7 @@ public static partial class PlanAnalyzer
     {
         // Check statement text for NOT IN
         if (string.IsNullOrEmpty(stmt.StatementText) ||
-            !NotInRegExp().IsMatch(stmt.StatementText))
+            !NotInRegExp().IsMatch(MaskCommentsAndLiterals(stmt.StatementText))) // #4524
             return false;
 
         // Walk up the tree checking ancestors and their children
@@ -1789,6 +1790,91 @@ public static partial class PlanAnalyzer
     }
 
     /// <summary>
+    /// Blanks the contents of string literals and whole comments (<c>--</c> to end of line,
+    /// and <c>/* */</c>, which nest in T-SQL) with spaces, so a hint or keyword found inside
+    /// one of them does not count as code. Every other character stays where it was, so a
+    /// match in the result is a match at the same position in the original text. Delimited
+    /// identifiers (<c>[...]</c> and <c>"..."</c>) are stepped over unchanged, so a quote or
+    /// a dash inside one does not start a string or a comment.
+    /// </summary>
+    private static string MaskCommentsAndLiterals(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return "";
+
+        var chars = text.ToCharArray();
+        var i = 0;
+        while (i < chars.Length)
+        {
+            var c = chars[i];
+            if (c == '\'' || c == '"' || c == '[')
+            {
+                var close = c == '[' ? ']' : c;
+                var end = i + 1;
+                while (end < chars.Length)
+                {
+                    if (chars[end] == close)
+                    {
+                        if (end + 1 < chars.Length && chars[end + 1] == close)
+                        {
+                            end += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    end++;
+                }
+                if (c == '\'')
+                {
+                    for (var k = i + 1; k < end && k < chars.Length; k++)
+                        chars[k] = ' ';
+                }
+                i = end + 1;
+                continue;
+            }
+
+            if (c == '-' && i + 1 < chars.Length && chars[i + 1] == '-')
+            {
+                while (i < chars.Length && chars[i] != '\n' && chars[i] != '\r')
+                    chars[i++] = ' ';
+                continue;
+            }
+
+            if (c == '/' && i + 1 < chars.Length && chars[i + 1] == '*')
+            {
+                var depth = 0;
+                while (i < chars.Length)
+                {
+                    if (chars[i] == '/' && i + 1 < chars.Length && chars[i + 1] == '*')
+                    {
+                        depth++;
+                        chars[i++] = ' ';
+                        chars[i++] = ' ';
+                        continue;
+                    }
+                    if (chars[i] == '*' && i + 1 < chars.Length && chars[i + 1] == '/')
+                    {
+                        depth--;
+                        chars[i++] = ' ';
+                        chars[i++] = ' ';
+                        if (depth == 0)
+                            break;
+                        continue;
+                    }
+                    if (chars[i] != '\n' && chars[i] != '\r')
+                        chars[i] = ' ';
+                    i++;
+                }
+                continue;
+            }
+
+            i++;
+        }
+
+        return new string(chars);
+    }
+
+    /// <summary>
     /// Identifies the specific cause of a row goal from the statement text.
     /// Returns a specific cause when detectable, or a generic list as fallback.
     /// </summary>
@@ -1797,7 +1883,7 @@ public static partial class PlanAnalyzer
         if (string.IsNullOrEmpty(stmtText))
             return "TOP, EXISTS, IN, or FAST hint";
 
-        var text = stmtText.ToUpperInvariant();
+        var text = MaskCommentsAndLiterals(stmtText).ToUpperInvariant();
         var causes = new List<string>(4);
 
         if (Regex.IsMatch(text, @"\bTOP\b"))
