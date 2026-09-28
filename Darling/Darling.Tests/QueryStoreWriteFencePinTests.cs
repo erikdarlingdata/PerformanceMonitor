@@ -46,8 +46,8 @@ public sealed class QueryStoreWriteFencePinTests
         Assert.True(begin > 0 && open > begin, "BeginWrite must precede the transaction's open");
         Assert.True(commit > open, "the commit follows the open");
         Assert.True(finallyAt > commit && end > finallyAt, "EndWrite must sit in a finally that follows CommitAsync");
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(body, "EndWrite\\(").Count);
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(body, "BeginWrite\\(").Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(body, "EndWrite\\("));
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(body, "BeginWrite\\("));
     }
 
     [Fact]
@@ -57,6 +57,59 @@ public sealed class QueryStoreWriteFencePinTests
         var text = File.ReadAllText(path);
         /* The two COPY entry points are the shared-connection attempt and the fresh-connection one; nothing else
            in the runner opens a binary import for a collector's rows. */
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(text, "BeginBinaryImportAsync\\(").Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(text, "BeginBinaryImportAsync\\("));
+    }
+
+    [Fact]
+    public void CopyBatchOnce_MarksTheFenceSucceededLast_AfterTheCommit_AndPassesItToEndWrite()
+    {
+        var body = CopyBatchOnceBody();
+        var commit = body.IndexOf("transaction.CommitAsync(", StringComparison.Ordinal);
+        var mark = body.IndexOf("fenceSucceeded = true;", StringComparison.Ordinal);
+        var finallyAt = body.IndexOf("finally", commit, StringComparison.Ordinal);
+        Assert.True(commit > 0 && mark > commit, "the success mark must follow CommitAsync");
+        Assert.True(finallyAt > mark, "the success mark sits in the try, before the finally");
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(body, "fenceSucceeded = true;"));
+        /* Nothing but whitespace and comments sits between the mark and the finally's closing of the try. */
+        var between = body[(mark + "fenceSucceeded = true;".Length)..finallyAt];
+        Assert.Equal("}", between.Trim());
+        Assert.Contains("EndWrite(endServerId, fenceSucceeded)", body);
+    }
+
+    [Fact]
+    public void TheFence_AFailedWritePoisonsTheServer_UntilACleanWriteEnds()
+    {
+        var fence = new PerformanceMonitor.Darling.Service.QueryStoreWriteFence();
+        fence.BeginWrite(1);
+        fence.EndWrite(1, false);
+        Assert.False(fence.Snapshot(1).Quiet);
+        Assert.True(fence.Snapshot(2).Quiet, "another server is untouched");
+
+        fence.BeginWrite(1);
+        Assert.False(fence.Snapshot(1).Quiet);
+        fence.EndWrite(1, true);
+        Assert.True(fence.Snapshot(1).Quiet);
+    }
+
+    [Fact]
+    public void TheFence_WhenOneOfTwoOverlappingWritesFails_TheServerStaysPoisonedAfterTheCleanOneEnds()
+    {
+        var fence = new PerformanceMonitor.Darling.Service.QueryStoreWriteFence();
+        fence.BeginWrite(1);
+        fence.BeginWrite(1);
+        fence.EndWrite(1, false);
+        fence.EndWrite(1, true);
+        Assert.False(fence.Snapshot(1).Quiet);
+
+        fence.BeginWrite(1);
+        fence.EndWrite(1, true);
+        Assert.True(fence.Snapshot(1).Quiet);
+
+        /* The failure ends after the clean overlapping write does. */
+        fence.BeginWrite(1);
+        fence.BeginWrite(1);
+        fence.EndWrite(1, true);
+        fence.EndWrite(1, false);
+        Assert.False(fence.Snapshot(1).Quiet);
     }
 }

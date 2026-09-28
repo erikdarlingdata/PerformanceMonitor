@@ -1863,9 +1863,20 @@ AND   qs.collection_time > $2";
     /// <summary>Number of times the full forced-plan failure read has run on this adapter (#4659).</summary>
     internal int ForcePlanFailuresFullReads;
 
+    /// <summary>#4659: keeps the entry read under the higher generation, so a slow pass never overwrites a newer memo.</summary>
+    internal void StoreMemoForTests(int serverId, long generation, DateTime newest) =>
+        StoreMemo(serverId, new ForcePlanFailuresMemo(newest, generation, Array.Empty<(ForcePlanFailureInfo, DateTime)>()));
+
+    internal long? MemoGenerationForTests(int serverId) =>
+        _forcePlanFailuresMemo.TryGetValue(serverId, out var m) ? m.Generation : null;
+
+    private void StoreMemo(int serverId, ForcePlanFailuresMemo fresh) =>
+        _forcePlanFailuresMemo.AddOrUpdate(serverId, fresh, (_, existing) => existing.Generation > fresh.Generation ? existing : fresh);
+
     /// <summary>#4659, PURE: the previous answer at a later window start. Exactly the full read's answer while the
     /// server's newest collection is unchanged: the window's lower edge can only remove a plan whose older
-    /// collection it passes, never add one.</summary>
+    /// collection it passes, never add one. The returned rows are the memo's own objects, shared across passes and
+    /// with the engine: callers must not mutate them.</summary>
     internal static List<ForcePlanFailureInfo> ReuseForWindow(
         IReadOnlyList<(ForcePlanFailureInfo Info, DateTime PriorObservedAt)> rows, DateTime windowStartNaive) =>
         rows.Where(r => r.PriorObservedAt > windowStartNaive).Select(r => r.Info).ToList();
@@ -1961,12 +1972,12 @@ AND   qs.collection_time > $2";
         var after = fence?.Snapshot(serverId);
         if (before is { Quiet: true } b0 && after is { Quiet: true } a0 && a0.Generation == b0.Generation)
         {
-            _forcePlanFailuresMemo[serverId] = new ForcePlanFailuresMemo(newest.Value, b0.Generation, rows);
+            StoreMemo(serverId, new ForcePlanFailuresMemo(newest.Value, b0.Generation, rows));
         }
-        else
-        {
-            _forcePlanFailuresMemo.TryRemove(serverId, out _);
-        }
+
+        /* Not quiet, or the generation moved: nothing is stored and nothing is removed. A memo that cannot be
+           reused is harmless, because reuse needs an equal generation and a quiet fence; removing here could evict
+           a newer valid memo a concurrent pass just stored. */
 
         return rows.Select(r => r.Info).ToList();
     }

@@ -209,14 +209,14 @@ public sealed class ForcePlanFailuresMemoLiveTests
         fence.BeginWrite(1);
         Assert.Equal((2L, false), fence.Snapshot(1));
 
-        fence.EndWrite(1);
+        fence.EndWrite(1, true);
         Assert.Equal((3L, false), fence.Snapshot(1));
 
-        fence.EndWrite(1);
+        fence.EndWrite(1, true);
         Assert.Equal((4L, true), fence.Snapshot(1));
 
         /* An unmatched End never drives the count below zero. */
-        fence.EndWrite(1);
+        fence.EndWrite(1, true);
         Assert.Equal((5L, true), fence.Snapshot(1));
 
         Assert.Equal((0L, true), fence.Snapshot(2));
@@ -343,8 +343,49 @@ public sealed class ForcePlanFailuresMemoLiveTests
         await Assert.ThrowsAnyAsync<Exception>(() => WriteAsync(rig, rig.Anchor.AddMinutes(-20), bad));
 
         var (generation, quiet) = rig.Fence.Snapshot(ServerId);
-        Assert.True(quiet, "a failed batch must not leave the fence in flight");
+        Assert.False(quiet, "a write that exited by exception may have landed, so the server stays non-quiet");
         Assert.True(generation >= 2L, "the failed batch still began and ended a write");
+    }
+
+    [Fact]
+    public async Task AfterAFailedWrite_PassesReadInFull_AndStoreNoMemo_UntilACleanWriteLands()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = (await OpenRigAsync(ct))!;
+        var t0 = rig.Anchor.AddMinutes(-30);
+        await WriteAsync(rig, t0, PlanRow("d1", 10, 3));
+        await WriteAsync(rig, t0.AddMinutes(5), PlanRow("d1", 10, 5));
+
+        /* A commit whose acknowledgement never arrived. */
+        rig.Fence.BeginWrite(ServerId);
+        rig.Fence.EndWrite(ServerId, false);
+
+        var first = await ViaAdapterAsync(rig);
+        var second = await ViaAdapterAsync(rig);
+        Assert.Equal(2, rig.Adapter.ForcePlanFailuresFullReads);
+        Assert.Null(rig.Adapter.MemoGenerationForTests(ServerId));
+        Assert.Equal(await DirectAsync(rig), first);
+        Assert.Equal(first, second);
+
+        /* A clean write proves the table state is known again: the next pass memoises, the one after reuses. */
+        await WriteAsync(rig, t0.AddMinutes(10), PlanRow("d1", 10, 6));
+        await ViaAdapterAsync(rig);
+        Assert.Equal(3, rig.Adapter.ForcePlanFailuresFullReads);
+        Assert.NotNull(rig.Adapter.MemoGenerationForTests(ServerId));
+        await ViaAdapterAsync(rig);
+        Assert.Equal(3, rig.Adapter.ForcePlanFailuresFullReads);
+    }
+
+    [Fact]
+    public void AMemoStore_WithALowerGeneration_DoesNotOverwriteANewerMemo()
+    {
+        var adapter = new DarlingAlertReadAdapter(Npgsql.NpgsqlDataSource.Create("Host=127.0.0.1;Database=none"), queryStoreWriteFence: new QueryStoreWriteFence());
+        var now = new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Unspecified);
+        adapter.StoreMemoForTests(ServerId, 7, now);
+        adapter.StoreMemoForTests(ServerId, 5, now);
+        Assert.Equal(7L, adapter.MemoGenerationForTests(ServerId));
+        adapter.StoreMemoForTests(ServerId, 9, now);
+        Assert.Equal(9L, adapter.MemoGenerationForTests(ServerId));
     }
 
     [Fact]

@@ -3750,6 +3750,7 @@ public sealed class DarlingCollectorRunner
             _queryStoreWriteFence?.BeginWrite(beginServerId);
         }
 
+        var fenceSucceeded = false;
         try
         {
             /* Only the diverting collectors and Query Store (#3953) need a transaction; everything else keeps the
@@ -3897,12 +3898,16 @@ public sealed class DarlingCollectorRunner
 
                 await transaction.CommitAsync(cancellationToken);
             }
+
+            /* Last statement: reaching it means the commit was acknowledged. Any exit before it leaves the write's
+               outcome unknown, and the fence poisons the server. */
+            fenceSucceeded = true;
         }
         finally
         {
             if (fencedServerId is { } endServerId)
             {
-                _queryStoreWriteFence?.EndWrite(endServerId);
+                _queryStoreWriteFence?.EndWrite(endServerId, fenceSucceeded);
             }
         }
 
