@@ -179,7 +179,7 @@ END $$;";
     /// two tables are kept to 15 and 9 days respectively by the same purge this index speeds up, so neither
     /// grows unbounded between upgrades.</para>
     ///
-    /// <para><b>Why not <see cref="UnorderedRowCappedDeleteSql"/> instead (the brief's alternate path).</b>
+    /// <para><b>Why not <see cref="UnorderedRowCappedDeleteSql"/> instead (the alternative measured for #4608).</b>
     /// That builder exists for the two plain (non-hypertable) tables whose V149 migration deliberately
     /// dropped their own <c>last_seen</c> btree so an unordered cap could avoid a second sort pass — it does
     /// not apply here, where V143/V145 never had a <c>first_execution_time</c> index to drop in the first
