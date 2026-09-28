@@ -64,6 +64,14 @@ public sealed class DarlingMcpStoreMetricsTools
     /// <summary>The order the job lists publish (#3903): see <see cref="DarlingStoreMetricsReader.OrderForList"/>.</summary>
     internal const string JobOrder = "failures_in_window_desc_then_duration_vs_cadence_percent_desc";
 
+    /// <summary>
+    /// How many of the inventory's dropped objects the response names (#4619), newest last row first;
+    /// <c>dropped_object_rows</c> carries the exact count. Each retirement leaves a row that stays newest
+    /// for <see cref="StoreSelfMetrics.RetentionDays"/> days, so the list only grows with product upgrades
+    /// (14 to 20 on the stores the issue measured) — bounded anyway, like every list here.
+    /// </summary>
+    internal const int DroppedObjectsListLimit = 25;
+
     [McpServerTool(Name = "get_store_metrics"), Description(
         "Gets the monitoring STORE's size/growth/health, not a monitored server's; no server_name. Default is a "
         + "SUMMARY: store blocks + 3 ranked lists bounded by limit; object_kind/object_name narrow it. Daily "
@@ -189,8 +197,13 @@ public sealed class DarlingMcpStoreMetricsTools
 
             /* #3582: the coverage statement. Pure over the same rows; null only when no store row exists to
                reconcile against, in which case the block says coverage is unknown instead of computing a
-               percentage of nothing. */
-            var inventory = DarlingStoreMetricsReader.ComputeInventory(latest);
+               percentage of nothing. #4619: a row from another sweep is only a sweep gap when its object
+               still EXISTS, which the series cannot say (it is append-only, so a retired object's last row
+               stays newest for the life of the store) — hence the one live catalog read, taken only when
+               such rows exist, and failure-isolated to null (every such row then gets no verdict). */
+            var outsideTheSweep = DarlingStoreMetricsReader.RowsOutsideTheSweep(latest);
+            var existence = await DarlingStoreMetricsReader.GetObjectExistenceAsync(postgres, jobLogging, outsideTheSweep, cancellationToken);
+            var inventory = DarlingStoreMetricsReader.ComputeInventory(latest, existence);
 
             /* #3783: the store's own checkpointer, differenced from the two newest checkpointer rows. A third
                read (the latest read takes one row per object and a difference needs two), not failure-isolated
@@ -290,7 +303,19 @@ public sealed class DarlingMcpStoreMetricsTools
                     residual_bytes = inventory.ResidualBytes,
                     tolerance_bytes = inventory.ToleranceBytes,
                     reconciled = inventory.Reconciled,
+                    /* #4619: the rows from another sweep, three ways — objects that still exist (a sweep
+                       gap), objects that no longer do (history, never a failure: newest first, bounded,
+                       the count exact) and rows the live check gave no verdict on. */
                     stale_object_rows = inventory.StaleRowCount,
+                    dropped_object_rows = inventory.DroppedObjects.Count,
+                    dropped_objects = inventory.DroppedObjects.Take(DroppedObjectsListLimit).Select(d => new
+                    {
+                        object_kind = d.ObjectKind,
+                        object_name = d.ObjectName,
+                        last_row_at = d.LastRowAt.ToString("o"),
+                    }),
+                    unchecked_object_rows = inventory.UncheckedRowCount,
+                    object_existence = existence is null ? "Unreadable" : "Observed",
                     bytes_by_kind = inventory.BytesByKind
                         .OrderByDescending(kv => kv.Value)
                         .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal),
@@ -313,7 +338,7 @@ public sealed class DarlingMcpStoreMetricsTools
                         total_bytes = r.TotalBytes,
                     }),
                     aggregate_state = aggregateStates is null ? "Unreadable" : "Observed",
-                    note = InventoryNote(inventory, latest, aggregateStates, largestUnenumerated),
+                    note = InventoryNote(inventory, latest, aggregateStates, largestUnenumerated, existenceRead: existence is not null),
                 },
                 /* #2813. Present on EVERY response, including when nothing is held — an absent block and
                    "nothing is held" must not look alike, which is the entire failure this reports on. */
@@ -762,14 +787,20 @@ public sealed class DarlingMcpStoreMetricsTools
     /// The coverage statement (#3582), in the issue's own words: "inventory covers N% of the database; X in
     /// K un-enumerated relations" — then what the reconciliation found. One sentence per fact, and the
     /// facts that are FINDINGS say so: a residual over the bar, catch-all rows missing from the newest
-    /// sweep, object rows the newest sweep never reached, aggregates holding bytes with compression off.
-    /// Bytes are stated in GiB to one decimal for a reader, beside the exact fields; counts invariant.
+    /// sweep, rows for objects that still exist that the newest sweep never reached, aggregates holding bytes
+    /// with compression off. Since #4619 two look-alikes are stated as what they are and NOT as findings:
+    /// rows for objects that no longer exist (retired, their last row kept by the append-only series), and
+    /// the one aggregate uncompressed by design. <paramref name="existenceRead"/> is false when the live
+    /// existence check did not complete, which is the only way the note can tell that apart from a kind
+    /// with no check. Bytes are stated in GiB to one decimal for a reader, beside the exact fields; counts
+    /// invariant.
     /// </summary>
     internal static string InventoryNote(
         DarlingStoreMetricsReader.InventoryReconciliation inventory,
         IReadOnlyList<DarlingStoreMetricsReader.StoreMetricRow> latest,
         IReadOnlyList<DarlingStoreMetricsReader.ContinuousAggregateState>? aggregateStates,
-        IReadOnlyList<DarlingStoreMetricsReader.UnenumeratedRelation>? largestUnenumerated)
+        IReadOnlyList<DarlingStoreMetricsReader.UnenumeratedRelation>? largestUnenumerated,
+        bool existenceRead)
     {
         var sb = new System.Text.StringBuilder();
 
@@ -835,11 +866,40 @@ public sealed class DarlingMcpStoreMetricsTools
               .Append("catch; compare a pg_class census against the object rows (object_kind lists them) before trusting any per-object figure.");
         }
 
+        /* #4619: rows from another sweep, three ways. All three stay out of the sums above; what the object's
+           existence decides is which of them is a finding. The log lines named are DarlingWorker's (every
+           sweep failure is an Error starting "Store self-metrics sweep") and TimescaleSupport.TryEnableAsync's
+           / the worker's start-path fallback (both say "plain-PostgreSQL mode"). */
         if (inventory.StaleRowCount > 0)
         {
             sb.Append(' ').Append(Invariant(inventory.StaleRowCount))
-              .Append(" object row(s) in the inventory are from an OLDER sweep than the store row and are excluded from these ")
-              .Append("sums: the newest sweep did not reach them, so the sweep is not completing — its own Warning line says why.");
+              .Append(" object row(s) are for objects that still exist but are not from the store row's sweep, so the newest ")
+              .Append("sweep did not reach them; they are excluded from these sums. The Darling service log (darling-service_yyyyMMdd.log) ")
+              .Append("says which of two causes it is: a sweep that fails logs an Error starting 'Store self-metrics sweep', and a ")
+              .Append("service running in plain-PostgreSQL mode skips the hypertable, continuous-aggregate, background-job and ")
+              .Append("job_history rows and says so at startup, in a line containing 'plain-PostgreSQL mode'.");
+        }
+
+        if (inventory.DroppedObjects.Count > 0)
+        {
+            sb.Append(' ').Append(Invariant(inventory.DroppedObjects.Count))
+              .Append(" object row(s) are for objects that no longer exist — dropped or retired since their last row — ")
+              .Append("and are excluded from these sums. That is history, not a sweep failure: the series is append-only, so a ")
+              .Append("retired object's last row stays its newest for ").Append(Invariant(StoreSelfMetrics.RetentionDays))
+              .Append(" days. The most recent: ")
+              .Append(string.Join(", ", inventory.DroppedObjects.Take(3).Select(d =>
+                  $"{d.ObjectName} ({d.ObjectKind}, last row {d.LastRowAt.ToString("o", CultureInfo.InvariantCulture)})")))
+              .Append(" (dropped_objects lists them).");
+        }
+
+        if (inventory.UncheckedRowCount > 0)
+        {
+            sb.Append(' ').Append(Invariant(inventory.UncheckedRowCount))
+              .Append(" object row(s) are not from the store row's sweep and are excluded from these sums, with no verdict on ")
+              .Append("whether their objects still exist: ")
+              .Append(existenceRead
+                  ? "their kind has no existence check on this store (the hypertable, continuous-aggregate and background-job checks read TimescaleDB's catalogs)."
+                  : "the live existence check did not complete.");
         }
 
         var hasTimescaleRows = latest.Any(r =>
@@ -853,7 +913,17 @@ public sealed class DarlingMcpStoreMetricsTools
 
         if (aggregateStates is { Count: > 0 })
         {
-            var uncompressed = aggregateStates.Where(s => !s.CompressionEnabled).Select(s => s.ViewName).ToHashSet(StringComparer.Ordinal);
+            /* #4619: collection_health_hourly is uncompressed BY DESIGN — the paragraph on
+               TimescaleSupport.CollectionHealthRetentionInterval says why — so it is explained rather than
+               counted as a finding. Matched by name, not by off-grid membership, so a future off-grid
+               aggregate is reported until someone writes down why it is uncompressed too. */
+            var byDesign = aggregateStates
+                .Where(s => !s.CompressionEnabled && s.ViewName == TimescaleSupport.CollectionHealthHourlyView)
+                .ToList();
+            var uncompressed = aggregateStates
+                .Where(s => !s.CompressionEnabled && s.ViewName != TimescaleSupport.CollectionHealthHourlyView)
+                .Select(s => s.ViewName)
+                .ToHashSet(StringComparer.Ordinal);
             var uncompressedBytes = latest
                 .Where(r => r.ObjectKind == StoreSelfMetrics.ContinuousAggregateObjectKind
                             && r.MetricTime == inventory.SweepAt
@@ -863,7 +933,19 @@ public sealed class DarlingMcpStoreMetricsTools
             {
                 sb.Append(' ').Append(Invariant(uncompressed.Count)).Append(" of ").Append(Invariant(aggregateStates.Count))
                   .Append(" continuous aggregate(s) have compression DISABLED and hold ").Append(Gib(uncompressedBytes))
-                  .Append(" between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it).");
+                  .Append(" between them (compression_enabled on each continuous_aggregate object; the policy job ids beside it)")
+                  .Append(byDesign.Count > 0 ? ", not counting the one uncompressed by design below." : ".");
+            }
+
+            if (byDesign.Count > 0)
+            {
+                sb.Append(' ').Append(TimescaleSupport.CollectionHealthHourlyView)
+                  .Append(" is uncompressed by design: each refresh re-materializes its last ")
+                  .Append(TimescaleSupport.CollectionHealthRefreshStartOffset).Append(" and its retention keeps ")
+                  .Append(TimescaleSupport.CollectionHealthRetentionInterval)
+                  .Append(", so every chunk it holds is inside its refresh window. This store compresses an aggregate's chunk only ")
+                  .Append("once it is a whole chunk past the refresh window, because compressing inside the window would be undone ")
+                  .Append("by the next refresh, and no chunk of this one gets that old before retention drops it.");
             }
         }
         else if (aggregateStates is null)

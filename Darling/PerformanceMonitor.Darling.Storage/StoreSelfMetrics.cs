@@ -267,6 +267,16 @@ LEFT JOIN LATERAL (
 ) n ON true";
 
     /// <summary>
+    /// The <c>object_name</c> a <see cref="BackgroundJobObjectKind"/> row carries, over a
+    /// <c>timescaledb_information.jobs</c> row aliased <c>j</c>: <c>proc_name</c>, the hypertable or
+    /// aggregate it serves, and <c>[job_id]</c> (<see cref="BackgroundJobInsertSql"/> says why each part).
+    /// ONE expression because two statements must agree on it byte for byte: the sweep writes the name
+    /// with it, and the MCP reader's existence check (#4619) looks the name up with it — a copy that
+    /// drifted would call every live job dropped.
+    /// </summary>
+    public const string BackgroundJobObjectNameSql = "j.proc_name || coalesce(' ' || j.hypertable_name, '') || ' [' || j.job_id || ']'";
+
+    /// <summary>
     /// The background-job rows (#2136) — TimescaleDB stores only, like the hypertable arm (the
     /// timescaledb_information views do not exist on plain PostgreSQL). The store's own background jobs
     /// (CAGG refreshes, compression, retention) are its heaviest recurring work, their runtimes scale
@@ -286,7 +296,7 @@ INSERT INTO collect.store_metrics
     (metric_time, object_name, object_kind, last_run_duration_ms, schedule_interval_ms, total_runs, total_failures)
 SELECT
     $1,
-    j.proc_name || coalesce(' ' || j.hypertable_name, '') || ' [' || j.job_id || ']',
+    {BackgroundJobObjectNameSql},
     '{BackgroundJobObjectKind}',
     (EXTRACT(EPOCH FROM js.last_run_duration) * 1000)::bigint,
     (EXTRACT(EPOCH FROM j.schedule_interval) * 1000)::bigint,
