@@ -20,6 +20,26 @@ public static partial class PlanAnalyzer
     // Matches CTE definitions: WITH name AS ( or , name AS (
     private static readonly Regex CteDefinitionRegex = CteDefinitionRegExp();
 
+    private static readonly Regex IsNullCoalesceRegex = IsNullCoalesceRegExp();
+
+    private static readonly Regex ConvertImplicitRegex = ConvertImplicitRegExp();
+
+    // A column reference in a ScalarString is multi-part bracket-qualified ([schema].[table]).
+    // A variable is a single bracket pair with an @ prefix ([@0]), so excluding @ from the first
+    // part is what separates the two.
+    private static readonly Regex ColumnReferenceRegex = ColumnReferenceRegExp();
+
+    // The operator a comparison turns on in a ScalarString: >=, <=, <>, !=, >, <, = or like.
+    // Without like, [col] like upper([@p]) had no operator at all, fell to the assume-the-worst
+    // default, and a function on the pattern was reported as a function on the column.
+    private static readonly Regex ComparisonOperatorRegex = ComparisonOperatorRegExp();
+
+    // What joins one comparison to the next in a compound predicate. String literals and
+    // bracketed identifiers are matched first, so an AND inside one of them (N'Tom AND Jerry',
+    // [Terms and Conditions]) is consumed whole and never reaches the capture group. Only a
+    // Groups[1] match is a real operator.
+    private static readonly Regex LogicalOperatorRegex = LogicalOperatorRegExp();
+
     public static void Analyze(ParsedPlan plan)
     {
         foreach (var batch in plan.Batches)
@@ -1235,26 +1255,47 @@ public static partial class PlanAnalyzer
         if (!IsRowstoreScan(node))
             return null;
 
-        var predicate = node.Predicate;
+        return DetectNonSargablePattern(node.Predicate);
+    }
 
+    /// <summary>
+    /// The pattern half of <see cref="DetectNonSargablePredicate"/>: which non-SARGable shape, if
+    /// any, a predicate ScalarString has.
+    ///
+    /// <para>Internal so predicate shapes can be tested as raw strings. The shapes that matter
+    /// (compound AND/OR predicates, date ranges, parenthesized groups, an AND inside a literal or a
+    /// bracketed name) outnumber any sensible set of plan fixtures, and every one of them is decided
+    /// entirely in this method and the helpers it calls.</para>
+    /// </summary>
+    internal static string? DetectNonSargablePattern(string predicate)
+    {
         // CASE expression in predicate — check first because CASE bodies
         // often contain CONVERT_IMPLICIT that isn't the root cause
         if (CaseInPredicateRegex.IsMatch(predicate))
             return "CASE expression in predicate";
 
-        // CONVERT_IMPLICIT — most common non-SARGable pattern
-        if (predicate.Contains("CONVERT_IMPLICIT", StringComparison.OrdinalIgnoreCase))
+        // CONVERT_IMPLICIT — most common non-SARGable pattern, but only when it converts the
+        // COLUMN. Converting the parameter up to the column's type costs nothing.
+        if (ConvertImplicitWrapsColumn(predicate))
             return "Implicit conversion (CONVERT_IMPLICIT)";
 
-        // ISNULL / COALESCE wrapping column
-        if (IsNullCoalesceRegExp().IsMatch(predicate))
-            return "ISNULL/COALESCE wrapping column";
+        // ISNULL / COALESCE wrapping column — on the column side only. ISNULL(@p, 0) on the
+        // parameter side is a runtime constant and seeks fine; flagging it contradicted this
+        // warning's own "wrapping a column" message. col = ISNULL(@p, col) is still caught,
+        // because the column sits inside the function, on its side of the comparison.
+        foreach (Match isnullMatch in IsNullCoalesceRegex.Matches(predicate))
+        {
+            if (IsFunctionOnColumnSide(predicate, isnullMatch))
+                return "ISNULL/COALESCE wrapping column";
+        }
 
         // Common function calls on columns — but only if the function wraps a column,
         // not a parameter/variable. Split on comparison operators to check which side
         // the function is on. Predicate format: [db].[schema].[table].[col]>func(...)
-        var funcMatch = FunctionInPredicateRegex.Match(predicate);
-        if (funcMatch.Success)
+        // Every match, not just the first: a parameter-side CONVERT_IMPLICIT now falls through to
+        // here, and it is skipped below. Taking only the first match would let a benign conversion
+        // sitting to the left of a real function-on-column hide it.
+        foreach (Match funcMatch in FunctionInPredicateRegex.Matches(predicate))
         {
             var funcName = funcMatch.Groups[1].Value.ToUpperInvariant();
             if (funcName != "CONVERT_IMPLICIT" && IsFunctionOnColumnSide(predicate, funcMatch))
@@ -1877,30 +1918,128 @@ public static partial class PlanAnalyzer
     /// Checks whether a function call in a predicate is on the column side of the comparison.
     /// Predicate ScalarStrings look like: [db].[schema].[table].[col]>dateadd(day,(0),[@var])
     /// If the function is only on the parameter/literal side, it's still SARGable.
+    ///
+    /// <para><b>Only the function's own comparison is read.</b> A compound predicate is several
+    /// comparisons joined by AND/OR, and the function belongs to exactly one of them. Splitting
+    /// the whole predicate at its FIRST operator instead put every later comparison, column and
+    /// all, on the function's side: in <c>[t].[A]=[@1] AND [t].[B]=CONVERT(tinyint,[@2],0)</c> the
+    /// CONVERT looked like it shared a side with [t].[B], and so did the dateadd in the everyday
+    /// range <c>[t].[d]&gt;=dateadd(day,(-7),getdate()) AND [t].[d]&lt;getdate()</c>.</para>
     /// </summary>
     private static bool IsFunctionOnColumnSide(string predicate, Match funcMatch)
     {
-        // Find the comparison operator that splits the predicate into left/right sides.
-        // Operators in ScalarString: >=, <=, <>, >, <, =
-        var compMatch = Regex.Match(predicate, @"(?<![<>])([<>=!]{1,2})(?![<>=])");
+        var comparison = ComparisonContaining(predicate, funcMatch.Index, out var offset);
+
+        var compMatch = ComparisonOperatorRegex.Match(comparison);
         if (!compMatch.Success)
             return true; // No comparison found — can't determine side, assume worst case
 
         var compPos = compMatch.Index;
-        var funcPos = funcMatch.Index;
+        var funcPos = funcMatch.Index - offset;
 
-        // Determine which side the function is on
-        var funcSide = funcPos < compPos ? "left" : "right";
+        // The side of this comparison the function is on, and whether a column shares it
+        string side = funcPos < compPos
+            ? comparison[..compPos]
+            : comparison[(compPos + compMatch.Length)..];
 
-        // Check if that side also contains a column reference [...].[...].[...]
-        string side = funcSide == "left"
-            ? predicate[..compPos]
-            : predicate[(compPos + compMatch.Length)..];
+        // Same column-vs-variable distinction ConvertImplicitWrapsColumn needs, so it shares the
+        // one regex rather than keeping a second copy of the pattern in sync by hand.
+        return ColumnReferenceRegex.IsMatch(side);
+    }
 
-        // Column references are multi-part bracket-qualified: [schema].[table].[column]
-        // Variables are [@var] or [@var] — single bracket pair with @ prefix.
-        // Match [identifier].[identifier] (at least two dotted parts) to distinguish columns.
-        return Regex.IsMatch(side, @"\[[^\]@]+\]\.\[");
+    /// <summary>
+    /// The single comparison around <paramref name="position"/>: the text between the nearest
+    /// AND/OR before it and the nearest after it. <paramref name="offset"/> is where that text
+    /// starts in <paramref name="predicate"/>, so positions can be translated into it.
+    ///
+    /// <para>Operators are split on at every depth, not just the top level: a parenthesized group
+    /// like <c>[t].[A]=(1) AND ([t].[B]=f([@p]) OR [t].[C]=(3))</c> has to come apart into its three
+    /// comparisons, or the group would be read as one. The leftover grouping parentheses cannot
+    /// move a comparison operator or add a column, so they are harmless. No function in a
+    /// ScalarString takes AND/OR inside its arguments; CASE does, and it is caught earlier.</para>
+    /// </summary>
+    private static string ComparisonContaining(string predicate, int position, out int offset)
+    {
+        var start = 0;
+        var end = predicate.Length;
+
+        foreach (Match match in LogicalOperatorRegex.Matches(predicate))
+        {
+            if (!match.Groups[1].Success)
+                continue; // a string literal or bracketed name, skipped whole
+
+            if (match.Index + match.Length <= position)
+            {
+                start = match.Index + match.Length;
+            }
+            else
+            {
+                end = match.Index;
+                break;
+            }
+        }
+
+        offset = start;
+        return predicate[start..end];
+    }
+
+    /// <summary>
+    /// Checks whether any CONVERT_IMPLICIT in a predicate converts a COLUMN, which is the only
+    /// version of it that costs a seek.
+    ///
+    /// <para><b>Why this is not just "contains CONVERT_IMPLICIT".</b> Data type precedence decides
+    /// which side SQL Server converts, and it converts the LOWER-precedence side. Comparing a
+    /// numeric(18,0) column to an int parameter converts the parameter UP:
+    /// <c>[db].[dbo].[t].[col]=CONVERT_IMPLICIT(numeric(18,0),[@0],0)</c>. The column is untouched
+    /// and still seekable — SQL Server will seek straight through that predicate given an index, and
+    /// it raises no PlanAffectingConvert warning of its own. The damaging shape is the mirror image,
+    /// <c>CONVERT_IMPLICIT(nvarchar(40),[db].[dbo].[t].[col],0)=[@d]</c>, where the conversion wraps
+    /// the column and every row has to be converted before it can be compared.</para>
+    ///
+    /// <para>So the question is not whether a conversion is present but what is inside it, which is
+    /// why this reads the CONVERT_IMPLICIT argument list rather than splitting on the comparison
+    /// operator the way <see cref="IsFunctionOnColumnSide"/> does. The first argument is the target
+    /// type and carries no brackets; a column reference in the remainder is the conversion input.</para>
+    /// </summary>
+    internal static bool ConvertImplicitWrapsColumn(string predicate)
+    {
+        foreach (Match match in ConvertImplicitRegex.Matches(predicate))
+        {
+            // The regex ends at the opening paren, so its last character is where the args start.
+            var arguments = ExtractBalancedArguments(predicate, match.Index + match.Length - 1);
+
+            // Unparseable means we cannot tell what is being converted. Assume the worst, matching
+            // IsFunctionOnColumnSide, rather than silently dropping a real conversion.
+            if (arguments == null || ColumnReferenceRegex.IsMatch(arguments))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Returns the text between the parenthesis at <paramref name="openParenIndex"/> and its match,
+    /// or null if the parentheses do not balance. Needed because the target type of a conversion can
+    /// carry its own parentheses — numeric(18,0), varchar(50) — so the first ')' is not the end.
+    /// </summary>
+    private static string? ExtractBalancedArguments(string text, int openParenIndex)
+    {
+        var depth = 0;
+        for (var i = openParenIndex; i < text.Length; i++)
+        {
+            if (text[i] == '(')
+            {
+                depth++;
+            }
+            else if (text[i] == ')')
+            {
+                depth--;
+                if (depth == 0)
+                    return text[(openParenIndex + 1)..i];
+            }
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -1934,6 +2073,24 @@ public static partial class PlanAnalyzer
     private static partial Regex CteDefinitionRegExp();
     [GeneratedRegex(@"\b(isnull|coalesce)\s*\(", RegexOptions.IgnoreCase)]
     private static partial Regex IsNullCoalesceRegExp();
+    [GeneratedRegex(@"\bCONVERT_IMPLICIT\s*\(", RegexOptions.IgnoreCase)]
+    private static partial Regex ConvertImplicitRegExp();
+    // A column reference in a ScalarString is multi-part bracket-qualified ([schema].[table]).
+    // A variable is a single bracket pair with an @ prefix ([@0]), so excluding @ from the first
+    // part is what separates the two.
+    [GeneratedRegex(@"\[[^\]@]+\]\.\[")]
+    private static partial Regex ColumnReferenceRegExp();
+    // The operator a comparison turns on in a ScalarString: >=, <=, <>, !=, >, <, = or like.
+    // Without like, [col] like upper([@p]) had no operator at all, fell to the assume-the-worst
+    // default, and a function on the pattern was reported as a function on the column.
+    [GeneratedRegex(@"(?<![<>])([<>=!]{1,2})(?![<>=])|\s(like)\s", RegexOptions.IgnoreCase)]
+    private static partial Regex ComparisonOperatorRegExp();
+    // What joins one comparison to the next in a compound predicate. String literals and
+    // bracketed identifiers are matched first, so an AND inside one of them (N'Tom AND Jerry',
+    // [Terms and Conditions]) is consumed whole and never reaches the capture group. Only a
+    // Groups[1] match is a real operator.
+    [GeneratedRegex(@"'(?:[^']|'')*'|\[(?:[^\]]|\]\])*\]|\s(AND|OR)\s", RegexOptions.IgnoreCase)]
+    private static partial Regex LogicalOperatorRegExp();
     [GeneratedRegex(@"OPTIMIZE\s+FOR\s+UNKNOWN", RegexOptions.IgnoreCase)]
     private static partial Regex OptimizeForUnknownRegExp();
     [GeneratedRegex(@"\bNOT\s+IN\b", RegexOptions.IgnoreCase)]
