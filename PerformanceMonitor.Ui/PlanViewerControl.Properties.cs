@@ -816,13 +816,16 @@ public partial class PlanViewerControl
                     var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
                         : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
                     var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
-                    warnPanel.Children.Add(new TextBlock
+                    var planWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
+                    var planWarnHeaderBlock = new TextBlock
                     {
-                        Text = PlanWarningDisplay.PlanWarningHeader(w),
+                        Text = planWarnHeaderText,
                         FontWeight = FontWeights.SemiBold,
                         FontSize = 11,
                         Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
-                    });
+                    };
+                    AttachOriginNavigation(planWarnHeaderBlock, planWarnHeaderText, w.OriginNodeIds);
+                    warnPanel.Children.Add(planWarnHeaderBlock);
                     warnPanel.Children.Add(new TextBlock
                     {
                         Text = w.Message,
@@ -857,13 +860,16 @@ public partial class PlanViewerControl
                 var warnColor = w.Severity == PlanWarningSeverity.Critical ? "#E57373"
                     : w.Severity == PlanWarningSeverity.Warning ? "#FFB347" : "#6BB5FF";
                 var warnPanel = new StackPanel { Margin = new Thickness(10, 2, 10, 2) };
-                warnPanel.Children.Add(new TextBlock
+                var opWarnHeaderText = PlanWarningDisplay.PlanWarningHeader(w);
+                var opWarnHeaderBlock = new TextBlock
                 {
-                    Text = PlanWarningDisplay.PlanWarningHeader(w),
+                    Text = opWarnHeaderText,
                     FontWeight = FontWeights.SemiBold,
                     FontSize = 11,
                     Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString(warnColor))
-                });
+                };
+                AttachOriginNavigation(opWarnHeaderBlock, opWarnHeaderText, w.OriginNodeIds);
+                warnPanel.Children.Add(opWarnHeaderBlock);
                 warnPanel.Children.Add(new TextBlock
                 {
                     Text = w.Message,
