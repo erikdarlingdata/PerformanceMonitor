@@ -552,12 +552,14 @@ public sealed class DarlingMcpAlertTools
     }
 
     /// <summary>The <c>route</c> member of a get_alert_history row (#3598): the persisted provenance, re-spelled
-    /// in the tool's snake_case, or null when the row carries none.</summary>
+    /// in the tool's snake_case, or null when the row carries none. #4750: each destination's <c>outcome</c> is
+    /// what the send to that channel did ("delivered", "failed" or "not attempted"), or null on a row written
+    /// before it was recorded.</summary>
     internal static object? RouteHistoryPayload(AlertRouteDto? route) => route is null ? null : new
     {
         family = route.Family,
         route_id = route.RouteId,
-        destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source }),
+        destinations = route.Destinations.Select(d => new { channel = d.Channel, route_id = d.RouteId, source = d.Source, outcome = d.Outcome }),
     };
 
     /// <summary>The one-line audience each family names, for the taxonomy the read tool publishes.</summary>

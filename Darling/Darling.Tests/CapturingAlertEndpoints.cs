@@ -38,9 +38,13 @@ internal sealed class CapturingWebhookEndpoint : IDisposable
     private readonly List<string> _bodies = new();
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _accepting;
+    private readonly int _statusCode;
 
-    public CapturingWebhookEndpoint()
+    /// <param name="statusCode">The status every response carries. 200 by default; a test that needs a channel
+    /// to fail (#4750) passes a 4xx or 5xx, which the sender reports as an error string.</param>
+    public CapturingWebhookEndpoint(int statusCode = 200)
     {
+        _statusCode = statusCode;
         _listener = new TcpListener(IPAddress.Loopback, 0);
         _listener.Start();
         Url = $"http://127.0.0.1:{((IPEndPoint)_listener.LocalEndpoint).Port}/hook";
@@ -66,7 +70,7 @@ internal sealed class CapturingWebhookEndpoint : IDisposable
                 _bodies.Add(await ReadRequestBodyAsync(stream));
 
                 var response = Encoding.ASCII.GetBytes(
-                    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    $"HTTP/1.1 {_statusCode} {(_statusCode == 200 ? "OK" : "Error")}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 await stream.WriteAsync(response, _stop.Token);
                 await stream.FlushAsync(_stop.Token);
             }
