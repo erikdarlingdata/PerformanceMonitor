@@ -7,7 +7,9 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis.Baselines;
@@ -174,21 +176,39 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         Assert.Equal(Utc(2026, 7, 1, 7, 0), ServerTimeHelper.DisplayTimeToServerTime(display, TimeDisplayMode.UTC, WinterOffset));
     }
 
+    /* Files under Lite/Controls and Lite/Windows whose code may still add one UTC offset to a time, each with the
+       reason it is right to. Empty on purpose: every chart time in the tabs, the lanes and the History windows
+       converts through the server clock, and a file that keeps a one-offset AddMinutes must be listed here with why. */
+    private static readonly Dictionary<string, string> OneOffsetExceptions = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
-    /// The tab converts each chart time through the clock instead of adding one offset to all of them, and reads
-    /// the clock again on every refresh before it derives the window. A source pin, because the tab is a WPF
-    /// control this suite does not instantiate.
+    /// The tabs, the Overview lanes and the History windows convert each chart time through the clock instead of
+    /// adding one offset to all of them, and the tab reads the clock again on every refresh before it derives the
+    /// window. A source pin, because these are WPF controls this suite does not instantiate. The scan covers every
+    /// file in Lite/Controls and Lite/Windows and every spelling of the offset (a <c>UtcOffsetMinutes</c> property,
+    /// with or without <c>Services.</c> in front, or a <c>utcOffset</c> local); a file it still finds must be listed
+    /// in <see cref="OneOffsetExceptions"/> with its reason, so a hit is never a silent pass.
     /// </summary>
     [Fact]
     public void ServerTab_ConvertsThroughTheClock_AndRereadsItOnEveryRefresh()
     {
         var controls = ControlsDir();
-        foreach (var file in Directory.GetFiles(controls, "ServerTab*.cs"))
+        var oneOffset = new Regex(@"\.AddMinutes\(-?\s*((Services\.)?ServerTimeHelper\.)?[uU]tcOffset(Minutes)?\)");
+        var scanned = Directory.GetFiles(controls, "*.cs").Concat(Directory.GetFiles(WindowsDir(), "*.cs")).ToList();
+        Assert.Contains(scanned, f => Path.GetFileName(f) == "CorrelatedTimelineLanesControl.xaml.cs");
+        Assert.Contains(scanned, f => Path.GetFileName(f) == "ProcedureHistoryWindow.xaml.cs");
+
+        foreach (var file in scanned)
         {
-            var source = File.ReadAllText(file);
-            Assert.False(
-                Regex.IsMatch(source, @"\.AddMinutes\(-?\s*(ServerTimeHelper\.)?UtcOffsetMinutes\)"),
-                $"{Path.GetFileName(file)} still adds one UtcOffsetMinutes to a time; convert through the server clock (#4766).");
+            var name = Path.GetFileName(file);
+            var hit = oneOffset.IsMatch(File.ReadAllText(file));
+            if (OneOffsetExceptions.ContainsKey(name))
+            {
+                Assert.True(hit, $"{name} is listed as a one-offset exception but no longer has one; remove the entry.");
+                continue;
+            }
+
+            Assert.False(hit, $"{name} still adds one UTC offset to a time; convert through the server clock (#4766).");
         }
 
         var refresh = File.ReadAllText(Path.Combine(controls, "ServerTab.Refresh.cs"));
@@ -204,4 +224,7 @@ public sealed class ServerTimeHelperClockTests : IDisposable
 
     private static string ControlsDir([CallerFilePath] string thisFile = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Controls"));
+
+    private static string WindowsDir([CallerFilePath] string thisFile = "") =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Windows"));
 }
