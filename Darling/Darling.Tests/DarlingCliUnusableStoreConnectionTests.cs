@@ -172,8 +172,12 @@ public sealed class DarlingCliUnusableStoreConnectionTests
 
     /// <summary>The other way a managed credential fails: the file is well-formed base64 that this machine's DPAPI
     /// cannot unprotect, which is what a credential written on a different machine looks like from here. The verb
-    /// says it is DPAPI on this host, through the same text every other DPAPI failure uses, and not the raw
-    /// <c>CryptographicException</c> message an operator reads as the store rejecting a login.</summary>
+    /// says it is DPAPI on this machine and names the store's own credential file, and it does not use the raw
+    /// <c>CryptographicException</c> message an operator reads as the store rejecting a login. It also does not use the
+    /// explanation written for a monitored server's saved password: that one blames a Viewer on another PC and tells
+    /// the operator to re-add the server, run <c>--add-server</c> or <c>--encrypt-password</c>, or use an
+    /// <c>env:</c>/<c>file:</c> reference, and none of those can bring back the store owner's generated password
+    /// (#4744).</summary>
     [Theory]
     [InlineData("--validate-config")]
     [InlineData("--check-settings")]
@@ -200,9 +204,14 @@ public sealed class DarlingCliUnusableStoreConnectionTests
             Assert.Equal(1, exit);
             Assert.Contains("The stored store credential could not be read:", error, StringComparison.Ordinal);
             Assert.Contains("DPAPI-decrypt", error, StringComparison.Ordinal);
-            Assert.Contains("not SQL Server", error, StringComparison.Ordinal);
             Assert.DoesNotContain("Key not valid for use in specified state", error, StringComparison.Ordinal);
             Assert.DoesNotContain("postgres.connectionString", error, StringComparison.Ordinal);
+
+            /* #4744: the store's credential file is named, and none of the monitored-server remedies is offered. */
+            Assert.Contains("pg-credential.dpapi", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("--add-server", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("--encrypt-password", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("SQL Server", error, StringComparison.Ordinal);
         }
         finally
         {
