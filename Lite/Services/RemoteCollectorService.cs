@@ -1308,8 +1308,6 @@ WHERE server_id = $3";
                when a window shows. */
             return await ExecuteThrottledWithRetryAsync(s_connectionThrottle, async () =>
             {
-                var connection = new SqlConnection(connStr);
-
                 /* Inside the retry lambda, not outside it. A retried open needs a FRESH code -
                    the previous one may already be spent or expired - and disposing the previous
                    attempt is what closes the window showing it. Null for every mode but device
@@ -1321,6 +1319,8 @@ WHERE server_id = $3";
                     ? null
                     : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deviceCode.Token);
 
+                /* Created after the prompt starts, so a Begin that throws leaves no connection behind. */
+                var connection = new SqlConnection(connStr);
                 try
                 {
                     await connection.OpenAsync(openCancellation?.Token ?? cancellationToken);
