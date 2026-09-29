@@ -262,7 +262,7 @@ public sealed class DarlingStoreUpgradeTests
     public void DecideTransferMode_CopyWhenTheVolumeHasRoomForTwoCopies()
     {
         const long tenGb = 10L * 1024 * 1024 * 1024;
-        var decision = DarlingStoreUpgrade.DecideTransferMode(tenGb, 40L * 1024 * 1024 * 1024, hardLinksSupported: true);
+        var decision = DarlingStoreUpgrade.DecideTransferMode(tenGb, 40L * 1024 * 1024 * 1024, hardLinksSupported: true, dataDirectoryMeasured: true);
 
         Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Copy, decision.Mode);
     }
@@ -273,12 +273,12 @@ public sealed class DarlingStoreUpgradeTests
         const long tenGb = 10L * 1024 * 1024 * 1024;
 
         /* 12 GB free cannot hold a second 10 GB copy plus slack, but easily covers link mode. */
-        var link = DarlingStoreUpgrade.DecideTransferMode(tenGb, 12L * 1024 * 1024 * 1024, hardLinksSupported: true);
+        var link = DarlingStoreUpgrade.DecideTransferMode(tenGb, 12L * 1024 * 1024 * 1024, hardLinksSupported: true, dataDirectoryMeasured: true);
         Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Link, link.Mode);
 
         /* Same space, but the volume cannot make hard links: there is no safe mode left, so do not upgrade.
            An abort keeps the store running on its existing major, which beats a half-finished upgrade. */
-        var abort = DarlingStoreUpgrade.DecideTransferMode(tenGb, 12L * 1024 * 1024 * 1024, hardLinksSupported: false);
+        var abort = DarlingStoreUpgrade.DecideTransferMode(tenGb, 12L * 1024 * 1024 * 1024, hardLinksSupported: false, dataDirectoryMeasured: true);
         Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Abort, abort.Mode);
     }
 
@@ -286,9 +286,134 @@ public sealed class DarlingStoreUpgradeTests
     public void DecideTransferMode_AbortWhenEvenLinkModeCannotFit()
     {
         const long tenGb = 10L * 1024 * 1024 * 1024;
-        var decision = DarlingStoreUpgrade.DecideTransferMode(tenGb, 200L * 1024 * 1024, hardLinksSupported: true);
+        var decision = DarlingStoreUpgrade.DecideTransferMode(tenGb, 200L * 1024 * 1024, hardLinksSupported: true, dataDirectoryMeasured: true);
 
         Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Abort, decision.Mode);
+    }
+
+    /// <summary>A size walk that did not finish is a floor, and a floor cannot prove the room a copy needs:
+    /// with a huge free space and a floor of nothing, the choice is the one too little room gets — link mode
+    /// where the volume supports it, otherwise abort — never copy.</summary>
+    [Fact]
+    public void DecideTransferMode_UnmeasuredDataDirectory_NeverCopies()
+    {
+        const long hundredGb = 100L * 1024 * 1024 * 1024;
+
+        var link = DarlingStoreUpgrade.DecideTransferMode(0, hundredGb, hardLinksSupported: true, dataDirectoryMeasured: false);
+        Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Link, link.Mode);
+        Assert.Contains("could not be fully measured", link.Reason, StringComparison.Ordinal);
+
+        var abort = DarlingStoreUpgrade.DecideTransferMode(0, hundredGb, hardLinksSupported: false, dataDirectoryMeasured: false);
+        Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Abort, abort.Mode);
+        Assert.Contains("could not be fully measured", abort.Reason, StringComparison.Ordinal);
+
+        /* The same numbers from a finished walk are the ordinary copy. */
+        var copy = DarlingStoreUpgrade.DecideTransferMode(0, hundredGb, hardLinksSupported: true, dataDirectoryMeasured: true);
+        Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Copy, copy.Mode);
+    }
+
+    /// <summary>A walk that an error ends reports incomplete, so a caller cannot mistake what it added up
+    /// before the error for the size. A directory that is not there is the error that needs no permissions
+    /// to stage; it used to come back as a complete measurement of zero bytes.</summary>
+    [Fact]
+    public void MeasureDirectoryBytes_WalkEndedByAnError_ReportsIncomplete()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"));
+
+        var bytes = DarlingStoreUpgrade.MeasureDirectoryBytes(missing, deadline: null, out var complete);
+
+        Assert.Equal(0L, bytes);
+        Assert.False(complete);
+    }
+
+    /// <summary>The free space is read for the path itself: a directory that is not there gets no answer,
+    /// where a read from its drive letter reports the letter's free space for any path under it.</summary>
+    [Fact]
+    public void ReadAvailableFreeBytes_AnswersForThePath_NotItsDriveLetter()
+    {
+        Assert.True(DarlingStoreUpgrade.ReadAvailableFreeBytes(Path.GetTempPath()) > 0);
+
+        var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"));
+        Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadAvailableFreeBytes(missing));
+    }
+
+    /// <summary>Hard-link mode: a carry that throws after the swap still takes the retained pre-upgrade
+    /// directory with it. It shares its files with the upgraded cluster, so it was never a rollback copy,
+    /// and it used to be left beside the new cluster for two starts whenever a carry threw.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_CarryThrows_RetainedDirectoryIsGone()
+    {
+        var retained = PlantRetainedDirectory();
+        var steps = new List<string>();
+        try
+        {
+            await Assert.ThrowsAsync<IOException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, retained, steps.Add,
+                () => throw new IOException("postgresql.auto.conf could not be written"),
+                () => Task.CompletedTask,
+                NullLogger.Instance));
+
+            Assert.False(Directory.Exists(retained));
+            Assert.Equal(new[] { "carry-auto-conf" }, steps);
+        }
+        finally
+        {
+            DarlingStoreUpgrade.TryDeleteDirectory(retained);
+        }
+    }
+
+    /// <summary>Copy mode: the retained directory IS the rollback copy, and a throwing carry leaves it alone.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_CopyMode_CarryThrows_RetainedDirectoryIsKept()
+    {
+        var retained = PlantRetainedDirectory();
+        var steps = new List<string>();
+        try
+        {
+            await Assert.ThrowsAsync<IOException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Copy, retained, steps.Add,
+                () => Task.CompletedTask,
+                () => throw new IOException("postgresql.conf could not be written"),
+                NullLogger.Instance));
+
+            Assert.True(File.Exists(Path.Combine(retained, "PG_VERSION")));
+            Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
+        }
+        finally
+        {
+            DarlingStoreUpgrade.TryDeleteDirectory(retained);
+        }
+    }
+
+    /// <summary>Hard-link mode, both carries return: the directory goes, and the steps ran in order.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_CarriesReturn_RetainedDirectoryIsGone()
+    {
+        var retained = PlantRetainedDirectory();
+        var steps = new List<string>();
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, retained, steps.Add,
+                () => Task.CompletedTask,
+                () => Task.CompletedTask,
+                NullLogger.Instance);
+
+            Assert.False(Directory.Exists(retained));
+            Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
+        }
+        finally
+        {
+            DarlingStoreUpgrade.TryDeleteDirectory(retained);
+        }
+    }
+
+    private static string PlantRetainedDirectory()
+    {
+        var retained = Path.Combine(Path.GetTempPath(), "pm-upgrade-retained-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(retained);
+        File.WriteAllText(Path.Combine(retained, "PG_VERSION"), "17\n");
+        return retained;
     }
 
     [Fact]

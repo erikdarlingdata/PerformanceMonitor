@@ -3093,8 +3093,11 @@ public sealed class DarlingManagedPostgres
                             "resume: no backup file found for a PendingVerify conf");
                     }
 
+                    /* The NEWEST backup. An attempt that finds postgresql.conf edited since the last
+                       snapshot takes another one (ManagedConfMigrationSteps.BackupOriginal), and a restore
+                       from an older backup would put the file back as it was before those edits. */
                     Array.Sort(backupPath, StringComparer.Ordinal);
-                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[0], cancellationToken, _logger);
+                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[^1], cancellationToken, _logger);
                     break;
                 }
 

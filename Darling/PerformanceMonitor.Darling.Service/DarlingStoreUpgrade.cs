@@ -367,16 +367,27 @@ internal sealed class DarlingStoreUpgrade
     /// catalogs, so link mode is offered — but only when the volume actually supports hard links, and
     /// always as a LOUD downgrade because it trades the rollback away. Neither affordable means abort, which
     /// leaves the store exactly as it was: running, on the old major.
+    ///
+    /// <para><paramref name="dataDirectoryMeasured"/> false means the walk that produced
+    /// <paramref name="dataDirectoryBytes"/> did not finish, so the number is a floor. A floor cannot prove
+    /// the room a copy needs — it used to count as the size, and a copy that fills the disk is recovered
+    /// before the commit point but costs the store the whole attempt — so copy mode is off the table and
+    /// the choice is the one too little room gets: link mode where the volume supports it, otherwise
+    /// abort.</para>
     /// </summary>
-    internal static TransferDecision DecideTransferMode(long dataDirectoryBytes, long freeBytes, bool hardLinksSupported)
+    internal static TransferDecision DecideTransferMode(long dataDirectoryBytes, long freeBytes, bool hardLinksSupported, bool dataDirectoryMeasured)
     {
         var copyNeeds = dataDirectoryBytes + dataDirectoryBytes + CopyHeadroomSlackBytes;
-        if (freeBytes >= copyNeeds)
+        if (dataDirectoryMeasured && freeBytes >= copyNeeds)
         {
             return new TransferDecision(
                 FileTransferMode.Copy,
                 $"{FormatBytes(freeBytes)} free covers the {FormatBytes(copyNeeds)} a copy needs (data {FormatBytes(dataDirectoryBytes)} x2 + 1 GB slack)");
         }
+
+        var shortfall = dataDirectoryMeasured
+            ? $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)})"
+            : $"the data directory could not be fully measured (at least {FormatBytes(dataDirectoryBytes)}), so the room a copy needs is unknown";
 
         /* Link mode still writes a fresh cluster's catalogs and the copied non-relation files; a tenth of
            the data directory plus the slack is a deliberately conservative floor for that. */
@@ -385,14 +396,14 @@ internal sealed class DarlingStoreUpgrade
         {
             return new TransferDecision(
                 FileTransferMode.Abort,
-                $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)}) and this volume does not support hard links, so link mode is unavailable");
+                $"{shortfall} and this volume does not support hard links, so link mode is unavailable");
         }
 
         if (freeBytes >= linkNeeds)
         {
             return new TransferDecision(
                 FileTransferMode.Link,
-                $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)}) — falling back to hard-link mode, which does NOT leave a rollback copy");
+                $"{shortfall} — falling back to hard-link mode, which does NOT leave a rollback copy");
         }
 
         return new TransferDecision(
@@ -710,6 +721,40 @@ internal sealed class DarlingStoreUpgrade
         }
     }
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpaceExW(
+        string lpDirectoryName, out ulong lpFreeBytesAvailableToCaller, out ulong lpTotalNumberOfBytes, out ulong lpTotalNumberOfFreeBytes);
+
+    /// <summary>
+    /// The bytes this process may still write on the volume that holds <paramref name="directory"/>, asked
+    /// of the directory itself. <see cref="DriveInfo"/> answers for a drive letter, and a data directory on a
+    /// volume mounted at a folder (a second disk mounted under the install directory, say) is not on its
+    /// drive letter's volume: the upgrade's headroom check used to read the letter's free space and could
+    /// choose copy mode on a volume with no room for the copy. Available-to-caller, like
+    /// <c>DriveInfo.AvailableFreeSpace</c>, so a quota on the service account counts. Throws when the path
+    /// cannot be asked, rather than answering for the drive letter: a headroom read from another volume is
+    /// the wrong answer this exists to end, and the upgrade's pre-commit handler turns the throw into a
+    /// Failed outcome with the store still running on its old major.
+    /// </summary>
+    internal static long ReadAvailableFreeBytes(string directory)
+    {
+        /* A trailing separator is what the Win32 call wants for a UNC path and harmless for a local one. */
+        var path = Path.GetFullPath(directory);
+        if (!Path.EndsInDirectorySeparator(path))
+        {
+            path += Path.DirectorySeparatorChar;
+        }
+
+        if (!GetDiskFreeSpaceExW(path, out var availableToCaller, out _, out _))
+        {
+            throw new IOException(
+                $"Could not read the free space of the volume that holds {path} (Win32 error {Marshal.GetLastPInvokeError()}).");
+        }
+
+        return availableToCaller > long.MaxValue ? long.MaxValue : (long)availableToCaller;
+    }
+
     /// <summary>
     /// Total bytes of every file under <paramref name="directory"/>; unreadable entries are skipped.
     ///
@@ -725,8 +770,9 @@ internal sealed class DarlingStoreUpgrade
 
     /// <summary>
     /// <see cref="MeasureDirectoryBytes(string)"/> with a wall-clock ceiling. Returns what it managed to add
-    /// up and sets <paramref name="complete"/> false when <paramref name="deadline"/> cut the walk short, so
-    /// a caller can say "at least" instead of stating a number it did not finish computing.
+    /// up and sets <paramref name="complete"/> false when <paramref name="deadline"/> cut the walk short, or
+    /// when an error ended it (an unreadable subdirectory stops the enumeration), so a caller can say "at
+    /// least" instead of stating a number it did not finish computing.
     ///
     /// <para>The report path needs this because it measures foreign data directories on EVERY service start,
     /// before the store is up, on exactly the low-headroom hosts the feature exists for. A budget is the
@@ -763,7 +809,11 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* Partial measurement still beats no measurement; the caller's slack absorbs it. */
+            /* An error ends the enumeration, so what was added up is a floor, not the size: reported as
+               incomplete, the same as a walk the deadline cut short. A caller that wants an order of
+               magnitude can still use the total; the upgrade's headroom check must not, because a floor
+               that passes its slack is how a copy fills the disk. */
+            complete = false;
         }
 
         return total;
@@ -3514,9 +3564,14 @@ internal sealed class DarlingStoreUpgrade
         {
             /* ---- 1. space + hard-link capability, measured before anything is touched ---- */
             step = "disk-headroom";
-            var dataBytes = MeasureDirectoryBytes(context.DataDirectory);
-            var free = new DriveInfo(Path.GetPathRoot(parent)!).AvailableFreeSpace;
-            var decision = DecideTransferMode(dataBytes, free, SupportsHardLinks(parent));
+            /* The size walk says whether it finished: a walk an error cut short is a floor, and the decision
+               treats a floor as unknown rather than as the size. The free space is read for the parent
+               directory itself, not its drive letter: a data directory on a volume mounted at a folder is on
+               a different volume from its drive root, whose free space says nothing about the room the copy
+               will take. */
+            var dataBytes = MeasureDirectoryBytes(context.DataDirectory, deadline: null, out var dataMeasured);
+            var free = ReadAvailableFreeBytes(parent);
+            var decision = DecideTransferMode(dataBytes, free, SupportsHardLinks(parent), dataMeasured);
             mode = decision.Mode;
 
             if (mode == FileTransferMode.Abort)
@@ -3677,35 +3732,27 @@ internal sealed class DarlingStoreUpgrade
                a completed upgrade. */
             swapped = true;
 
-            /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) — BEFORE anything gives the new
-                    cluster its first real start, the quiesced TimescaleDB update just below included. Read
-                    from `retained`: the old data directory's content now lives there, since the swap above
-                    already moved it. Any failure here is caught by the post-commit handler below, which
-                    keeps the store running on the new major regardless — never a reason to brick it. */
-            step = "carry-auto-conf";
-            await CarryAutoConfAsync(
-                retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions);
+            /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) and, alongside it with the same
+                    post-swap timing (#4358), the operator lines below the darling-managed.conf include in
+                    the OLD cluster's postgresql.conf — BEFORE anything gives the new cluster its first real
+                    start, the quiesced TimescaleDB update just below included. Both read from `retained`:
+                    the old data directory's content now lives there, since the swap above already moved it.
+                    The operator lines are appended to the NEW cluster's postgresql.conf AFTER the legacy
+                    blocks context.AppendManagedConf already wrote there (step "conf-new-cluster", above), so
+                    an operator's override still wins over the legacy block's own copy of the same key. Any
+                    failure here is caught by the post-commit handler below, which keeps the store running on
+                    the new major regardless — never a reason to brick it. In hard-link mode `retained` goes
+                    the moment the carries are done with it, whether they returned or threw
+                    (CarryConfAfterSwapAsync says why). ---- */
+            await CarryConfAfterSwapAsync(
+                mode,
+                retained,
+                name => step = name,
+                () => CarryAutoConfAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions),
+                () => CarryOperatorConfLinesAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken),
+                _logger);
 
-            /* #4358: alongside the auto.conf carry, same post-swap timing — one pattern. Reads the OLD
-               cluster's postgresql.conf from `retained` (its content now lives there, since the swap above
-               already moved it), extracts any operator lines below the darling-managed.conf include, and
-               appends them to the NEW cluster's postgresql.conf AFTER the legacy blocks
-               context.AppendManagedConf already wrote there (step "conf-new-cluster", above) — so an
-               operator's override still wins over the legacy block's own copy of the same key. Any failure
-               here is caught by the post-commit handler below, which keeps the store running on the new
-               major regardless — never a reason to brick it. */
-            step = "carry-operator-conf-lines";
-            await CarryOperatorConfLinesAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken);
-
-            if (mode == FileTransferMode.Link)
-            {
-                /* Hard-link mode leaves an old directory that SHARES its files with the new cluster — it is
-                   not a rollback copy and keeping it invites someone to try. Delete it now, loudly. */
-                TryDeleteDirectory(retained);
-                _logger.LogWarning(
-                    "Removed the pre-upgrade data directory immediately: hard-link mode shares its files with the upgraded cluster, so it was never a usable rollback copy.");
-            }
-            else
+            if (mode != FileTransferMode.Link)
             {
                 /* Non-fatal on purpose, and belt-and-braces with the post-commit catch below. The upgrade is
                    already COMMITTED by the time this runs, so a marker file that will not write must not
@@ -3806,6 +3853,44 @@ internal sealed class DarlingStoreUpgrade
         finally
         {
             TryDeleteFile(passwordFile);
+        }
+    }
+
+    /// <summary>
+    /// The two post-swap conf carries, with hard-link mode's removal of the retained pre-upgrade directory
+    /// bound to them in a <c>finally</c>. In hard-link mode that directory SHARES its files with the upgraded
+    /// cluster, so it is not a rollback copy and keeping it invites someone to try one; it used to be
+    /// deleted only after both carries returned, so a carry that threw left it beside the new cluster for
+    /// the two starts the retention sweep gives a real copy. The carries are its last readers, so it goes
+    /// the moment they are done with it, whether they returned or threw. Only these two steps are wrapped,
+    /// never the upgrade's outer try: before the swap commits, the same directory can be the only copy of
+    /// the store. <paramref name="setStep"/> names the step in flight for the post-commit handler's
+    /// message. Its own method so a test can run the carries against a directory, without a cluster.
+    /// </summary>
+    internal static async Task CarryConfAfterSwapAsync(
+        FileTransferMode mode,
+        string retained,
+        Action<string> setStep,
+        Func<Task> carryAutoConf,
+        Func<Task> carryOperatorConfLines,
+        ILogger logger)
+    {
+        try
+        {
+            setStep("carry-auto-conf");
+            await carryAutoConf();
+
+            setStep("carry-operator-conf-lines");
+            await carryOperatorConfLines();
+        }
+        finally
+        {
+            if (mode == FileTransferMode.Link)
+            {
+                TryDeleteDirectory(retained);
+                logger.LogWarning(
+                    "Removed the pre-upgrade data directory immediately: hard-link mode shares its files with the upgraded cluster, so it was never a usable rollback copy.");
+            }
         }
     }
 
