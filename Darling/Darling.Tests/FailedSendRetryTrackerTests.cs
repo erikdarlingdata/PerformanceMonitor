@@ -131,4 +131,53 @@ public sealed class FailedSendRetryTrackerTests
         tracker.Record("k", Delivered(), T0.AddMinutes(1), Cap);
         Assert.False(tracker.RetryPending("k", T0.AddMinutes(1)));
     }
+
+    [Fact]
+    public void ClearPrefix_EndsEveryKeyThatStartsWithIt_AndItsStreak_AndNoOtherKey()
+    {
+        var tracker = new FailedSendRetryTracker();
+        tracker.Record("42|a", Failed(), T0, Cap);
+        tracker.Record("42|b", Failed(), T0, Cap);
+        tracker.Record("42|b", Failed(), T0.AddMinutes(1), Cap);
+        tracker.Record("4242|a", Failed(), T0, Cap);
+        tracker.Record("43|a", Failed(), T0, Cap);
+
+        tracker.ClearPrefix("42|");
+
+        Assert.Null(tracker.DueUtc("42|a"));
+        Assert.Null(tracker.DueUtc("42|b"));
+        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("4242|a"));
+        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("43|a"));
+
+        /* The streak went with the key: the next failure starts at a minute, not at the four that "42|b" had earned. */
+        var later = T0.AddMinutes(10);
+        Assert.True(tracker.Record("42|b", Failed(), later, Cap));
+        Assert.Equal(later.AddMinutes(1), tracker.DueUtc("42|b"));
+    }
+
+    [Fact]
+    public void ClearPrefix_MatchesTheCaseOfTheKeys_AndAPrefixNothingStartsWithClearsNothing()
+    {
+        var tracker = new FailedSendRetryTracker();
+        tracker.Record("Ab|x", Failed(), T0, Cap);
+
+        tracker.ClearPrefix("ab|");
+        tracker.ClearPrefix("Ab|x|longer");
+        tracker.ClearPrefix("zz");
+
+        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("Ab|x"));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    public void ClearPrefix_RefusesAnEmptyPrefix_ThatWouldEndEveryKey(string? prefix)
+    {
+        var tracker = new FailedSendRetryTracker();
+        tracker.Record("k", Failed(), T0, Cap);
+
+        Assert.ThrowsAny<ArgumentException>(() => tracker.ClearPrefix(prefix!));
+
+        Assert.Equal(T0.AddMinutes(1), tracker.DueUtc("k"));
+    }
 }

@@ -204,6 +204,42 @@ public sealed class ConnectionAlertFailedSendRetryTests
     }
 
     [Fact]
+    public async Task ARemovedServer_DropsItsPendingConnectionRetry_SoAReAddedOneThatIsStillDownStaysQuiet()
+    {
+        var rig = new Rig { Answer = Failed() };
+
+        await rig.ConnectionAsync(true);
+        await rig.ConnectionAsync(false);
+        Assert.Equal(1, rig.Fires);
+
+        /* Removed from the monitored set with a retry pending, and added again while it is still down: the first
+           pass is the silent baseline and the next is steady. The retry belonged to the outage the removed server
+           had. */
+        rig.Evaluator.Forget(ServerId);
+        await rig.AtAsync(TimeSpan.FromSeconds(60), () => rig.ConnectionAsync(false));
+        await rig.AtAsync(TimeSpan.FromSeconds(90), () => rig.ConnectionAsync(false));
+        Assert.Equal(1, rig.Fires);
+    }
+
+    [Fact]
+    public async Task ARemovedServers_AgRetry_IsKept_BecauseTheGroupOutlivesTheNode()
+    {
+        var rig = new Rig { Answer = Failed() };
+
+        await rig.ReplicaAsync(connected: "CONNECTED");
+        await rig.ReplicaAsync(connected: "DISCONNECTED");
+        Assert.Equal(1, rig.Fires);
+
+        /* AG state is keyed by the group, not by the node that watched it (DarlingSelfAlertEvaluator.Forget keeps
+           it on purpose), and the retry of the group's alert is part of that state. Dropping it with one node would
+           lose a page for a group another node is still watching. */
+        rig.Evaluator.Forget(ServerId);
+        await rig.AtAsync(TimeSpan.FromSeconds(60), () => rig.ReplicaAsync(connected: "DISCONNECTED"));
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, rig.Last.MetricName);
+    }
+
+    [Fact]
     public async Task WithRefireOn_AFailedLost_IsRetriedAtTheFailedSendDelay_WithTheUsualRefireText()
     {
         var rig = new Rig(connectionRefireMinutes: 10) { Answer = Failed() };

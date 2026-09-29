@@ -225,4 +225,79 @@ public sealed class AgAlertFailedSendRetryTests
         At(TimeSpan.FromSeconds(60) + Cooldown);
         Single(e.EvaluateDatabases(ServerId, behind, 300, 0, Cooldown));
     }
+
+    /* ---------------- a server removed from monitoring ---------------- */
+
+    [Fact]
+    public void AForgottenServer_DropsItsPendingRetry_SoAReAddedOneWithTheReplicaStillDisconnectedTakesTheSilentBaseline()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") });
+        e.NoteSent(Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") })), Failed(), Cooldown);
+
+        /* Removed with a retry pending, then added again with the replica still down: like any first sighting, a
+           silent baseline. The retry belonged to the outage the removed server had, not to this one. */
+        e.Forget(ServerId);
+        At(TimeSpan.FromMinutes(2));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+        At(TimeSpan.FromMinutes(3));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+    }
+
+    [Fact]
+    public void AForgottenServer_StartsItsFailedSendStreakOver()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") });
+        e.NoteSent(Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") })), Failed(), Cooldown);
+        At(TimeSpan.FromSeconds(60));
+        e.NoteSent(Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") })), Failed(), Cooldown);
+
+        /* Removed after two failures in a row, added again, and a new outage whose first send fails. */
+        e.Forget(ServerId);
+        At(TimeSpan.FromMinutes(10));
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") });
+        e.NoteSent(Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") })), Failed(), Cooldown);
+
+        /* It is the first failure of that outage, so it waits a minute, not the four the old streak had earned. */
+        At(TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(60));
+        Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+    }
+
+    [Fact]
+    public void AForgottenServer_DropsTheMarkersItsUnsentAlertsWouldHavePutBack()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(role: "SECONDARY") });
+
+        /* Decided but never sent (the server is acknowledged or silenced): the put-back waits for a NoteSent that
+           does not come. */
+        Single(e.EvaluateReplicas(ServerId, new[] { Replica(role: "PRIMARY") }));
+        var putBack = (System.Collections.IDictionary)typeof(AgAlertEvaluator)
+            .GetField("_putBack", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(e)!;
+        Assert.Single(putBack);
+
+        e.Forget(ServerId);
+
+        Assert.Empty(putBack);
+    }
+
+    [Fact]
+    public void ForgettingOneServer_LeavesAnotherServersPendingRetryAlone()
+    {
+        /* "42" is a prefix of "4242": what keeps the two apart is the separator after the id. */
+        const int shorterId = 42;
+        var e = Evaluator();
+        foreach (var id in new[] { ServerId, shorterId })
+        {
+            e.EvaluateReplicas(id, new[] { Replica(connected: "CONNECTED") });
+            e.NoteSent(Single(e.EvaluateReplicas(id, new[] { Replica(connected: "DISCONNECTED") })), Failed(), Cooldown);
+        }
+
+        e.Forget(shorterId);
+
+        At(TimeSpan.FromSeconds(60));
+        Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+    }
 }

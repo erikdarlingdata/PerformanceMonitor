@@ -75,4 +75,8 @@ public sealed class FailedSendRetryTracker
         _streaks.RecordDelivered(Family, key);
         _due.TryRemove(key, out _);
     }
+
+    public void ClearPrefix(string prefix)
+    {
+    }
 }
