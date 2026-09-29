@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -98,28 +100,33 @@ internal static class DarlingJobReader
         NpgsqlDataSource postgres, int serverId, CancellationToken cancellationToken = default)
     {
         var rows = new List<RunningJobRow>();
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(RunningJobsSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new RunningJobRow(
-                reader.GetDateTime(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? "" : reader.GetString(2),
-                !reader.IsDBNull(3) && reader.GetBoolean(3),
-                reader.GetDateTime(4),
-                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                !reader.IsDBNull(9) && reader.GetBoolean(9),
-                reader.IsDBNull(10) ? null : reader.GetDecimal(10)));
+            rows.Add(MapRunningJobRow(reader, clock));
         }
 
         return rows;
     }
+
+    /// <summary>Maps one row of <see cref="RunningJobsSql"/> (11 columns, in the SELECT's order).</summary>
+    internal static RunningJobRow MapRunningJobRow(DbDataReader reader, ServerClock clock) =>
+        new(
+            reader.GetDateTime(0),
+            reader.IsDBNull(1) ? "" : reader.GetString(1),
+            reader.IsDBNull(2) ? "" : reader.GetString(2),
+            !reader.IsDBNull(3) && reader.GetBoolean(3),
+            reader.GetDateTime(4),
+            reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+            reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+            !reader.IsDBNull(9) && reader.GetBoolean(9),
+            reader.IsDBNull(10) ? null : reader.GetDecimal(10));
 
     /// <summary>Lite/Dashboard's job-duration display formatting (Xs / Xm Ys / Xh Ym).</summary>
     public static string FormatDuration(long seconds)
