@@ -122,7 +122,7 @@ public class ArchiveService
         IsArchiving = true;
         try
         {
-        RemoveUnfinishedResetExports();
+        await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
 
         var cutoffDate = hotDataHours.HasValue
             ? DateTime.UtcNow.AddHours(-hotDataHours.Value)
@@ -852,11 +852,11 @@ COPY (
     /// Removes the archive files a size-triggered reset promoted without reaching its database reset (the
     /// process died in between). The database still holds every row they contain.
     /// </summary>
-    private void RemoveUnfinishedResetExports()
+    private int RemoveUnfinishedResetExports()
     {
         if (!File.Exists(ResetMarkerPath))
         {
-            return;
+            return 0;
         }
 
         var removed = 0;
@@ -880,6 +880,31 @@ COPY (
 
         File.Delete(ResetMarkerPath);
         _logger?.LogWarning("An earlier archive-and-reset exported its files but never reset the database; removed {Count} archive file(s) that duplicated rows still in it", removed);
+        return removed;
+    }
+
+    /// <summary>
+    /// <see cref="RemoveUnfinishedResetExports"/>, then a rebuild of the archive views when it removed anything, under
+    /// the write lock so no reader sees the gap. The views built at startup already hold a glob for those files, and
+    /// with the last file behind a glob gone DuckDB fails every read of that table's view at bind. The hourly cycle
+    /// only rebuilds at its end, and the size-triggered reset's failure branch never does.
+    /// </summary>
+    private async Task RemoveUnfinishedResetExportsAndRefreshViewsAsync()
+    {
+        if (!File.Exists(ResetMarkerPath))
+        {
+            return;
+        }
+
+        using (_duckDb.AcquireWriteLock())
+        {
+            var removed = RemoveUnfinishedResetExports();
+            if (removed > 0)
+            {
+                /* Core, not CreateArchiveViewsAsync: this thread holds the write lock, and the lock does not nest. */
+                await _duckDb.CreateArchiveViewsCoreAsync();
+            }
+        }
     }
 
     /// <summary>
@@ -948,7 +973,7 @@ COPY (
         var resetStarted = false;
         try
         {
-            RemoveUnfinishedResetExports();
+            await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
