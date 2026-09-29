@@ -119,7 +119,7 @@ public class PgPlanCaptureReadinessCollectorDefinitionTests
     {
         var sql = PgPlanCaptureReadinessCollector.Instance.BuildQuery(MakeContext()).Text;
 
-        var facets = new[] { "library_loaded", "capture_threshold", "extension_available", "plan_text_setting", "plan_attribution", "message_locale" };
+        var facets = new[] { "library_loaded", "capture_threshold", "extension_available", "plan_text_setting", "plan_attribution", "message_locale", "log_line_prefix_readable" };
         foreach (var facet in facets)
         {
             Assert.Contains($"'{facet}'::text", sql, StringComparison.Ordinal);

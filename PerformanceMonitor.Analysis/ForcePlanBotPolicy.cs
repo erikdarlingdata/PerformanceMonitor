@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 namespace PerformanceMonitor.Analysis;
@@ -245,6 +246,15 @@ public static class ForcePlanBotPolicy
     public const string ReasonApcEnabledForDatabase = "apc_enabled_for_database";
 
     /// <summary>
+    /// #4736: the engine's own open (<c>Active</c>) recommendation for the query names the target's plan as the
+    /// regressed, worse one. The advisory surface says so in the target's guidance and leaves the decision to
+    /// the person; the unattended bot has no one to hand it to, so it does not force the plan automatic plan
+    /// correction wants replaced. Reverted and Expired do not block: there the engine withdrew the claim or
+    /// found no gain. See <see cref="Blockers"/>.
+    /// </summary>
+    public const string ReasonApcNamesPlanAsRegressed = "apc_names_this_plan_as_regressed";
+
+    /// <summary>
     /// #4770: the target's database has no <c>plan_correction</c> row inside the state read's lookback, on a
     /// server where the plan_correction collector runs, so whether automatic plan correction owns plan
     /// forcing there is unknown. A database can be missing for ordinary reasons (a capture lands one database
@@ -284,6 +294,14 @@ public static class ForcePlanBotPolicy
     /// database on purpose, and the bot must not. A database-level fact evaluated per target rather than
     /// once per pass so the journal names it on every target it stopped and the cooldown dedups the
     /// repeats, the same way the other blockers are recorded.</para>
+    ///
+    /// <para><b><c>apc_names_this_plan_as_regressed</c> — the engine calls the proposed plan the worse one.</b>
+    /// When the query's newest automatic-plan-correction row is <c>Active</c> and its
+    /// <c>regressedPlanId</c> is the target's plan (#4736), the engine has an open claim that the plan this
+    /// pass would force is the regressed one. The shared gate deliberately leaves that to the person reading
+    /// the guidance; the bot stands down and its journal row quotes both plan ids and the snapshot time.
+    /// Only <c>Active</c>: a <c>Reverted</c> or <c>Expired</c> row is the engine withdrawing the claim, and
+    /// <c>Verifying</c>/<c>Success</c> already block through the shared gate.</para>
     ///
     /// <para><b><c>state_unavailable</c> — unknown fails closed.</b> Two shapes, one blocker, evidence
     /// distinguishing them. A null state (the read failed, or returned no row for this key) is the plain
@@ -332,6 +350,15 @@ public static class ForcePlanBotPolicy
             blockers.Add(new ForcePlanBlocker(
                 ReasonApcEnabledForDatabase,
                 $"plan_correction: force_last_good_plan_actual_state = {state.ForceLastGoodPlanActualState} for {target.Database} at {FactRemediation.Stamp(state.EnablementObservedAtUtc)} — automatic plan correction owns plan forcing on this database; the bot stands down rather than be the second forcer (#3652: a manual force on a plan the engine is verifying replaces AUTO forcing and removes its revert path)"));
+        }
+
+        if (state is not null && FactRemediation.ApcNamesPlanAsRegressed(target, state))
+        {
+            var lastGood = state.ApcLastGoodPlanId is long good ? good.ToString(CultureInfo.InvariantCulture) : "(none recorded)";
+            var reason = string.IsNullOrEmpty(state.ApcStateReason) ? string.Empty : $" / {state.ApcStateReason}";
+            blockers.Add(new ForcePlanBlocker(
+                ReasonApcNamesPlanAsRegressed,
+                $"plan_correction: recommendation state {state.ApcState}{reason} with regressed_plan_id = {state.ApcRegressedPlanId} (the plan proposed here, {target.PlanId}) and last_good_plan_id = {lastGood} at {FactRemediation.Stamp(state.ApcObservedAtUtc)} — the engine's own open recommendation calls this plan the worse one; an unattended force would pin the plan automatic plan correction wants replaced"));
         }
 
         if (state is null)

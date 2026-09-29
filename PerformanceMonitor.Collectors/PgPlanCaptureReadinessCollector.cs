@@ -211,7 +211,14 @@ probe AS (
            message language from the server PROCESS's environment, which no SQL read can see - so it is
            UNKNOWN rather than translated, and it gets its own detail arm because what a reader may conclude
            from an empty deadlock result differs between the two. */
-        coalesce(s.message_locale, '') = ''                                      AS locale_unset
+        coalesce(s.message_locale, '') = ''                                      AS locale_unset,
+        /* #4735 item 3: DERIVED ONCE, for the reason library_loaded is. SATISFIED means a log_line_prefix the stderr
+           log readers can read: it starts with a timestamp (%t or %m) and carries the process id alone in brackets,
+           [%p]. The readers anchor on that bracket, so a prefix with an unbracketed %p (%m %p, %t %p:) or with more in
+           the bracket than the pid (%t [%p-%l]) has every line dropped, and an empty deadlock, plan or log-event read
+           then looks like a quiet server. Case-sensitive on purpose: %P is not %p, and %T is not %t. A NULL or empty
+           prefix reads as unsatisfied, the direction that never presents a precondition this cannot prove as met. */
+        coalesce(s.line_prefix, '') ~ '^%[tm].*\[%p\]'                          AS prefix_readable
     FROM settings AS s
 )
 SELECT
@@ -378,6 +385,29 @@ SELECT
              || 'parameter and needs a reload. One honest caveat: this reports what the product can '
              || 'CONFIRM, not a verdict on your build - a PostgreSQL compiled without NLS support writes '
              || 'English whatever this is set to, and SQL cannot see that.'
+    END
+FROM probe AS p
+
+UNION ALL
+
+SELECT
+    'log_line_prefix_readable'::text,
+    /* NOT gated on loaded, for message_locale's reason: the deadlock and log-event reads depend on the prefix with
+       no auto_explain in the picture at all. */
+    p.prefix_readable,
+    coalesce(p.line_prefix, '(unreadable)'),
+    CASE
+        WHEN p.prefix_readable
+            THEN 'log_line_prefix starts with a timestamp (%t or %m) and carries the process id in brackets ([%p]), '
+                 || 'which is the shape the stderr log readers understand. That is a precondition being met, not a '
+                 || 'claim that anything was read. csvlog and jsonlog carry the process id in a column of their own '
+                 || 'and do not depend on the prefix.'
+        ELSE 'The stderr log readers cannot read this log_line_prefix, so every line written under it is dropped '
+             || 'and an empty deadlock, plan or log-event result from this target means nothing. They need the '
+             || 'prefix to start with a timestamp (%t or %m) and to carry the process id alone in brackets, as '
+             || 'in ''%m [%p] ''. An unbracketed %p (''%m %p '', ''%t %p:'') or a bracket that holds more than the pid '
+             || '(''%t [%p-%l]'') is not read. Change log_line_prefix to include [%p]; it is a dynamic parameter and '
+             || 'needs a reload, not a restart. A target that logs to csvlog or jsonlog only does not depend on it.'
     END
 FROM probe AS p";
 

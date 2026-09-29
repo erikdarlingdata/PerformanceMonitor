@@ -39,9 +39,9 @@ namespace PerformanceMonitor.Collectors;
 /// exactly that rejected three-part reference inside an empty CATCH, so every database failed
 /// silently, the item list came back empty, and the collector logged SUCCESS with zero rows forever.
 /// Both shapes are built from the SINGLE body <see cref="BuildPayloadBody"/> returns — the on-prem
-/// wrapper only quote-doubles it for nesting — because two hand-maintained copies of a 55-column
-/// SELECT is precisely the drift this collector cannot survive. (55 selected columns; the stored row
-/// is 56 — <c>database_name</c> is supplied client-side, from the enumerated item or the connected
+/// wrapper only quote-doubles it for nesting — because two hand-maintained copies of a 56-column
+/// SELECT is precisely the drift this collector cannot survive. (56 selected columns; the stored row
+/// is 57 — <c>database_name</c> is supplied client-side, from the enumerated item or the connected
 /// database.)</para>
 ///
 /// <para>ONE ROW PER INTERVAL (#1907). <c>sys.query_store_runtime_stats</c> hands back the flushed and
@@ -144,6 +144,16 @@ public sealed class QueryStoreCollector : CollectorDefinitionBase<QueryStoreColl
         /// which on Query Store's default 60-minute interval is reliably one bucket late.
         /// </summary>
         public DateTime? IntervalStartTimeUtc { get; set; }
+
+        /// <summary>
+        /// When the interval ENDED, in UTC — <c>sys.query_store_runtime_stats_interval.end_time</c>,
+        /// converted at collection exactly like <see cref="IntervalStartTimeUtc"/> (#4765). With the start it
+        /// gives the interval's real length, which a rate needs as its denominator: the time since the
+        /// previous STORED interval is not that length, because Query Store stores no row for an interval
+        /// with no executions and the gap then folds into the next interval's divisor. NULL on rows
+        /// collected before this column existed, and when the interval-row join misses.
+        /// </summary>
+        public DateTime? IntervalEndTimeUtc { get; set; }
     }
 
     private const string OnPremDatabaseListQueryText = @"
@@ -515,7 +525,7 @@ END;
     /// written as ordinary single-quoted T-SQL because that is what Azure SQL DB's per-database
     /// connection executes verbatim; <see cref="BuildPerItemQuery"/> quote-doubles the same string to
     /// nest it inside <c>[db].sys.sp_executesql N'...'</c> for on-prem. Both forms therefore select
-    /// the identical 55 reader ordinals in the identical order, which is the whole point: this method
+    /// the identical 56 reader ordinals in the identical order, which is the whole point: this method
     /// is what stops the two paths from drifting into two column sets that one shared
     /// <see cref="ReadItemAsync"/> then mis-reads.
     ///
@@ -792,9 +802,10 @@ END;
            and are dropped before they enter the batch (never stored, never counted against the byte
            budget). The query still CONTAINS the marker, in its own leading comment. */
 
-        /* Interval identity (#1841 tier 2), the last two SELECT items. Not version-gated: both
+        /* Interval identity (#1841 tier 2), the last three SELECT items (the interval end joined them in
+           #4765, read off the same joined row as the start). Not version-gated: both
            sys.query_store_runtime_stats.runtime_stats_interval_id and the
-           sys.query_store_runtime_stats_interval catalog view are original Query Store surface, verified
+           sys.query_store_runtime_stats_interval catalog view (start_time and end_time) are original Query Store surface, verified
            present on SQL Server 2016 SP3 (13.0.6300.2) — the collector's own AppliesTo floor — so there is
            no target this collector runs on that lacks them.
 
@@ -802,7 +813,7 @@ END;
            make every runtime-stats row's survival depend on its interval row resolving, and a Query Store
            that trimmed an interval row out from under us would silently delete real collection rather than
            lose one column. The id comes off qsrs directly and is unaffected either way; only
-           interval_start_time_utc goes NULL if the join misses.
+           interval_start_time_utc and interval_end_time_utc go NULL if the join misses.
 
            start_time is datetimeoffset. AT TIME ZONE 'UTC' re-expresses it at +00:00 and the CONVERT drops
            the offset, so the stored value is naive UTC — the same clock as collection_time and as
@@ -833,7 +844,7 @@ END;
            So the slices are combined HERE, where the identity is unambiguous, keyed on exactly the
            natural key of the view — (plan_id, runtime_stats_interval_id, execution_type, replica_group) —
            and one interval now yields at most one row per cycle. The EMITTED ROW SHAPE is unchanged: the
-           same 55 columns in the same order, only fewer rows, so the positional writers and every
+           same columns in the same order, only fewer rows, so the positional writers and every
            downstream reader are untouched.
 
            How each column combines:
@@ -1048,7 +1059,8 @@ SELECT /* PerformanceMonitorLite */ TOP ({MaxRowsPerDatabase}) WITH TIES
     query_plan_hash = CONVERT(varchar(64), qsp.query_plan_hash, 1),
     {replicaRoleCol},
     runtime_stats_interval_id = qsrs.runtime_stats_interval_id,
-    interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC')
+    interval_start_time_utc = CONVERT(datetime2, qsrsi.start_time AT TIME ZONE 'UTC'),
+    interval_end_time_utc = CONVERT(datetime2, qsrsi.end_time AT TIME ZONE 'UTC')
 FROM #pm_qs_slice AS qsrs
 JOIN sys.query_store_plan AS qsp
   ON qsp.plan_id = qsrs.plan_id
@@ -1623,6 +1635,8 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
                    DateTime — unlike first_execution_time/last_execution_time above, which arrive as
                    datetimeoffset and need the .UtcDateTime normalization. */
                 IntervalStartTimeUtc = reader.IsDBNull(54) ? null : reader.GetDateTime(54),
+                /* Same datetime2 shape as the start above (#4765). */
+                IntervalEndTimeUtc = reader.IsDBNull(55) ? null : reader.GetDateTime(55),
             };
 
             /* Client-side self-exclusion (#1565): our own collector queries carry the marker in their
@@ -1764,6 +1778,11 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
            cannot — the identity was never collected). */
         new CollectorColumn("runtime_stats_interval_id", CollectorColumnType.BigInt),
         new CollectorColumn("interval_start_time_utc", CollectorColumnType.Timestamp),
+        /* #4765, appended LAST for the same positional reason as the two above: an upgraded store gets it
+           from an ALTER TABLE ADD COLUMN, which can only append, while a fresh store's DDL is generated
+           from this list. Nullable — rows collected before it have no interval end, and every rate that
+           reads it falls back to the old previous-interval gap when it is NULL. */
+        new CollectorColumn("interval_end_time_utc", CollectorColumnType.Timestamp),
     };
 
     public override void WritePayload(Row row, ICollectorRowWriter writer, CollectorContext context)
@@ -1824,6 +1843,7 @@ EXECUTE [{escapedDbName}].sys.sp_executesql
             .Value(row.QueryPlanHash)
             .Value(row.ReplicaRole)
             .Value(row.RuntimeStatsIntervalId)
-            .Value(row.IntervalStartTimeUtc);
+            .Value(row.IntervalStartTimeUtc)
+            .Value(row.IntervalEndTimeUtc);
     }
 }
