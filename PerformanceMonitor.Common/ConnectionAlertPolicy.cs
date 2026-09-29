@@ -68,8 +68,10 @@ public static class ConnectionAlertPolicy
         bool alertWhenAlreadyDownAtFirstSight,
         TimeSpan? refireInterval,
         DateTime? lastDownAlertUtc,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        DateTime? retryDueUtc = null)
     {
+        _ = retryDueUtc;
         if (previousOnline is null)
         {
             return !online && alertWhenAlreadyDownAtFirstSight

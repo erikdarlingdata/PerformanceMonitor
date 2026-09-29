@@ -278,8 +278,10 @@ public static class AgAlertPolicy
         string? currentStateDesc,
         TimeSpan? refireInterval,
         DateTime? lastDisconnectAlertUtc,
-        DateTime nowUtc)
+        DateTime nowUtc,
+        DateTime? retryDueUtc = null)
     {
+        _ = retryDueUtc;
         var edge = DecideConnection(previousStateDesc, currentStateDesc);
 
         /* A real transition wins outright: the Disconnected edge already announces, and a Reconnected one

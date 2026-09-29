@@ -323,6 +323,14 @@ public sealed class AgAlertEvaluator
         }
     }
 
+    /// <summary>Stand-in: opens the window whatever the send did.</summary>
+    public void NoteSent(AgAlert alert, PerformanceMonitor.Notifications.AlertDelivery? delivery, TimeSpan cap)
+    {
+        _ = delivery;
+        _ = cap;
+        NoteDelivered(alert);
+    }
+
     /// <summary>Drops all AG state for a server removed from the monitored list, so a later re-add starts at a
     /// fresh baseline rather than inheriting a stale role and paging a phantom failover.</summary>
     public void Forget(int serverId)

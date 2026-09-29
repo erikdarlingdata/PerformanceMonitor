@@ -96,4 +96,61 @@ public sealed class ConnectionAlertPolicyTests
         Assert.Equal(ConnectionAlertDecision.Lost,
             Decide(true, online: false, startupOptIn: true, refireMinutes: 10));
     }
+
+    /* ── #4795: a down alert no channel delivered is due again once its retry time arrives ── */
+
+    private static ConnectionAlertDecision DecideWithRetry(
+        bool? previous, bool online, DateTime? retryDueUtc, int refireMinutes = 0, DateTime? lastDownUtc = null) =>
+        ConnectionAlertPolicy.Decide(
+            previous, online, false,
+            refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
+            lastDownUtc, Now, retryDueUtc);
+
+    /// <summary>
+    /// The retry is due whatever the re-fire setting says: with re-fire off, a standing outage whose alert
+    /// reached no channel has nothing else to bring it back. Not yet due stays quiet, at the due time and after
+    /// it is a StillDown.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 1, ConnectionAlertDecision.None)]
+    [InlineData(0, 0, ConnectionAlertDecision.StillDown)]
+    [InlineData(0, -1, ConnectionAlertDecision.StillDown)]
+    [InlineData(10, 1, ConnectionAlertDecision.None)]
+    [InlineData(10, 0, ConnectionAlertDecision.StillDown)]
+    public void Retry_IsStillDownOnceDue_WhateverTheRefireSetting(
+        int refireMinutes, int dueInMinutes, ConnectionAlertDecision expected) =>
+        Assert.Equal(
+            expected,
+            DecideWithRetry(false, false, Now.AddMinutes(dueInMinutes), refireMinutes, lastDownUtc: Now.AddMinutes(-1)));
+
+    /// <summary>The delivered case: no retry pending and re-fire off gives None for as long as the server is down.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(60)]
+    [InlineData(60 * 24 * 30)]
+    public void NoRetryPending_RefireOff_StaysQuietWhileDown(int minutesSinceLastAlert) =>
+        Assert.Equal(
+            ConnectionAlertDecision.None,
+            DecideWithRetry(false, false, retryDueUtc: null, lastDownUtc: Now.AddMinutes(-minutesSinceLastAlert)));
+
+    /// <summary>A due retry time only matters to a standing outage: an edge, a restore and a silent baseline decide as before.</summary>
+    [Fact]
+    public void Retry_DoesNotChangeAnEdgeARestoreOrABaseline()
+    {
+        var due = Now.AddMinutes(-5);
+        Assert.Equal(ConnectionAlertDecision.Lost, DecideWithRetry(true, false, due));
+        Assert.Equal(ConnectionAlertDecision.Restored, DecideWithRetry(false, true, due));
+        Assert.Equal(ConnectionAlertDecision.None, DecideWithRetry(true, true, due));
+        Assert.Equal(ConnectionAlertDecision.None, DecideWithRetry(null, false, due));
+        Assert.Equal(ConnectionAlertDecision.None, DecideWithRetry(null, true, due));
+    }
+
+    /// <summary>A restore ends the outage: with the retry cleared the next outage is quiet after its own edge.</summary>
+    [Fact]
+    public void Restored_ThenAClearedRetry_LeavesTheNextOutageQuiet()
+    {
+        Assert.Equal(ConnectionAlertDecision.Restored, DecideWithRetry(false, true, Now.AddMinutes(-1)));
+        Assert.Equal(ConnectionAlertDecision.Lost, DecideWithRetry(true, false, retryDueUtc: null));
+        Assert.Equal(ConnectionAlertDecision.None, DecideWithRetry(false, false, retryDueUtc: null, lastDownUtc: Now));
+    }
 }
