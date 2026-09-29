@@ -23,7 +23,8 @@ namespace PerformanceMonitor.Alerting;
 /// the cap the caller passes (the alert cooldown). Any other answer (delivered, partly delivered, muted,
 /// throttled, folded, unreported) clears the key and its streak, because a retry of a partly delivered alert would
 /// send it a second time down the channel that worked. <see cref="Clear"/> ends a key without a send, for the
-/// outage that came back on its own.</para>
+/// outage that came back on its own, and <see cref="ClearPrefix"/> ends every key of one scope, for a server removed
+/// from monitoring.</para>
 ///
 /// <para>In memory only, and safe to call from several threads (Lite records from the continuation of a send
 /// task). A restart forgets every pending retry, which is the same state a restart leaves the edge itself in.</para>
@@ -76,7 +77,22 @@ public sealed class FailedSendRetryTracker
         _due.TryRemove(key, out _);
     }
 
+    /// <summary>
+    /// Ends every key that starts with <paramref name="prefix"/> (compared ordinally), each as <see cref="Clear"/>
+    /// does. For a scope that is going away as a whole, such as every alert of one server removed from monitoring:
+    /// left behind, its pending retries would page for an outage the server no longer has, and its streaks would
+    /// lengthen the waits of the next one. An empty prefix is refused, because it would end every key.
+    /// </summary>
     public void ClearPrefix(string prefix)
     {
+        ArgumentException.ThrowIfNullOrEmpty(prefix);
+
+        foreach (var key in _due.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                Clear(key);
+            }
+        }
     }
 }

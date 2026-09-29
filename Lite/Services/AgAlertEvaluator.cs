@@ -28,8 +28,9 @@ namespace PerformanceMonitorLite.Services;
 /// alerts and resolutions, which carry no database. Trailing optional so existing construction sites
 /// (and the tests that pin them) stay untouched.</param>
 /// <param name="RefireStampKey">Opaque token (#2426), non-null only on an alert whose DELIVERY opens a
-/// re-fire window. The caller hands it back through <see cref="AgAlertEvaluator.NoteDelivered"/> after
-/// sending, which is what keeps the window stamped on delivery rather than on the decision: Lite evaluates
+/// re-fire window. The caller hands the alert back through <see cref="AgAlertEvaluator.NoteSent"/> after
+/// sending, which stamps the window (through <see cref="AgAlertEvaluator.NoteDelivered"/>) unless every channel
+/// failed. That is what keeps the window stamped on delivery rather than on the decision: Lite evaluates
 /// even while a server is acknowledged or silenced and simply does not send, and a suppressed alert must not
 /// consume a window it was never announced in.</param>
 /// <param name="RetryKey">Opaque token (#4795), non-null on an alert that is tried again when no channel delivered
@@ -440,7 +441,10 @@ public sealed class AgAlertEvaluator
     private static string RetryKeyFor(string grainKey, string metric) => grainKey + KeySeparator + metric;
 
     /// <summary>Drops all AG state for a server removed from the monitored list, so a later re-add starts at a
-    /// fresh baseline rather than inheriting a stale role and paging a phantom failover.</summary>
+    /// fresh baseline rather than inheriting a stale role and paging a phantom failover. That includes the
+    /// server's pending retries and put-backs (#4795): a retry left behind would page a replica that is still
+    /// disconnected on the re-add's first sweep instead of taking the silent baseline, and a failed-send streak
+    /// left behind would lengthen the waits of its next outage. Every retry key starts with the server's prefix.</summary>
     public void Forget(int serverId)
     {
         var prefix = ServerPrefix(serverId);
@@ -450,6 +454,8 @@ public sealed class AgAlertEvaluator
         ForgetByPrefix(_lastSyncBehindAlert, prefix);
         ForgetByPrefix(_lastDisconnectAlert, prefix);
         _activeSyncBehind.RemoveWhere(k => k.StartsWith(prefix, StringComparison.Ordinal));
+        _retries.ClearPrefix(prefix);
+        ForgetByPrefix(_putBack, prefix);
     }
 
     private static void ForgetByPrefix<TValue>(Dictionary<string, TValue> state, string prefix)

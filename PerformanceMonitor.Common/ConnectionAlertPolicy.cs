@@ -68,7 +68,9 @@ public static class ConnectionAlertPolicy
     /// <see cref="ConnectionAlertDecision.StillDown"/> WHATEVER the re-fire setting says: with re-fire off (the
     /// shipped default) a "Server Unreachable" that no channel delivered has nothing else to bring it back.
     /// Null, or a time still ahead, leaves every rule above exactly as it was — a delivered alert is never
-    /// repeated by this.</param>
+    /// repeated by this. A caller that hands its send off without waiting for the answer passes null while that
+    /// send is still running: the due time only moves once the answer is recorded, and until then a due time in
+    /// the past would send the retry again on every call.</param>
     public static ConnectionAlertDecision Decide(
         bool? previousOnline,
         bool online,

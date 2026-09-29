@@ -229,6 +229,9 @@ public partial class MainWindow : Window
     /// doubling, never more than the alert cooldown) while the server stays down, with re-fire off or on; any other
     /// answer clears it. The step runs on the UI thread, after the loop has stored this poll's state, and does
     /// nothing if the server came back while the send was in flight: the outage it would retry is over.
+    /// The loop marked the server in <c>_connectionAlertSends</c> before it handed the send over, so no tick offers
+    /// the retry while the send runs; this step lifts the mark once the answer is recorded (or the step gave up),
+    /// in a <c>finally</c>, so no exit leaves the server held back.
     /// </summary>
     private async Task NoteConnectionAlertSentAsync(string serverId, Task<PerformanceMonitor.Notifications.AlertDelivery?> send)
     {
@@ -252,6 +255,10 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AppLogger.Error("ConnectionAlerts", $"Recording the Server Unreachable delivery failed: {ex.Message}");
+        }
+        finally
+        {
+            _connectionAlertSends.End(serverId);
         }
     }
 

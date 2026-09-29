@@ -6883,10 +6883,16 @@ internal sealed class DarlingSelfAlertEvaluator
         _hasBeenOnline.TryRemove(key, out _);
         _collectionWatchStart[key] = Unstamped;
 
+        /* #4795: the pending retry of a "Server Unreachable" that no channel delivered belongs to the connection
+           state dropped above. Left behind, a re-add that is still down would pass its silent first pass and then
+           be paged on the second, as "the previous alert reached no channel", for an outage the removed server had. */
+        _connectionRetries.Clear(key);
+
         /* AG state is keyed by the AG GRAIN, not by server (#1696), so there is deliberately nothing here to
            drop: an Availability Group outlives any one of its monitored nodes, and another node may still be
            watching it. Dropping the edge state on removal would re-baseline a group that is still monitored
-           and silently swallow the next failover.
+           and silently swallow the next failover. The same goes for the AG retries (#4795): they are keyed by
+           metric and grain, so they are part of that state and stay with it.
 
            What DOES belong to the departing server is its claim to judge an AG. Releasing it lets a
            surviving node take over on its next sweep; the edge state it inherits is the same state, so the
