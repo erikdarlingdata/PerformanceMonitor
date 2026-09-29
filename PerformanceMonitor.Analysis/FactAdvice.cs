@@ -1834,11 +1834,7 @@ public static class FactAdvice
 
         if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
         {
-            var days = FactMeta(facts, key, "baseline_distinct_days");
-            var restsOn = samples is > 0
-                ? $"{samples.Value:N0} baseline sample{(samples.Value == 1 ? "" : "s")}" +
-                  (days is > 0 ? $" across {days.Value:N0} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
-                : "this server's hour-of-week baseline";
+            var restsOn = ZeroHistoryRestsOn(samples, FactMeta(facts, key, "baseline_distinct_days"));
             return fallback with
             {
                 Headline = $"{noun} reached {fmt(observed.Value)} — against a month in which this hour saw none",
@@ -1879,9 +1875,29 @@ public static class FactAdvice
     }
 
     /// <summary>
+    /// The clause both zero-history shapes rest their claim on: the baseline's sample count and the distinct
+    /// days behind it, or the plain "this server's hour-of-week baseline" when the fact carries no sample
+    /// count. One spelling for <see cref="ComposeAnomaly"/> and <see cref="ComposeAnomalyRatio"/>, so the two
+    /// cannot word the same measurement two ways.
+    /// </summary>
+    private static string ZeroHistoryRestsOn(double? samples, double? days) =>
+        samples is > 0
+            ? $"{samples.Value:N0} baseline sample{(samples.Value == 1 ? "" : "s")}" +
+              (days is > 0 ? $" across {days.Value:N0} distinct day{(days.Value == 1 ? "" : "s")}" : string.Empty)
+            : "this server's hour-of-week baseline";
+
+    /// <summary>
     /// Ratio-anomaly composed (BLOCKING / DEADLOCK spike): states the event count this window and how
     /// many times the hour-of-week baseline rate it represents. Falls back to the static block when
     /// the count/ratio metadata is absent.
+    /// <para>
+    /// #4731: a <c>baseline_zero_history</c> fact gets the gate families' third shape (see
+    /// <see cref="ComposeAnomaly"/>), checked BEFORE <c>is_new</c>. A zero-history bucket is never trustworthy,
+    /// so the detector stamps it <c>is_new = 1</c> as well, and read in the old order it was worded "first
+    /// occurrence, no baseline yet" — the words for a baseline the engine has not built, said about a month it
+    /// measured as empty. The zero-history shape prints no multiple: <c>ratio</c> on such a fact is the
+    /// first-occurrence sentinel, and any multiple of a zero rate would be infinite.
+    /// </para>
     /// </summary>
     private static AdviceBlock ComposeAnomalyRatio(IReadOnlyDictionary<string, Fact> facts, string key, string noun)
     {
@@ -1890,6 +1906,28 @@ public static class FactAdvice
         var ratio = FactMeta(facts, key, "ratio");
         if (current is null || ratio is null)
             return fallback;
+
+        if ((FactMeta(facts, key, "baseline_zero_history") ?? 0) >= 1)
+        {
+            var restsOn = ZeroHistoryRestsOn(FactMeta(facts, key, "baseline_samples"), FactMeta(facts, key, "baseline_distinct_days"));
+            var invZero =
+                $"{Plural(current.Value, noun)} this window. This server's baseline for this hour-of-week is not thin — " +
+                $"it is a measured ZERO: {restsOn}, not one of them above zero. That makes this an extremity rather than " +
+                "a multiple of a normal rate: the count went from never-happens to this, and a rate that is zero has no " +
+                "multiple to print. Check whether it lines up with a workload change, a deploy, or a one-off job before " +
+                "treating it as chronic.";
+            var remZero =
+                "This is the first time this hour has seen it at all, which makes the change itself the lead: find what " +
+                "changed. If it was a one-time event — a report run, a backfill, a deploy — awareness is enough, but a count " +
+                "that was reliably zero and now is not will usually recur; if it recurs or sustains, it will cross the standard " +
+                $"{noun} threshold and surface as a first-class finding with its chain or graph detail on a later window; treat it then.";
+            return fallback with
+            {
+                Headline = $"{Plural(current.Value, noun)} this window — against a month in which this hour saw none",
+                Investigation = invZero,
+                Remediation = remZero
+            };
+        }
 
         // is_new = the baseline was too thin to trust a ratio (the detector fell back to the absolute
         // count). Render it as a first occurrence — never the dishonest "spiked to 100×" the sentinel

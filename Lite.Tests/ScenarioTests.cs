@@ -497,6 +497,28 @@ public class ScenarioTests : IClassFixture<SharedDuckDbFixture>
         Assert.True(facts.ContainsKey("ANOMALY_DEADLOCK_SPIKE"), "Should detect deadlock spike");
     }
 
+    /// <summary>
+    /// #4731: the real detector path. The scenario's baseline holds no blocking or deadlock rows at all, and
+    /// the event baselines group the rows that exist, so a quiet history reaches the detector as an EMPTY
+    /// bucket: not trustworthy, so both facts fire on the count alone as first occurrences, and not a measured
+    /// zero, so <c>baseline_zero_history</c> is stamped 0. The measured-zero arm itself is pinned on a
+    /// hand-built bucket in <c>CountFamilyZeroHistoryTests</c>.
+    /// </summary>
+    [Fact]
+    public async Task BlockingSpikeAnomaly_OnAnEmptyBaseline_IsAFirstOccurrence_AndNotStampedZeroHistory()
+    {
+        var (_, facts) = await RunFullPipelineWithAnomaliesAsync(s => s.SeedBlockingSpikeAnomalyAsync());
+
+        foreach (var key in new[] { "ANOMALY_BLOCKING_SPIKE", "ANOMALY_DEADLOCK_SPIKE" })
+        {
+            var metadata = facts[key].Metadata;
+            Assert.Equal(1.0, metadata["is_new"]);
+            Assert.Equal(PerformanceMonitor.Analysis.Baselines.AnomalyThresholds.NoBaselineRatio, metadata["ratio"]);
+            Assert.Equal(0.0, metadata["baseline_zero_history"]);
+            Assert.Equal(0.0, metadata["baseline_samples"]);
+        }
+    }
+
     /* ── Anomaly Detection: Wait Spike ── */
 
     [Fact]
