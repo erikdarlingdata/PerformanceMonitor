@@ -50,6 +50,11 @@ public sealed class DarlingCollectorToggleExitCodeTests
            script's own mistake from a store that is down. */
         Assert.Contains("`2` when the store cannot be reached, refuses the login, or refuses the change", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("tell its own mistake from a store that is down", readme, StringComparison.Ordinal);
+
+        /* The two verbs do not file every case under the same code, and the README says which differ. */
+        Assert.Contains(
+            "a managed credential that was never stored exits `1` from the collector verbs (the setup is not finished) and `2` from `--check-settings` (there is no store to check)",
+            readme, StringComparison.Ordinal);
     }
 
     /// <summary>A TCP port nothing is listening on, proven closed by bind-then-release, so a connection attempt
@@ -168,6 +173,56 @@ public sealed class DarlingCollectorToggleExitCodeTests
 
             Assert.Equal(UsageOrConfig, exit);
             Assert.Contains("postgres.connectionString is empty", error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>The README says an empty <c>postgres.connectionString</c> is <c>1</c> from both: <c>--check-settings</c>
+    /// rejects it when it validates the config, before it looks for a store, so it does NOT take its store code here.</summary>
+    [Fact]
+    public async Task CheckSettings_WithNoStoreConnectionString_ExitsWithTheConfigCode_LikeTheCollectorVerbs()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-checksettings-4744-nostore-");
+        try
+        {
+            var path = WriteConfigWithAServer(root, PostgresBlock(string.Empty));
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.CheckSettingsAsync(path, json: false, output, error, CancellationToken.None);
+            var (collectorExit, _, _) = await RunAsync(true, "wait_stats", "--config", path);
+
+            Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.ConfigError, exit);
+            Assert.Equal(UsageOrConfig, collectorExit);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>And a managed store whose credential was never written: <c>--check-settings</c> exits with its store
+    /// code, the collector verbs with the usage-or-config code.</summary>
+    [Fact]
+    public async Task CheckSettings_ManagedStoreWithNoStoredCredential_ExitsWithTheStoreCode_WhereTheCollectorVerbsExitWithOne()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-checksettings-4744-nocred-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var path = WriteConfigWithAServer(root,
+                "{ \"managed\": true, \"port\": " + GetClosedPort() + ", \"dataDirectory\": " + JsonSerializer.Serialize(dataDirectory) + " }");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.CheckSettingsAsync(path, json: false, output, error, CancellationToken.None);
+            var (collectorExit, _, _) = await RunAsync(true, "wait_stats", "--config", path);
+
+            Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.StoreUnreachable, exit);
+            Assert.Equal(UsageOrConfig, collectorExit);
         }
         finally
         {

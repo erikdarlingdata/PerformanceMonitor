@@ -68,8 +68,9 @@ public sealed class ProvisionRolesCollisionGuardTests
 
     /// <summary>The caller's own <c>ON_ERROR_STOP</c> (psql <c>-v ON_ERROR_STOP=1</c>, or psqlrc) survives the guard: the
     /// script saves it before it switches the stop on, and puts it back right after the last guard block. It never sets
-    /// the variable to off, which would override a caller who asked psql to stop at the first error. psql reads an unset
-    /// <c>ON_ERROR_STOP</c> as off, so the saved value is always on or off.</summary>
+    /// the variable to off, which would override a caller who asked psql to stop at the first error. From psql 10 an unset
+    /// <c>ON_ERROR_STOP</c> reads as off, so the saved value is always on or off; in psql 9.6 it would stay the literal
+    /// text and read as on, which is why the script and the README ask for psql 10 or later.</summary>
     [Fact]
     public void TheCallersOnErrorStop_IsSavedBeforeTheGuard_AndPutBackRightAfterIt_NeverForcedOff()
     {
@@ -151,6 +152,20 @@ public sealed class ProvisionRolesCollisionGuardTests
 
         Assert.Contains("already exists without Darling's `darling-managed` marker", readme, StringComparison.Ordinal);
         Assert.DoesNotContain("Darling did not create it", readme, StringComparison.Ordinal);
+    }
+
+    /// <summary>The script and the README both say psql 10 or later, and the script no longer says a bare psql reads an
+    /// unset <c>ON_ERROR_STOP</c> as off: that is true only from psql 10.</summary>
+    [Fact]
+    public void TheScriptAndTheReadme_SayPsql10OrLater()
+    {
+        var sql = Script();
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+
+        Assert.Contains("Needs psql 10 or later", sql, StringComparison.Ordinal);
+        Assert.Contains("this script needs psql 10 or later", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("psql reads an unset ON_ERROR_STOP as off", sql, StringComparison.Ordinal);
+        Assert.Contains("Use **psql 10 or later**", readme, StringComparison.Ordinal);
     }
 
     /// <summary>The README's psql command line must not set ON_ERROR_STOP for the whole run: that would stop an owner

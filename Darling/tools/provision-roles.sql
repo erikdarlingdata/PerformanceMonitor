@@ -66,6 +66,7 @@
 --   3. If the owner role is not "darling", change it in the ALTER DEFAULT PRIVILEGES FOR ROLE
 --      lines (it must be the role that CREATEs the tables — your collection connection's role).
 --
+--   Needs psql 10 or later (step 1 says why):
 --   psql -X -h <host> -U <owner> -d darling -f provision-roles.sql
 --
 --   -X keeps your own psqlrc out of the run: an \set AUTOCOMMIT off in it would leave every role, grant and
@@ -92,7 +93,9 @@ SET pg_stat_statements.track_utility = off;
 --    is stamped 'darling-managed'; an unmarked same-named role fails loud (never repurposed).
 -- Stop on an error for this guard alone (#4746): a script-wide stop would end a non-superuser owner before any grant.
 -- The caller's own ON_ERROR_STOP (psql -v ON_ERROR_STOP=1, or psqlrc) is saved first and put back after the guard,
--- not forced off. psql reads an unset ON_ERROR_STOP as off, so the saved value is always on or off.
+-- not forced off. From psql 10 an unset ON_ERROR_STOP reads as off, so the saved value is always on or off. In psql 9.6
+-- an unset variable stays the literal text :ON_ERROR_STOP and reads as on, so the whole run would stop at its first
+-- error and an owner who is not a superuser would get no grants: this script needs psql 10 or later.
 \set darling_saved_stop :ON_ERROR_STOP
 \set ON_ERROR_STOP on
 DO $$
