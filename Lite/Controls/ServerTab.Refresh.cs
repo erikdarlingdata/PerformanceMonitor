@@ -471,8 +471,8 @@ public partial class ServerTab : UserControl
             (DateTime From, DateTime To, DateTime CurrentFrom)? comparison = CompareToCombo == null
                 ? null
                 : CorrelatedTimelineLanesControl.GetOverviewComparisonRange(
-                    CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.UtcOffsetMinutes);
-            await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes, comparison);
+                    CompareToCombo.SelectedIndex, hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.ActiveServerClock);
+            await CorrelatedLanes.RefreshAsync(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock, comparison);
         }
         catch (Exception ex)
         {
