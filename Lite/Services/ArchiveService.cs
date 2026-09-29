@@ -47,6 +47,10 @@ public class ArchiveService
     internal Action<IReadOnlyList<string>>? OnCompactionTempsReadyForTests { get; set; }
     internal Action<string>? BeforeTableExportForTests { get; set; }
     internal Action? BeforeDatabaseResetForTests { get; set; }
+
+    /* Fires after the reset has cleared the tables and before the preserved config rows are put back (#4824): the
+       moment a reader would find those tables empty. */
+    internal Action? AfterDatabaseResetForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
     /* Stand in for a process kill at the two points of the periodic export where one matters (#4720): the first
@@ -55,6 +59,14 @@ public class ArchiveService
        way a kill does: the per-table catch below lets it through, so nothing after the seam runs. */
     internal Action<string>? BeforePromoteForTests { get; set; }
     internal Action<string>? AfterPromoteForTests { get; set; }
+
+    /* Fires with the table name after a compaction group's files are swapped in and before the archive views are
+       rebuilt (#4720): the moment a reader would find a glob that matches nothing. */
+    internal Action<string>? AfterCompactionSwapForTests { get; set; }
+
+    /* Fires after the swap journals an earlier run left behind are resolved and before the archive views are
+       rebuilt (#4720): the same moment for a replay that the seam above marks for a swap. */
+    internal Action? AfterCompactionReplayForTests { get; set; }
 
     /* Replaces the minute-resolution file-name prefix, so a test can put two runs in different "minutes"
        without waiting for the clock. */
@@ -157,12 +169,14 @@ public class ArchiveService
 
         /* Archive each table independently. Export-to-Parquet (COPY ... TO)
            only READS the database, so it runs under a read lock — concurrently
-           with the UI. Only the DELETE modifies the file, so just the DELETE
-           takes the exclusive write lock, and only briefly. This keeps the UI
+           with the UI. Only the DELETE modifies the file, and the promote of
+           the exported file has to share its lock (#4824: a view's glob sees a
+           promoted file at once), so just the promote and the DELETE take the
+           exclusive write lock, together, and only briefly. This keeps the UI
            responsive during archival instead of freezing it for the whole
            export (issue #979).
 
-           Exporting and deleting in separate lock scopes is safe here: the
+           Exporting and promoting in separate lock scopes is safe here: the
            DELETE only removes rows older than cutoffDate, and collectors only
            ever insert rows timestamped "now", so nothing archivable can be
            written into the gap between the export and the DELETE. */
@@ -216,50 +230,59 @@ public class ArchiveService
                     }
                 }
 
-                /* Promote the temp only after the COPY has fully succeeded. The name carries this cycle's
+                /* The promote and the DELETE share one write lock (#4824). A view is the table UNION ALL its
+                   archive glob, so a promoted file is in every read at once: with the promote outside the lock
+                   and the DELETE under a lock of its own, a reader in between counted the exported rows in the
+                   table and in the file. What undoes a failed step (the temp, the promoted file, the journal)
+                   runs inside the lock too, so a reader never finds a file the table still covers.
+
+                   Promote the temp only after the COPY has fully succeeded. The name carries this cycle's
                    timestamp, so nothing is at the final name. A move that fails after its retries leaves the
                    rows in the table (the DELETE below never runs); the temp is removed so it cannot pile up.
                    The journal goes down first (#4720): a process that dies between the promote and the DELETE
                    below leaves the rows in the table AND in the promoted file, and the next run reads the
-                   journal to delete them instead of exporting them a second time. */
-                try
-                {
-                    WritePendingArchive(table, cutoffDate, Path.GetFileName(parquetPath));
-                    BeforePromoteForTests?.Invoke(table);
-                    MoveWithRetry(tempParquetPath, parquetPath);
-                }
-                catch (Exception ex) when (ex is not SimulatedKillException)
-                {
-                    try { File.Delete(tempParquetPath); } catch { /* best effort */ }
-                    TryDeletePendingArchive(table);
-                    throw;
-                }
+                   journal to delete them instead of exporting them a second time.
 
-                AfterPromoteForTests?.Invoke(table);
-
-                /* Delete the archived rows under the write lock. The DELETE
-                   modifies table data and the next CHECKPOINT reorganizes the
-                   file — readers must not be mid-query when that happens or
-                   they get "Reached the end of the file" errors — but the
-                   DELETE itself is fast, so the UI stall is brief. */
-                try
+                   The DELETE modifies table data and the next CHECKPOINT reorganizes the file, so readers must
+                   not be mid-query when that happens or they get "Reached the end of the file" errors; the move
+                   and the DELETE are both fast, so the UI stall is short. */
+                using (_duckDb.AcquireWriteLock())
                 {
-                    await DeleteArchivedRowsAsync(table, timeColumn, cutoffDate);
-                }
-                catch
-                {
-                    /* The rows are still in the table (DELETE failed), so they aren't lost —
-                       discard the archive file we just wrote so the same rows aren't counted in
-                       both the table and the parquet (double-counted by v_* views and re-exported
-                       next cycle). The journal goes with the file; if the file cannot be removed the
-                       journal stays, and the next run finishes the DELETE against it. */
                     try
                     {
-                        File.Delete(parquetPath);
-                        TryDeletePendingArchive(table);
+                        WritePendingArchive(table, cutoffDate, Path.GetFileName(parquetPath));
+                        BeforePromoteForTests?.Invoke(table);
+                        MoveWithRetry(tempParquetPath, parquetPath);
                     }
-                    catch { /* best effort */ }
-                    throw;
+                    catch (Exception ex) when (ex is not SimulatedKillException)
+                    {
+                        try { File.Delete(tempParquetPath); } catch { /* best effort */ }
+                        TryDeletePendingArchive(table);
+                        throw;
+                    }
+
+                    AfterPromoteForTests?.Invoke(table);
+
+                    try
+                    {
+                        /* Core, not DeleteArchivedRowsAsync: this thread holds the write lock, and the lock does not nest. */
+                        await DeleteArchivedRowsCoreAsync(table, timeColumn, cutoffDate);
+                    }
+                    catch
+                    {
+                        /* The rows are still in the table (DELETE failed), so they aren't lost —
+                           discard the archive file we just wrote so the same rows aren't counted in
+                           both the table and the parquet (double-counted by v_* views and re-exported
+                           next cycle). The journal goes with the file; if the file cannot be removed the
+                           journal stays, and the next run finishes the DELETE against it. */
+                        try
+                        {
+                            File.Delete(parquetPath);
+                            TryDeletePendingArchive(table);
+                        }
+                        catch { /* best effort */ }
+                        throw;
+                    }
                 }
 
                 TryDeletePendingArchive(table);
@@ -292,19 +315,30 @@ public class ArchiveService
     }
 
     /* The DELETE of a periodic export, under the write lock: it modifies table data and the next CHECKPOINT
-       reorganizes the file, so readers must not be mid-query when that happens. Returns the rows deleted. */
+       reorganizes the file, so readers must not be mid-query when that happens. Returns the rows deleted.
+       The export itself calls the Core form below, with its promote under the same lock (#4824); this one is for
+       a caller with no promote to keep it with, the recovery of an interrupted export. */
     private async Task<int> DeleteArchivedRowsAsync(string table, string timeColumn, DateTime cutoff)
     {
         using (_duckDb.AcquireWriteLock())
         {
-            using var writeConnection = _duckDb.CreateConnection();
-            await writeConnection.OpenAsync();
-
-            using var deleteCmd = writeConnection.CreateCommand();
-            deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
-            deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
-            return await deleteCmd.ExecuteNonQueryAsync();
+            return await DeleteArchivedRowsCoreAsync(table, timeColumn, cutoff);
         }
+    }
+
+    /* The body of DeleteArchivedRowsAsync, for a caller that already holds the write lock (#4824). A view reads
+       a promoted parquet file through its glob at once, so the export takes the lock before it promotes its file
+       and keeps it through this DELETE: released in between, a reader would count the rows in the table and in
+       the file. The lock does not nest, so this takes none of its own. */
+    private async Task<int> DeleteArchivedRowsCoreAsync(string table, string timeColumn, DateTime cutoff)
+    {
+        using var writeConnection = _duckDb.CreateConnection();
+        await writeConnection.OpenAsync();
+
+        using var deleteCmd = writeConnection.CreateCommand();
+        deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
+        deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
+        return await deleteCmd.ExecuteNonQueryAsync();
     }
 
     private string PendingArchivePath(string table) => Path.Combine(_archivePath, table + PendingArchiveSuffix);
@@ -566,7 +600,9 @@ COPY (
 
     /// <summary>
     /// Finishes or undoes every compaction swap an earlier run left behind. Returns the input files that swaps
-    /// folded into their outputs but could not delete, and the groups whose swap could not be resolved.
+    /// folded into their outputs but could not delete, and the groups whose swap could not be resolved. With
+    /// any journal to resolve, the resolving and the archive-view rebuild that follows it run under one write
+    /// lock; with none, no lock is taken (#4720).
     /// </summary>
     private (HashSet<string> AlreadyFolded, HashSet<(string Month, string Table)> UnresolvedGroups) ReplayCompactionSwapJournals()
     {
@@ -576,7 +612,20 @@ COPY (
            of this run's merge, and the groups whose swap could not be resolved stay untouched. */
         var alreadyFolded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var unresolvedGroups = new HashSet<(string Month, string Table)>();
-        foreach (var journalPath in Directory.GetFiles(_archivePath, "*" + SwapJournalSuffix))
+
+        /* Almost every run finds no journal: return before taking a lock the run does not need. */
+        var journalPaths = Directory.GetFiles(_archivePath, "*" + SwapJournalSuffix);
+        if (journalPaths.Length == 0)
+        {
+            return (alreadyFolded, unresolvedGroups);
+        }
+
+        /* Finishing a swap deletes the files the views read and undoing one moves them, so a reader in between
+           finds the same missing rows or empty glob that the per-group swap in CompactParquetFiles explains
+           (#4720). The lock is held to the end of the method, past the rebuild below, so no reader gets in
+           between the two. */
+        using var writeLock = _duckDb.AcquireWriteLock();
+        foreach (var journalPath in journalPaths)
         {
             var journalName = Path.GetFileName(journalPath);
             try
@@ -609,6 +658,20 @@ COPY (
                     unresolvedGroups.Add((m.Groups[1].Value, m.Groups[2].Value));
                 }
             }
+        }
+
+        AfterCompactionReplayForTests?.Invoke();
+
+        /* Core, not CreateArchiveViewsAsync: this thread holds the write lock and the lock does not nest.
+           A failed rebuild is logged, not thrown: the caller still needs the sets built above, and the run
+           rebuilds the views again before it ends. */
+        try
+        {
+            _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Could not rebuild the archive views after resolving the compaction swaps; the rebuild at the end of the run covers them");
         }
 
         return (alreadyFolded, unresolvedGroups);
@@ -762,6 +825,7 @@ COPY (
            Each group gets its own DuckDB connection so memory is fully released between groups. */
         var totalMerged = 0;
         var totalRemoved = 0;
+        var viewRebuildFailures = 0;
 
         /* Spill directory for the in-memory compaction connections. Set per #935
            so DuckDB has somewhere to page if it chooses to. In practice (see #933)
@@ -845,11 +909,41 @@ COPY (
                    temp is in place: SwapCompactionOutputs renames the files the outputs replace aside, moves
                    the temps in, and only then removes the inputs. A move that fails after its retries (a
                    scanner, backup agent or indexer holding the fresh file) undoes the swap, and the next
-                   cycle starts from exactly the files this one found. */
-                var removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
+                   cycle starts from exactly the files this one found.
 
-                totalMerged++;
-                totalRemoved += removed;
+                   The swap and the view rebuild run together under the write lock (#4720). A view keeps the
+                   globs it was built with, so a reader that got in between the two found this group's rows
+                   missing (the view had no glob for the new part files) or, once the last per-cycle file was
+                   gone, a glob that matched nothing, which fails the whole read at bind. The lock is taken
+                   here, per group, after the merge: the merge is the slow part and readers are never held
+                   behind it, and one lock across every group would keep every group's merged output on disk
+                   at once. Core, not CreateArchiveViewsAsync: this thread already holds the write lock and
+                   the lock does not nest. Blocking on it is safe because DuckDB.NET's async calls complete
+                   synchronously, so the thread that took the lock is the one that releases it. */
+                using (_duckDb.AcquireWriteLock())
+                {
+                    var removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
+
+                    /* The group is compacted from here on: the merged files are in place and the inputs are gone.
+                       It counts now, so a rebuild that throws below is not reported as a compaction that failed. */
+                    totalMerged++;
+                    totalRemoved += removed;
+
+                    AfterCompactionSwapForTests?.Invoke(table);
+
+                    /* A failed rebuild is logged for what it is and does not reach the group's catch below, which
+                       is for a merge or a swap that failed. Both callers rebuild the views again in a finally when
+                       compaction ends, so the views are not left behind for good. */
+                    try
+                    {
+                        _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
+                    }
+                    catch (Exception rebuildEx)
+                    {
+                        viewRebuildFailures++;
+                        _logger?.LogError(rebuildEx, "Compacted {Month}/{Table} ({Count} files), but the archive views could not be rebuilt; they are rebuilt again when compaction ends", month, table, files.Count);
+                    }
+                }
 
                 if (batches.Count == 1)
                 {
@@ -876,8 +970,16 @@ COPY (
         if (totalMerged > 0)
         {
             var remaining = Directory.GetFiles(_archivePath, "*.parquet").Length;
-            _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining",
-                totalMerged, totalRemoved, remaining);
+            if (viewRebuildFailures > 0)
+            {
+                _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining, view rebuilds failed: {Failures}",
+                    totalMerged, totalRemoved, remaining, viewRebuildFailures);
+            }
+            else
+            {
+                _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining",
+                    totalMerged, totalRemoved, remaining);
+            }
         }
     }
 
@@ -1337,44 +1439,68 @@ COPY (
                process dies between here and the reset, the next archival run removes them, because the
                database still holds every row they contain. */
             File.WriteAllLines(ResetMarkerPath, exports.Select(e => Path.GetFileName(e.FinalPath)));
-            foreach (var (tempPath, finalPath) in exports)
-            {
-                MoveWithRetry(tempPath, finalPath);
-                promoted.Add(finalPath);
-            }
 
-            BeforeDatabaseResetForTests?.Invoke();
-
-            /* From here the archive files are the only copy, so the marker goes first. Nuke and reinitialize
-               outside the using-connection scope so all handles are closed. */
-            File.Delete(ResetMarkerPath);
-            resetStarted = true;
-            _logger?.LogInformation("Deleting and reinitializing database");
-            await _duckDb.ResetDatabaseAsync();
-
-            /* Restore preserved config rows into the freshly initialized tables. */
+            /* Promoting every export, clearing the tables and putting the preserved config rows back share one
+               write lock (#4824). A view is the table UNION ALL its archive glob, so a promoted file is in every
+               read at once: released between the promote and the reset, a reader would count every row in the
+               table and in the files. Released between the reset and the restore, a reader would read the
+               preserved tables, which the reset just emptied, with none of their rows. The reset is the Core form
+               because the lock does not nest, and a failure before it removes the promoted files inside the lock
+               too, so a reader never finds files the tables still cover. */
             var allRestoresSucceeded = true;
-            if (preservedFiles.Count > 0)
+            using (_duckDb.AcquireWriteLock())
             {
-                using (_duckDb.AcquireWriteLock())
+                try
                 {
-                    using var connection = _duckDb.CreateConnection();
-                    await connection.OpenAsync();
-                    foreach (var (table, path) in preservedFiles)
+                    foreach (var (tempPath, finalPath) in exports)
                     {
-                        try
+                        MoveWithRetry(tempPath, finalPath);
+                        promoted.Add(finalPath);
+                    }
+
+                    BeforeDatabaseResetForTests?.Invoke();
+
+                    /* From here the archive files are the only copy, so the marker goes first. Nuke and reinitialize
+                       outside the using-connection scope so all handles are closed. */
+                    File.Delete(ResetMarkerPath);
+                    resetStarted = true;
+                    _logger?.LogInformation("Deleting and reinitializing database");
+                    await _duckDb.ResetDatabaseCoreAsync();
+
+                    AfterDatabaseResetForTests?.Invoke();
+
+                    /* Restore preserved config rows into the freshly initialized tables. Still under the lock the
+                       reset took, and not one of its own (#4824): the tables exist and are empty from the end of
+                       the reset until their rows are back, and no reader may read them in between. resetStarted is
+                       set, so a failure here is not undone: the archive files are the only copy of the rows now. */
+                    if (preservedFiles.Count > 0)
+                    {
+                        using var connection = _duckDb.CreateConnection();
+                        await connection.OpenAsync();
+                        foreach (var (table, path) in preservedFiles)
                         {
-                            using var insertCmd = connection.CreateCommand();
-                            insertCmd.CommandText = $"INSERT INTO {table} SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
-                            await insertCmd.ExecuteNonQueryAsync();
-                            _logger?.LogInformation("Restored rows to {Table} after database reset", table);
-                        }
-                        catch (Exception ex)
-                        {
-                            allRestoresSucceeded = false;
-                            _logger?.LogError(ex, "Failed to restore {Table} from {Path} — preservation files retained for manual recovery", table, path);
+                            try
+                            {
+                                using var insertCmd = connection.CreateCommand();
+                                insertCmd.CommandText = $"INSERT INTO {table} SELECT * FROM read_parquet('{EscapeSqlPath(path)}')";
+                                await insertCmd.ExecuteNonQueryAsync();
+                                _logger?.LogInformation("Restored rows to {Table} after database reset", table);
+                            }
+                            catch (Exception ex)
+                            {
+                                allRestoresSucceeded = false;
+                                _logger?.LogError(ex, "Failed to restore {Table} from {Path} — preservation files retained for manual recovery", table, path);
+                            }
                         }
                     }
+                }
+                catch when (!resetStarted)
+                {
+                    /* The database still holds every row: undo the attempt before the lock is released. The handler
+                       below repeats this for a failure from anywhere else in the method; every step here checks
+                       that the file is there, so the second pass finds nothing left to remove. */
+                    DiscardResetAttempt(exports, promoted, preserveDir);
+                    throw;
                 }
             }
 
@@ -1382,9 +1508,10 @@ COPY (
 
             /* Compact per-cycle files into monthly parquet files, then refresh the views over the result.
                This runs after the reset rather than before it, so the files the marker above names still
-               exist under those names until the reset is through. It uses an in-memory DuckDB connection
-               and only touches files on disk, so it does not contend with the collectors now writing to
-               the fresh database. */
+               exist under those names until the reset is through. The merges run on an in-memory DuckDB
+               connection and only touch files on disk, so they do not contend with the collectors now
+               writing to the fresh database; each group's swap and view rebuild briefly hold the write
+               lock (#4720). */
             _logger?.LogInformation("Compacting parquet files into monthly archives");
             try
             {
