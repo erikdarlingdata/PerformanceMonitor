@@ -117,6 +117,15 @@ internal static class OversizedPlanBacklogSweep
     internal const int MaxConnectWaitAttempts = 5;
 
     /// <summary>
+    /// #4732: the longest delay <see cref="NextSweepDelay"/> can return, which is how far ahead of now the worker's
+    /// stamp for this sweep can sit when it is written. The worker's due check treats a stamp further ahead than this
+    /// as a wall clock that stepped backwards, so this must never be smaller than either delay: a smaller span would
+    /// wake the sweep early. Derived from both, so lengthening the connect wait past the interval widens it.
+    /// </summary>
+    internal static readonly TimeSpan LongestSweepDelay =
+        SweepInterval >= ConnectWaitDelay ? SweepInterval : ConnectWaitDelay;
+
+    /// <summary>
     /// Plans one pass may fetch for one server. Ten, and the number is the RATE bound; the per-fetch
     /// isolation above is the MEMORY bound, and the two are independent — raising this would not batch
     /// anything, it would take longer.

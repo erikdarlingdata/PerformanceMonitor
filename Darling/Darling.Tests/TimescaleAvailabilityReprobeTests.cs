@@ -51,7 +51,7 @@ public sealed class TimescaleAvailabilityReprobeTests
     private const string CompressionCall = "await EvaluateCompressionJobHealthAsync(stoppingToken);";
     private const string RetentionCall = "await ReevaluateRetentionPoliciesAsync(stoppingToken);";
     private const string ConvergenceCall = "await ConvergeStoreObjectsAsync(stoppingToken);";
-    private const string TickGuard = "if (DateTime.UtcNow >= _nextCompressionCheckUtc)";
+    private const string TickGuard = "if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))";
     private const string Stamp = "_nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);";
     private const string Latch = "_timescaleAvailable";
     private const string ReprobeSignature = "private async Task ReprobeTimescaleAvailabilityAsync(CancellationToken cancellationToken)";
@@ -153,7 +153,7 @@ public sealed class TimescaleAvailabilityReprobeTests
         Assert.Equal(1, CountOf(code, ConvergenceCall));
 
         /* The latch is gone from the tick's OUTER condition; it now sits one level in. */
-        Assert.DoesNotContain(Latch + " && DateTime.UtcNow >= _nextCompressionCheckUtc", code, StringComparison.Ordinal);
+        Assert.DoesNotContain(Latch + " && StampIsDue(_nextCompressionCheckUtc", code, StringComparison.Ordinal);
 
         var guardAt = code.IndexOf(TickGuard, StringComparison.Ordinal);
         var stampAt = code.IndexOf(Stamp, StringComparison.Ordinal);

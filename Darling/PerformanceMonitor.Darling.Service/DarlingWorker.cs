@@ -146,6 +146,19 @@ public sealed class DarlingWorker : BackgroundService
        on a large store would slide that sample toward the :00 instant the policies start on. */
     private static readonly TimeSpan s_compressionCheckInterval = TimeSpan.FromHours(1);
 
+    /// <summary>#4732: the longest the compression check's stamp is written ahead of now: <see cref="TimescaleSupport.NextCompressionCheckUtc"/>
+    /// floors <c>now + s_compressionCheckInterval</c> to its minute and adds the phase, so it is at most the interval plus the phase.</summary>
+    internal static readonly TimeSpan CompressionCheckSpan =
+        s_compressionCheckInterval + TimeSpan.FromSeconds(TimescaleSupport.CompressionCheckPhaseSeconds);
+
+    /// <summary>#4732: the longest the fleet sweep's stamp can sit ahead of now. It is written on a grid of the interval read
+    /// at each fire (<see cref="FleetSweepEngine.ClampIntervalMinutes"/>), and the operator can change that between fires, so
+    /// the span is the largest value the clamp allows, not the current one: a shorter span would wake the sweep early.</summary>
+    internal static readonly TimeSpan FleetSweepStampSpan = TimeSpan.FromMinutes(FleetSweepCadence.IntervalMinutesCeiling);
+
+    /// <summary>The daily retention purge's cadence: the stamp is written as now plus this, and it is the span its due check uses (#4732).</summary>
+    private static readonly TimeSpan s_purgeInterval = TimeSpan.FromHours(24);
+
     /* The whole-pass budget for the hourly retention re-evaluation (#3812), the #2327 shape: this pass is
        AWAITED on the serial sweep loop, so its worst case stalls per-server dispatch and every fleet-level
        check behind it. Each statement inside TimescaleSupport.EnsureRetentionPoliciesAsync carries the 300 s
@@ -3064,7 +3077,8 @@ public sealed class DarlingWorker : BackgroundService
                sweepTargets is this tick's snapshot, already taken under the servers lock, so the pass
                iterates a stable set. RunAsync is failure-isolated per server and returns quietly on
                cancellation, so the task can complete unobserved without an unhandled fault. */
-            if (DateTime.UtcNow >= _nextOversizedPlanSweepUtc
+            /* #4732: the span is the longest delay NextSweepDelay returns, which is the delay the stamp below is written with. */
+            if (StampIsDue(_nextOversizedPlanSweepUtc, OversizedPlanBacklogSweep.LongestSweepDelay, DateTime.UtcNow)
                 && (_oversizedPlanSweep is null || _oversizedPlanSweep.IsCompleted))
             {
                 /* #3405: count BOTH populations, because an empty target list has two causes that mean
@@ -3106,7 +3120,8 @@ public sealed class DarlingWorker : BackgroundService
                other maintenance cadence and it is purely time-based (no disk-free check), so on its own the
                store can still fill between purges — this edge-fired condition is the flagship-appropriate
                backstop. Own slow cadence; the master alerts gate + edge-trigger live inside the evaluator. */
-            if (DateTime.UtcNow >= _nextDiskCheckUtc)
+            /* #4732: the stamp below is written as now + s_diskCheckInterval, so that is the span. */
+            if (StampIsDue(_nextDiskCheckUtc, s_diskCheckInterval, DateTime.UtcNow))
             {
                 _nextDiskCheckUtc = DateTime.UtcNow.Add(s_diskCheckInterval);
                 await EvaluateStoreDiskPressureAsync(config, stoppingToken);
@@ -3118,8 +3133,9 @@ public sealed class DarlingWorker : BackgroundService
                "opens" a rule, so a silent gap = an alert an operator believes is armed. Fleet-level, own slow
                cadence; both evaluators are null on deployments without a viewer pool, and each Evaluate* half
                is failure-isolated so a throw never stops the fleet loop. */
+            /* #4732: the stamp below is written as now + s_customAlertHealthInterval, so that is the span. */
             if (_customAlertEvaluator is not null && _selfAlerts is not null
-                && DateTime.UtcNow >= _nextCustomAlertHealthCheckUtc)
+                && StampIsDue(_nextCustomAlertHealthCheckUtc, s_customAlertHealthInterval, DateTime.UtcNow))
             {
                 _nextCustomAlertHealthCheckUtc = DateTime.UtcNow.Add(s_customAlertHealthInterval);
                 await EvaluateCustomAlertRuleHealthAsync(servers, stoppingToken);
@@ -3139,7 +3155,8 @@ public sealed class DarlingWorker : BackgroundService
                MuteRuleService cache the engine matches against — so it sees exactly what is suppressing
                alerts right now, and needs no store read of its own. Fleet-level, own slow cadence; the
                Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
-            if (_selfAlerts is not null && DateTime.UtcNow >= _nextStaleMuteCheckUtc)
+            /* #4732: the stamp below is written as now + s_staleMuteCheckInterval, so that is the span. */
+            if (_selfAlerts is not null && StampIsDue(_nextStaleMuteCheckUtc, s_staleMuteCheckInterval, DateTime.UtcNow))
             {
                 _nextStaleMuteCheckUtc = DateTime.UtcNow.Add(s_staleMuteCheckInterval);
                 await _selfAlerts.EvaluateStaleMuteRulesAsync(muteRuleService.GetRules(), stoppingToken);
@@ -3165,7 +3182,8 @@ public sealed class DarlingWorker : BackgroundService
                loopback-only from the start, and the host does not re-decide when the date passes). A null
                snapshot means no LAN TLS certificate to watch. Fleet-level, and the Evaluate* wrapper is
                failure-isolated so a throw never stops the fleet loop. */
-            if (_selfAlerts is not null && DateTime.UtcNow >= _nextWebTlsCheckUtc)
+            /* #4732: the stamp below is written as now + s_webTlsCheckInterval, so that is the span. */
+            if (_selfAlerts is not null && StampIsDue(_nextWebTlsCheckUtc, s_webTlsCheckInterval, DateTime.UtcNow))
             {
                 _nextWebTlsCheckUtc = DateTime.UtcNow.Add(s_webTlsCheckInterval);
                 await _selfAlerts.EvaluateWebTlsCertificateAsync(
@@ -3176,7 +3194,8 @@ public sealed class DarlingWorker : BackgroundService
                (fleet-level, master-gated inside, failure-isolated inside) and the service log's hourly summary line,
                which also runs with no alert engine. Before this a collector slot that came due while its run was
                late was skipped with one Info line, and how long a body queued for a gate slot was never measured. */
-            if (DateTime.UtcNow >= _nextFleetGateCheckUtc)
+            /* #4732: the stamp below is written as now + s_fleetGateCheckInterval, so that is the span. */
+            if (StampIsDue(_nextFleetGateCheckUtc, s_fleetGateCheckInterval, DateTime.UtcNow))
             {
                 _nextFleetGateCheckUtc = DateTime.UtcNow.Add(s_fleetGateCheckInterval);
                 await CheckFleetGateAsync(stoppingToken);
@@ -3191,7 +3210,8 @@ public sealed class DarlingWorker : BackgroundService
                fact that is store-backed (collect.managed_conf_verdicts, V146), read fresh each tick so a value
                fixed by a later start clears without this process restarting. Fleet-level, own slow cadence;
                the Evaluate* wrapper is failure-isolated so a throw never stops the fleet loop. */
-            if (_selfAlerts is not null && DateTime.UtcNow >= _nextStoreSettingsCheckUtc)
+            /* #4732: the stamp below is written as now + s_storeSettingsCheckInterval, so that is the span. */
+            if (_selfAlerts is not null && StampIsDue(_nextStoreSettingsCheckUtc, s_storeSettingsCheckInterval, DateTime.UtcNow))
             {
                 _nextStoreSettingsCheckUtc = DateTime.UtcNow.Add(s_storeSettingsCheckInterval);
                 await EvaluateStoreSettingsAsync(config, managedConfWriteResult, managedUsedLastGoodConf, managedConfVerification, stoppingToken);
@@ -3213,7 +3233,8 @@ public sealed class DarlingWorker : BackgroundService
                half the grid step from every policy's start in both directions. The read itself now confirms
                a -infinity trip with a second read five seconds later (ReadStuckPolicyJobsAsync), so the
                phase is hardening on top of the fix, not the fix. */
-            if (DateTime.UtcNow >= _nextCompressionCheckUtc)
+            /* #4732: NextCompressionCheckUtc writes at most one interval plus its 30 s phase ahead (CompressionCheckSpan). */
+            if (StampIsDue(_nextCompressionCheckUtc, CompressionCheckSpan, DateTime.UtcNow))
             {
                 _nextCompressionCheckUtc = TimescaleSupport.NextCompressionCheckUtc(DateTime.UtcNow, s_compressionCheckInterval);
 
@@ -3326,9 +3347,11 @@ public sealed class DarlingWorker : BackgroundService
                claim a span the schedule never used — the retention-hold read-once discipline. Stamped
                BEFORE the launch, like every cadence on this loop. */
             if (config.Alerts.FleetSweepEnabled
-                && DateTime.UtcNow >= _nextFleetSweepUtc
+                && StampIsDue(_nextFleetSweepUtc, FleetSweepStampSpan, DateTime.UtcNow)
                 && (_fleetSweep is null || _fleetSweep.IsCompleted))
             {
+                /* #4732: this interval is read at the fire and can differ from the one the stamp was last written with, so the
+                   guard above spans the largest interval ClampIntervalMinutes allows, never this fire's value. */
                 var fleetSweepMinutes = FleetSweepEngine.ClampIntervalMinutes(config.Alerts.FleetSweepIntervalMinutes);
                 _nextFleetSweepUtc = NextGridStamp(_nextFleetSweepUtc, DateTime.UtcNow, TimeSpan.FromMinutes(fleetSweepMinutes));
 
@@ -3350,13 +3373,15 @@ public sealed class DarlingWorker : BackgroundService
                on a tick's own pass is inside the window that tick takes. #4834: whether or not a self-alert evaluator
                exists, because the hourly checkpointer row stores the window's maximum either way. A failed read is a
                Debug line and a skipped minute inside SampleCheckpointSyncAsync, never a stopped loop. */
-            if (DateTime.UtcNow >= _nextCheckpointSyncSampleUtc)
+            /* #4732: NextGridStamp writes at most one interval ahead, and s_checkpointSyncSampleInterval is the one it uses. */
+            if (StampIsDue(_nextCheckpointSyncSampleUtc, s_checkpointSyncSampleInterval, DateTime.UtcNow))
             {
                 _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
                 await SampleCheckpointSyncAsync(stoppingToken);
             }
 
-            if (DateTime.UtcNow >= _nextStoreMetricsUtc)
+            /* #4732: NextGridStamp writes at most one interval ahead, and s_storeMetricsInterval is the one it uses. */
+            if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))
             {
                 _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);
 
@@ -5106,10 +5131,15 @@ public sealed class DarlingWorker : BackgroundService
     /// <summary>
     /// #4652: the next due time for a stamp on this loop, on a fixed grid: the first run (still at MinValue) anchors
     /// the grid at now; after that, the previous due plus the interval, skipping missed slots, so a slow sweep or
-    /// the loop's own 15-second tick is never carried into the next slot.
+    /// the loop's own 15-second tick is never carried into the next slot. #4732: a stamp more than one interval ahead can
+    /// only be a wall clock that stepped backwards (<see cref="StampIsDue"/> counts it as due), and it is re-anchored at
+    /// now instead of advanced from where it sits, so the stamp written is never more than one interval ahead. Advanced
+    /// from a far-future stamp it would stay ahead of the span and fire on every pass.
     /// </summary>
     internal static DateTime NextGridStamp(DateTime currentDue, DateTime now, TimeSpan interval) =>
-        currentDue == DateTime.MinValue ? now + interval : CollectorCadence.NextDue(currentDue, now, interval);
+        currentDue == DateTime.MinValue
+            ? now + interval
+            : CollectorCadence.NextDue(CollectorCadence.ClampDue(currentDue, now, interval), now, interval);
 
     /// <summary>
     /// The pure #1575 seed policy for one collector's first post-connect / newly-enabled due time, decided from
@@ -9243,7 +9273,8 @@ AND   j.hypertable_name = '{relation}'", connection))
     internal bool TryStartScheduledPurge(
         DateTime nowUtc, Func<CancellationToken, Task> startPurge, CancellationToken stoppingToken)
     {
-        if (nowUtc < _nextPurgeUtc)
+        /* #4732: the stamp below is written as now + s_purgeInterval, so that is the span. */
+        if (!StampIsDue(_nextPurgeUtc, s_purgeInterval, nowUtc))
         {
             return false;
         }
@@ -9259,7 +9290,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                 return false;
             }
 
-            _nextPurgeUtc = nowUtc.AddHours(24);
+            _nextPurgeUtc = nowUtc + s_purgeInterval;
             _purgeTask = RunTrackedAsync(startPurge, stoppingToken);
             return true;
         }

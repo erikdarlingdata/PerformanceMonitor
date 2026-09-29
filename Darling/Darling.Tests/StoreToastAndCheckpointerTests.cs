@@ -1342,7 +1342,7 @@ public sealed class StoreToastAndCheckpointerTests
         var worker = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs")
             .Replace("\r\n", "\n", StringComparison.Ordinal);
 
-        var tick = worker.IndexOf("if (DateTime.UtcNow >= _nextStoreMetricsUtc)", StringComparison.Ordinal);
+        var tick = worker.IndexOf("if (StampIsDue(_nextStoreMetricsUtc, s_storeMetricsInterval, DateTime.UtcNow))", StringComparison.Ordinal);
         var window = worker.IndexOf("var checkpointWindow = _checkpointSyncSampler.TakeWindowMax();", tick, StringComparison.Ordinal);
         var sweep = worker.IndexOf("await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);", tick, StringComparison.Ordinal);
         var toast = worker.IndexOf("await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);", sweep, StringComparison.Ordinal);
