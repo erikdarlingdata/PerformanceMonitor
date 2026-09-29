@@ -2676,11 +2676,11 @@ public sealed class AlertEngine
                     AfterFire("Failed Agent Job", _lastFailedJobAlert, key, now, alertCooldown, delivery);
 
                     /* #4752: the in-memory watermark moved to the newest failure BEFORE the fire; the saved one
-                       moves only AFTER it, and only when a channel delivered. A fire nobody received puts the
-                       in-memory entry back to the value the operator was last told about, or removes it when
-                       there was none, so the retry sweep still sees a failure above it. The saved row never
-                       received the new value, so there is nothing to put back there: it still holds the prior
-                       value, or none, and a restart inside the retry delay reads the failure as not yet
+                       moves only AFTER it, and not at all when every channel failed. A fire nobody received
+                       puts the in-memory entry back to the value the operator was last told about, or removes
+                       it when there was none, so the retry sweep still sees a failure above it. The saved row
+                       never received the new value, so there is nothing to put back there: it still holds the
+                       prior value, or none, and a restart inside the retry delay reads the failure as not yet
                        announced instead of losing it. The gate is the failed delivery alone, not the mute: a
                        muted fire attempts no channel, is not "every channel failed", and saves as it always did.
                        The trade is that this family is at-least-once: a crash after a send and before this save
