@@ -188,4 +188,35 @@ public static class ViewerTimeHelper
         TimeDisplayMode.ServerTime => clock.ToUtc(display),
         _ => DateTime.SpecifyKind(display, DateTimeKind.Unspecified), /* UTC — the picker IS naive UTC */
     };
+
+    /// <summary>
+    /// A short label naming the zone a time is shown in under <paramref name="mode"/>, for the text that sits
+    /// next to a rendered time: "UTC", the viewer machine's zone name, or the server's UTC offset (for example
+    /// <c>UTC-4:00</c>). The viewer's port of Lite's <c>ServerTimeHelper.GetTimezoneLabel</c>, with one
+    /// difference: it takes the instant that was converted (<paramref name="naiveUtc"/>, the stored naive-UTC
+    /// value). The server's offset and the machine's standard-or-daylight zone name both change across a
+    /// daylight saving change, so a label built from the offset in force now would name a different zone than
+    /// the one <see cref="ConvertToDisplay(DateTime, TimeDisplayMode, ServerClock)"/> used for a finding from
+    /// the other side of that change (#4766). Pure (static-free).
+    /// </summary>
+    public static string GetTimezoneLabel(TimeDisplayMode mode, ServerClock clock, DateTime naiveUtc) => mode switch
+    {
+        TimeDisplayMode.LocalTime => LocalZoneName(naiveUtc),
+        TimeDisplayMode.UTC => "UTC",
+        _ => OffsetLabel(clock.OffsetMinutesAt(naiveUtc)),
+    };
+
+    private static string LocalZoneName(DateTime naiveUtc)
+    {
+        var zone = TimeZoneInfo.Local;
+        return zone.IsDaylightSavingTime(DateTime.SpecifyKind(naiveUtc, DateTimeKind.Utc))
+            ? zone.DaylightName
+            : zone.StandardName;
+    }
+
+    private static string OffsetLabel(int utcOffsetMinutes)
+    {
+        var magnitude = Math.Abs(utcOffsetMinutes);
+        return $"UTC{(utcOffsetMinutes < 0 ? "-" : "+")}{magnitude / 60}:{magnitude % 60:D2}";
+    }
 }

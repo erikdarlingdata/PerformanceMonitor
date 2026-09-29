@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Database;
@@ -52,6 +53,9 @@ public partial class RecommendationsTab : UserControl
     private FindingStore? _findingStore;
     private LiteRecommendationsReader? _reader;
 
+    /* #4766: reads the selected server's own clock for the cards' Ask-AI prompt window. */
+    private LocalDataService? _dataService;
+
     private int _hoursBack = 24;
     private bool _isBusy;
 
@@ -87,6 +91,7 @@ public partial class RecommendationsTab : UserControl
 
         _findingStore = new FindingStore(_duckDb);
         _reader = new LiteRecommendationsReader(_findingStore);
+        _dataService = new LocalDataService(_duckDb);
 
         PopulateServerSelector();
         _ = RefreshDataAsync();
@@ -142,7 +147,7 @@ public partial class RecommendationsTab : UserControl
     /// </summary>
     public async Task RefreshDataAsync()
     {
-        if (_reader is null)
+        if (_reader is null || _dataService is null)
             return;
 
         if (_isBusy)
@@ -174,7 +179,14 @@ public partial class RecommendationsTab : UserControl
 
                 var items = await Task.Run(() => _reader.GetRecommendationsAsync(serverId, serverName, _hoursBack));
 
-                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, ServerTimeHelper.UtcOffsetMinutes));
+                /* #4766: the cards' clock is the SELECTED server's own, read by the same serverId the findings
+                   were read for. This tab has its own server selector, so it can show a server other than the one
+                   whose tab the main window has open, and ServerTimeHelper's clock follows that tab; its offset
+                   is also the one in force today, an hour off for a finding from before a daylight saving change.
+                   A server with no collected clock yet keeps the offset its own server tab shows, not UTC. */
+                var serverClock = await ReadCardClockAsync(_dataService, serverId);
+
+                ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
             }
             while (_reloadRequested);
         }
@@ -191,6 +203,20 @@ public partial class RecommendationsTab : UserControl
     }
 
     /// <summary>
+    /// The clock the cards of the server with <paramref name="serverId"/> convert on (#4766): that server's own
+    /// collected clock, else the clock the server tabs are showing (see
+    /// <see cref="LiteRecommendationsViewModel.CardClock"/>). The read goes through the data service directly and
+    /// not through <c>McpServerLocalWindow.ClockForAsync</c>, whose UTC fallback is the MCP tools' and not the
+    /// desktop's: a server with no <c>server_properties</c> row yet is shown in UTC there and at the connect probe's
+    /// offset on its own tab.
+    /// </summary>
+    private static async Task<ServerClock> ReadCardClockAsync(LocalDataService dataService, int serverId)
+    {
+        var collected = await Task.Run(() => dataService.GetServerClockAsync(serverId));
+        return LiteRecommendationsViewModel.CardClock(collected, ServerTimeHelper.ActiveServerClock);
+    }
+
+    /// <summary>
     /// Runs an on-demand analysis for the selected server (same construction path the background
     /// collector uses), then renders the freshly-enriched in-memory findings directly — which, unlike
     /// the stored-finding read path, carry drill-down detail, so copy-paste SQL is populated. If the
@@ -201,7 +227,7 @@ public partial class RecommendationsTab : UserControl
     /// </summary>
     private async void GenerateNowButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_duckDb is null || _serverManager is null)
+        if (_duckDb is null || _serverManager is null || _dataService is null)
             return;
 
         if (_isBusy)
@@ -266,7 +292,11 @@ public partial class RecommendationsTab : UserControl
 
             StatusText.Text = string.Empty;
             var items = LiteRecommendationsReader.MapFindings(findings, serverName);
-            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, ServerTimeHelper.UtcOffsetMinutes));
+
+            /* #4766: the selected server's own clock, by the serverId the analysis ran for (see RefreshDataAsync). */
+            var serverClock = await ReadCardClockAsync(_dataService, serverId);
+
+            ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
         }
         catch (Exception ex)
         {
