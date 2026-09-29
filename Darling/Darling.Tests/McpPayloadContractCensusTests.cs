@@ -1495,9 +1495,10 @@ public sealed class McpPayloadContractCensusTests
     /// reach verdict that withholds a figure rather than publishing a page's count under a whole's name.</item>
     /// </list>
     ///
-    /// <para>Two more keys the inventory's regex caught are NOT about a cut at all and are excluded by name
+    /// <para>Three more keys the inventory's regex caught are NOT about a cut at all and are excluded by name
     /// with the reason (<see cref="CutHomonyms"/>): <c>is_partial</c> is a PARTIAL INDEX (<c>CREATE INDEX …
-    /// WHERE</c>), <c>partial_count</c> counts logging-audit facets whose verdict is <c>partial</c>. And one
+    /// WHERE</c>), <c>partial_count</c> counts logging-audit facets whose verdict is <c>partial</c>, and
+    /// <c>partial</c> on <c>get_store_metrics</c>' daily growth marks the day still in progress (#4734). And one
     /// page count survives under a neutral noun (<see cref="PageCountsUnderANeutralNoun"/>): <c>shown</c>
     /// beside an honest whole <c>total_*</c> on the health-parser, default-trace and analysis-facts tools —
     /// the cut is exact (<c>total − shown</c>) and disclosed by the pair, and its rename to <c>*_returned</c> +
@@ -1581,6 +1582,7 @@ public sealed class McpPayloadContractCensusTests
     [
         ("is_partial", ["DarlingMcpPgIndexUsageTools.cs"], "a PARTIAL INDEX (CREATE INDEX … WHERE) — an index property the collector reads off pg_index, not a cut"),
         ("partial_count", ["DarlingMcpPgLoggingAuditTools.cs"], "the number of logging-audit facets whose verdict is `partial` (DarlingPgLoggingAudit.Partial) — a verdict tally, not a cut"),
+        ("partial", ["DarlingMcpStoreMetricsTools.cs"], "get_store_metrics' store.daily_growth point (#4734): true for the UTC day still in progress, whose delta runs from the previous day's last snapshot to the latest one so far and is not a full day's growth — whether the day is over, not a page or window cut"),
     ];
 
     /// <summary>The spellings this lane retired, named so their return fails as THE regression rather than as

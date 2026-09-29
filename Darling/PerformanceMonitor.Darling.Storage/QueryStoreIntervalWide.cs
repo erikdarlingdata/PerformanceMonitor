@@ -270,7 +270,8 @@ WITH
         query_plan_hash,
         replica_role,
         runtime_stats_interval_id,
-        interval_start_time_utc
+        interval_start_time_utc,
+        interval_end_time_utc
     )
     SELECT DISTINCT ON (" + BatchIdentityColumns + @")
         s.collection_time,
@@ -329,7 +330,8 @@ WITH
         s.query_plan_hash,
         s.replica_role,
         s.runtime_stats_interval_id,
-        s.interval_start_time_utc
+        s.interval_start_time_utc,
+        s.interval_end_time_utc
     FROM collect.query_store_stats AS s
     WHERE s.server_id = $1
     AND   s.collection_time = $2
@@ -388,7 +390,8 @@ WITH
         last_force_failure_reason = EXCLUDED.last_force_failure_reason,
         compatibility_level = EXCLUDED.compatibility_level,
         query_plan_hash = EXCLUDED.query_plan_hash,
-        interval_start_time_utc = EXCLUDED.interval_start_time_utc
+        interval_start_time_utc = EXCLUDED.interval_start_time_utc,
+        interval_end_time_utc = EXCLUDED.interval_end_time_utc
     WHERE (EXCLUDED.collection_time, EXCLUDED.execution_count) > (t.collection_time, t.execution_count)
     RETURNING 1
 )
