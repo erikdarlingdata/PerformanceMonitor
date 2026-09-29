@@ -66,6 +66,7 @@ public class RetentionService
     ///   - Timestamped: "20260221_1328_wait_stats.parquet" (yyyyMMdd prefix)
     ///   - Consolidated daily: "20260221_wait_stats.parquet" (yyyyMMdd prefix)
     ///   - Legacy monthly: "2026-02_wait_stats.parquet" (yyyy-MM prefix)
+    ///   - Any of the above copied from a previous install: "imported_202602_wait_stats.parquet"
     /// </summary>
     public void CleanupOldArchives(int retentionMonths = ArchiveRetentionMonths)
     {
@@ -81,6 +82,15 @@ public class RetentionService
             try
             {
                 var fileName = Path.GetFileNameWithoutExtension(file);
+
+                /* A file copied in from a previous install carries an imported_ prefix in front of one of the
+                   date forms below. Unstripped, none of the parses matched and such files never expired;
+                   imported query_snapshots, the largest table, stayed on disk for good. */
+                if (fileName.StartsWith("imported_", StringComparison.OrdinalIgnoreCase))
+                {
+                    fileName = fileName["imported_".Length..];
+                }
+
                 DateTime? fileDate = null;
 
                 /* Monthly compacted format: "202602_wait_stats" -> "202602" */

@@ -288,6 +288,9 @@ public sealed class ArchiveCompactionSwapTests : IDisposable
         Assert.Equal(
             ["20260928_1400_query_snapshots.parquet", "202609_query_snapshots_pt001.parquet", "imported_202609_query_snapshots_pt001.parquet"],
             ArchiveFileNames());
+        /* Names alone would not catch the imported rows moved over the local part file. */
+        Assert.Equal(100, Scalar($"SELECT count(*) FROM read_parquet('{P("202609_query_snapshots_pt001.parquet")}') WHERE id < 100"));
+        Assert.Equal(100, Scalar($"SELECT count(*) FROM read_parquet('{P("imported_202609_query_snapshots_pt001.parquet")}') WHERE id >= 100"));
     }
 
     /// <summary>
