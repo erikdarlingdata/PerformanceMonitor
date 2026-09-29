@@ -307,7 +307,7 @@ public sealed class McpToolGuideHeadsPgPlanTests
         Assert.DoesNotContain("lives in the collector process", note, StringComparison.Ordinal);
         Assert.DoesNotContain("re-reads a bounded tail", note, StringComparison.Ordinal);
 
-        var source = RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgDeadlockTools.cs");
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpPgDeadlockTools.cs");
         Assert.Contains("note = DeadlocksNote,", source, StringComparison.Ordinal);
     }
 
