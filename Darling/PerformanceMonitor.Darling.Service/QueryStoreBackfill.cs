@@ -463,6 +463,59 @@ public sealed class QueryStoreBackfill
     internal const string CandidateSql =
         "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name";
 
+    /// <summary>#4662, TimescaleDB store, step 1: the chunk of <c>collect.query_store_stats</c> that holds the
+    /// floor, read from the catalog at run time. NEVER derived from a constant: <c>set_chunk_time_interval</c>
+    /// changes only chunks created after it, so a chunk width is wrong for every older chunk. <c>{floor}</c> is
+    /// replaced by the floor formatted <c>yyyy-MM-dd HH:mm:ss.ffffff</c> (invariant culture) - a literal, like
+    /// the statement below, so chunk exclusion happens at plan time. No row means no chunk holds the floor.</summary>
+    internal const string CutChunkCatalogSql =
+        "SELECT range_start AT TIME ZONE 'UTC' AS cut_start, range_end AT TIME ZONE 'UTC' AS cut_end FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats' AND range_start <= TIMESTAMP '{floor}' AT TIME ZONE 'UTC' AND range_end > TIMESTAMP '{floor}' AT TIME ZONE 'UTC'";
+
+    /// <summary>#4662, TimescaleDB store, step 2: the database list from the cut chunk's start. Inside the chunk
+    /// that holds the floor a <c>collection_time &gt; floor</c> bound can only FILTER (it is the fifth key column
+    /// of the index), so the old read walked the chunk's index entry by entry; a bound at the chunk start lets
+    /// the skip scan seek once per name. <c>{cut_start}</c> is the catalog's <c>cut_start</c>, formatted as above.</summary>
+    internal const string CutChunkCandidateSql =
+        "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time >= TIMESTAMP '{cut_start}' ORDER BY database_name";
+
+    /// <summary>#4662, plain PostgreSQL store: no chunks, so no time bound - a walk down the index, one seek per
+    /// database. Every name stored for the server is listed, and each is marked done once.</summary>
+    internal const string WalkCandidateSql =
+        "WITH RECURSIVE walk AS ((SELECT s.database_name FROM query_store_stats AS s WHERE s.server_id = $1 AND s.database_name IS NOT NULL ORDER BY s.database_name LIMIT 1) UNION ALL SELECT (SELECT s.database_name FROM query_store_stats AS s WHERE s.server_id = $1 AND s.database_name > w.database_name ORDER BY s.database_name LIMIT 1) FROM walk AS w WHERE w.database_name IS NOT NULL) SELECT database_name FROM walk WHERE database_name IS NOT NULL";
+
+    private static string TimestampLiteral(DateTime value)
+        => value.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
+
+    /// <summary>Picks the candidate statement for this store (#4662). Plain PostgreSQL: the walk. TimescaleDB:
+    /// the cut-chunk read when the catalog names a chunk that holds the floor; otherwise (no such chunk, or the
+    /// catalog read failed) <see cref="CandidateSql"/>, unchanged. A catalog failure never reaches the caller's
+    /// catch, which would drop the whole store list.</summary>
+    private async Task<string> ChooseCandidateSqlAsync(NpgsqlConnection connection, DateTime floorLimit, CancellationToken cancellationToken)
+    {
+        if (!_hasContinuousAggregates())
+        {
+            return WalkCandidateSql;
+        }
+
+        try
+        {
+            using var catalog = new NpgsqlCommand(
+                CutChunkCatalogSql.Replace("{floor}", TimestampLiteral(floorLimit), StringComparison.Ordinal), connection);
+            catalog.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
+            await using var catalogReader = await catalog.ExecuteReaderAsync(cancellationToken);
+            if (await catalogReader.ReadAsync(cancellationToken) && !catalogReader.IsDBNull(0))
+            {
+                return CutChunkCandidateSql.Replace("{cut_start}", TimestampLiteral(catalogReader.GetDateTime(0)), StringComparison.Ordinal);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "query_store backfill cut-chunk catalog read failed; using the floor-bound candidate read");
+        }
+
+        return CandidateSql;
+    }
+
     /// <summary>Databases that shipped query_store rows since <paramref name="floorLimit"/>, unioned
     /// with every database a hole key already names — the backfill universe.
     ///
@@ -485,12 +538,18 @@ public sealed class QueryStoreBackfill
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(CandidateSql, connection);
+            var sql = await ChooseCandidateSqlAsync(connection, floorLimit, cancellationToken);
+            using var command = new NpgsqlCommand(sql, connection);
             /* #2874: the enclosing BackfillSliceDeadline ABANDONS rather than cancels, so this is the only
                bound that reaches the statement. */
             command.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
             command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
+            if (string.Equals(sql, CandidateSql, StringComparison.Ordinal))
+            {
+                /* Only the floor-bound statement takes the floor as a parameter; the cut-chunk read and the
+                   walk carry no second placeholder, and a surplus parameter is a bind error. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
+            }
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {

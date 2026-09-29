@@ -163,6 +163,20 @@ public sealed class QueryStoreBackfillCandidateLiveTests
         Assert.DoesNotContain(compressedChunkName, plan);
         Assert.True(PlanChunkScans.Count(plan) >= 1,
             "expected the hot (2026-06-15) chunk to still be scanned:\n" + plan);
+
+        /* #4662: the TimescaleDB store's own read starts at the start of the chunk that holds the floor. That chunk
+           is newer than the compression boundary by design, so the read still excludes the compressed chunk. */
+        var cutStart = await ScalarStringAsync(connection, @"
+SELECT to_char(range_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') FROM timescaledb_information.chunks
+WHERE hypertable_name = 'query_store_stats' AND NOT is_compressed ORDER BY range_start LIMIT 1", ct);
+        var cutPlan = await ExplainAsync(connection, "EXPLAIN (COSTS OFF) " + QueryStoreBackfill.CutChunkCandidateSql
+            .Replace("$1", TestServerId.ToString(CultureInfo.InvariantCulture))
+            .Replace("{cut_start}", cutStart), ct);
+
+        Assert.DoesNotContain("DecompressChunk", cutPlan);
+        Assert.DoesNotContain("ColumnarScan", cutPlan);
+        Assert.DoesNotContain(compressedChunkName, cutPlan);
+        Assert.True(PlanChunkScans.Count(cutPlan) >= 1, "expected the hot (2026-06-15) chunk to still be scanned:\n" + cutPlan);
     }
 
     /// <summary>
