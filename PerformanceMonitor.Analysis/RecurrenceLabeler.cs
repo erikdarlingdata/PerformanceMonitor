@@ -261,7 +261,9 @@ public static class RecurrenceLabeler
 
         // Last week's slots for THIS job, by name. "Moved" needs at least one, and none of them in this
         // pass's slot — a job in the same slot last week is recurring, not moved, and the recurrence arm
-        // above is the one that speaks to it.
+        // above is the one that speaks to it. Rows on two or more dates that are not next to each other are
+        // not one weekly slot at all (#4737): a nightly job has a row every night, none of them "the" slot,
+        // and naming its oldest hour as where it "was" would say a job moved that never did.
         List<DateTime>? lastWeekSlotsForJob = null;
         if (jobName is not null)
         {
@@ -269,7 +271,7 @@ public static class RecurrenceLabeler
                 .Where(r => r.WeeksAgo == 1 && r.JobName is not null && string.Equals(r.JobName, jobName, StringComparison.OrdinalIgnoreCase))
                 .Select(r => r.Bucket)
                 .ToList();
-            if (lastWeekSlotsForJob.Count == 0 || lastWeekSlotsForJob.Any(b => SameSlot(b, referenceBucket)))
+            if (lastWeekSlotsForJob.Count == 0 || lastWeekSlotsForJob.Any(b => SameSlot(b, referenceBucket)) || SpansSeparateDates(lastWeekSlotsForJob))
                 lastWeekSlotsForJob = null;
         }
 
@@ -352,6 +354,14 @@ public static class RecurrenceLabeler
 
     private static bool SameSlot(DateTime a, DateTime b) =>
         a.Hour == b.Hour && a.DayOfWeek == b.DayOfWeek;
+
+    /// <summary>
+    /// Whether the buckets cover two or more calendar dates that are not next to each other (#4737). A run that
+    /// crosses midnight covers two adjacent dates and is still one run; a job with a row on every night of the
+    /// week, or on two separate days, is not a single weekly slot that could have slid.
+    /// </summary>
+    private static bool SpansSeparateDates(List<DateTime> buckets) =>
+        (buckets.Max(b => b.Date) - buckets.Min(b => b.Date)).TotalDays > 1;
 
     /// <summary>The slot's start on the target's wall clock — Kind-Unspecified, like the store's buckets: it is not a UTC instant.</summary>
     private static DateTime TruncateToHour(DateTime value) =>
