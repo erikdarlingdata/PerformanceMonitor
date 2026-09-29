@@ -168,6 +168,8 @@ Web dashboard on `http://<host>:5153` behind its token, MCP (if enabled) on `:51
 - **File permissions are yours on Linux.** The Windows build locks config/credentials down with ACLs; here the container boundary is the isolation, and the `secrets/` directory should be `chmod 700` with `600` files (the systemd shape should do the same for `darling.json` itself).
 - **The store's preload list is the compose file's.** The store service passes `shared_preload_libraries` on its command line (TimescaleDB plus `pg_stat_statements`, for `get_store_query_stats`, #3899), and a command-line setting outranks both `postgresql.conf` and `ALTER SYSTEM`. To preload another library in the store, add it to that line in `docker-compose.yml`; an `ALTER SYSTEM` or conf edit of the list is ignored while the line is there.
 
+**A container that has stopped collecting reports unhealthy** ([#4733](https://github.com/erikdarlingdata/PerformanceMonitor/issues/4733)). After a startup failure that stops collection for good (a rejected `darling.json`, a step that can never apply, a refused login), the `darling` container stays up on purpose and its healthcheck reports `unhealthy` in `docker compose ps`, rather than restarting it in a loop. `docker compose logs darling` and `/api/ping` say why; a failure the service is still retrying does not count as a stop.
+
 **systemd + bring-your-own PostgreSQL** — download `PerformanceMonitorDarling-linux-x64-*.tar.gz` from the release, extract to `/opt/darling`, point `DARLING_CONFIG` at your config (connection string to your own PostgreSQL 15+ with TimescaleDB; the service degrades gracefully without TimescaleDB), and run `dotnet PerformanceMonitor.Darling.Service.dll` under a unit like:
 
 ```ini
