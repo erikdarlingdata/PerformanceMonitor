@@ -143,29 +143,65 @@ public sealed class LiteRecommendationServerClockTests
         Assert.Contains(prompts, p => p.Contains($"2026-07-15 10:00{Dash}12:00", StringComparison.Ordinal));
     }
 
+    // ── a server with no collected clock yet ─────────────────────────────────────
+
+    /// <summary>
+    /// A server whose first <c>server_properties</c> row has not arrived has no collected clock. Its own server tab
+    /// keeps the fixed offset the connect probe read until that row lands, so its cards keep that offset too and do
+    /// not drop to UTC. The probe read -240 here, so a finding at 15:00 UTC is 11:00 on the tab; read in UTC the same
+    /// prompt says 15:00.
+    /// </summary>
+    [Fact]
+    public void CardClock_WithNoCollectedClock_KeepsTheOffsetTheServerTabShows()
+    {
+        var tabsClock = ServerClock.FixedOffset(-240);
+
+        var clock = LiteRecommendationsViewModel.CardClock(collected: null, activeServerClock: tabsClock);
+        var prompt = Prompt(Utc(2026, 6, 1, 15, 0), Utc(2026, 6, 1, 17, 0), clock);
+
+        Assert.Contains($"2026-06-01 11:00{Dash}13:00", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CardClock_WithACollectedClock_UsesItAndNotTheTabs()
+    {
+        var indiaOnTheTab = ServerClock.FixedOffset(330);
+
+        var clock = LiteRecommendationsViewModel.CardClock(collected: Eastern, activeServerClock: indiaOnTheTab);
+        var prompt = Prompt(Utc(2026, 1, 15, 14, 0), Utc(2026, 1, 15, 16, 0), clock);
+
+        Assert.Contains($"2026-01-15 09:00{Dash}11:00", prompt, StringComparison.Ordinal);
+    }
+
     // ── the tab asks for the clock of the server it is showing ───────────────────
 
     /// <summary>
     /// The Recommendations tab reads findings for the server ITS selector names, so it has to take that server's
     /// clock, by the same server id, at both places that build the cards (the refresh read and Generate now). It
     /// used to hand every card <c>ServerTimeHelper.UtcOffsetMinutes</c>, which is the offset in force now of
-    /// whichever server tab the main window last selected. The tab is a WPF control this suite does not
-    /// instantiate, so this is a source pin.
+    /// whichever server tab the main window last selected. That clock is only the fallback, for a server with no
+    /// collected clock yet, and the fallback is not the MCP tools' one, which reads such a server in UTC. The tab is
+    /// a WPF control this suite does not instantiate, so this is a source pin.
     /// </summary>
     [Fact]
-    public void RecommendationsTab_TakesTheClockOfItsOwnSelectedServer_NotTheMainWindowsActiveOne()
+    public void RecommendationsTab_TakesTheClockOfItsOwnSelectedServer_AndOnlyFallsBackToTheActiveOne()
     {
         var code = CodeOnly(ReadLite("Controls", "RecommendationsTab.xaml.cs"));
 
         Assert.DoesNotContain("ServerTimeHelper.UtcOffsetMinutes", code, StringComparison.Ordinal);
-        Assert.DoesNotContain("ActiveServerClock", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("McpServerLocalWindow", code, StringComparison.Ordinal);
 
         /* Both builds take the id from the tab's own selector, and both resolve the clock by that same id. */
         Assert.Equal(2, Regex.Matches(code, @"var\s+serverId\s*=\s*GetSelectedServerId\(\)").Count);
-        Assert.Equal(
-            2,
-            Regex.Matches(code, @"McpServerLocalWindow\s*\.\s*ClockForAsync\(\s*[\w.!]+\s*,\s*serverId\s*\)").Count);
+        Assert.Equal(2, Regex.Matches(code, @"await\s+ReadCardClockAsync\(\s*_dataService\s*,\s*serverId\s*\)").Count);
         Assert.Equal(2, Regex.Matches(code, @"FromItems\(\s*items\s*,\s*serverClock\s*\)").Count);
+
+        /* One read, of that server's clock, and the active server clock is named once: as the fallback. */
+        Assert.Single(Regex.Matches(code, @"dataService\s*\.\s*GetServerClockAsync\(\s*serverId\s*\)"));
+        Assert.Single(Regex.Matches(
+            code,
+            @"LiteRecommendationsViewModel\s*\.\s*CardClock\(\s*collected\s*,\s*ServerTimeHelper\s*\.\s*ActiveServerClock\s*\)"));
+        Assert.Single(Regex.Matches(code, "ActiveServerClock"));
     }
 
     /* Line and block comments removed, and line endings normalised, so a pin reads code only. */
