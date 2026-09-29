@@ -12,8 +12,6 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using PerformanceMonitor.Analysis;
-using PerformanceMonitor.Analysis.Baselines;
-using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -158,16 +156,12 @@ public sealed class RecommendationItem
 /// </summary>
 public sealed class RecommendationCardViewModel
 {
-    private readonly ServerClock _serverClock;
+    private readonly int _utcOffsetMinutes;
 
-    /// <param name="item">The recommendation this card shows.</param>
-    /// <param name="serverClock">
-    /// The monitored server's own clock (#4766), for the Ask-AI prompt's window. <c>null</c> reads the window in UTC.
-    /// </param>
-    public RecommendationCardViewModel(RecommendationItem item, ServerClock? serverClock = null)
+    public RecommendationCardViewModel(RecommendationItem item, int utcOffsetMinutes = 0)
     {
         Item = item ?? throw new ArgumentNullException(nameof(item));
-        _serverClock = serverClock ?? ServerClock.Utc;
+        _utcOffsetMinutes = utcOffsetMinutes;
     }
 
     /// <summary>The underlying advise-only recommendation row.</summary>
@@ -305,40 +299,30 @@ public sealed class RecommendationCardViewModel
 
     /// <summary>
     /// The MCP investigation prompt copied to the clipboard by "Ask AI". The window is rendered in
-    /// the monitored server's local time for operator legibility: each end of the window is converted with the
-    /// offset the server's clock had at that instant (#4766), so a finding from before a daylight saving change
-    /// reads right, whichever zone the viewer machine is in.
+    /// the viewer machine's local time (UTC window + offset) for operator legibility.
     /// </summary>
     public string AskAiPrompt
     {
         get
         {
-            var (from, to) = ServerLocalWindow();
+            var (from, to) = LocalWindow();
             return RecommendationsViewModel.BuildAskAiPrompt(Item.ServerName, Title, from, to);
         }
     }
 
     /// <summary>
-    /// The finding window converted to the monitored server's local time, each end on its own instant's offset,
-    /// with a sensible fallback when the producer carried no window (the last two hours, ending now). Tests pass
-    /// no clock (UTC) for determinism; the tab passes the selected server's own clock.
+    /// The finding window converted to local time via the passed offset, with a sensible fallback
+    /// when the producer carried no window (a 2h band ending "now"). Tests pass offset 0 (UTC) for
+    /// determinism; the tab passes the viewer machine's local offset.
     /// </summary>
-    private (DateTime From, DateTime To) ServerLocalWindow()
+    private (DateTime From, DateTime To) LocalWindow()
     {
         if (Item.WindowStartUtc is { } su && Item.WindowEndUtc is { } eu)
-            return (_serverClock.ToServerLocal(su), _serverClock.ToServerLocal(eu));
+            return (su.AddMinutes(_utcOffsetMinutes), eu.AddMinutes(_utcOffsetMinutes));
 
-        return FallbackWindow(_serverClock, DateTime.UtcNow);
+        var now = DateTime.UtcNow.AddMinutes(_utcOffsetMinutes);
+        return (now.AddHours(-2), now);
     }
-
-    /// <summary>
-    /// The window of a finding that carries none: the two hours before <paramref name="utcNow"/>, each end shown
-    /// on <paramref name="serverClock"/> (#4766). The two hours are real hours. Taking the server's "now" and
-    /// subtracting two hours from that wall-clock time spans one real hour too few across a spring-forward change
-    /// (and starts at a local time that never happened) and one real hour too many across a fall-back change.
-    /// </summary>
-    internal static (DateTime From, DateTime To) FallbackWindow(ServerClock serverClock, DateTime utcNow)
-        => (serverClock.ToServerLocal(utcNow.AddHours(-2)), serverClock.ToServerLocal(utcNow));
 }
 
 /// <summary>
@@ -483,14 +467,13 @@ public sealed class RecommendationsViewModel
     /// <item>zero findings and neither marker -> <see cref="RecommendationsState.Empty"/>
     /// (the genuine all-clear — enough data, facts measured, nothing to report).</item>
     /// </list>
-    /// <paramref name="serverClock"/> is the clock of the server the rows belong to (#4766); it is carried onto each
-    /// card for the Ask-AI prompt's window, and <c>null</c> reads that window in UTC. The
+    /// <paramref name="utcOffsetMinutes"/> is carried onto each card for the Ask-AI prompt's window. The
     /// rows arrive pre-sorted (severity band desc, raw desc, database, title) from the read, and grouping
     /// preserves that order. <paramref name="insufficientData"/> and <paramref name="windowEmpty"/> default
     /// false so the callers that carry no marker keep the prior loaded/empty behavior.
     /// </summary>
     public static RecommendationsViewModel FromFindings(
-        IReadOnlyList<ViewerFindingRow> rows, string serverName, ServerClock? serverClock = null,
+        IReadOnlyList<ViewerFindingRow> rows, string serverName, int utcOffsetMinutes = 0,
         bool insufficientData = false, string? insufficientDataMessage = null,
         bool windowEmpty = false, string? windowEmptyMessage = null)
     {
@@ -509,7 +492,7 @@ public sealed class RecommendationsViewModel
             return ZeroFindingState(insufficientData, insufficientDataMessage, windowEmpty, windowEmptyMessage);
 
         AppendCoFired(items);
-        return new(GroupByIncident(items, serverClock ?? ServerClock.Utc), RecommendationsState.Loaded, string.Empty);
+        return new(GroupByIncident(items, utcOffsetMinutes), RecommendationsState.Loaded, string.Empty);
     }
 
     /// <summary>
@@ -647,7 +630,7 @@ public sealed class RecommendationsViewModel
     /// sorted). A group expands unless it is Info-only. Mirrors Lite's GroupByIncident.
     /// </summary>
     private static List<RecommendationSectionViewModel> GroupByIncident(
-        IReadOnlyList<RecommendationItem> list, ServerClock serverClock)
+        IReadOnlyList<RecommendationItem> list, int utcOffsetMinutes)
     {
         var order = new List<string>();
         var buckets = new Dictionary<string, List<RecommendationItem>>(StringComparer.Ordinal);
@@ -666,7 +649,7 @@ public sealed class RecommendationsViewModel
 
         var sections = new List<RecommendationSectionViewModel>(order.Count);
         foreach (var key in order)
-            sections.Add(BuildIncidentSection(buckets[key], serverClock));
+            sections.Add(BuildIncidentSection(buckets[key], utcOffsetMinutes));
         return sections;
     }
 
@@ -676,10 +659,10 @@ public sealed class RecommendationsViewModel
     /// section expands unless the incident is Info-only. Mirrors Lite's BuildIncidentSection.
     /// </summary>
     private static RecommendationSectionViewModel BuildIncidentSection(
-        IReadOnlyList<RecommendationItem> incidentItems, ServerClock serverClock)
+        IReadOnlyList<RecommendationItem> incidentItems, int utcOffsetMinutes)
     {
         var cards = incidentItems
-            .Select(i => new RecommendationCardViewModel(i, serverClock))
+            .Select(i => new RecommendationCardViewModel(i, utcOffsetMinutes))
             .ToList();
         var primary = cards[0]; // severity-desc sorted -> the first card is the incident primary
         var severity = primary.Severity;
@@ -699,7 +682,7 @@ public sealed class RecommendationsViewModel
     /// <summary>
     /// Builds the MCP investigation prompt "Ask AI" copies to the clipboard for a finding. Pure (no
     /// WPF / clock) so the interpolation is unit-testable. The window times are formatted in whatever
-    /// timezone the caller passed (the card passes server-local). Ported verbatim from Lite's prompt
+    /// timezone the caller passed (the card passes viewer-local). Ported verbatim from Lite's prompt
     /// (RecommendationsTab AskAi_Click -> LiteRecommendationsViewModel.BuildAskAiPrompt).
     /// </summary>
     public static string BuildAskAiPrompt(string serverName, string title, DateTime from, DateTime to)
@@ -711,22 +694,6 @@ public sealed class RecommendationsViewModel
             "get_analysis_findings and the relevant wait/blocking/memory tools, then tell me the " +
             "likely cause and what to do.",
             serverName, title, from, to);
-    }
-
-    /// <summary>
-    /// The Recommendations tab's status line: when the newest analysis batch ran, in the display mode the user
-    /// picked and followed by that mode's zone, so "10:00:00 (UTC-4:00)", "14:00:00 (UTC)" and a local time
-    /// with the machine's zone name cannot be read as one another (#4766). It used to end in a fixed "(local)",
-    /// which was wrong in Server and UTC modes. The time is converted on <paramref name="serverClock"/>, the
-    /// selected server's own clock, not the process-wide clock the last server tab set (another server's, when
-    /// the tab was for another server), and the label is taken from the same clock at the same instant, so it
-    /// always names the zone the time beside it is in. Pure (no WPF, no statics) so the text is unit-testable.
-    /// </summary>
-    internal static string FormatLastAnalyzed(DateTime analysisTimeUtc, TimeDisplayMode mode, ServerClock serverClock)
-    {
-        var shown = ViewerTimeHelper.ConvertToDisplay(analysisTimeUtc, mode, serverClock);
-        var zone = ViewerTimeHelper.GetTimezoneLabel(mode, serverClock, analysisTimeUtc);
-        return $"Last analyzed {shown:yyyy-MM-dd HH:mm:ss} ({zone})";
     }
 
     /// <summary>
