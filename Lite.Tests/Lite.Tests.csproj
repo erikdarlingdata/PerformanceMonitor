@@ -45,6 +45,8 @@
          Its own coverage stays in Darling.Tests/CSharpSourceWalkerTests.cs - the implementation Lite compiles
          is byte-identical to the one those tests exercise. -->
     <Compile Include="..\Darling\Darling.Tests\CSharpSourceWalker.cs" Link="CSharpSourceWalker.cs" />
+    <!-- The XAML name-source scan behind XamlAccessibleNameTests, shared with the Viewer's ViewerXamlAccessibleNameTests so the two apps cannot define "named" differently. -->
+    <Compile Include="..\Darling\Darling.Tests\XamlAccessibleNames.cs" Link="XamlAccessibleNames.cs" />
   </ItemGroup>
 
   <ItemGroup>

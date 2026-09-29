@@ -234,6 +234,7 @@ public partial class WaitDrillDownWindow : Window
         var filterButton = new Button { Tag = bindingPath, Margin = new Thickness(0, 0, 4, 0) };
         filterButton.SetResourceReference(StyleProperty, "ColumnFilterButtonStyle");
         filterButton.Click += Filter_Click;
+        System.Windows.Automation.AutomationProperties.SetName(filterButton, $"Filter {headerText}");
 
         var header = new StackPanel { Orientation = Orientation.Horizontal };
         header.Children.Add(filterButton);

@@ -37,7 +37,7 @@
                             <CheckBox IsChecked="{Binding IsExcluded, Mode=TwoWay}"
                                       IsEnabled="{Binding IsEnabled}"
                                       Foreground="{Binding ForegroundBrush}"
-                                      Margin="2,3">
+                                      Margin="2,3" AutomationProperties.Name="{Binding DisplayName}">
                                 <TextBlock Text="{Binding DisplayName}"
                                            Foreground="{Binding ForegroundBrush}"/>
                             </CheckBox>

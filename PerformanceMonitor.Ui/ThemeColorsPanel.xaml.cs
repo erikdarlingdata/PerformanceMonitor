@@ -144,6 +144,7 @@ public partial class ThemeColorsPanel : UserControl
                 Margin = new Thickness(0, 1, 10, 1),
                 ToolTip = "Pick a color",
             };
+            System.Windows.Automation.AutomationProperties.SetName(pick, $"Pick a color for {slot.Label}");
 
             var readout = new TextBlock
             {

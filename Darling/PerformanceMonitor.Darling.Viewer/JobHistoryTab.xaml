@@ -122,7 +122,7 @@
                     <DataGridTextColumn Binding="{Binding RunTimeLocal}" Width="150" SortMemberPath="RunDateTimeUtc" SortDirection="Descending">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunTimeLocal" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Run Time"/>
                                 <TextBlock Text="Run Time" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -130,7 +130,7 @@
                     <DataGridTextColumn Binding="{Binding ServerName}" Width="130">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="ServerName" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Server"/>
                                 <TextBlock Text="Server" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -138,7 +138,7 @@
                     <DataGridTextColumn Binding="{Binding JobName}" Width="180">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="JobName" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="JobName" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Job"/>
                                 <TextBlock Text="Job" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -146,7 +146,7 @@
                     <DataGridTextColumn Binding="{Binding CategoryName}" Width="120">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CategoryName" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="CategoryName" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Category"/>
                                 <TextBlock Text="Category" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -154,7 +154,7 @@
                     <DataGridTextColumn Binding="{Binding StepDisplay}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StepDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="StepDisplay" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Step"/>
                                 <TextBlock Text="Step" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -162,7 +162,7 @@
                     <DataGridTextColumn Binding="{Binding RunStatusDesc}" Width="90">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunStatusDesc" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RunStatusDesc" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Status"/>
                                 <TextBlock Text="Status" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -170,7 +170,7 @@
                     <DataGridTextColumn Binding="{Binding DurationFormatted}" Width="90">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="DurationFormatted" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Duration"/>
                                 <TextBlock Text="Duration" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -178,7 +178,7 @@
                     <DataGridTextColumn Binding="{Binding RetriesDisplay}" Width="65">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RetriesDisplay" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="RetriesDisplay" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Retries"/>
                                 <TextBlock Text="Retries" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -186,7 +186,7 @@
                     <DataGridTextColumn Binding="{Binding LastSuccessfulRunLocal}" Width="150">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessfulRunLocal" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="LastSuccessfulRunLocal" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Last Success"/>
                                 <TextBlock Text="Last Success" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>
@@ -194,7 +194,7 @@
                     <DataGridTextColumn Binding="{Binding Message}" Width="*" MinWidth="200">
                         <DataGridTextColumn.Header>
                             <StackPanel Orientation="Horizontal">
-                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Message" Click="FilterButton_Click" Margin="0,0,4,0"/>
+                                <Button Style="{DynamicResource ColumnFilterButtonStyle}" Tag="Message" Click="FilterButton_Click" Margin="0,0,4,0" AutomationProperties.Name="Filter Message"/>
                                 <TextBlock Text="Message" FontWeight="Bold" VerticalAlignment="Center"/>
                             </StackPanel>
                         </DataGridTextColumn.Header>

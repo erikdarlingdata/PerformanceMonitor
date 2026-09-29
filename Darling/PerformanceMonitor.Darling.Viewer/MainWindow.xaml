@@ -273,7 +273,7 @@
                     <Button Grid.Column="1" x:Name="SidebarToggleButton" Content="«" Click="ToggleSidebar_Click"
                             Style="{StaticResource DarkButton}"
                             ToolTip="Collapse/expand the sidebar" VerticalAlignment="Top"
-                            Width="24" Height="24" Padding="0" FontSize="14"/>
+                            Width="24" Height="24" Padding="0" FontSize="14" AutomationProperties.Name="Toggle sidebar"/>
                 </Grid>
 
                 <!-- Server search: filters the list/tree below by name or tag, live. Slots into
@@ -313,7 +313,7 @@
                         <Button x:Name="AddServerSidebarButton" Click="AddServerButton_Click"
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
-                                ToolTip="Add a monitored SQL Server to the viewer's registry">
+                                ToolTip="Add a monitored SQL Server to the viewer's registry" AutomationProperties.Name="Add Server">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE710;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -324,7 +324,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Paste a list of servers and add them all at once with shared credentials">
+                                ToolTip="Paste a list of servers and add them all at once with shared credentials" AutomationProperties.Name="Add Multiple">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE710;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -335,7 +335,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Add, edit, or remove monitored servers">
+                                ToolTip="Add, edit, or remove monitored servers" AutomationProperties.Name="Manage Servers">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE8FD;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -353,7 +353,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Create, rename, nest, and assign tags across the fleet">
+                                ToolTip="Create, rename, nest, and assign tags across the fleet" AutomationProperties.Name="Manage Tags">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE8EC;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -364,7 +364,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Open or paste an execution plan (independent of any server)">
+                                ToolTip="Open or paste an execution plan (independent of any server)" AutomationProperties.Name="Open Plan Viewer">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE8A5;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -375,7 +375,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Import server definitions and settings from a previous viewer install">
+                                ToolTip="Import server definitions and settings from a previous viewer install" AutomationProperties.Name="Import Settings">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE8FA;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -386,7 +386,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Open the current application log file">
+                                ToolTip="Open the current application log file" AutomationProperties.Name="View Log">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -397,7 +397,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Open the log folder in Explorer (for grabbing logs to attach to bug reports)">
+                                ToolTip="Open the log folder in Explorer (for grabbing logs to attach to bug reports)" AutomationProperties.Name="Open Log Folder">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -408,7 +408,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="Viewer settings — defaults for newly-opened server tabs">
+                                ToolTip="Viewer settings — defaults for newly-opened server tabs" AutomationProperties.Name="Settings">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -419,7 +419,7 @@
                                 Style="{StaticResource DarkButton}"
                                 Padding="8,5"
                                 Margin="0,8,0,0"
-                                ToolTip="About Performance Monitor Darling">
+                                ToolTip="About Performance Monitor Darling" AutomationProperties.Name="About">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE897;" FontFamily="Segoe MDL2 Assets" FontSize="12"
                                            VerticalAlignment="Center" Margin="0,0,6,0"/>
@@ -1360,13 +1360,13 @@
                      button; the header's close button hides it again. Built in MainWindow.PlanViewer.cs.
                      Its inner sub-tabs pick up the theme's implicit TabItem style automatically (no
                      ItemContainerStyle), matching the per-server PlanTabControl. -->
-                <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed">
+                <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed" AutomationProperties.Name="Plan Viewer">
                     <TabItem.Header>
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="Plan Viewer" VerticalAlignment="Center" FontWeight="SemiBold"/>
                             <Button Style="{DynamicResource TabCloseButton}"
                                     Click="MainWindowPlanViewerClose_Click"
-                                    Margin="4,0,0,0"/>
+                                    Margin="4,0,0,0" AutomationProperties.Name="Close Plan Viewer tab"/>
                         </StackPanel>
                     </TabItem.Header>
                     <Grid AllowDrop="True" PreviewDrop="MainWindowPlanViewer_Drop"
