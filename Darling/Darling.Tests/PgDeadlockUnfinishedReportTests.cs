@@ -5,6 +5,7 @@
 using System;
 using System.Data;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using PerformanceMonitor.Collectors;
@@ -176,6 +177,29 @@ public sealed class PgDeadlockUnfinishedReportTests
         /* The newest one cut, the older one not: one stored now, the cut one on the next read. */
         var cutNewest = await ReadAsync(SecondReportWithoutHint(), Header + Detail);
         Assert.Equal(1549, Assert.Single(cutNewest).VictimPid);
+    }
+
+    /// <summary>
+    /// The self-hosted route skips an unfinished report because the next read covers its lines again. The next read
+    /// starts at the first line inside the last <see cref="PgServerLogTail.ResumeOverlapBytes"/> of what this read
+    /// returned (<see cref="PgServerLogTail.NextResumeOffset"/>, the C# twin of the resume CTE's rule), so a report
+    /// cut at the end of a read, which is a few hundred bytes long, starts after that offset; and a read shorter than
+    /// the overlap starts again where it began.
+    /// </summary>
+    [Fact]
+    public void TheNextReadStartsBeforeAnUnfinishedReportAtTheEndOfARead()
+    {
+        const long readFrom = 1_000_000;
+        var filler = string.Concat(Enumerable.Repeat(Other, (2 * PgServerLogTail.ResumeOverlapBytes / Other.Length) + 1));
+        var reportStart = readFrom + Encoding.UTF8.GetByteCount(filler);
+
+        var next = PgServerLogTail.NextResumeOffset(Encoding.UTF8.GetBytes(filler + Header + Detail), readFrom);
+
+        Assert.True(next > readFrom, "a long read moves the marker forward");
+        Assert.True(next <= reportStart, "and not past the start of the report the read ended inside");
+        Assert.True(reportStart - next <= PgServerLogTail.ResumeOverlapBytes, "which lies inside the last megabyte the next read covers");
+
+        Assert.Equal(readFrom, PgServerLogTail.NextResumeOffset(Encoding.UTF8.GetBytes(Header + Detail), readFrom));
     }
 
     // ---- the RDS route --------------------------------------------------------------------------------------
