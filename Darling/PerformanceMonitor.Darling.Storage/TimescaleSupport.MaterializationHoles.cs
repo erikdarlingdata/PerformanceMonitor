@@ -130,8 +130,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// its daily regardless of which caller closed it. Failure-isolated from the hourly repair whose range just
 /// closed: a daily-chase error is logged at Warning and never fails the pass that found it. The chase never
 /// refreshes a day while the hourly underneath it still has a hole in that range: it re-scans the hourly
-/// first and defers the whole chase if one is found, so a partial day is never handed to the daily as if it
-/// were whole.</para>
+/// first and defers the chase of that range if one is found, so a partial day is never handed to the daily as
+/// if it were whole. A day the closed range's own dependent-daily refresh (#4716) already refreshed is left out
+/// of the chase (<see cref="ChaseRangesAfterRefresh"/>), so each day is refreshed once per closed range and
+/// counted once.</para>
 ///
 /// <para><b>Launched, not awaited.</b> The scan itself is cheap and starts the moment the ensure sweep has
 /// created every aggregate; the repairs are bounded but a full cap on the heaviest aggregate is a policy run's
@@ -557,7 +559,9 @@ ORDER BY c.bucket";
     /// unchanged. It sums two things: the days the seam chase refreshes (#4300: the part of a closed seam
     /// range older than the successor daily's own 3-day window, whether or not the daily held a row yet), and
     /// the days a closed hourly range (seam OR ordinary loop, #4716) invalidated in a daily that already held
-    /// a bucket for them, plus the dailies chained behind those (interval_daily to daygrain_daily). A failed
+    /// a bucket for them, plus the dailies chained behind those (interval_daily to daygrain_daily). A day both
+    /// would reach is refreshed and counted once: the seam chase leaves out the days the #4716 refresh already
+    /// refreshed (<see cref="ChaseRangesAfterRefresh"/>). A failed
     /// daily refresh is not counted here (it is isolated and logged separately, never surfaced as a <see
     /// cref="Failures"/> of the hourly repair itself). Counted the same way whether the closed range came
     /// from the hourly seam-only repair or the start-path full walk (<c>seamOnly: false</c>). A day the
@@ -825,12 +829,15 @@ ORDER BY c.bucket";
                 }
 
                 /* One range's plain-then-forced repair, shared by the seam and ordinary walks below. Returns
-                   the holes still standing in [start, lastBucket] after both attempts. */
-                async Task<int> RepairRangeAsync(DateTime start, DateTime end)
+                   the holes still standing in [start, lastBucket] after both attempts, and (#4716) the
+                   (daily, day) pairs its dependent-daily refresh refreshed — empty unless the range closed —
+                   which the seam walk hands to the older successor-daily chase so it skips them. */
+                async Task<(int Remaining, IReadOnlyList<(string Daily, DateTime Day)> Refreshed)> RepairRangeAsync(DateTime start, DateTime end)
                 {
                     var buckets = (int)((end - start).Ticks / target.BucketWidth.Ticks);
                     var lastBucket = end - target.BucketWidth;
                     var stopwatch = Stopwatch.StartNew();
+                    IReadOnlyList<(string Daily, DateTime Day)> refreshed = Array.Empty<(string Daily, DateTime Day)>();
 
                     /* Plain first: on the outage shape this IS the repair (measured on 2.28.1 — see the type
                        summary), and it runs on every TimescaleDB version. */
@@ -866,8 +873,9 @@ ORDER BY c.bucket";
                            holds a bucket for that day. Runs for the seam loop AND the ordinary loop (both call this),
                            only once the range is whole (a range with holes standing is not ready to back a day), and
                            is failure-isolated inside: it never fails the hourly repair. */
-                        dailyBucketsChained += await RefreshDependentDailiesAsync(
+                        refreshed = await RefreshDependentDailiesAsync(
                             connection, logger, disclosure, target.View, CompleteDaysTouched(start, end, utcNow), cancellationToken);
+                        dailyBucketsChained += refreshed.Count;
                     }
                     else
                     {
@@ -876,7 +884,7 @@ ORDER BY c.bucket";
                             target.View, remaining, buckets, start.ToString("O", CultureInfo.InvariantCulture), end.ToString("O", CultureInfo.InvariantCulture), stopwatch.Elapsed.TotalSeconds);
                     }
 
-                    return remaining;
+                    return (remaining, refreshed);
                 }
 
                 /* #4300: after a seam range closes, chase the dependent successor DAILY over the same
@@ -936,7 +944,13 @@ ORDER BY c.bucket";
                     return days;
                 }
 
-                async Task<int> ChainDailyAsync(DateTime seamStart, DateTime seamEnd)
+                /* #4716: refreshedByRange is what the closed range's own dependent-daily refresh (RepairRangeAsync)
+                   already refreshed. That refresh force-refreshes every complete day the successor daily holds a
+                   bucket for, and this chase used to refresh the same days a second time and count them twice, so
+                   it chases only the days ChaseRangesAfterRefresh leaves (the ones the daily holds no bucket for
+                   yet, which is what this chase is for), one contiguous range at a time. The days already chased
+                   stay counted if a later range throws. */
+                async Task<int> ChainDailyAsync(DateTime seamStart, DateTime seamEnd, IReadOnlyList<(string Daily, DateTime Day)> refreshedByRange)
                 {
                     var successorDaily = SuccessorDailyOf(target.View);
                     if (successorDaily is null)
@@ -944,6 +958,7 @@ ORDER BY c.bucket";
                         return 0;
                     }
 
+                    var chasedDays = 0;
                     try
                     {
                         var dailyPolicyWindowStart = utcNow - DailyRefreshStartSpan;
@@ -953,15 +968,19 @@ ORDER BY c.bucket";
                             return 0;
                         }
 
-                        var (chainStart, chainEnd) = chained.Value;
-                        return await RunDailyChaseAsync(successorDaily, chainStart, chainEnd, chainStart, chainEnd, "repaired seam range");
+                        foreach (var (chainStart, chainEnd) in ChaseRangesAfterRefresh(chained.Value, successorDaily, refreshedByRange))
+                        {
+                            chasedDays += await RunDailyChaseAsync(successorDaily, chainStart, chainEnd, chainStart, chainEnd, "repaired seam range");
+                        }
+
+                        return chasedDays;
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
                         logger?.LogWarning(
                             "Materialization-hole repair (#4300): could not chase {View}'s successor daily over its just-repaired seam range [{Start}, {End}) this run — re-judged on a later run: {Message}",
                             target.View, seamStart.ToString("O", CultureInfo.InvariantCulture), seamEnd.ToString("O", CultureInfo.InvariantCulture), ex.Message);
-                        return 0;
+                        return chasedDays;
                     }
                 }
 
@@ -1032,7 +1051,7 @@ ORDER BY c.bucket";
                    happens, or the floor could advance past a still-open hole the same way the bug did. */
                 foreach (var (start, end) in seamRepair)
                 {
-                    var remaining = await RepairRangeAsync(start, end);
+                    var (remaining, refreshedByRange) = await RepairRangeAsync(start, end);
                     if (remaining > 0)
                     {
                         break;
@@ -1048,7 +1067,7 @@ ORDER BY c.bucket";
                         continue;
                     }
 
-                    dailyBucketsChained += await ChainDailyAsync(start, end);
+                    dailyBucketsChained += await ChainDailyAsync(start, end, refreshedByRange);
                 }
 
                 /* Ordinary window: unchanged from before this fix. An interior repair cannot move the floor,
@@ -1271,6 +1290,61 @@ ORDER BY c.bucket";
     }
 
     /// <summary>
+    /// #4716: the part of a seam chase range (<see cref="ChainedDailyRange"/>) that is still left to the older
+    /// chase once <see cref="RefreshDependentDailiesAsync"/> has refreshed some of the same days for the closed
+    /// range. That refresh force-refreshes every complete day the dependent daily already holds a bucket for; the
+    /// chase used to refresh those days a second time, and <see cref="MaterializationHoleRepairSummary.DailyBucketsChained"/>
+    /// counted them twice. The chase exists for the days the daily holds NO bucket for yet (retention arms
+    /// through the daily's coverage), so it keeps exactly those: the days of <paramref name="chase"/> minus the
+    /// days <paramref name="refreshed"/> names for <paramref name="successorDaily"/> (a pair for another daily,
+    /// or for a day outside <paramref name="chase"/>, changes nothing), as the contiguous whole-day ranges they
+    /// leave, oldest first. The days those ranges span are the days the chase refreshes and counts. Pure, so the
+    /// tests can walk it without a live store.
+    /// </summary>
+    public static IReadOnlyList<(DateTime Start, DateTime End)> ChaseRangesAfterRefresh(
+        (DateTime Start, DateTime End) chase, string successorDaily, IEnumerable<(string Daily, DateTime Day)> refreshed)
+    {
+        ArgumentNullException.ThrowIfNull(successorDaily);
+        ArgumentNullException.ThrowIfNull(refreshed);
+
+        var skip = new HashSet<DateTime>();
+        foreach (var (daily, day) in refreshed)
+        {
+            if (string.Equals(daily, successorDaily, StringComparison.Ordinal))
+            {
+                skip.Add(day);
+            }
+        }
+
+        /* The chase range is whole days by construction (ChainedDailyRange aligns both ends), so a walk from its
+           start in day steps lands on the same instants the refreshed days name. */
+        var ranges = new List<(DateTime Start, DateTime End)>();
+        DateTime? runStart = null;
+        for (var day = chase.Start; day < chase.End; day += DailyBucket)
+        {
+            if (skip.Contains(day))
+            {
+                if (runStart is not null)
+                {
+                    ranges.Add((runStart.Value, day));
+                    runStart = null;
+                }
+            }
+            else
+            {
+                runStart ??= day;
+            }
+        }
+
+        if (runStart is not null)
+        {
+            ranges.Add((runStart.Value, chase.End));
+        }
+
+        return ranges;
+    }
+
+    /// <summary>
     /// #4716: the non-frozen DAILY rollups built directly on <paramref name="view"/> — <see cref="RollupViews"/>
     /// rows whose <c>Source</c> is the view and whose width is a day, kept to <see cref="DailyAggregates"/> so a
     /// frozen legacy daily (which the freeze forbids refreshing) never appears. Derived, never hand-listed.
@@ -1336,16 +1410,20 @@ ORDER BY c.bucket";
     /// <see cref="RollupBackfill.RepairAsync"/> (plain refresh where the engine has no forced form, SQLSTATE 42883).
     /// A day with no row is left alone: the daily's own hole scan materializes it. The days refreshed chain on to
     /// the daily's own dependents (interval_daily to daygrain_daily). Failure-isolated per daily — a throw is
-    /// logged at Warning and never fails the hourly repair whose range just closed. Returns the days refreshed.
+    /// logged at Warning and never fails the hourly repair whose range just closed. Returns the (daily, day) pairs
+    /// it refreshed, the dailies chained behind them included, each added once its refresh succeeded: the caller
+    /// counts them (<see cref="MaterializationHoleRepairSummary.DailyBucketsChained"/>) and hands them to the seam
+    /// chase (<see cref="ChaseRangesAfterRefresh"/>) so a day refreshed here is not refreshed or counted again
+    /// there.
     /// </summary>
-    private static async Task<int> RefreshDependentDailiesAsync(
+    private static async Task<IReadOnlyList<(string Daily, DateTime Day)>> RefreshDependentDailiesAsync(
         NpgsqlConnection connection, ILogger? logger, RefreshDisclosure disclosure, string closedView,
         IReadOnlyList<DateTime> touchedDays, CancellationToken cancellationToken)
     {
-        var refreshedTotal = 0;
+        var refreshed = new List<(string Daily, DateTime Day)>();
         if (touchedDays.Count == 0)
         {
-            return refreshedTotal;
+            return refreshed;
         }
 
         foreach (var daily in DependentDailiesOf(closedView))
@@ -1390,6 +1468,8 @@ ORDER BY c.bucket";
                         await RollupBackfill.RunSliceAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
                     }
 
+                    refreshed.Add((daily, day));
+
                     /* One line per forced refresh, the shape of the heal's per-day line (the daily, the day, the
                        seconds), so a slow day shows in the log as it happens rather than only in the per-daily
                        summary below, which comes after the whole loop. */
@@ -1398,12 +1478,11 @@ ORDER BY c.bucket";
                         daily, day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), stopwatch.Elapsed.TotalSeconds, closedView);
                 }
 
-                refreshedTotal += kept.Count;
                 logger?.LogInformation(
                     "Materialization-hole repair (#4716): {Hourly}'s repaired range invalidated {Days} day(s) of {Daily} that it already held a bucket for ({FirstDay} to {LastDay}) — refreshed them so a partial day does not stand until the source ages out.",
                     closedView, kept.Count, daily, kept[0].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), kept[^1].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
 
-                refreshedTotal += await RefreshDependentDailiesAsync(connection, logger, disclosure, daily, kept, cancellationToken);
+                refreshed.AddRange(await RefreshDependentDailiesAsync(connection, logger, disclosure, daily, kept, cancellationToken));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1413,7 +1492,7 @@ ORDER BY c.bucket";
             }
         }
 
-        return refreshedTotal;
+        return refreshed;
     }
 
     /* ─────────────── #4716: the one-time heal of daily days an earlier hourly repair left short ─────────────── */
@@ -1607,7 +1686,7 @@ FROM d";
             currentDay = null;
             if (healed.Count > 0)
             {
-                chained = await RefreshDependentDailiesAsync(connection, logger, disclosure, daily, healed, cancellationToken);
+                chained = (await RefreshDependentDailiesAsync(connection, logger, disclosure, daily, healed, cancellationToken)).Count;
             }
 
             return new PartialDailyHealOutcome(true, true, compared, partial, refreshed, chained);

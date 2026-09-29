@@ -240,4 +240,112 @@ public sealed class PartialDailyHealPureTests
         Assert.True(sql.IndexOf("_materialized_hypertable_22", StringComparison.Ordinal) < sql.IndexOf("_materialized_hypertable_11", StringComparison.Ordinal));
         Assert.Contains("CASE WHEN d.samples IS NULL THEN NULL", sql, StringComparison.Ordinal);
     }
+
+    /* ─────────────── the seam chase after the dependent refresh ─────────────── */
+
+    private static readonly string SuccessorDaily = TimescaleSupport.QueryStatsIntervalDailyView;
+
+    /* The chase range a closed seam range [seamStart, seamEnd) gets at `now`, exactly as the seam loop asks for it. */
+    private static (DateTime Start, DateTime End) ChaseRange(DateTime seamStart, DateTime seamEnd, DateTime now) =>
+        TimescaleSupport.ChainedDailyRange(
+            seamStart, seamEnd, now - TimescaleSupport.DailyRefreshStartSpan,
+            TimescaleSupport.MaterializationHoleRepairCapBuckets(TimescaleSupport.DailyBucket))!.Value;
+
+    private static int DaysIn(System.Collections.Generic.IEnumerable<(DateTime Start, DateTime End)> ranges) =>
+        ranges.Sum(r => (int)((r.End - r.Start).Ticks / TimescaleSupport.DailyBucket.Ticks));
+
+    [Fact]
+    public void ChaseRangesAfterRefresh_DaysTheDependentRefreshAlreadyRefreshed_AreNotChasedAgain_AndEveryDayIsCountedOnce()
+    {
+        /* A closed seam range over four old days, Day to Day+3. The chase is capped to the newest three of them,
+           Day+1 to Day+3. The daily held a bucket for Day, Day+1 and Day+3 but not Day+2, so the dependent refresh
+           forced those three (Day is older than the chase and outside it); only the chase can materialize Day+2. */
+        var now = Day.AddDays(30);
+        var chase = ChaseRange(Day.AddHours(5), Day.AddDays(3).AddHours(7), now);
+        Assert.Equal((Day.AddDays(1), Day.AddDays(4)), chase);
+
+        var refreshed = new[]
+        {
+            (SuccessorDaily, Day),
+            (SuccessorDaily, Day.AddDays(1)),
+            (SuccessorDaily, Day.AddDays(3)),
+            /* The daily chained behind it refreshed the same days; the chase never reads those pairs. */
+            (TimescaleSupport.QueryStoreStatsDayGrainDailyView, Day),
+            (TimescaleSupport.QueryStoreStatsDayGrainDailyView, Day.AddDays(1)),
+            (TimescaleSupport.QueryStoreStatsDayGrainDailyView, Day.AddDays(2)),
+            (TimescaleSupport.QueryStoreStatsDayGrainDailyView, Day.AddDays(3)),
+        };
+
+        var left = TimescaleSupport.ChaseRangesAfterRefresh(chase, SuccessorDaily, refreshed);
+
+        /* Only the one day the refresh did not reach is left to the chase. */
+        Assert.Equal(new[] { (Day.AddDays(2), Day.AddDays(3)) }, left);
+
+        /* No day the refresh forced is chased a second time... */
+        var chasedDays = left.SelectMany(r => Enumerable.Range(0, (int)((r.End - r.Start).Ticks / TimescaleSupport.DailyBucket.Ticks)).Select(i => r.Start.AddDays(i))).ToArray();
+        var refreshedDays = refreshed.Where(p => p.Item1 == SuccessorDaily).Select(p => p.Item2).ToArray();
+        Assert.Empty(chasedDays.Intersect(refreshedDays));
+
+        /* ...and the days counted for the successor daily (the days the refresh forced plus the days the chase
+           runs) are its distinct days, each once. Before the fix the chase ran all three of its days again. */
+        var counted = refreshedDays.Length + DaysIn(left);
+        var distinct = refreshedDays.Union(chasedDays).Distinct().Count();
+        Assert.Equal(4, distinct);
+        Assert.Equal(distinct, counted);
+    }
+
+    [Fact]
+    public void ChaseRangesAfterRefresh_EveryDayRefreshed_LeavesNothingToChase()
+    {
+        var now = Day.AddDays(30);
+        var chase = ChaseRange(Day.AddHours(5), Day.AddDays(2).AddHours(7), now);
+        var refreshed = new[] { (SuccessorDaily, Day), (SuccessorDaily, Day.AddDays(1)), (SuccessorDaily, Day.AddDays(2)) };
+
+        Assert.Empty(TimescaleSupport.ChaseRangesAfterRefresh(chase, SuccessorDaily, refreshed));
+    }
+
+    [Fact]
+    public void ChaseRangesAfterRefresh_NothingRefreshed_LeavesTheWholeChaseRange()
+    {
+        var now = Day.AddDays(30);
+        var chase = ChaseRange(Day.AddHours(5), Day.AddDays(2).AddHours(7), now);
+
+        /* The catch-up chase and a range the refresh found no bucket for both take this shape: nothing skipped. */
+        Assert.Equal(new[] { chase }, TimescaleSupport.ChaseRangesAfterRefresh(chase, SuccessorDaily, Array.Empty<(string, DateTime)>()));
+    }
+
+    [Fact]
+    public void ChaseRangesAfterRefresh_APairForAnotherDailyOrADayOutsideTheChase_ChangesNothing()
+    {
+        /* The refresh has no clip to the daily policy's 3-day window, the chase does: a refreshed day newer than
+           the window is not in the chase range at all, and a pair for another daily is not this daily's day. */
+        var now = Day.AddDays(30);
+        var chase = ChaseRange(Day.AddDays(24).AddHours(5), Day.AddDays(28).AddHours(7), now);
+        Assert.Equal((Day.AddDays(24), Day.AddDays(27)), chase);
+
+        var refreshed = new[]
+        {
+            (SuccessorDaily, Day.AddDays(27)),
+            (SuccessorDaily, Day.AddDays(28)),
+            (TimescaleSupport.QueryStoreStatsCorrectedDailyView, Day.AddDays(25)),
+        };
+
+        var left = TimescaleSupport.ChaseRangesAfterRefresh(chase, SuccessorDaily, refreshed);
+
+        Assert.Equal(new[] { chase }, left);
+        Assert.Equal(3, DaysIn(left));
+    }
+
+    [Fact]
+    public void ChaseRangesAfterRefresh_AnEdgeDayRefreshed_ShrinksTheRangeFromThatEnd()
+    {
+        var now = Day.AddDays(30);
+        var chase = ChaseRange(Day.AddHours(5), Day.AddDays(2).AddHours(7), now);
+
+        var firstDone = TimescaleSupport.ChaseRangesAfterRefresh(chase, SuccessorDaily, new[] { (SuccessorDaily, Day) });
+        Assert.Equal(new[] { (Day.AddDays(1), Day.AddDays(3)) }, firstDone);
+
+        var lastDone = TimescaleSupport.ChaseRangesAfterRefresh(chase, SuccessorDaily, new[] { (SuccessorDaily, Day.AddDays(2)) });
+        Assert.Equal(new[] { (Day, Day.AddDays(2)) }, lastDone);
+    }
 }
