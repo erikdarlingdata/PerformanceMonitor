@@ -256,7 +256,11 @@ public sealed partial class ViewerDataService
     {
         var items = new List<CollectionCaveatRow>();
 
-        var storeVersion = await GetStoreSchemaVersionAsync(cancellationToken);
+        /* #4767: the cached field the Query Store and trend reads use. This tab refreshes every 30 seconds by
+           default and the probe is one round trip of about 130 EXISTS arms, so it is read once per session; a
+           null result (the probe could not answer) is not cached and reads again. A store upgraded mid-session
+           keeps reading as the older rung until the viewer reconnects, the same as those two reads. */
+        var storeVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
         if (storeVersion is not int version || version < 141)
         {
             return items;
