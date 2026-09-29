@@ -5896,17 +5896,17 @@ public sealed class AlertEngineTests
         Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
 
-        /* A newer one arrives while delivery is down. The fire moves the watermark to it and saves it before
-           delivering; the failure puts back the one the operator was actually told about, in memory and in
-           the store. */
+        /* A newer one arrives while delivery is down. The fire moves the in-memory watermark to it, and the
+           failure puts back the one the operator was actually told about. The saved watermark is written
+           only after a delivery, so it never held the newer time and the fire made no save call at all. */
         var secondFailure = firstFailure.AddMinutes(30);
         h.Deliverer.Report = _ => FailedByWebhook();
         h.FailedJobs.Insert(0, new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = secondFailure });
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
-        Assert.Contains((Key, secondFailure), h.StateStore.SavedFailedJob);
-        Assert.Equal((Key, firstFailure), h.StateStore.SavedFailedJob[^1]);
+        Assert.DoesNotContain((Key, secondFailure), h.StateStore.SavedFailedJob);
+        Assert.Equal((Key, firstFailure), Assert.Single(h.StateStore.SavedFailedJob));
         Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
 
         h.Now = h.Now.AddSeconds(30);
@@ -5931,13 +5931,16 @@ public sealed class AlertEngineTests
         Assert.Equal(4, h.Deliverer.Outcomes.Count);
         Assert.Equal(secondFailure, h.StateStore.FailedJobWatermarks[Key]);
 
+        /* Only the two delivered fires saved anything: the two that no channel received made no save call. */
+        Assert.Equal(new[] { (Key, firstFailure), (Key, secondFailure) }, h.StateStore.SavedFailedJob);
+
         h.Now = h.Now.AddMinutes(6);
         await engine.EvaluateServerAsync(Harness.Snapshot());
         Assert.Equal(4, h.Deliverer.Outcomes.Count);
     }
 
     [Fact]
-    public async Task FailedJobs_EveryChannelFailedOnTheFirstFire_ForgetsTheWatermarkInMemory_AndTheRetryFiresInThisProcess()
+    public async Task FailedJobs_EveryChannelFailedOnTheFirstFire_NeverSavesTheWatermark_AndTheRetryFiresInThisProcess()
     {
         var h = new Harness();
         h.Settings.FailedJobEnabled = true;
@@ -5957,19 +5960,141 @@ public sealed class AlertEngineTests
 
         Assert.Equal(1, await SweepAfterAsync(TimeSpan.Zero));
 
-        /* There was no prior value to put back and the store has no delete, so the saved row keeps the new
-           one: a restart inside the retry delay would read this failure as announced. Only that gap is
-           accepted; in this process the retry still happens. */
-        Assert.Equal(failure, h.StateStore.FailedJobWatermarks[Key]);
+        /* There was no prior value to put back, and none is needed: the saved watermark is written only
+           after a delivery, so this fire never sent the failure's time anywhere. The in-memory entry is
+           removed, which is why the retry below still happens in this process. */
+        Assert.Empty(h.StateStore.SavedFailedJob);
+        Assert.False(h.StateStore.FailedJobWatermarks.ContainsKey(Key));
 
         Assert.Equal(1, await SweepAfterAsync(TimeSpan.FromSeconds(30)));
         Assert.Equal(2, await SweepAfterAsync(TimeSpan.FromSeconds(31)));
         Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Empty(h.StateStore.SavedFailedJob);
 
-        /* Delivered on the next try: the same failure is then reported for good. */
+        /* Delivered on the next try: the same failure is then reported for good, and saved once. */
         h.Deliverer.Report = _ => DeliveredByWebhook();
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromSeconds(121)));
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
         Assert.Equal(3, await SweepAfterAsync(TimeSpan.FromMinutes(6)));
+    }
+
+    /// <summary>
+    /// #4752: with no earlier watermark a fire nobody received has nothing to put back, and the saved
+    /// watermark used to keep the failure's time anyway. A restart inside the retry delay then read that
+    /// failure as already announced, and no channel ever carried it. The save now follows a delivery, so a
+    /// new engine over the same saved state finds no watermark and fires.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailedOnTheFirstFire_ARestartBeforeTheRetry_StillAnnouncesTheFailure()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => FailedByEmail();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The process restarts inside the retry delay: a new engine over the SAME state store, with every
+           in-memory watermark and cooldown clock gone. Its first sweep seeds from what was saved. */
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        h.Now = h.Now.AddSeconds(10);
+        var restarted = h.Build(withFailedJobsFetcher: true);
+        await restarted.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Equal(h.Deliverer.Outcomes[0].ShortMessage, h.Deliverer.Outcomes[1].ShortMessage);
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
+
+        /* Delivered this time, so the restarted engine does not announce it a third time. */
+        h.Now = h.Now.AddMinutes(6);
+        await restarted.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    /// <summary>
+    /// #4752: a fire that a channel delivered saves the watermark exactly once, and the value is the newest
+    /// failure's run time (the maximum, not whichever row the fetcher listed first). The same failure
+    /// lingering in the lookback window on the next sweep saves nothing more.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_ADeliveredFire_SavesTheWatermarkOnce_WithTheNewestFailuresTime()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        h.Deliverer.Report = _ => DeliveredByWebhook();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var oldest = new DateTime(2026, 7, 1, 6, 10, 0);
+        var newest = new DateTime(2026, 7, 1, 6, 55, 0);
+        var middle = new DateTime(2026, 7, 1, 6, 30, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = oldest, StepId = 2, StepName = "Backup", Message = "disk full" });
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = newest });
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Stats.Update", JobId = "j3", RunDateTime = middle });
+
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal((Key, newest), Assert.Single(h.StateStore.SavedFailedJob));
+
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Single(h.StateStore.SavedFailedJob);
+    }
+
+    /// <summary>
+    /// #4752: a fire where every channel failed, with a watermark already saved, leaves that watermark
+    /// exactly as it was and makes no save call. The new value never reached the saved state, so there is
+    /// nothing to put back there.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_EveryChannelFailed_WithAnEarlierWatermark_LeavesTheSavedWatermarkAlone_AndMakesNoSaveCall()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Settings.CooldownMinutes = 5;
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var firstFailure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = firstFailure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+        Assert.Equal((Key, firstFailure), Assert.Single(h.StateStore.SavedFailedJob));
+
+        h.StateStore.SavedFailedJob.Clear();
+        h.Deliverer.Report = _ => FailedByWebhook();
+        h.FailedJobs.Insert(0, new FailedJobInfo { JobName = "Index.Rebuild", JobId = "j2", RunDateTime = firstFailure.AddMinutes(30) });
+        h.Now = h.Now.AddMinutes(6);
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+        Assert.Empty(h.StateStore.SavedFailedJob);
+        Assert.Equal(firstFailure, h.StateStore.FailedJobWatermarks[Key]);
+    }
+
+    /// <summary>
+    /// #4752: the save is gated on a channel failing, not on the mute. A muted fire attempts no channel, so
+    /// it is not "every channel failed" and it saves the watermark, as it did before the save moved after
+    /// the fire.
+    /// </summary>
+    [Fact]
+    public async Task FailedJobs_AMutedFire_StillSavesTheWatermark()
+    {
+        var h = new Harness();
+        h.Settings.FailedJobEnabled = true;
+        h.Muted = true;
+        h.Deliverer.Report = _ => MutedNothingAttempted();
+        var engine = h.Build(withFailedJobsFetcher: true);
+
+        var failure = new DateTime(2026, 7, 1, 6, 55, 0);
+        h.FailedJobs.Add(new FailedJobInfo { JobName = "Backup.Full", JobId = "j1", RunDateTime = failure, StepId = 2, StepName = "Backup", Message = "disk full" });
+        await engine.EvaluateServerAsync(Harness.Snapshot());
+
+        Assert.True(Assert.Single(h.Deliverer.Outcomes).Muted);
+        Assert.Equal((Key, failure), Assert.Single(h.StateStore.SavedFailedJob));
     }
 
     [Fact]
