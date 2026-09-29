@@ -164,7 +164,7 @@ public class FleetPartialDatabaseFailureBandTests
     }
 
     [Fact]
-    public void RollupRefresh_UsesThePoliciesOwnWindow_AndRunsOnlyWhileTheViewHoldsNothing()
+    public void RollupRefresh_UsesTheRefreshPolicyWindow_AndRunsOnlyWhileTheViewHoldsNothing()
     {
         var source = Source("Darling/PerformanceMonitor.Darling.Storage/TimescaleSupport.cs");
         var start = source.IndexOf("public static async Task<bool> WarmCollectionHealthHourlyAsync(", StringComparison.Ordinal);
@@ -181,7 +181,7 @@ public class FleetPartialDatabaseFailureBandTests
     }
 
     [Fact]
-    public void RollupRefresh_MeetingThePoliciesOwnRefresh_LogsInformation_BeforeTheGeneralWarningCatch()
+    public void RollupRefresh_ThatMeetsTheRefreshPolicyRun_LogsInformation_BeforeTheGeneralWarningCatch()
     {
         var source = Source("Darling/PerformanceMonitor.Darling.Storage/TimescaleSupport.cs");
         var start = source.IndexOf("public static async Task<bool> WarmCollectionHealthHourlyAsync(", StringComparison.Ordinal);
@@ -543,7 +543,7 @@ CROSS JOIN generate_series(0, {SeededRuns - 1}) AS g", connection);
         var ct = TestContext.Current.CancellationToken;
         var store = await CollectionHealthAggregateTests.OpenStoreAsync(ct);
         Assert.SkipWhen(store is null, "Set DARLING_TEST_PG to a Postgres connection string with TimescaleDB to run the live rebuild test.");
-        var (scratch, connection, jobId) = store!.Value;
+        var (scratch, connection, _) = store!.Value;
         await using var _s = scratch;
         await using var _c = connection;
         await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
@@ -597,6 +597,5 @@ CROSS JOIN generate_series(0, {SeededRuns - 1}) AS g", connection);
         Assert.Equal("WARNING", warmedBands[collectors[0]]);
         Assert.Equal("HEALTHY", warmedBands[collectors[1]]);
         Assert.Equal("HEALTHY", warmedBands[collectors[2]]);
-        _ = jobId;
     }
 }
