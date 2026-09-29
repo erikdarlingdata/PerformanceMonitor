@@ -281,14 +281,15 @@ public sealed class CollectionOutputBesideCostTests
            denial-currency term, which is what this pin refuses); #4000 then removed isOnLoad, netting 9 -
            an on-load collector is no longer a distinct input to the ladder, only a distinct CADENCE the
            caller resolves (to CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes) before calling
-           in, so the ladder itself needs one fewer parameter to describe it. */
-        Assert.Equal(9, parameters.Length);
+           in, so the ladder itself needs one fewer parameter to describe it. #4748 then appended latestRunNote - the newest run's own partial-failure
+           note, a text input that is neither an output count nor denial currency - netting 10. */
+        Assert.Equal(10, parameters.Length);
 
         Assert.Equal(
             new[]
             {
                 "totalRuns", "successCount", "errorCount", "permissionDeniedCount", "extensionMissingCount",
-                "abandonedCount", "hoursSinceLastSuccess", "hoursSinceLastRun", "frequencyMinutes",
+                "abandonedCount", "hoursSinceLastSuccess", "hoursSinceLastRun", "frequencyMinutes", "latestRunNote",
             },
             parameters);
 
@@ -433,7 +434,8 @@ public sealed class CollectionOutputBesideCostTests
             Path.Combine("Lite", "Services", "LocalDataService.CollectionHealth.cs"),
             "public async Task<List<CollectorHealthRow>> GetCollectionHealthAsync");
 
-        /* The precondition. 30 columns since #3885's one - 16 at #2460, plus #2472's four fan-out
+        /* The precondition. 31 columns since #4748's one (latest_run_note, the newest run's note the band
+           reads) - 30 at #3885's, 16 at #2460, plus #2472's four fan-out
            columns, #2804's abandoned_count, #3010's last_denied_time, #3017's two, #3240's
            extension_missing_count, #3754's session_missing_count, #3819's current_status,
            last_non_skip_time and last_productive_time, and #3885's trailing_zero_row_success_runs. A
@@ -443,13 +445,13 @@ public sealed class CollectionOutputBesideCostTests
            #3885 is the case this pin is FOR: the produced-then-stopped arm is not a Darling-only class -
            both SKUs dedup on watermarks - so the column had to land on both readers at the same ordinal,
            and this count is what would have failed had only one been widened. */
-        Assert.Equal(30, darling.Count);
-        Assert.Equal(30, lite.Count);
+        Assert.Equal(31, darling.Count);
+        Assert.Equal(31, lite.Count);
 
-        /* No gaps and no duplicates: ordinals 0..29 exactly once each. A duplicate would let two fields
+        /* No gaps and no duplicates: ordinals 0..30 exactly once each. A duplicate would let two fields
            read one column while a third read nothing, which compiles and is silently wrong. */
-        Assert.Equal(Enumerable.Range(0, 30), darling.Values.OrderBy(o => o));
-        Assert.Equal(Enumerable.Range(0, 30), lite.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 31), darling.Values.OrderBy(o => o));
+        Assert.Equal(Enumerable.Range(0, 31), lite.Values.OrderBy(o => o));
 
         /* And the same field at the same ordinal on both sides. */
         Assert.Equal(
@@ -469,6 +471,8 @@ public sealed class CollectionOutputBesideCostTests
         Assert.Equal(26, darling["CurrentStatus"]);
         Assert.Equal(27, darling["LastNonSkipTime"]);
         Assert.Equal(28, darling["LastProductiveTime"]);
+        /* #4748's one, appended last: the newest run's note, the band's text input. */
+        Assert.Equal(30, darling["LatestRunNote"]);
     }
 
     /// <summary>
