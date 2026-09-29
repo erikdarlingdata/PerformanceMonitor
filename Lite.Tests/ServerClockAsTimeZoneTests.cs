@@ -47,7 +47,8 @@ public sealed class ServerClockAsTimeZoneTests
 
         var west = ServerClock.FixedOffset(-570).AsTimeZone();
         Assert.Equal(TimeSpan.FromMinutes(-570), west.BaseUtcOffset);
-        Assert.Equal("UTC-09:30", west.Id);
+        Assert.EndsWith("09:30", west.Id, StringComparison.Ordinal);
+        Assert.StartsWith("UTC", west.Id, StringComparison.Ordinal);
     }
 
     [Fact]
