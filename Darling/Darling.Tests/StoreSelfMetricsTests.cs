@@ -884,7 +884,7 @@ FROM collect.store_metrics", connection);
         Assert.True(second.SyncMs is >= 0);
         Assert.True(second.Requested is >= 1, $"the forced CHECKPOINT must land in the interval's requested count, not {second.Requested}");
         Assert.Equal(first.CumulativeRequested + second.Requested, second.CumulativeRequested);
-        Assert.True(second.IsPressure, "one WAL-forced checkpoint in the interval IS the pressure arm");
+        Assert.True(second.IsPressure, "one requested checkpoint in the interval IS the pressure arm");
 
         /* #4619: the existence check, through the shipped SQL, over the names THIS SWEEP WROTE. Every one must
            resolve back to its object: a kind whose lookup drifted from the sweep's name form (the job name, a

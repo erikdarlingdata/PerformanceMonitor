@@ -200,7 +200,8 @@ RETURNING action_id", connection)
     /// aggregate carries its own window so the cooldowns are properties of the READ:
     /// <list type="bullet">
     /// <item>last journaled decision for the query (would_force/blocked/force — the kinds the
-    /// per-query cooldown dedupes);</item>
+    /// per-query cooldown dedupes), and whether that newest row was a state_unavailable block, which the
+    /// policy holds for a shorter window (#4769);</item>
     /// <item>actionable decisions for the whole server in the trailing 24h (would_force + force,
     /// so the dry run spends the same budget the live bot would);</item>
     /// <item>failed forces for the query inside the failure-memory window: force rows whose outcome
@@ -257,7 +258,17 @@ SELECT
      AND   pfa.query_id = $3
      AND   pfa.action_time > $5
      AND   ((pfa.action = 'force' AND pfa.outcome = 'failed')
-            OR (pfa.action = 'unforce' AND pfa.decision IN ('not_net_benefit', 'force_failing')))) AS recent_failed", connection)
+            OR (pfa.action = 'unforce' AND pfa.decision IN ('not_net_benefit', 'force_failing')))) AS recent_failed,
+    /* #4769: is the newest journaled row a state_unavailable block? reasons is the comma-joined blocker
+       names, so the whole token is matched, never a substring. */
+    (SELECT COALESCE('state_unavailable' = ANY(string_to_array(pfa.reasons, ',')), FALSE)
+     FROM collect.plan_force_actions AS pfa
+     WHERE pfa.server_id = $1
+     AND   pfa.database_name = $2
+     AND   pfa.query_id = $3
+     AND   pfa.action IN ('would_force', 'blocked', 'force')
+     ORDER BY pfa.action_time DESC, pfa.action_id DESC
+     LIMIT 1) AS last_was_state_unavailable", connection)
         {
             CommandTimeout = ServiceCommandDeadlines.PostAnalysisForcePlanSeconds,
         };
@@ -281,7 +292,8 @@ SELECT
         return new ForcePlanBotHistory(
             lastJournaled,
             Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture),
-            Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture));
+            Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture),
+            !reader.IsDBNull(3) && reader.GetBoolean(3));
     }
 
     /// <summary>

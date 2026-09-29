@@ -119,13 +119,21 @@ apc_latest AS (
     WHERE p.recommendation_name IS NOT NULL
 ),
 enablement AS (
-    SELECT DISTINCT
-        e.database_name,
-        e.force_last_good_plan_actual_state,
-        e.collection_time
-    FROM plan_correction AS e
-    WHERE e.server_id = $1
-    AND   e.collection_time = (SELECT MAX(collection_time) FROM plan_correction WHERE server_id = $1)
+    SELECT
+        el.database_name,
+        el.force_last_good_plan_actual_state,
+        el.collection_time
+    FROM (
+        SELECT
+            e.database_name,
+            e.force_last_good_plan_actual_state,
+            e.collection_time,
+            ROW_NUMBER() OVER (PARTITION BY e.database_name ORDER BY e.collection_time DESC) AS rn
+        FROM plan_correction AS e
+        WHERE e.server_id = $1
+        AND   e.collection_time > $2
+    ) AS el
+    WHERE el.rn = 1
 )
 SELECT
     t.database_name,
