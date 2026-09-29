@@ -563,6 +563,7 @@ public class CollectorMeasurementSeamTests
                 PgServerLogTail.BytesSkippedMeasurement,
                 PgServerLogTail.ResumeFileMissingMeasurement,
                 PgServerLogTail.ResumeFileRecycledMeasurement,
+                PgServerLogTail.MatchesLimitedMeasurement,
                 /* #4058 item 3: plan captures whose query id or duration failed the guarded casts. A real auto_explain
                    line never does, so each one is a forgery, skipped rather than stored under query id 0. Measured by
                    plan capture's own ReadAsync, which is why the const lives in PgPlanCaptureCollector.cs. */

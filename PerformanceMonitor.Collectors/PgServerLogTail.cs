@@ -143,12 +143,20 @@ public static class PgServerLogTail
     /// <summary>The state keys a resuming consumer declares: one per log format.</summary>
     public static IReadOnlyList<string> ResumeStateKeys { get; } = new[] { ResumeStateKey, ResumeStateKeyCsv, ResumeStateKeyJson };
 
-    /// <summary>The marker key for the route <paramref name="context"/> selects: jsonlog wins over csvlog, then stderr.</summary>
-    public static string ResumeStateKeyFor(CollectorContext context)
+    /// <summary>1 when the regex arm of a stderr read returned more matches than the collector's row limit.</summary>
+    public const string MatchesLimitedMeasurement = "log_matches_limited";
+
+    /// <summary>Records <see cref="MatchesLimitedMeasurement"/> = 1 for a read whose regex arm returned more matches than the row limit.</summary>
+    public static void MeasureMatchesLimited(CollectorContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return context.PgLogUsesJsonlog ? ResumeStateKeyJson : context.PgLogUsesCsvlog ? ResumeStateKeyCsv : ResumeStateKey;
+        context.Measure(MatchesLimitedMeasurement, 1);
     }
+
+    /// <summary>The sentence beside <see cref="MatchesLimitedMeasurement"/>.</summary>
+    public const string LogMatchesLimitedNote =
+        "More matching log entries were in this read than the collector's row limit, so the newest ones were kept and "
+        + "older ones in this window were not collected (#4699)";
 
     /// <summary>Count of log files between the marked file and the newest that no read opened.</summary>
     public const string FilesSkippedByRotationMeasurement = "log_files_skipped_by_rotation";
@@ -231,20 +239,19 @@ public static class PgServerLogTail
     }
 
     /// <summary>
-    /// True when the row is the resume row (consumed, never parsed as log). Stages the marker under <see cref="ResumeStateKeyFor"/> (the route's own key) only when well-formed
-    /// and <paramref name="mayAdvance"/>; the runner persists <see cref="CollectorContext.PendingState"/> only after
+    /// True when the row is the resume row (consumed, never parsed as log). Stages the marker under <paramref name="stateKey"/> (the route's own key, the one the query's parameters were bound from) when well-formed; the runner persists <see cref="CollectorContext.PendingState"/> only after
     /// the COPY returned.
     /// </summary>
-    public static bool TryConsumeResumeRow(string? text, bool fillColumnIsNull, bool mayAdvance, CollectorContext context)
+    public static bool TryConsumeResumeRow(string? text, bool fillColumnIsNull, string stateKey, CollectorContext context)
     {
         if (!TryConsumeResumeRow(text, fillColumnIsNull, context, out var next))
         {
             return false;
         }
 
-        if (mayAdvance && next is not null)
+        if (next is not null)
         {
-            context.PendingState[ResumeStateKeyFor(context)] = next;
+            context.PendingState[stateKey] = next;
         }
 
         return true;

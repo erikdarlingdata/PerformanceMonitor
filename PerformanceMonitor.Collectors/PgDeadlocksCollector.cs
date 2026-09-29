@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Data.Common;
 using System.Threading;
@@ -133,30 +134,35 @@ public sealed class PgDeadlocksCollector : PostgresCollectorDefinitionBase<PgDea
        setting that renders UTC, a candidate in another zone is not the server's own (a client plants one
        through %u or %d with a failed login), so ReadAsync skips and counts it instead of refusing the read.
        The marker arms carry NULL there. */
-    /* The row cap on the stderr routes, spliced into both LIMIT clauses. The resume row counts against it: a
-       cycle that read RowLimit rows was cut, so the resume marker stays where it was. */
+    /* The match cap on the stderr routes. The regex arm orders its matches newest first (the newest file, then the
+       latest match in it) and fetches one more than RowLimit, so ReadAsync can tell a read the cap cut from one that
+       ended exactly at it; the resume marker advances either way. */
     private const int RowLimit = 500;
-    private const string RowLimitLiteral = "500";
+    private const string MatchFetchLiteral = "501";
 
     private const string QueryText = PgServerLogTail.TailCteSql + @"
 SELECT " + PgServerLogTail.ResumeRowSql + @" AS report_text, NULL AS log_timezone
 FROM resume AS r
 UNION ALL
 SELECT
-    m[1]    AS report_text,
+    x.m[1]  AS report_text,
     " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
-FROM tail,
-     regexp_matches(
+FROM (
+    SELECT mm.m AS m
+    FROM tail
+    CROSS JOIN LATERAL regexp_matches(
          tail.body,
          '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*" + DeadlockMarkerLiteral + @"\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*" + DeadlockMarkerLiteral + @")\d{4}-\d\d-\d\d [^\n]*\n)?)',
-         'gn') AS m
+         'gn') WITH ORDINALITY AS mm(m, ord)
+    ORDER BY tail.part DESC, mm.ord DESC
+    LIMIT " + MatchFetchLiteral + @"
+) AS x
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
 SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
-WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
-LIMIT " + RowLimitLiteral;
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     /* The marker text the regexp anchors on — 'ERROR:  deadlock detected' — spliced as its own literal
        so the amplification guard below (item 1, #4058) and the pattern's own literal stay ONE spelling. */
@@ -200,21 +206,25 @@ SELECT " + PgServerLogTail.ResumeRowSql + @" AS report_text, NULL AS log_timezon
 FROM resume AS r
 UNION ALL
 SELECT
-    m[1]    AS report_text,
+    x.m[1]  AS report_text,
     " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
-FROM tail,
-     regexp_matches(
+FROM (
+    SELECT mm.m AS m
+    FROM tail
+    CROSS JOIN LATERAL regexp_matches(
          pg_catalog.encode(tail.body, 'escape'),
          '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)? (?:[^ \n]+ (?:(?!:  )[^[\n])*\[\d+\]|[^ :\n]+:[^[\n]*\[\d+\])(?:(?!:  )[^\n])*" + DeadlockMarkerLiteral + @"\s*\n(?:(?!:  )[^\n])*DETAIL:  (?:[^\n]*\n)(?:\t[^\n]*\n)*(?:(?![^\n]*" + DeadlockMarkerLiteral + @")\d{4}-\d\d-\d\d [^\n]*\n)?)',
-         'gn') AS m
-WHERE pg_catalog.position(tail.body, '" + DeadlockMarkerLiteral + @"'::bytea) > 0
+         'gn') WITH ORDINALITY AS mm(m, ord)
+    WHERE pg_catalog.position(tail.body, '" + DeadlockMarkerLiteral + @"'::bytea) > 0
+    ORDER BY tail.part DESC, mm.ord DESC
+    LIMIT " + MatchFetchLiteral + @"
+) AS x
 UNION ALL
 SELECT '" + PgLoggingCollectorOffException.Marker + @"', NULL
 WHERE " + PgServerLogTail.LoggingCollectorOffMarkerSql + @"
 UNION ALL
 SELECT '" + PgNoStderrLogFileException.Marker + @"', NULL
-WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql + @"
-LIMIT " + RowLimitLiteral;
+WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     /* The csvlog pair (#4053 part b1), sent instead of the two above once context.PgLogUsesCsvlog says the
        target's log_destination includes csvlog — the same flag PgLogEventsCollector reads, extended to this
@@ -303,8 +313,15 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
         context.PgLogUsesCsvlog
-            ? PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, PgServerLogTail.ResumeStateKeyCsv)
-            : PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
+            ? PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, RouteKey(context))
+            : PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context, RouteKey(context));
+
+    /// <summary>The resume-marker key for the route <see cref="BuildQuery"/> sends and <see cref="ReadAsync"/> stages under: csvlog or stderr, never jsonlog (this collector has no json route).</summary>
+    internal static string RouteKey(CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.PgLogUsesCsvlog ? PgServerLogTail.ResumeStateKeyCsv : PgServerLogTail.ResumeStateKey;
+    }
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
     {
@@ -328,16 +345,14 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
     {
         var rows = new List<Row>();
-        var rowsRead = 0;
+        var matchRows = 0;
+        var limited = false;
         string? nextMarker = null;
 
         while (await reader.ReadAsync(cancellationToken))
         {
-            rowsRead++;
-
             /* The resume row (#4699), recognised on every route before any marker check: log_timezone is NULL
-               on it and never on a real row. Its marker is staged after the loop, and only when the row limit
-               did not cut the match set. */
+               on it and never on a real row. Its marker is staged after the loop. */
             if (reader.FieldCount > 1 && reader.IsDBNull(1)
                 && PgServerLogTail.TryConsumeResumeRow(ResumeCandidateText(reader, context), true, context, out var staged))
             {
@@ -371,6 +386,13 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                 throw new PgNoStderrLogFileException();
             }
 
+            /* The regex arm fetched RowLimit + 1: the extra row only proves the cap cut the read, and is not read. */
+            if (++matchRows > RowLimit)
+            {
+                limited = true;
+                continue;
+            }
+
             /* #4046 part 1c: on the binary route the candidate came back through encode(..., 'escape'), so
                it is reversed here before the parser sees it — after the marker checks above, since a marker
                is never escaped text and must be compared to the literal constant first. */
@@ -400,11 +422,16 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
             rows.Add(ToRow(parsed.Value));
         }
 
-        /* A stderr read that hit the LIMIT saw only the first RowLimit matches, so the tail past them was
-           never examined and the marker must not move past it. The csv route has no LIMIT. */
-        if (nextMarker is not null && (context.PgLogUsesCsvlog || rowsRead < RowLimit))
+        /* The marker always advances: a read the cap cut kept the newest matches, and a marker held back would
+           re-read the same window forever (a rotation would leave the newer file unread). The cut is disclosed. */
+        if (nextMarker is not null)
         {
-            context.PendingState[PgServerLogTail.ResumeStateKeyFor(context)] = nextMarker;
+            context.PendingState[RouteKey(context)] = nextMarker;
+        }
+
+        if (limited)
+        {
+            PgServerLogTail.MeasureMatchesLimited(context);
         }
 
         return rows;

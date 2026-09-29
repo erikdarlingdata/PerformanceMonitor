@@ -768,6 +768,7 @@ public sealed class DarlingCollectorRunner
             (PgServerLogTail.ResumeFileRecycledMeasurement, PgServerLogTail.LogResumeLostNote),
             (PgServerLogTail.FilesSkippedByRotationMeasurement, PgServerLogTail.LogFilesSkippedNote),
             (PgServerLogTail.BytesSkippedMeasurement, PgServerLogTail.LogBytesSkippedNote),
+            (PgServerLogTail.MatchesLimitedMeasurement, PgServerLogTail.LogMatchesLimitedNote),
         })
         {
             if (result.Measurements.Any(m => string.Equals(m.Label, label, StringComparison.Ordinal) && m.Value > 0))

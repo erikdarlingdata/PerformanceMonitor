@@ -203,17 +203,27 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     public override CollectorQuery BuildQuery(CollectorContext context)
     {
         _ = RequireKey(context);
+        var key = RouteKey(context);
         if (context.PgLogUsesJsonlog)
         {
-            return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText, context, PgServerLogTail.ResumeStateKeyJson);
+            return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? JsonBinaryQueryText : JsonQueryText, context, key);
         }
 
         if (context.PgLogUsesCsvlog)
         {
-            return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, PgServerLogTail.ResumeStateKeyCsv);
+            return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, key);
         }
 
-        return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
+        return PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context, key);
+    }
+
+    /// <summary>The resume-marker key for the route <see cref="BuildQuery"/> sends and the read stages under: jsonlog wins over csvlog, then stderr.</summary>
+    internal static string RouteKey(CollectorContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.PgLogUsesJsonlog ? PgServerLogTail.ResumeStateKeyJson
+            : context.PgLogUsesCsvlog ? PgServerLogTail.ResumeStateKeyCsv
+            : PgServerLogTail.ResumeStateKey;
     }
 
     /// <summary>Each route keeps a resume marker under its own key (#4699).</summary>
@@ -297,7 +307,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
             }
 
             /* The resume row (#4699), every route, under the route's own key: column 1 is NULL on it and never on a real row. */
-            if (PgServerLogTail.TryConsumeResumeRow(body, reader.FieldCount > 1 && reader.IsDBNull(1), true, context))
+            if (PgServerLogTail.TryConsumeResumeRow(body, reader.FieldCount > 1 && reader.IsDBNull(1), RouteKey(context), context))
             {
                 continue;
             }

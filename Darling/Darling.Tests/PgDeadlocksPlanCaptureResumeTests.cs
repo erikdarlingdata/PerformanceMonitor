@@ -9,14 +9,14 @@ namespace Darling.Tests;
 
 /// <summary>
 /// #4699: <c>pg_deadlocks</c> and <c>pg_plan_capture</c> consume the stderr log tail's resume row. The marker is
-/// staged only when the row LIMIT (which counts the resume row) did not cut the match set, and only for a row whose fill column is NULL.
+/// always staged (a row-capped read discloses the cut instead of holding the marker), and only for a row whose fill column is NULL.
 /// </summary>
 public sealed class PgDeadlocksPlanCaptureResumeTests
 {
     private const string ResumeRow = "pm-log-resume|4096|0|0||postgresql-2026-09-28_000000.log";
     private const string Expected = "4096|postgresql-2026-09-28_000000.log";
 
-    private static CollectorContext Context(bool binary = false) => new()
+    private static CollectorContext Context(bool binary = false, IReadOnlyDictionary<string, string>? state = null) => new()
     {
         ServerId = 1,
         ServerName = "target-a",
@@ -25,6 +25,7 @@ public sealed class PgDeadlocksPlanCaptureResumeTests
         Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
         PgReadBinaryFileGranted = binary,
         LogHashKey = TestLogHashKeys.Fixed,
+        State = state ?? CollectorContext.NoState,
     };
 
     private static object?[] DeadlockFiller() => new object?[] { "not a deadlock report", "UTC" };
@@ -65,21 +66,23 @@ public sealed class PgDeadlocksPlanCaptureResumeTests
     }
 
     [Fact]
-    public async Task Deadlocks_ARowLimitedRead_StagesNoMarker()
+    public async Task Deadlocks_ARowLimitedRead_StagesTheMarker_AndDisclosesTheCut()
     {
         var context = Context();
-        using var reader = new ListReader(Rows(new object?[] { ResumeRow, null }, DeadlockFiller, 499));
+        using var reader = new ListReader(Rows(new object?[] { ResumeRow, null }, DeadlockFiller, 501));
         await PgDeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
-        Assert.False(context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey));
+        Assert.Equal(Expected, context.PendingState[PgServerLogTail.ResumeStateKey]);
+        Assert.Contains(context.Measurements, m => m.Label == PgServerLogTail.MatchesLimitedMeasurement && m.Value == 1);
     }
 
     [Fact]
-    public async Task Deadlocks_AnUnlimitedRead_StagesTheMarker()
+    public async Task Deadlocks_AnUnlimitedRead_StagesTheMarker_WithNoDisclosure()
     {
         var context = Context();
-        using var reader = new ListReader(Rows(new object?[] { ResumeRow, null }, DeadlockFiller, 498));
+        using var reader = new ListReader(Rows(new object?[] { ResumeRow, null }, DeadlockFiller, 500));
         await PgDeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
         Assert.Equal(Expected, context.PendingState[PgServerLogTail.ResumeStateKey]);
+        Assert.DoesNotContain(context.Measurements, m => m.Label == PgServerLogTail.MatchesLimitedMeasurement);
     }
 
     [Fact]
@@ -92,21 +95,23 @@ public sealed class PgDeadlocksPlanCaptureResumeTests
     }
 
     [Fact]
-    public async Task Plans_ARowLimitedRead_StagesNoMarker()
+    public async Task Plans_ARowLimitedRead_StagesTheMarker_AndDisclosesTheCut()
     {
         var context = Context();
-        using var reader = new ListReader(Rows(new object?[] { null, null, ResumeRow, null }, PlanFiller, 1999));
+        using var reader = new ListReader(Rows(new object?[] { null, null, ResumeRow, null }, PlanFiller, 2001));
         await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
-        Assert.False(context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey));
+        Assert.Equal(Expected, context.PendingState[PgServerLogTail.ResumeStateKey]);
+        Assert.Contains(context.Measurements, m => m.Label == PgServerLogTail.MatchesLimitedMeasurement && m.Value == 1);
     }
 
     [Fact]
-    public async Task Plans_AnUnlimitedRead_StagesTheMarker()
+    public async Task Plans_AnUnlimitedRead_StagesTheMarker_WithNoDisclosure()
     {
         var context = Context();
-        using var reader = new ListReader(Rows(new object?[] { null, null, ResumeRow, null }, PlanFiller, 1998));
+        using var reader = new ListReader(Rows(new object?[] { null, null, ResumeRow, null }, PlanFiller, 2000));
         await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
         Assert.Equal(Expected, context.PendingState[PgServerLogTail.ResumeStateKey]);
+        Assert.DoesNotContain(context.Measurements, m => m.Label == PgServerLogTail.MatchesLimitedMeasurement);
     }
 
     [Fact]
@@ -162,6 +167,62 @@ public sealed class PgDeadlocksPlanCaptureResumeTests
         var context = Context();
         context.PgLogUsesCsvlog = csv;
         context.PgLogUsesJsonlog = json;
+        using var reader = new ListReader(new[] { new object?[] { ResumeRow, null } });
+        await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        Assert.Equal(Expected, context.PendingState[key]);
+        Assert.Single(context.PendingState);
+    }
+
+    /// <summary>
+    /// The key BuildQuery binds its parameters from EQUALS the key the read stages under, on every route, including a
+    /// target whose jsonlog flag is set while the collector reads stderr or csvlog.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false, "log_resume")]
+    [InlineData(true, false, "log_resume_csv")]
+    [InlineData(false, true, "log_resume")]
+    [InlineData(true, true, "log_resume_csv")]
+    public async Task DeadlocksAndPlans_TheBoundKeyIsTheStagedKey_EvenWithTheJsonFlagSet(bool csv, bool json, string key)
+    {
+        foreach (var isPlan in new[] { false, true })
+        {
+            var state = new Dictionary<string, string> { [key] = "77|marked.log" };
+            var context = Context(state: state);
+            context.PgLogUsesCsvlog = csv;
+            context.PgLogUsesJsonlog = json;
+
+            var query = isPlan ? PgPlanCaptureCollector.Instance.BuildQuery(context) : PgDeadlocksCollector.Instance.BuildQuery(context);
+            Assert.Contains(query.Parameters, p => Equals(p.Value, "marked.log"));
+
+            var row = isPlan && !csv ? new object?[] { null, null, ResumeRow, null } : new object?[] { ResumeRow, null };
+            using var reader = new ListReader(new[] { row });
+            if (isPlan)
+            {
+                await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+            }
+            else
+            {
+                await PgDeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+            }
+
+            Assert.Equal(Expected, context.PendingState[key]);
+            Assert.Single(context.PendingState);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false, "log_resume")]
+    [InlineData(true, false, "log_resume_csv")]
+    [InlineData(false, true, "log_resume_json")]
+    [InlineData(true, true, "log_resume_json")]
+    public async Task LogEvents_TheBoundKeyIsTheStagedKey_OnEveryRoute(bool csv, bool json, string key)
+    {
+        var context = Context(state: new Dictionary<string, string> { [key] = "77|marked.log" });
+        context.PgLogUsesCsvlog = csv;
+        context.PgLogUsesJsonlog = json;
+
+        Assert.Contains(PgLogEventsCollector.Instance.BuildQuery(context).Parameters, p => Equals(p.Value, "marked.log"));
+
         using var reader = new ListReader(new[] { new object?[] { ResumeRow, null } });
         await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
         Assert.Equal(Expected, context.PendingState[key]);

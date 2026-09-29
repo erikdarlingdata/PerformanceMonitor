@@ -60,7 +60,7 @@ public sealed class PgServerLogTailResumeTests
         var context = Context();
         var row = PgServerLogTail.ResumeRowPrefix + "900|2|5000|missing|pg|log.log";
 
-        Assert.True(PgServerLogTail.TryConsumeResumeRow(row, fillColumnIsNull: true, mayAdvance: true, context));
+        Assert.True(PgServerLogTail.TryConsumeResumeRow(row, fillColumnIsNull: true, PgServerLogTail.ResumeStateKey, context));
         Assert.Equal("900|pg|log.log", context.PendingState[PgServerLogTail.ResumeStateKey]);
         var labels = context.Measurements.ToDictionary(m => m.Label, m => m.Value);
         Assert.Equal(2, labels[PgServerLogTail.FilesSkippedByRotationMeasurement]);
@@ -69,13 +69,10 @@ public sealed class PgServerLogTailResumeTests
     }
 
     [Fact]
-    public void TryConsumeResumeRow_DoesNotAdvance_WhenNotAllowed_AndSkipsMalformed()
+    public void TryConsumeResumeRow_SkipsAMalformedRow()
     {
         var context = Context();
-        Assert.True(PgServerLogTail.TryConsumeResumeRow(PgServerLogTail.ResumeRowPrefix + "9|0|0||f.log", true, false, context));
-        Assert.Empty(context.PendingState);
-
-        Assert.True(PgServerLogTail.TryConsumeResumeRow(PgServerLogTail.ResumeRowPrefix + "junk", true, true, context));
+        Assert.True(PgServerLogTail.TryConsumeResumeRow(PgServerLogTail.ResumeRowPrefix + "junk", true, PgServerLogTail.ResumeStateKey, context));
         Assert.Empty(context.PendingState);
     }
 
@@ -83,7 +80,7 @@ public sealed class PgServerLogTailResumeTests
     public void TryConsumeResumeRow_LeavesAPlantedBodyAlone_WhenTheFillColumnIsNotNull()
     {
         var context = Context();
-        Assert.False(PgServerLogTail.TryConsumeResumeRow(PgServerLogTail.ResumeRowPrefix + "1|0|0||f.log", fillColumnIsNull: false, mayAdvance: true, context));
+        Assert.False(PgServerLogTail.TryConsumeResumeRow(PgServerLogTail.ResumeRowPrefix + "1|0|0||f.log", fillColumnIsNull: false, PgServerLogTail.ResumeStateKey, context));
         Assert.Empty(context.PendingState);
     }
 
@@ -121,7 +118,7 @@ public sealed class PgServerLogTailResumeTests
         /* The runner saves PendingState only after the write returns, and a read that throws never reaches
            that block. The staged marker exists only in PendingState until then. */
         var context = Context("5|f.log");
-        Assert.True(PgServerLogTail.TryConsumeResumeRow(PgServerLogTail.ResumeRowPrefix + "9|0|0||f.log", true, true, context));
+        Assert.True(PgServerLogTail.TryConsumeResumeRow(PgServerLogTail.ResumeRowPrefix + "9|0|0||f.log", true, PgServerLogTail.ResumeStateKey, context));
         Assert.Equal("5|f.log", context.State[PgServerLogTail.ResumeStateKey]);
         Assert.Equal("9|f.log", context.PendingState[PgServerLogTail.ResumeStateKey]);
     }
@@ -178,22 +175,19 @@ public sealed class PgServerLogTailResumeTests
     [Fact]
     public void EachFormat_KeepsItsOwnMarkerKey()
     {
-        Assert.Equal("log_resume", PgServerLogTail.ResumeStateKeyFor(Context()));
-        Assert.Equal("log_resume_csv", PgServerLogTail.ResumeStateKeyFor(FormatContext(false)));
-        Assert.Equal("log_resume_json", PgServerLogTail.ResumeStateKeyFor(FormatContext(true)));
         Assert.Equal(new[] { "log_resume", "log_resume_csv", "log_resume_json" }, PgServerLogTail.ResumeStateKeys);
 
         /* A stderr marker on a csv route binds NULL parameters: no marked file, so no "missing" disclosure. */
         var csv = FormatContext(false, new() { [PgServerLogTail.ResumeStateKey] = "5|f.log" });
-        var bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyFor(csv));
+        var bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyCsv);
         Assert.All(bound.Parameters, p => Assert.Null(p.Value));
 
         csv = FormatContext(false, new() { [PgServerLogTail.ResumeStateKeyCsv] = "5|f.csv" });
-        bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyFor(csv));
+        bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyCsv);
         Assert.Contains(bound.Parameters, p => Equals(p.Value, "f.csv"));
 
         var staged = FormatContext(false);
-        Assert.True(PgServerLogTail.TryConsumeResumeRow("pm-log-resume|9|0|0||f.csv", true, true, staged));
+        Assert.True(PgServerLogTail.TryConsumeResumeRow("pm-log-resume|9|0|0||f.csv", true, PgServerLogTail.ResumeStateKeyCsv, staged));
         Assert.Equal("9|f.csv", staged.PendingState[PgServerLogTail.ResumeStateKeyCsv]);
         Assert.False(staged.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey));
     }
