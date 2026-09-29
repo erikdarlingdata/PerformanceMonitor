@@ -538,22 +538,22 @@ public sealed class DarlingStoreUpgradeTests
     [Fact]
     public async Task CarryConfAfterSwapAsync_LinkMode_CarryThrows_RetainedDirectoryIsGone()
     {
-        var retained = PlantRetainedDirectory();
+        var store = PlantStore();
         var steps = new List<string>();
         try
         {
             await Assert.ThrowsAsync<IOException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
-                DarlingStoreUpgrade.FileTransferMode.Link, retained, steps.Add,
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
                 () => throw new IOException("postgresql.auto.conf could not be written"),
                 () => Task.CompletedTask,
                 NullLogger.Instance));
 
-            Assert.False(Directory.Exists(retained));
+            Assert.False(Directory.Exists(store.Retained));
             Assert.Equal(new[] { "carry-auto-conf" }, steps);
         }
         finally
         {
-            DarlingStoreUpgrade.TryDeleteDirectory(retained);
+            TryDeleteTree(store.Root);
         }
     }
 
@@ -561,22 +561,22 @@ public sealed class DarlingStoreUpgradeTests
     [Fact]
     public async Task CarryConfAfterSwapAsync_CopyMode_CarryThrows_RetainedDirectoryIsKept()
     {
-        var retained = PlantRetainedDirectory();
+        var store = PlantStore();
         var steps = new List<string>();
         try
         {
             await Assert.ThrowsAsync<IOException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
-                DarlingStoreUpgrade.FileTransferMode.Copy, retained, steps.Add,
+                DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, steps.Add,
                 () => Task.CompletedTask,
                 () => throw new IOException("postgresql.conf could not be written"),
                 NullLogger.Instance));
 
-            Assert.True(File.Exists(Path.Combine(retained, "PG_VERSION")));
+            Assert.True(File.Exists(Path.Combine(store.Retained, "PG_VERSION")));
             Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
         }
         finally
         {
-            DarlingStoreUpgrade.TryDeleteDirectory(retained);
+            TryDeleteTree(store.Root);
         }
     }
 
@@ -584,31 +584,239 @@ public sealed class DarlingStoreUpgradeTests
     [Fact]
     public async Task CarryConfAfterSwapAsync_LinkMode_CarriesReturn_RetainedDirectoryIsGone()
     {
-        var retained = PlantRetainedDirectory();
+        var store = PlantStore();
         var steps = new List<string>();
         try
         {
             await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
-                DarlingStoreUpgrade.FileTransferMode.Link, retained, steps.Add,
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
                 () => Task.CompletedTask,
                 () => Task.CompletedTask,
                 NullLogger.Instance);
 
-            Assert.False(Directory.Exists(retained));
+            Assert.False(Directory.Exists(store.Retained));
             Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
         }
         finally
         {
-            DarlingStoreUpgrade.TryDeleteDirectory(retained);
+            TryDeleteTree(store.Root);
         }
     }
 
-    private static string PlantRetainedDirectory()
+    /// <summary>The operator's lines below the darling-managed.conf include exist only in the old
+    /// postgresql.conf, and hard-link mode removes the directory that holds it. The auto.conf carry rethrows
+    /// (a probe timeout, a cancellation at service stop, a failed reset), so the operator-lines carry never
+    /// runs: the file has to be saved beside the new data directory BEFORE either carry, or those lines are
+    /// lost with no copy.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_AutoConfCarryThrows_OperatorLinesSurviveBesideTheNewDataDirectory()
     {
-        var retained = Path.Combine(Path.GetTempPath(), "pm-upgrade-retained-" + Guid.NewGuid().ToString("N"));
+        var store = PlantStore(OperatorConf);
+        var steps = new List<string>();
+        try
+        {
+            await Assert.ThrowsAsync<TimeoutException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
+                () => throw new TimeoutException("postgres -C did not answer"),
+                () => Task.CompletedTask,
+                NullLogger.Instance));
+
+            Assert.False(Directory.Exists(store.Retained));
+            Assert.Equal(new[] { "carry-auto-conf" }, steps);
+            Assert.True(File.Exists(store.SavedConf), $"expected the saved postgresql.conf at {store.SavedConf}");
+            Assert.Equal(OperatorConf, await File.ReadAllTextAsync(store.SavedConf));
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>Hard-link mode, the copy cannot be made (a directory sits where the file belongs, so
+    /// File.Copy cannot replace it): the retained directory is kept, with a warning that says so, because it
+    /// holds the only copy of the operator's lines. Both carries still run.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_CopyCannotBeMade_RetainedDirectoryIsKept_CarriesStillRun()
+    {
+        var store = PlantStore(OperatorConf);
+        Directory.CreateDirectory(store.SavedConf);
+        var steps = new List<string>();
+        var log = new CapturingLogger();
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
+                () => Task.CompletedTask,
+                () => Task.CompletedTask,
+                log);
+
+            Assert.Equal(OperatorConf, await File.ReadAllTextAsync(Path.Combine(store.Retained, "postgresql.conf")));
+            Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
+
+            var logText = log.ToString();
+            Assert.Contains("Could not save the pre-upgrade postgresql.conf", logText, StringComparison.Ordinal);
+            Assert.Contains("Kept the pre-upgrade data directory", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Removed the pre-upgrade data directory", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>Copy mode: the old postgresql.conf is saved beside the new data directory too, and the
+    /// retained directory is kept as today (it is the rollback copy).</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_CopyMode_SavesTheOldConfBesideTheNewDataDirectory_RetainedDirectoryIsKept()
+    {
+        var store = PlantStore(OperatorConf);
+        var steps = new List<string>();
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, steps.Add,
+                () => Task.CompletedTask,
+                () => Task.CompletedTask,
+                NullLogger.Instance);
+
+            Assert.True(File.Exists(store.SavedConf), $"expected the saved postgresql.conf at {store.SavedConf}");
+            Assert.Equal(OperatorConf, await File.ReadAllTextAsync(store.SavedConf));
+            Assert.Equal(OperatorConf, await File.ReadAllTextAsync(Path.Combine(store.Retained, "postgresql.conf")));
+            Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>Hard-link mode, and the old data directory holds no postgresql.conf: there is nothing to save,
+    /// nothing is lost by removing it, so it goes as it did before the copy existed.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_NoPostgresqlConfToSave_RetainedDirectoryIsGone_NothingIsSaved()
+    {
+        var store = PlantStore();
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, _ => { },
+                () => Task.CompletedTask,
+                () => Task.CompletedTask,
+                NullLogger.Instance);
+
+            Assert.False(Directory.Exists(store.Retained));
+            Assert.False(File.Exists(store.SavedConf));
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>The saved copy is hardened like the auto.conf original: File.Copy gives it the store folder's
+    /// inherited ACL, and HardenFile takes that inheritance off.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_SavedConf_IsHardenedLikeTheAutoConfOriginal()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var store = PlantStore(OperatorConf);
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, _ => { },
+                () => Task.CompletedTask,
+                () => Task.CompletedTask,
+                NullLogger.Instance);
+
+            Assert.True(File.Exists(store.SavedConf), $"expected the saved postgresql.conf at {store.SavedConf}");
+            Assert.True(
+                new FileInfo(store.SavedConf).GetAccessControl().AreAccessRulesProtected,
+                "the saved postgresql.conf still inherits the store folder's ACL");
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>The operator-lines carry's warnings name where the original line is kept: the saved copy when
+    /// there is one, otherwise the old data directory's own file (which is then kept). They used to name the
+    /// retained pre-upgrade data directory, which hard-link mode removes right after the carries.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CarryOperatorConfLinesAsync_RejectedLine_WarningNamesWhereTheOriginalIsKept(bool savedCopyExists)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-opconf-kept-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            var oldConf = Path.Combine(oldDataDirectory, "postgresql.conf");
+            File.WriteAllText(
+                oldConf,
+                "include 'darling-managed.conf'\n" +
+                "darling_4725_unknown_setting = 'on'\n");
+            File.WriteAllText(Path.Combine(newDataDirectory, "postgresql.conf"), "include 'darling-managed.conf'\n");
+
+            var savedCopy = Path.Combine(root.FullName, DarlingStoreUpgrade.PreUpgradeConfFileName);
+            if (savedCopyExists)
+            {
+                File.Copy(oldConf, savedCopy);
+            }
+
+            var log = new CapturingLogger();
+            var result = await new DarlingStoreUpgrade(log).CarryOperatorConfLinesAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir",
+                (exePath, arguments, timeout, token) => Task.FromResult((1, "unrecognized configuration parameter")),
+                CancellationToken.None);
+
+            Assert.Equal(1, result.RejectedCount);
+
+            var logText = log.ToString();
+            Assert.Contains("NOT carried: darling_4725_unknown_setting", logText, StringComparison.Ordinal);
+            Assert.Contains($"The original line is kept in {(savedCopyExists ? savedCopy : oldConf)}.", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("retained pre-upgrade data directory", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>The operator's own lines below the darling-managed.conf include, as an old postgresql.conf holds them.</summary>
+    private const string OperatorConf =
+        "max_connections = 200\n" +
+        "include 'darling-managed.conf'\n" +
+        "# operator settings kept from the previous postgresql.conf (#4215)\n" +
+        "log_min_duration_statement = 250\n";
+
+    /// <summary>A store folder as the upgrade leaves it after the directory swap: the new data directory, and
+    /// the retained old one beside it. Neither is a real cluster. <see cref="SavedConf"/> is where the old
+    /// postgresql.conf is kept for good.</summary>
+    private sealed record PlantedStore(string Root, string NewDataDirectory, string Retained)
+    {
+        public string SavedConf => Path.Combine(Root, DarlingStoreUpgrade.PreUpgradeConfFileName);
+    }
+
+    private static PlantedStore PlantStore(string? oldConf = null)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pm-upgrade-store-" + Guid.NewGuid().ToString("N"));
+        var newDataDirectory = Path.Combine(root, "data");
+        var retained = Path.Combine(root, "data-old-17");
+        Directory.CreateDirectory(newDataDirectory);
         Directory.CreateDirectory(retained);
         File.WriteAllText(Path.Combine(retained, "PG_VERSION"), "17\n");
-        return retained;
+        if (oldConf is not null)
+        {
+            File.WriteAllText(Path.Combine(retained, "postgresql.conf"), oldConf);
+        }
+
+        return new PlantedStore(root, newDataDirectory, retained);
     }
 
     [Fact]

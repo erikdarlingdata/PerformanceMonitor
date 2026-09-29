@@ -106,6 +106,16 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     public const string PreUpgradeAutoConfFileName = "postgresql.auto.conf.pre-upgrade";
 
+    /// <summary>
+    /// The pre-upgrade postgresql.conf, kept beside the new data directory before the two conf carries run
+    /// (<see cref="CarryConfAfterSwapAsync"/>). The operator's own lines below the darling-managed.conf include
+    /// exist only in the old data directory's file until <see cref="CarryOperatorConfLinesAsync"/> has carried
+    /// what the new major accepts, and in hard-link mode that directory is removed right after the carries, so
+    /// this copy is the operator's record of what a rejected or uncarried line said. Kept until the NEXT major
+    /// upgrade replaces it, like <see cref="PreUpgradeAutoConfFileName"/>.
+    /// </summary>
+    public const string PreUpgradeConfFileName = "postgresql.conf.pre-upgrade";
+
     /// <summary>Suffix on the runtime root holding the rescued previous runtime (pg_upgrade's --old-bindir).</summary>
     public const string PreviousRuntimeSuffix = "-prev";
 
@@ -3519,8 +3529,9 @@ internal sealed class DarlingStoreUpgrade
     /// not need to distinguish a same-major move from a cross-major carry). Never throws: same
     /// "must never brick a completed upgrade" posture the auto.conf carry follows for a probe failure — an
     /// unexpected exception here resets the new cluster's <c>postgresql.conf</c> back to its pre-carry
-    /// (legacy-appended) baseline and logs a warning naming the retained old data directory as the manual
-    /// fallback, rather than propagate.
+    /// (legacy-appended) baseline and logs a warning naming where the original lines are kept as the manual
+    /// fallback (the copy <see cref="CarryConfAfterSwapAsync"/> saves as <see cref="PreUpgradeConfFileName"/>,
+    /// or the old data directory's own file when that copy could not be made), rather than propagate.
     /// </summary>
     internal async Task<OperatorConfLineCarryResult> CarryOperatorConfLinesAsync(
         string oldDataDirectory,
@@ -3555,6 +3566,7 @@ internal sealed class DarlingStoreUpgrade
             baseline += "\n";
         }
 
+        var originalConf = OriginalConfPath(oldDataDirectory, newDataDirectory);
         var postgresExe = Path.Combine(newBinDirectory, "postgres.exe");
         var goodLines = new List<string>();
         var carried = 0;
@@ -3603,15 +3615,15 @@ internal sealed class DarlingStoreUpgrade
                         _logger.LogWarning(
                             "NOT carried: {Name} — the new PostgreSQL binaries reject it (reason withheld: the " +
                             "name suggests it may hold a credential, or names an extension setting whose reason " +
-                            "could). The original line is kept in the retained pre-upgrade data directory.",
-                            name);
+                            "could). The original line is kept in {OriginalConf}.",
+                            name, originalConf);
                     }
                     else
                     {
                         _logger.LogWarning(
                             "NOT carried: {Name} — the new PostgreSQL binaries reject it: {Reason}. The original " +
-                            "line is kept in the retained pre-upgrade data directory.",
-                            name, output);
+                            "line is kept in {OriginalConf}.",
+                            name, output, originalConf);
                     }
                 }
             }
@@ -3639,16 +3651,15 @@ internal sealed class DarlingStoreUpgrade
                 _logger.LogWarning(
                     "Carrying operator postgresql.conf lines below the include did not finish ({Reason}), and " +
                     "resetting postgresql.conf to its pre-carry content also failed ({ResetReason}) — check " +
-                    "{Path} by hand against the retained pre-upgrade data directory.",
-                    ex.Message, resetEx.Message, newConfPath);
+                    "{Path} by hand against the original in {OriginalConf}.",
+                    ex.Message, resetEx.Message, newConfPath, originalConf);
                 return none;
             }
 
             _logger.LogWarning(
                 "Carrying operator postgresql.conf lines below the include did not finish ({Reason}) — " +
-                "postgresql.conf was reset to its pre-carry content. The originals are kept in the retained " +
-                "pre-upgrade data directory.",
-                ex.Message);
+                "postgresql.conf was reset to its pre-carry content. The originals are kept in {OriginalConf}.",
+                ex.Message, originalConf);
             return none;
         }
 
@@ -3876,12 +3887,14 @@ internal sealed class DarlingStoreUpgrade
                     blocks context.AppendManagedConf already wrote there (step "conf-new-cluster", above), so
                     an operator's override still wins over the legacy block's own copy of the same key. Any
                     failure here is caught by the post-commit handler below, which keeps the store running on
-                    the new major regardless — never a reason to brick it. In hard-link mode `retained` goes
-                    the moment the carries are done with it, whether they returned or threw
+                    the new major regardless — never a reason to brick it. The old postgresql.conf is saved
+                    beside the new data directory first, and in hard-link mode `retained` goes the moment the
+                    carries are done with it, whether they returned or threw, once that copy exists
                     (CarryConfAfterSwapAsync says why). ---- */
             await CarryConfAfterSwapAsync(
                 mode,
                 retained,
+                context.DataDirectory,
                 name => step = name,
                 () => CarryAutoConfAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions),
                 () => CarryOperatorConfLinesAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken),
@@ -4001,17 +4014,32 @@ internal sealed class DarlingStoreUpgrade
     /// never the upgrade's outer try: before the swap commits, the same directory can be the only copy of
     /// the store. <paramref name="setStep"/> names the step in flight for the post-commit handler's
     /// message. Its own method so a test can run the carries against a directory, without a cluster.
+    ///
+    /// <para>The old directory's postgresql.conf is the only place the operator's lines below the
+    /// darling-managed.conf include still exist, and the auto.conf carry can throw (a probe timeout, a
+    /// cancellation at service stop, a failed reset) before the operator-lines carry has read it. So before
+    /// either carry, in every mode, it is copied beside <paramref name="newDataDirectory"/> as
+    /// <see cref="PreUpgradeConfFileName"/> and hardened like <see cref="PreUpgradeAutoConfFileName"/>. In
+    /// hard-link mode the retained directory is removed only once that copy exists (or there was no
+    /// postgresql.conf to copy). When the copy could not be made it is kept, with a warning, and the retention
+    /// sweep ages it out after <see cref="RollbackRetentionStarts"/> starts as it did before this copy existed.</para>
     /// </summary>
     internal static async Task CarryConfAfterSwapAsync(
         FileTransferMode mode,
         string retained,
+        string newDataDirectory,
         Action<string> setStep,
         Func<Task> carryAutoConf,
         Func<Task> carryOperatorConfLines,
         ILogger logger)
     {
+        /* False until the copy is known to exist, so anything unexpected before that leaves the retained
+           directory in place. */
+        var oldConfSaved = false;
         try
         {
+            oldConfSaved = TrySavePreUpgradeConf(retained, newDataDirectory, logger);
+
             setStep("carry-auto-conf");
             await carryAutoConf();
 
@@ -4022,11 +4050,95 @@ internal sealed class DarlingStoreUpgrade
         {
             if (mode == FileTransferMode.Link)
             {
-                TryDeleteDirectory(retained);
-                logger.LogWarning(
-                    "Removed the pre-upgrade data directory immediately: hard-link mode shares its files with the upgraded cluster, so it was never a usable rollback copy.");
+                if (oldConfSaved)
+                {
+                    TryDeleteDirectory(retained);
+                    logger.LogWarning(
+                        "Removed the pre-upgrade data directory immediately: hard-link mode shares its files with the upgraded cluster, so it was never a usable rollback copy.");
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Kept the pre-upgrade data directory at {Path} because the pre-upgrade postgresql.conf could not be " +
+                        "saved beside the new data directory, so its operator lines exist only there. Hard-link mode shares " +
+                        "its files with the upgraded cluster, so it is not a usable rollback copy: it is kept only for those " +
+                        "lines, and the retention sweep removes it after {Starts} service starts.",
+                        retained, RollbackRetentionStarts);
+                }
             }
         }
+    }
+
+    /// <summary>
+    /// Where <see cref="PreUpgradeConfFileName"/> lives: beside the new data directory, in its parent, where
+    /// <see cref="CarryAutoConfAsync"/> keeps <see cref="PreUpgradeAutoConfFileName"/> and this class keeps the
+    /// pg-upgrade password file and the retained pre-upgrade data directory.
+    /// </summary>
+    private static string SavedConfPath(string newDataDirectory)
+        => Path.Combine(
+            Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(newDataDirectory)))!,
+            PreUpgradeConfFileName);
+
+    /// <summary>
+    /// Copies the old data directory's postgresql.conf to <see cref="SavedConfPath"/> and hardens the copy the
+    /// way <see cref="CarryAutoConfAsync"/> hardens its auto.conf original (best effort: a failed harden is a
+    /// warning, and the copy still counts). Returns true when the retained directory no longer holds the only
+    /// copy of the file: it was saved, or there was none to save. Returns false, after a warning, when the copy
+    /// could not be made. Never throws: a copy that cannot be made must not stop the carries or the upgrade.
+    /// </summary>
+    private static bool TrySavePreUpgradeConf(string retained, string newDataDirectory, ILogger logger)
+    {
+        string preUpgradeCopy;
+        try
+        {
+            var sourcePath = Path.Combine(retained, "postgresql.conf");
+            if (!File.Exists(sourcePath))
+            {
+                return true;
+            }
+
+            preUpgradeCopy = SavedConfPath(newDataDirectory);
+            File.Copy(sourcePath, preUpgradeCopy, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                "Could not save the pre-upgrade postgresql.conf beside the new data directory ({Message}). Its " +
+                "operator lines below the darling-managed.conf include still exist in {Path}.",
+                ex.Message, Path.Combine(retained, "postgresql.conf"));
+            return false;
+        }
+
+        try
+        {
+            DarlingFileSecurity.HardenFile(preUpgradeCopy, allowInteractiveRead: false);
+        }
+        catch (Exception ex)
+        {
+            /* Best-effort, like the auto.conf original this mirrors — a failure here must not cost the copy
+               itself, only get logged so it can be fixed by hand. */
+            logger.LogWarning(
+                "Could not restrict {Path} to the store's own ACL ({Message}) — it may be readable more " +
+                "broadly than the data directory it was copied from.",
+                preUpgradeCopy, ex.Message);
+        }
+
+        logger.LogInformation(
+            "Pre-upgrade postgresql.conf saved to {Path} — kept until the NEXT major upgrade replaces it, not " +
+            "deleted with the rest of the pre-upgrade data directory.",
+            preUpgradeCopy);
+        return true;
+    }
+
+    /// <summary>
+    /// Where the operator's original below-include lines can be read once <see cref="CarryOperatorConfLinesAsync"/>
+    /// is done with them: the copy saved beside the new data directory, or, when there is none (it could not
+    /// be made, and the pre-upgrade data directory is kept in its place), the old directory's own file.
+    /// </summary>
+    private static string OriginalConfPath(string oldDataDirectory, string newDataDirectory)
+    {
+        var saved = SavedConfPath(newDataDirectory);
+        return File.Exists(saved) ? saved : Path.Combine(oldDataDirectory, "postgresql.conf");
     }
 
     private async Task TryStopAsync(UpgradeContext context, bool oldStarted)

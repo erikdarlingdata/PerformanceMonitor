@@ -3578,6 +3578,9 @@ public static class DarlingCliCommands
             /* #4253/#4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf, which File.Copy does
                not ACL on its own. Kept until the NEXT major upgrade replaces it (DarlingStoreUpgrade.CarryAutoConfAsync). */
             targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeAutoConfFileName), false, false, "the pre-upgrade postgresql.auto.conf"));
+            /* The same for the last major upgrade's pre-upgrade postgresql.conf, which carries the operator's own
+               lines below the darling-managed.conf include (DarlingStoreUpgrade.CarryConfAfterSwapAsync). */
+            targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeConfFileName), false, false, "the pre-upgrade postgresql.conf"));
         }
 
         /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the
