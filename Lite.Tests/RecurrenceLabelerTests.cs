@@ -477,6 +477,52 @@ public class RecurrenceLabelerTests
         Assert.Equal(expectedWeeks, RecurrenceLabeler.WeeksAgo(reference, reference.AddDays(-daysAgo)));
     }
 
+    /* ---------------- #4737 item 2: a job that runs on several days is not a weekly job that moved ---------------- */
+
+    /* The reference is Tuesday 2026-09-15 10:37 local; "last week" is 4 to 10 days back, Saturday 09-05 to Friday 09-11. */
+
+    [Fact]
+    public void ANightlyJob_WithNoRowInLastWeeksSameWeekdaySlot_SaysNothing()
+    {
+        /* 02:00 every night from Saturday 09-05 to Thursday 09-10: six dates, none of them Tuesday 10:00. The rows
+           span dates that are not next to each other, so the job is not a weekly slot that slid. */
+        var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
+        var nights = new List<PriorOccurrence>();
+        for (var day = 5; day <= 10; day++)
+            nights.Add(JobRow(new DateTime(2026, 9, day, 2, 0, 0), "Nightly Index Maintenance"));
+
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")], Read(nights.ToArray()));
+
+        Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
+        Assert.False(RecurrenceLabeler.TryReadLabel(job.StoryText)?.MaintenanceWindowMoved ?? false);
+    }
+
+    [Fact]
+    public void ARunThatCrossesMidnight_IsStillOneRun_AndTheMovedSentenceStillSpeaks()
+    {
+        /* Thursday 23:00 and Friday 00:00 last week: two dates, but next to each other - one run. */
+        var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
+
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")],
+            Read(JobRow(new DateTime(2026, 9, 10, 23, 0, 0), "Nightly Index Maintenance"), JobRow(new DateTime(2026, 9, 11, 0, 0, 0), "Nightly Index Maintenance")));
+
+        var investigation = Investigation(job);
+        Assert.Contains(RecurrenceLabeler.MovedWindowMarker, investigation, StringComparison.Ordinal);
+        Assert.Contains("ran at 23:00 Thursday last week, 10:00 Tuesday this week", investigation, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RowsOnTwoDatesThatAreNotNextToEachOther_SayNothing()
+    {
+        /* Saturday 09-05 and Wednesday 09-09 last week: two runs on two separate days is a schedule, not one slide. */
+        var job = Story(RecurrenceLabeler.JobKey, "job-hash", severity: 0.5);
+
+        RecurrenceLabeler.Label([job], [FiredJob("Nightly Index Maintenance")],
+            Read(JobRow(new DateTime(2026, 9, 5, 2, 0, 0), "Nightly Index Maintenance"), JobRow(new DateTime(2026, 9, 9, 2, 0, 0), "Nightly Index Maintenance")));
+
+        Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, Investigation(job), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ReadLowerBound_IsTheLookbackPlusAnHourOfSlack()
     {
