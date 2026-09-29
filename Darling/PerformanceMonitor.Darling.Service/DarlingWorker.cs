@@ -10045,6 +10045,15 @@ AND   j.hypertable_name = '{relation}'", connection))
                     server.Config.DisplayName, retrySeconds);
             }
 
+            /* Retired containment (#4795), mirroring the CONNECT-path re-check on the online path above: a removal
+               (Retired, then Forget) that lands during a failed connect must leave no alert state and send nothing.
+               Applying the offline outcome now would write Offline under the removed server's key AFTER Forget
+               cleared it, and a re-added server (same storage name, same server_id) would inherit that Offline. */
+            if (server.Retired)
+            {
+                return;
+            }
+
             /* Stage 4: the online->offline connection edge (Server Unreachable) — fires once when a
                previously-connected server can no longer be reached; a repeated failed reconnect does NOT
                re-fire (the state machine dedups). server_id comes from the CONFIG rather than the runtime,

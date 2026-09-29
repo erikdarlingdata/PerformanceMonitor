@@ -4716,6 +4716,51 @@ public sealed class DarlingSelfAlertTests
             sweep, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4795: a server removed while its connect was queued or running must leave no alert state and send nothing,
+    /// on the failed connect exactly as on the successful one. The worker's Retired containment has no unit seam
+    /// (see the remark in DarlingSweepSchedulingTests), so this pins the shape: every connection alert in the
+    /// connect body sits behind a <c>server.Retired</c> re-check that returns, with no await between the check and
+    /// the call. Without the offline half, a removal landing in a failed connect is followed by an Offline write
+    /// under the removed server's key after <c>Forget</c> cleared it, and the re-added server, which hashes to
+    /// the same server_id, inherits it.
+    /// </summary>
+    [Fact]
+    public void TheConnectBody_ChecksRetiredRightBeforeEachConnectionAlert_WithNoAwaitBetween()
+    {
+        var source = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile(
+            "Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs"));
+        var start = source.IndexOf("private async Task TryConnectAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the worker has no TryConnectAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "TryConnectAsync has no closing brace");
+        var body = Regex.Replace(source[start..end], @"\s+", " ");
+
+        var checks = Regex.Matches(body, @"if \(server\.Retired\) \{[^{}]*\breturn; \}");
+        var alerts = Regex.Matches(body, @"await _selfAlerts!\.ApplyConnectionOutcomeAsync\(");
+        Assert.Equal(Regex.Matches(body, @"ApplyConnectionOutcomeAsync\(").Count, alerts.Count);
+        Assert.Matches(@"ApplyConnectionOutcomeAsync\([^;]*online: true", body);
+        Assert.Matches(@"ApplyConnectionOutcomeAsync\([^;]*online: false", body);
+
+        foreach (Match alert in alerts)
+        {
+            var flavour = alert.Index + 160 < body.Length ? body.Substring(alert.Index, 160) : body[alert.Index..];
+            Match? check = null;
+            foreach (Match candidate in checks)
+            {
+                if (candidate.Index + candidate.Length <= alert.Index)
+                {
+                    check = candidate;
+                }
+            }
+
+            Assert.True(check is not null, "no server.Retired re-check that returns comes before the connection alert: " + flavour);
+            var between = body[(check.Index + check.Length)..alert.Index];
+            Assert.False(between.Contains("await ", StringComparison.Ordinal),
+                "an await sits between the server.Retired re-check and the connection alert, so a removal in that await goes unseen: " + flavour);
+        }
+    }
+
     [Fact]
     public async Task AgAlerts_FireUnderTheRealServerKey_SoPerServerDeliveryAndHistoryStillCorrelate()
     {
