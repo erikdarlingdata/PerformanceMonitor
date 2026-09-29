@@ -222,6 +222,26 @@ public sealed class ConnectionAlertFailedSendRetryTests
     }
 
     [Fact]
+    public async Task ARemovedServer_DropsItsConnectionRefireClock_SoAReAddedOneThatIsStillDownIsAnnouncedOnItsSecondPass()
+    {
+        var rig = new Rig(connectionRefireMinutes: 10) { Answer = Delivered() };
+
+        await rig.ConnectionAsync(true);
+        await rig.ConnectionAsync(false);
+        Assert.Equal(1, rig.Fires);
+
+        /* Removed and added again two minutes into the outage, still down. The first pass is the silent baseline. The
+           next finds no down alert on record for THIS server, which re-fire treats as due now; the clock the removed
+           server's delivered alert stamped must not hold that back for the rest of its window. */
+        rig.Evaluator.Forget(ServerId);
+        await rig.AtAsync(TimeSpan.FromMinutes(2), () => rig.ConnectionAsync(false));
+        Assert.Equal(1, rig.Fires);
+        await rig.AtAsync(TimeSpan.FromMinutes(3), () => rig.ConnectionAsync(false));
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal("Server Unreachable", rig.Last.MetricName);
+    }
+
+    [Fact]
     public async Task ARemovedServers_AgRetry_IsKept_BecauseTheGroupOutlivesTheNode()
     {
         var rig = new Rig { Answer = Failed() };
