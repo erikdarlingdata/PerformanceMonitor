@@ -56,15 +56,14 @@ public sealed class ManagedConfMigrationStepsTests : IDisposable
     }
 
     [Fact]
-    public void BackupOriginal_SecondCall_MakesNoNewFile_ReturnsFirstPath()
+    public void BackupOriginal_SecondCall_SameBytes_MakesNoNewFile_ReturnsFirstPath()
     {
         var confPath = Path.Combine(_dataDir, "postgresql.conf");
         File.WriteAllText(confPath, "port = 5432\n");
 
         var first = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc));
 
-        // Mutate the conf and try again a day later — the backup must not move or duplicate.
-        File.WriteAllText(confPath, "port = 9999\n");
+        // Try again a day later with the conf as it was — the backup must not move or duplicate.
         var second = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, new DateTime(2026, 1, 3, 3, 4, 5, DateTimeKind.Utc));
 
         Assert.Equal(first, second);
@@ -72,17 +71,45 @@ public sealed class ManagedConfMigrationStepsTests : IDisposable
         Assert.Single(backups);
     }
 
+    /// <summary>The conf changed since the newest backup — an edit between attempts — so a new backup
+    /// holds the edited bytes and is the one returned; the earlier snapshot is kept as it was. A second
+    /// call with the conf unchanged returns that newest backup, not the first.</summary>
     [Fact]
-    public void BackupOriginal_ExistingBackup_NeverOverwritten_CheckedByContent()
+    public void BackupOriginal_ConfEditedSinceTheNewestBackup_TakesANewBackup_KeepsTheOld()
     {
         var confPath = Path.Combine(_dataDir, "postgresql.conf");
         File.WriteAllText(confPath, "port = 5432\n");
         var first = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc));
 
         File.WriteAllText(confPath, "port = 1111\nshared_buffers = 1GB\n");
-        ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, new DateTime(2026, 1, 4, 0, 0, 0, DateTimeKind.Utc));
+        var second = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, new DateTime(2026, 1, 4, 0, 0, 0, DateTimeKind.Utc));
 
+        Assert.NotEqual(first, second);
+        Assert.Contains("postgresql.conf.pre-4215.20260104T000000Z.bak", second, StringComparison.Ordinal);
         Assert.Equal("port = 5432\n", File.ReadAllText(first));
+        Assert.Equal("port = 1111\nshared_buffers = 1GB\n", File.ReadAllText(second));
+
+        var third = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, new DateTime(2026, 1, 5, 0, 0, 0, DateTimeKind.Utc));
+        Assert.Equal(second, third);
+        Assert.Equal(2, Directory.GetFiles(_dataDir, "postgresql.conf.pre-4215.*.bak").Length);
+    }
+
+    /// <summary>Two backups inside the same second: the second takes the next free second's name, so it
+    /// still sorts last and the first is never overwritten.</summary>
+    [Fact]
+    public void BackupOriginal_SameSecond_DifferentBytes_TakesTheNextFreeSecond()
+    {
+        var confPath = Path.Combine(_dataDir, "postgresql.conf");
+        var utcNow = new DateTime(2026, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        File.WriteAllText(confPath, "port = 5432\n");
+        var first = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, utcNow);
+
+        File.WriteAllText(confPath, "port = 1111\n");
+        var second = ManagedConfMigrationSteps.BackupOriginal(_dataDir, confPath, utcNow);
+
+        Assert.Contains("postgresql.conf.pre-4215.20260102T030406Z.bak", second, StringComparison.Ordinal);
+        Assert.Equal("port = 5432\n", File.ReadAllText(first));
+        Assert.Equal("port = 1111\n", File.ReadAllText(second));
     }
 
     [Fact]

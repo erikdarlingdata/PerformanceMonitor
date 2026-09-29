@@ -119,6 +119,10 @@ public class DarlingHardenFilesVerbTests
         /* #4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf is a target too, since
            File.Copy does not ACL it on its own. */
         Assert.Contains("DarlingStoreUpgrade.PreUpgradeAutoConfFileName", body, StringComparison.Ordinal);
+
+        /* Its sibling, the pre-upgrade postgresql.conf (the operator's own lines below the include), is copied the
+           same way and needs the same ACL. */
+        Assert.Contains("DarlingStoreUpgrade.PreUpgradeConfFileName", body, StringComparison.Ordinal);
     }
 
     /// <summary>

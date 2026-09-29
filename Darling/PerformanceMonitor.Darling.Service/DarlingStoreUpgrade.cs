@@ -106,6 +106,16 @@ internal sealed class DarlingStoreUpgrade
     /// </summary>
     public const string PreUpgradeAutoConfFileName = "postgresql.auto.conf.pre-upgrade";
 
+    /// <summary>
+    /// The pre-upgrade postgresql.conf, kept beside the new data directory before the two conf carries run
+    /// (<see cref="CarryConfAfterSwapAsync"/>). The operator's own lines below the darling-managed.conf include
+    /// exist only in the old data directory's file until <see cref="CarryOperatorConfLinesAsync"/> has carried
+    /// what the new major accepts, and in hard-link mode that directory is removed right after the carries, so
+    /// this copy is the operator's record of what a rejected or uncarried line said. Kept until the NEXT major
+    /// upgrade replaces it, like <see cref="PreUpgradeAutoConfFileName"/>.
+    /// </summary>
+    public const string PreUpgradeConfFileName = "postgresql.conf.pre-upgrade";
+
     /// <summary>Suffix on the runtime root holding the rescued previous runtime (pg_upgrade's --old-bindir).</summary>
     public const string PreviousRuntimeSuffix = "-prev";
 
@@ -374,16 +384,27 @@ internal sealed class DarlingStoreUpgrade
     /// catalogs, so link mode is offered — but only when the volume actually supports hard links, and
     /// always as a LOUD downgrade because it trades the rollback away. Neither affordable means abort, which
     /// leaves the store exactly as it was: running, on the old major.
+    ///
+    /// <para><paramref name="dataDirectoryMeasured"/> false means the walk that produced
+    /// <paramref name="dataDirectoryBytes"/> did not finish, so the number is a floor. A floor cannot prove
+    /// the room a copy needs — it used to count as the size, and a copy that fills the disk is recovered
+    /// before the commit point but costs the store the whole attempt — so copy mode is off the table and
+    /// the choice is the one too little room gets: link mode where the volume supports it, otherwise
+    /// abort.</para>
     /// </summary>
-    internal static TransferDecision DecideTransferMode(long dataDirectoryBytes, long freeBytes, bool hardLinksSupported)
+    internal static TransferDecision DecideTransferMode(long dataDirectoryBytes, long freeBytes, bool hardLinksSupported, bool dataDirectoryMeasured)
     {
         var copyNeeds = dataDirectoryBytes + dataDirectoryBytes + CopyHeadroomSlackBytes;
-        if (freeBytes >= copyNeeds)
+        if (dataDirectoryMeasured && freeBytes >= copyNeeds)
         {
             return new TransferDecision(
                 FileTransferMode.Copy,
                 $"{FormatBytes(freeBytes)} free covers the {FormatBytes(copyNeeds)} a copy needs (data {FormatBytes(dataDirectoryBytes)} x2 + 1 GB slack)");
         }
+
+        var shortfall = dataDirectoryMeasured
+            ? $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)})"
+            : $"the data directory could not be fully measured (at least {FormatBytes(dataDirectoryBytes)}), so the room a copy needs is unknown";
 
         /* Link mode still writes a fresh cluster's catalogs and the copied non-relation files; a tenth of
            the data directory plus the slack is a deliberately conservative floor for that. */
@@ -392,14 +413,14 @@ internal sealed class DarlingStoreUpgrade
         {
             return new TransferDecision(
                 FileTransferMode.Abort,
-                $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)}) and this volume does not support hard links, so link mode is unavailable");
+                $"{shortfall} and this volume does not support hard links, so link mode is unavailable");
         }
 
         if (freeBytes >= linkNeeds)
         {
             return new TransferDecision(
                 FileTransferMode.Link,
-                $"only {FormatBytes(freeBytes)} free (a copy needs {FormatBytes(copyNeeds)}) — falling back to hard-link mode, which does NOT leave a rollback copy");
+                $"{shortfall} — falling back to hard-link mode, which does NOT leave a rollback copy");
         }
 
         return new TransferDecision(
@@ -717,6 +738,175 @@ internal sealed class DarlingStoreUpgrade
         }
     }
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetDiskFreeSpaceExW(
+        string lpDirectoryName, out ulong lpFreeBytesAvailableToCaller, out ulong lpTotalNumberOfBytes, out ulong lpTotalNumberOfFreeBytes);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVolumePathNameW(
+        string lpszFileName, [Out] char[] lpszVolumePathName, uint cchBufferLength);
+
+    /// <summary>MAX_PATH: the least room <see cref="ResolveVolumeMountPoint"/> gives <c>GetVolumePathNameW</c> for its answer.</summary>
+    private const int VolumePathBufferFloor = 260;
+
+    /// <summary>ERROR_ACCESS_DENIED: what <c>GetDiskFreeSpaceExW</c> answers for a folder the caller holds no right on.</summary>
+    private const int ErrorAccessDenied = 5;
+
+    /// <summary>
+    /// The bytes this process may still write on the volume that holds <paramref name="directory"/>, asked
+    /// for the directory's own volume. <see cref="DriveInfo"/> answers for a drive letter, and a data
+    /// directory on a volume mounted at a folder (a second disk mounted under the install directory, say) is
+    /// not on its drive letter's volume: the upgrade's headroom check used to read the letter's free space
+    /// and could choose copy mode on a volume with no room for the copy. Available-to-caller, like
+    /// <c>DriveInfo.AvailableFreeSpace</c>, so a quota on the service account counts. Throws when the volume
+    /// cannot be read (a directory that is not there, a volume that is not ready), rather than answering for
+    /// the drive letter: a headroom read from another volume is the wrong answer this exists to end, and the
+    /// upgrade's pre-commit handler turns the throw into a Failed outcome with the store still running on its
+    /// old major.
+    /// </summary>
+    internal static long ReadAvailableFreeBytes(string directory)
+        => ReadVolumeSpace(directory).AvailableFreeBytes;
+
+    /// <summary>
+    /// The free and total bytes of the volume that holds <paramref name="directory"/>, both from the one
+    /// <c>GetDiskFreeSpaceExW</c> call. A report that shows a volume's size beside its free space reads both
+    /// here so the two describe ONE volume, and a directory on a volume mounted at a folder gets that
+    /// volume's figures rather than the ones behind its drive letter. Both are the caller's view, like
+    /// <c>DriveInfo.AvailableFreeSpace</c> and <c>DriveInfo.TotalSize</c>, so a quota on the service account
+    /// counts.
+    ///
+    /// <para>The directory is asked first: <c>GetDiskFreeSpaceExW</c> opens whatever it is given, so a data
+    /// directory reached through a directory junction or a symbolic link is read on the volume the link
+    /// points at, where a lookup from the path alone names the volume that holds the link. Only when the
+    /// caller is turned away from the directory with "access denied" (a command prompt that is not elevated,
+    /// the viewer's own profile, asking about a data directory only the service account can open) is the
+    /// space asked of the volume's mount point (<see cref="ResolveVolumeMountPoint"/>) instead: the size and
+    /// free space of a volume do not depend on the caller's access to one folder on it. Any other failure
+    /// throws <see cref="IOException"/> (a directory that is not there, a volume that is not ready), and the
+    /// read never answers for the drive letter. A Windows call: a caller that also runs elsewhere keeps its
+    /// own read for the other platforms.</para>
+    /// </summary>
+    internal static (long AvailableFreeBytes, long TotalBytes) ReadVolumeSpace(string directory)
+        => ReadVolumeSpaceVia(directory, ReadDirectorySpace, ResolveVolumeMountPoint, ReadMountPointSpace);
+
+    /// <summary>
+    /// <see cref="ReadVolumeSpace"/> with its three steps replaceable, so a test can say what the directory
+    /// read answers, which mount point holds a directory and what that mount point's volume holds. The order
+    /// is the contract: the directory is asked first, and the numbers it gives are the answer, with no mount
+    /// point looked up. Only a directory read that answers <c>null</c> (the caller is turned away from the
+    /// directory) goes on to the mount point the second step finds, and any other failure of the first step
+    /// reaches the caller as it is. The space is never asked of the drive letter.
+    /// </summary>
+    internal static (long AvailableFreeBytes, long TotalBytes) ReadVolumeSpaceVia(
+        string directory,
+        Func<string, (long AvailableFreeBytes, long TotalBytes)?> readDirectorySpace,
+        Func<string, string> resolveMountPoint,
+        Func<string, (long AvailableFreeBytes, long TotalBytes)> readMountPointSpace)
+        => readDirectorySpace(directory) ?? readMountPointSpace(resolveMountPoint(directory));
+
+    /// <summary>
+    /// The root of the volume that holds <paramref name="directory"/>: <c>C:\</c> for a folder on a drive
+    /// letter, the mount point's own folder (with its trailing separator) for a volume mounted at a folder,
+    /// the share root for a UNC path. Found by <c>GetVolumePathNameW</c>, which works it out from the path
+    /// without opening the directory, so it answers for a directory the caller has no access to: the read
+    /// <see cref="ReadVolumeSpace"/> falls back to when the directory itself turns the caller away.
+    ///
+    /// <para>A directory that is not there is refused. <c>GetVolumePathNameW</c> answers for it anyway, with
+    /// the volume of the nearest folder that does exist, and that is the wrong-volume answer this read exists
+    /// to end: a volume mounted at a folder that is offline leaves an ordinary empty folder in its place, and
+    /// a data directory below it would be judged by the drive letter's free space. Only "not there" is
+    /// refused. A directory the caller cannot open is still on a volume.</para>
+    /// </summary>
+    internal static string ResolveVolumeMountPoint(string directory)
+    {
+        var path = Path.GetFullPath(directory);
+
+        try
+        {
+            _ = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new IOException(
+                $"Could not read the free space of the volume that holds {path}: the directory is not there.", ex);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            /* Closed to this caller, but it is there, and which volume it is on does not depend on the caller's access. */
+        }
+
+        var buffer = new char[Math.Max(path.Length, VolumePathBufferFloor) + 1];
+        if (!GetVolumePathNameW(path, buffer, (uint)buffer.Length))
+        {
+            throw new IOException(
+                $"Could not find the volume that holds {path} (Win32 error {Marshal.GetLastPInvokeError()}).");
+        }
+
+        var length = Array.IndexOf(buffer, '\0');
+        return length < 0 ? new string(buffer) : new string(buffer, 0, length);
+    }
+
+    /// <summary>
+    /// The space of the volume behind <paramref name="directory"/>, asked of the directory itself, or
+    /// <c>null</c> when the caller is turned away from it with "access denied": that is the one answer
+    /// <see cref="ReadVolumeSpaceVia"/> goes on from, to the volume's mount point. Any other failure throws
+    /// <see cref="IOException"/>, so a directory that is not there is not answered with the volume above it.
+    /// </summary>
+    private static (long AvailableFreeBytes, long TotalBytes)? ReadDirectorySpace(string directory)
+    {
+        var path = WithTrailingSeparator(Path.GetFullPath(directory));
+
+        if (TryQueryVolumeSpace(path, out var space, out var win32Error))
+        {
+            return space;
+        }
+
+        if (win32Error == ErrorAccessDenied)
+        {
+            return null;
+        }
+
+        throw new IOException(
+            $"Could not read the free space of the volume that holds {path} (Win32 error {win32Error}).");
+    }
+
+    private static (long AvailableFreeBytes, long TotalBytes) ReadMountPointSpace(string mountPoint)
+    {
+        var path = WithTrailingSeparator(mountPoint);
+
+        if (!TryQueryVolumeSpace(path, out var space, out var win32Error))
+        {
+            throw new IOException(
+                $"Could not read the free space of the volume mounted at {path} (Win32 error {win32Error}).");
+        }
+
+        return space;
+    }
+
+    /// <summary>A trailing separator is what the Win32 call wants for a UNC path and harmless for a local one.</summary>
+    private static string WithTrailingSeparator(string path)
+        => Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar;
+
+    /// <summary>The one <c>GetDiskFreeSpaceExW</c> call, with the Win32 error read straight after it.</summary>
+    private static bool TryQueryVolumeSpace(
+        string path, out (long AvailableFreeBytes, long TotalBytes) space, out int win32Error)
+    {
+        if (GetDiskFreeSpaceExW(path, out var availableToCaller, out var totalBytes, out _))
+        {
+            space = (ClampToLong(availableToCaller), ClampToLong(totalBytes));
+            win32Error = 0;
+            return true;
+        }
+
+        space = default;
+        win32Error = Marshal.GetLastPInvokeError();
+        return false;
+    }
+
+    private static long ClampToLong(ulong value) => value > long.MaxValue ? long.MaxValue : (long)value;
+
     /// <summary>
     /// Total bytes of every file under <paramref name="directory"/>; unreadable entries are skipped.
     ///
@@ -732,8 +922,9 @@ internal sealed class DarlingStoreUpgrade
 
     /// <summary>
     /// <see cref="MeasureDirectoryBytes(string)"/> with a wall-clock ceiling. Returns what it managed to add
-    /// up and sets <paramref name="complete"/> false when <paramref name="deadline"/> cut the walk short, so
-    /// a caller can say "at least" instead of stating a number it did not finish computing.
+    /// up and sets <paramref name="complete"/> false when <paramref name="deadline"/> cut the walk short, or
+    /// when an error ended it (an unreadable subdirectory stops the enumeration), so a caller can say "at
+    /// least" instead of stating a number it did not finish computing.
     ///
     /// <para>The report path needs this because it measures foreign data directories on EVERY service start,
     /// before the store is up, on exactly the low-headroom hosts the feature exists for. A budget is the
@@ -770,7 +961,11 @@ internal sealed class DarlingStoreUpgrade
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* Partial measurement still beats no measurement; the caller's slack absorbs it. */
+            /* An error ends the enumeration, so what was added up is a floor, not the size: reported as
+               incomplete, the same as a walk the deadline cut short. A caller that wants an order of
+               magnitude can still use the total; the upgrade's headroom check must not, because a floor
+               that passes its slack is how a copy fills the disk. */
+            complete = false;
         }
 
         return total;
@@ -3461,9 +3656,10 @@ internal sealed class DarlingStoreUpgrade
         string oldDataDirectory,
         string newDataDirectory,
         string newBinDirectory,
+        string? originalConfPath,
         CancellationToken cancellationToken)
         => CarryOperatorConfLinesAsync(
-            oldDataDirectory, newDataDirectory, newBinDirectory,
+            oldDataDirectory, newDataDirectory, newBinDirectory, originalConfPath,
             (exePath, arguments, timeout, token) => DarlingManagedPostgres.RunToolAsync(exePath, arguments, timeout, token),
             cancellationToken);
 
@@ -3484,13 +3680,19 @@ internal sealed class DarlingStoreUpgrade
     /// not need to distinguish a same-major move from a cross-major carry). Never throws: same
     /// "must never brick a completed upgrade" posture the auto.conf carry follows for a probe failure — an
     /// unexpected exception here resets the new cluster's <c>postgresql.conf</c> back to its pre-carry
-    /// (legacy-appended) baseline and logs a warning naming the retained old data directory as the manual
-    /// fallback, rather than propagate.
+    /// (legacy-appended) baseline and logs a warning naming where the original lines are kept as the manual
+    /// fallback, rather than propagate. That place is <paramref name="originalConfPath"/>, the file
+    /// <see cref="CarryConfAfterSwapAsync"/>'s save step reported as holding the old lines (the copy it saves
+    /// as <see cref="PreUpgradeConfFileName"/>, or the old data directory's own file when that copy could not
+    /// be made), never a guess from which files happen to exist: an earlier major upgrade's copy can still be
+    /// sitting there. It is null when the save step found no postgresql.conf to save, and the old data
+    /// directory's own file is named then.
     /// </summary>
     internal async Task<OperatorConfLineCarryResult> CarryOperatorConfLinesAsync(
         string oldDataDirectory,
         string newDataDirectory,
         string newBinDirectory,
+        string? originalConfPath,
         Func<string, string, TimeSpan, CancellationToken, Task<(int ExitCode, string Output)>> probe,
         CancellationToken cancellationToken)
     {
@@ -3520,6 +3722,7 @@ internal sealed class DarlingStoreUpgrade
             baseline += "\n";
         }
 
+        var originalConf = originalConfPath ?? sourcePath;
         var postgresExe = Path.Combine(newBinDirectory, "postgres.exe");
         var goodLines = new List<string>();
         var carried = 0;
@@ -3568,15 +3771,15 @@ internal sealed class DarlingStoreUpgrade
                         _logger.LogWarning(
                             "NOT carried: {Name} — the new PostgreSQL binaries reject it (reason withheld: the " +
                             "name suggests it may hold a credential, or names an extension setting whose reason " +
-                            "could). The original line is kept in the retained pre-upgrade data directory.",
-                            name);
+                            "could). The original line is kept in {OriginalConf}.",
+                            name, originalConf);
                     }
                     else
                     {
                         _logger.LogWarning(
                             "NOT carried: {Name} — the new PostgreSQL binaries reject it: {Reason}. The original " +
-                            "line is kept in the retained pre-upgrade data directory.",
-                            name, output);
+                            "line is kept in {OriginalConf}.",
+                            name, output, originalConf);
                     }
                 }
             }
@@ -3604,16 +3807,15 @@ internal sealed class DarlingStoreUpgrade
                 _logger.LogWarning(
                     "Carrying operator postgresql.conf lines below the include did not finish ({Reason}), and " +
                     "resetting postgresql.conf to its pre-carry content also failed ({ResetReason}) — check " +
-                    "{Path} by hand against the retained pre-upgrade data directory.",
-                    ex.Message, resetEx.Message, newConfPath);
+                    "{Path} by hand against the original in {OriginalConf}.",
+                    ex.Message, resetEx.Message, newConfPath, originalConf);
                 return none;
             }
 
             _logger.LogWarning(
                 "Carrying operator postgresql.conf lines below the include did not finish ({Reason}) — " +
-                "postgresql.conf was reset to its pre-carry content. The originals are kept in the retained " +
-                "pre-upgrade data directory.",
-                ex.Message);
+                "postgresql.conf was reset to its pre-carry content. The originals are kept in {OriginalConf}.",
+                ex.Message, originalConf);
             return none;
         }
 
@@ -3664,9 +3866,14 @@ internal sealed class DarlingStoreUpgrade
         {
             /* ---- 1. space + hard-link capability, measured before anything is touched ---- */
             step = "disk-headroom";
-            var dataBytes = MeasureDirectoryBytes(context.DataDirectory);
-            var free = new DriveInfo(Path.GetPathRoot(parent)!).AvailableFreeSpace;
-            var decision = DecideTransferMode(dataBytes, free, SupportsHardLinks(parent));
+            /* The size walk says whether it finished: a walk an error cut short is a floor, and the decision
+               treats a floor as unknown rather than as the size. The free space is read for the parent
+               directory itself, not its drive letter: a data directory on a volume mounted at a folder is on
+               a different volume from its drive root, whose free space says nothing about the room the copy
+               will take. */
+            var dataBytes = MeasureDirectoryBytes(context.DataDirectory, deadline: null, out var dataMeasured);
+            var free = ReadAvailableFreeBytes(parent);
+            var decision = DecideTransferMode(dataBytes, free, SupportsHardLinks(parent), dataMeasured);
             mode = decision.Mode;
 
             if (mode == FileTransferMode.Abort)
@@ -3827,35 +4034,29 @@ internal sealed class DarlingStoreUpgrade
                a completed upgrade. */
             swapped = true;
 
-            /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) — BEFORE anything gives the new
-                    cluster its first real start, the quiesced TimescaleDB update just below included. Read
-                    from `retained`: the old data directory's content now lives there, since the swap above
-                    already moved it. Any failure here is caught by the post-commit handler below, which
-                    keeps the store running on the new major regardless — never a reason to brick it. */
-            step = "carry-auto-conf";
-            await CarryAutoConfAsync(
-                retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions);
+            /* ---- 8. carry the pre-upgrade postgresql.auto.conf (#4253) and, alongside it with the same
+                    post-swap timing (#4358), the operator lines below the darling-managed.conf include in
+                    the OLD cluster's postgresql.conf — BEFORE anything gives the new cluster its first real
+                    start, the quiesced TimescaleDB update just below included. Both read from `retained`:
+                    the old data directory's content now lives there, since the swap above already moved it.
+                    The operator lines are appended to the NEW cluster's postgresql.conf AFTER the legacy
+                    blocks context.AppendManagedConf already wrote there (step "conf-new-cluster", above), so
+                    an operator's override still wins over the legacy block's own copy of the same key. Any
+                    failure here is caught by the post-commit handler below, which keeps the store running on
+                    the new major regardless — never a reason to brick it. The old postgresql.conf is saved
+                    beside the new data directory first, and in hard-link mode `retained` goes the moment the
+                    carries are done with it, whether they returned or threw, once that copy exists
+                    (CarryConfAfterSwapAsync says why). ---- */
+            await CarryConfAfterSwapAsync(
+                mode,
+                retained,
+                context.DataDirectory,
+                name => step = name,
+                () => CarryAutoConfAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken, context.SslServerOptions),
+                linesPath => CarryOperatorConfLinesAsync(retained, context.DataDirectory, context.NewBinDirectory, linesPath, cancellationToken),
+                _logger);
 
-            /* #4358: alongside the auto.conf carry, same post-swap timing — one pattern. Reads the OLD
-               cluster's postgresql.conf from `retained` (its content now lives there, since the swap above
-               already moved it), extracts any operator lines below the darling-managed.conf include, and
-               appends them to the NEW cluster's postgresql.conf AFTER the legacy blocks
-               context.AppendManagedConf already wrote there (step "conf-new-cluster", above) — so an
-               operator's override still wins over the legacy block's own copy of the same key. Any failure
-               here is caught by the post-commit handler below, which keeps the store running on the new
-               major regardless — never a reason to brick it. */
-            step = "carry-operator-conf-lines";
-            await CarryOperatorConfLinesAsync(retained, context.DataDirectory, context.NewBinDirectory, cancellationToken);
-
-            if (mode == FileTransferMode.Link)
-            {
-                /* Hard-link mode leaves an old directory that SHARES its files with the new cluster — it is
-                   not a rollback copy and keeping it invites someone to try. Delete it now, loudly. */
-                TryDeleteDirectory(retained);
-                _logger.LogWarning(
-                    "Removed the pre-upgrade data directory immediately: hard-link mode shares its files with the upgraded cluster, so it was never a usable rollback copy.");
-            }
-            else
+            if (mode != FileTransferMode.Link)
             {
                 /* Non-fatal on purpose, and belt-and-braces with the post-commit catch below. The upgrade is
                    already COMMITTED by the time this runs, so a marker file that will not write must not
@@ -3957,6 +4158,149 @@ internal sealed class DarlingStoreUpgrade
         {
             TryDeleteFile(passwordFile);
         }
+    }
+
+    /// <summary>
+    /// The two post-swap conf carries, with hard-link mode's removal of the retained pre-upgrade directory
+    /// bound to them in a <c>finally</c>. In hard-link mode that directory SHARES its files with the upgraded
+    /// cluster, so it is not a rollback copy and keeping it invites someone to try one; it used to be
+    /// deleted only after both carries returned, so a carry that threw left it beside the new cluster for
+    /// the two starts the retention sweep gives a real copy. The carries are its last readers, so it goes
+    /// the moment they are done with it, whether they returned or threw. Only these two steps are wrapped,
+    /// never the upgrade's outer try: before the swap commits, the same directory can be the only copy of
+    /// the store. <paramref name="setStep"/> names the step in flight for the post-commit handler's
+    /// message. Its own method so a test can run the carries against a directory, without a cluster.
+    ///
+    /// <para>The old directory's postgresql.conf is the only place the operator's lines below the
+    /// darling-managed.conf include still exist, and the auto.conf carry can throw (a probe timeout, a
+    /// cancellation at service stop, a failed reset) before the operator-lines carry has read it. So before
+    /// either carry, in every mode, it is copied beside <paramref name="newDataDirectory"/> as
+    /// <see cref="PreUpgradeConfFileName"/> and hardened like <see cref="PreUpgradeAutoConfFileName"/>. In
+    /// hard-link mode the retained directory is removed only once that copy exists (or there was no
+    /// postgresql.conf to copy). When the copy could not be made it is kept, with a warning, and the retention
+    /// sweep ages it out after <see cref="RollbackRetentionStarts"/> starts as it did before this copy existed.</para>
+    ///
+    /// <para><paramref name="carryOperatorConfLines"/> is handed the path the save step reports as holding the
+    /// old lines, so its warnings name that file and not a guess from which files exist beside the new data
+    /// directory: the saved copy, or the retained directory's own postgresql.conf when the copy could not be
+    /// made (a copy left by an earlier major upgrade may still be sitting at the saved path then, holding
+    /// that upgrade's lines), or null when there was no postgresql.conf to save.</para>
+    /// </summary>
+    internal static async Task CarryConfAfterSwapAsync(
+        FileTransferMode mode,
+        string retained,
+        string newDataDirectory,
+        Action<string> setStep,
+        Func<Task> carryAutoConf,
+        Func<string?, Task> carryOperatorConfLines,
+        ILogger logger)
+    {
+        /* False until the save step has answered, so anything unexpected before that leaves the retained
+           directory in place. */
+        var saveAnswered = false;
+        string? oldConfPath = null;
+        try
+        {
+            oldConfPath = TrySavePreUpgradeConf(retained, newDataDirectory, logger);
+            saveAnswered = true;
+
+            setStep("carry-auto-conf");
+            await carryAutoConf();
+
+            setStep("carry-operator-conf-lines");
+            await carryOperatorConfLines(oldConfPath);
+        }
+        finally
+        {
+            if (mode == FileTransferMode.Link)
+            {
+                /* The retained directory goes once it no longer holds the only copy of the file: the save step
+                   reported the saved copy (the file named PreUpgradeConfFileName), or there was none to save
+                   (null). Its other answer, the retained directory's own postgresql.conf, keeps it. Read off
+                   the file name so the finally has nothing left to compute that could throw. */
+                if (saveAnswered
+                    && (oldConfPath is null
+                        || string.Equals(Path.GetFileName(oldConfPath), PreUpgradeConfFileName, StringComparison.Ordinal)))
+                {
+                    TryDeleteDirectory(retained);
+                    logger.LogWarning(
+                        "Removed the pre-upgrade data directory immediately: hard-link mode shares its files with the upgraded cluster, so it was never a usable rollback copy.");
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Kept the pre-upgrade data directory at {Path} because the pre-upgrade postgresql.conf could not be " +
+                        "saved beside the new data directory, so its operator lines exist only there. Hard-link mode shares " +
+                        "its files with the upgraded cluster, so it is not a usable rollback copy: it is kept only for those " +
+                        "lines, and the retention sweep removes it after {Starts} service starts.",
+                        retained, RollbackRetentionStarts);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Where <see cref="PreUpgradeConfFileName"/> lives: beside the new data directory, in its parent, where
+    /// <see cref="CarryAutoConfAsync"/> keeps <see cref="PreUpgradeAutoConfFileName"/> and this class keeps the
+    /// pg-upgrade password file and the retained pre-upgrade data directory.
+    /// </summary>
+    private static string SavedConfPath(string newDataDirectory)
+        => Path.Combine(
+            Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(newDataDirectory)))!,
+            PreUpgradeConfFileName);
+
+    /// <summary>
+    /// Copies the old data directory's postgresql.conf to <see cref="SavedConfPath"/> and hardens the copy the
+    /// way <see cref="CarryAutoConfAsync"/> hardens its auto.conf original (best effort: a failed harden is a
+    /// warning, and the copy still counts). Returns the path that holds the old lines: the saved copy when it
+    /// was saved, the retained directory's own postgresql.conf, after a warning, when the copy could not be
+    /// made (a copy left by an earlier major upgrade may still sit at the saved path then, and it holds that
+    /// upgrade's lines, so it is never the answer), or null when there was no postgresql.conf to save. Never
+    /// throws: a copy that cannot be made must not stop the carries or the upgrade.
+    /// </summary>
+    private static string? TrySavePreUpgradeConf(string retained, string newDataDirectory, ILogger logger)
+    {
+        string preUpgradeCopy;
+        try
+        {
+            var sourcePath = Path.Combine(retained, "postgresql.conf");
+            if (!File.Exists(sourcePath))
+            {
+                return null;
+            }
+
+            preUpgradeCopy = SavedConfPath(newDataDirectory);
+            File.Copy(sourcePath, preUpgradeCopy, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            var retainedConf = Path.Combine(retained, "postgresql.conf");
+            logger.LogWarning(
+                "Could not save the pre-upgrade postgresql.conf beside the new data directory ({Message}). Its " +
+                "operator lines below the darling-managed.conf include still exist in {Path}.",
+                ex.Message, retainedConf);
+            return retainedConf;
+        }
+
+        try
+        {
+            DarlingFileSecurity.HardenFile(preUpgradeCopy, allowInteractiveRead: false);
+        }
+        catch (Exception ex)
+        {
+            /* Best-effort, like the auto.conf original this mirrors — a failure here must not cost the copy
+               itself, only get logged so it can be fixed by hand. */
+            logger.LogWarning(
+                "Could not restrict {Path} to the store's own ACL ({Message}) — it may be readable more " +
+                "broadly than the data directory it was copied from.",
+                preUpgradeCopy, ex.Message);
+        }
+
+        logger.LogInformation(
+            "Pre-upgrade postgresql.conf saved to {Path} — kept until the NEXT major upgrade replaces it, not " +
+            "deleted with the rest of the pre-upgrade data directory.",
+            preUpgradeCopy);
+        return preUpgradeCopy;
     }
 
     private async Task TryStopAsync(UpgradeContext context, bool oldStarted)
