@@ -706,6 +706,11 @@ SELECT EXISTS
         ILogger? logger,
         CancellationToken cancellationToken)
     {
+        /* The probes bind these as timestamp-without-time-zone, which Npgsql refuses for Kind=Utc; a caller that
+           resolves its window from DateTime.UtcNow (the MCP tool) would otherwise fail every decision and read raw. */
+        windowStart = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified);
+        windowEnd = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified);
+        literalWindowEnd = literalWindowEnd is DateTime lw ? DateTime.SpecifyKind(lw, DateTimeKind.Unspecified) : null;
         try
         {
             DateTime? filledSince;
