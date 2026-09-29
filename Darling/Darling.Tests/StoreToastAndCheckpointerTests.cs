@@ -190,8 +190,7 @@ public sealed class StoreToastAndCheckpointerTests
            flat top level StoreMetricsDailySql still has; the trailing-pair-before-FROM shape is checked
            against each read's own indentation instead of one shared literal. #4734: the daily read appends the
            kept row's own metric_time after the pair (the latest read already returns it as its third column),
-           so a growth point can say when its snapshot was taken; the pair still follows the checkpointer-free
-           columns directly and nothing else moves. */
+           so a growth point can say when its snapshot was taken. No other column moves. */
         var dailyNormalised = DarlingStoreMetricsReader.StoreMetricsDailySql.Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains("    total_failures,\n    toast_bytes,\n    toast_live_bytes,\n    metric_time\nFROM collect.store_metrics", dailyNormalised, StringComparison.Ordinal);
 
