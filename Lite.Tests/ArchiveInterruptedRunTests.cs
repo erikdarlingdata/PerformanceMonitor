@@ -76,6 +76,18 @@ public sealed class ArchiveInterruptedRunTests : IDisposable
         return Convert.ToInt64(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken));
     }
 
+    private static void ExecInMemory(string sql)
+    {
+        using var connection = new DuckDBConnection("DataSource=:memory:");
+        connection.Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+
+    private void MakeParquet(string fileName, long from, long to) =>
+        ExecInMemory($"COPY (SELECT i AS id, md5(i::VARCHAR) AS payload FROM range({from}, {to}) t(i)) TO '{P(fileName)}' (FORMAT PARQUET)");
+
     /* 50 old collection_log rows and 20 old config_alert_log rows, all far older than the 7-day cutoff. */
     private async Task<DuckDbInitializer> SeedAsync()
     {
@@ -117,6 +129,10 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
 
     private string[] Journals() =>
         Directory.GetFiles(_archiveDir, "*.archive-pending*").Select(f => Path.GetFileName(f)).Order(StringComparer.Ordinal).ToArray();
+
+    private string[] TempFiles() =>
+        Directory.GetFiles(_archiveDir).Select(f => Path.GetFileName(f))
+            .Where(f => f.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)).Order(StringComparer.Ordinal).ToArray();
 
     [Fact]
     public async Task RunKilledBetweenThePromoteAndTheDelete_IsFinishedByTheNextRun_WithEachRowKeptOnce()
@@ -200,6 +216,51 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
         Assert.Equal(50, await ScalarAsync("SELECT COUNT(*) FROM collection_log"));
         Assert.Equal(0, Archived("collection_log", "log_id").Rows);
         Assert.Empty(Journals());
+    }
+
+    [Fact]
+    public async Task StaleTempFiles_AreRemovedAtTheStartOfTheNextRun()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        /* What a process killed inside a COPY, a compaction merge or a journal write leaves behind. */
+        File.WriteAllText(P("20260901_0000_wait_stats.parquet.tmp"), "partial COPY");
+        File.WriteAllText(P("202609_wait_stats.parquet.tmp"), "partial merge");
+        File.WriteAllText(P("collection_log.archive-pending.tmp"), "partial journal");
+        MakeParquet("202609_t.parquet", 0, 10);
+
+        await new ArchiveService(initializer, _archiveDir).ArchiveOldDataAsync(hotDataDays: 7);
+
+        Assert.Empty(TempFiles());
+        Assert.True(File.Exists(P("202609_t.parquet")), "a real archive file went with the temps");
+    }
+
+    [Fact]
+    public async Task ATempNamedByASwapJournalThatIsStillLive_IsKept_WhileOtherTempsGo()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+
+        MakeParquet("202609_t.parquet", 0, 1_000);              /* merged output, in place */
+        MakeParquet("20260928_1400_t.parquet", 500, 1_000);      /* folded into the output, not yet deleted */
+        File.WriteAllLines(P("202609_t.swap"),
+        [
+            "state|swapped",
+            "output|replacing|202609_t.parquet",
+            "input|20260928_1400_t.parquet"
+        ]);
+        File.WriteAllText(P("202609_t.parquet.tmp"), "named by the journal");
+        File.WriteAllText(P("20260901_0000_wait_stats.parquet.tmp"), "partial COPY");
+
+        /* An input that cannot be deleted keeps the journal alive through this run. */
+        using (new FileStream(P("20260928_1400_t.parquet").Replace("/", "\\"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            await new ArchiveService(initializer, _archiveDir).ArchiveOldDataAsync(hotDataDays: 7);
+        }
+
+        Assert.True(File.Exists(P("202609_t.swap")), "the journal was dropped although its input could not be deleted");
+        Assert.Equal(["202609_t.parquet.tmp"], TempFiles());
     }
 
     private sealed class CapturingLogger : ILogger<ArchiveService>

@@ -367,6 +367,71 @@ public class ArchiveService
         }
 
         await RecoverPendingArchivesAsync();
+
+        /* After the swap journals are replayed: a journal the replay could not finish still names temps it needs. */
+        ReplayCompactionSwapJournals();
+        RemoveStaleTempFiles();
+    }
+
+    /// <summary>
+    /// Deletes the <c>.tmp</c> files left in the archive folder by a process killed inside a COPY (a periodic or
+    /// reset export, a compaction merge) or between writing a journal and renaming it. Nothing else removes them
+    /// (#4720), and they sit on a disk that is already under size pressure. A <c>.tmp</c> that a swap journal
+    /// still names is kept: an undo that could not finish needs it, and it may hold rows that exist nowhere else.
+    /// Runs under the process-wide archive lock, so no export or merge of this process has a <c>.tmp</c> open.
+    /// </summary>
+    private void RemoveStaleTempFiles()
+    {
+        var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var journalPath in Directory.GetFiles(_archivePath, "*" + SwapJournalSuffix))
+            {
+                var swap = ReadSwapJournal(journalPath.Replace("\\", "/"));
+                if (swap is null)
+                {
+                    continue;
+                }
+
+                foreach (var (_, tempPath, _) in swap.Outputs)
+                {
+                    named.Add(Path.GetFileName(tempPath));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            /* A journal that cannot be read may name any temp, so none is deleted until it can. */
+            _logger?.LogWarning(ex, "Could not read a compaction swap journal; the leftover .tmp files stay until the next run");
+            return;
+        }
+
+        var removed = 0;
+        foreach (var path in Directory.GetFiles(_archivePath, "*.tmp"))
+        {
+            var name = Path.GetFileName(path);
+
+            /* The three-letter pattern also matches longer extensions that start with it on Windows. */
+            if (!name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) || named.Contains(name))
+            {
+                continue;
+            }
+
+            try
+            {
+                File.Delete(path);
+                removed++;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger?.LogWarning("Could not delete the leftover {File}; it is removed by a later run: {Message}", name, ex.Message);
+            }
+        }
+
+        if (removed > 0)
+        {
+            _logger?.LogInformation("Removed {Count} partial .tmp file(s) that an interrupted run left in the archive folder", removed);
+        }
     }
 
     /// <summary>
@@ -493,17 +558,11 @@ COPY (
     }
 
     /// <summary>
-    /// Compacts all per-cycle parquet files into monthly files (YYYYMM_tablename.parquet).
-    /// This keeps the archive directory small (~75 files for 3 months of 25 tables)
-    /// and dramatically improves DuckDB read_parquet glob performance.
+    /// Finishes or undoes every compaction swap an earlier run left behind. Returns the input files that swaps
+    /// folded into their outputs but could not delete, and the groups whose swap could not be resolved.
     /// </summary>
-    internal void CompactParquetFiles()
+    private (HashSet<string> AlreadyFolded, HashSet<(string Month, string Table)> UnresolvedGroups) ReplayCompactionSwapJournals()
     {
-        if (!Directory.Exists(_archivePath))
-        {
-            return;
-        }
-
         /* Finish or undo any swap a previous run left behind (a crash, a kill, or a file it could not delete)
            before grouping, so this run starts from a consistent set of files. Inputs that an earlier swap
            folded into its outputs but could not delete are already counted in those outputs: they stay out
@@ -544,6 +603,23 @@ COPY (
                 }
             }
         }
+
+        return (alreadyFolded, unresolvedGroups);
+    }
+
+    /// <summary>
+    /// Compacts all per-cycle parquet files into monthly files (YYYYMM_tablename.parquet).
+    /// This keeps the archive directory small (~75 files for 3 months of 25 tables)
+    /// and dramatically improves DuckDB read_parquet glob performance.
+    /// </summary>
+    internal void CompactParquetFiles()
+    {
+        if (!Directory.Exists(_archivePath))
+        {
+            return;
+        }
+
+        var (alreadyFolded, unresolvedGroups) = ReplayCompactionSwapJournals();
 
         var allFiles = Directory.GetFiles(_archivePath, "*.parquet")
             .Select(f => Path.GetFileName(f))
