@@ -431,7 +431,7 @@ LIMIT 1";
     /// <summary>
     /// Gets recent collection log entries for a server, most recent first, bounded to the tab's
     /// settable window. A preset ends "now" (<paramref name="hoursBack"/> from now); a custom range
-    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both already server-time) bounds
+    /// (<paramref name="fromDate"/>/<paramref name="toDate"/>, both naive UTC as the tab holds them, #4766) bounds
     /// <c>collection_time</c> on BOTH sides EXACTLY via <see cref="GetTimeRange"/> — mirroring how
     /// <see cref="GetWaitStatsAsync"/> windows its read. The old single now-relative lower bound ignored
     /// the custom To, rounding a custom range to a hours-back-from-now span.

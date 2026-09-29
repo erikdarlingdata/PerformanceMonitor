@@ -1254,9 +1254,9 @@ ORDER BY wait_type, 2";
     ///
     /// <para>#2484: takes <paramref name="asOfUtc"/> so the MCP twin (get_lock_wait_trend) can anchor the
     /// window at a past incident. Threaded as the anchor rather than as fromDate/toDate because those two
-    /// are SERVER-LOCAL and converted back to UTC inside GetTimeRange — handing them an instant already in
-    /// UTC would shift the window by the monitored server's offset. collection_time is stored in UTC, so
-    /// this read windows on the UTC bounds.</para>
+    /// are a custom range's UTC bounds (#4766) and the caller here has one instant, the end of an hours-back
+    /// window: the anchor states that end once and the window's length comes from hoursBack. collection_time
+    /// is stored in UTC, so this read windows on the UTC bounds.</para>
     /// <para>#4349: buckets to <see cref="TrendBudget.Chart"/>'s point budget PER SERIES (wait type), matching
     /// #4234/#4340's shape — <c>seriesCount</c> is always 1 into <see cref="TrendBuckets.AutoMinutes"/>. When
     /// every bucket the call returns holds exactly one physical collection, every point is stamped at its own

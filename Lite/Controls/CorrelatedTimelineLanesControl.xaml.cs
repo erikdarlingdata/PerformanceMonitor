@@ -629,8 +629,10 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
-    /// #4766: the X-axis window every lane is pinned to, on the server's wall clock -- the frame the lanes plot in. A
-    /// custom range's bounds are already server-local. A preset range is the window
+    /// #4766: the X-axis window every lane is pinned to, on the server's wall clock -- the frame the lanes plot in. It
+    /// takes the UTC window the tab holds and returns server-local limits: a custom range's fromDate/toDate are
+    /// naive-UTC instants, and each end goes to the server's clock at its own instant
+    /// (<see cref="GetCurrentWindowServerLocal"/>). A preset range is the window
     /// <see cref="GetCurrentWindowServerLocal"/> gives (hoursBack REAL hours ending now), not "the server's local now
     /// minus hoursBack of wall clock", which is an hour long or short when a clock change falls inside it and would cut
     /// the first hour off the axis while its samples are still plotted. serverClock/utcNow are explicit parameters so a
