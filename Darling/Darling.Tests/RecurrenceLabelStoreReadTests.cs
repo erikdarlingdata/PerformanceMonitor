@@ -39,6 +39,11 @@ public sealed class RecurrenceLabelStoreReadTests
     private static readonly int ServerId = ServerIdHelper.GetDeterministicHashCode(ServerName);
     private const string UtcServerName = "recurrence-label-e2e-no-offset";
     private static readonly int UtcServerId = ServerIdHelper.GetDeterministicHashCode(UtcServerName);
+    private const string DstServerName = "recurrence-label-e2e-dst";
+    private static readonly int DstServerId = ServerIdHelper.GetDeterministicHashCode(DstServerName);
+    private const string DstJobChain = "rl-dst-job-chain";
+    private const string DstJobName = "Weekly Reporting Extract";
+    private const string EasternWindowsId = "Eastern Standard Time";
     private static string? ConnectionString => Environment.GetEnvironmentVariable("DARLING_TEST_PG");
 
     /* Tuesday 14:37:12 UTC; on the UTC-4 server that is 10:37 local, so the slot is 10:00 Tuesday. */
@@ -173,6 +178,39 @@ public sealed class RecurrenceLabelStoreReadTests
             Description(RepoFile.ReadRepoFileLf("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs")));
     }
 
+    [Fact]
+    public void PriorOccurrencesSql_ShiftsEachRowByTheOffsetInForceAtItsOwnAnalysisTime()
+    {
+        /* #4737 item 1: one utc_offset_minutes for the whole 21-day read moved every older row by an hour after a
+           DST change. The statement now takes the same three numbers the baseline statements do - $4 the
+           transition instant, $5 the offset before it, $6 the offset after - and applies them per row; the
+           reference slot's hour and weekday arrive as $7 and $8, computed from the same clock. */
+        var sql = PgFindingStore.GetPriorOccurrencesSql;
+
+        Assert.Contains("(analysis_time + (CASE WHEN analysis_time < $4 THEN $5 ELSE $6 END) * INTERVAL '1' MINUTE)", sql, StringComparison.Ordinal);
+        Assert.Contains("EXTRACT(HOUR FROM local_bucket) = $7", sql, StringComparison.Ordinal);
+        Assert.Contains("EXTRACT(DOW FROM local_bucket) = $8", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("COALESCE(svr.offset_minutes", sql, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Darling/PerformanceMonitor.Darling.Analysis/PgFindingStore.cs")]
+    [InlineData("Lite/Analysis/FindingStore.cs")]
+    public void BothFindingStores_ResolveTheTargetsClockOverTheReadWindow_AndHandTheLabelerItsLocalReference(string file)
+    {
+        /* The zone id, not just the offset, is read and resolved with the shared BaselineLocalClock over the
+           lower bound..reference window; the bound clock and the reference's local time come from that one
+           LocalClockWindow, and the labeler is handed the local reference rather than working it out. */
+        var source = RepoFile.ReadRepoFileLf(file.Split('/'));
+
+        Assert.Contains("_localClock.Resolve(timeZoneId, utcOffsetMinutes, lowerBoundUtc, referenceUtc)", source, StringComparison.Ordinal);
+        Assert.Contains("clock.TransitionAtUtc", source, StringComparison.Ordinal);
+        Assert.Contains("clock.OffsetBeforeMinutes", source, StringComparison.Ordinal);
+        Assert.Contains("clock.OffsetAfterMinutes", source, StringComparison.Ordinal);
+        Assert.Contains("var referenceLocal = clock.ToLocal(referenceUtc);", source, StringComparison.Ordinal);
+        Assert.Contains("return new PriorOccurrenceRead(utcOffsetMinutes, referenceLocal, occurrences);", source, StringComparison.Ordinal);
+    }
+
     /* ---------------- gated: the read against a real store, through to the sentence ---------------- */
 
     [Fact]
@@ -295,6 +333,122 @@ VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5)",
         }
     }
 
+    /// <summary>
+    /// A weekly job that starts at 14:10 local on a US Eastern server, as the UTC instant it is stamped with: 19:10Z
+    /// while the server is on standard time, 18:10Z once the clocks have moved (Sunday 2026-03-08 02:00).
+    /// </summary>
+    private static DateTime EasternJobStartUtc(DateTime tuesday) =>
+        new DateTime(tuesday.Year, tuesday.Month, tuesday.Day, 14, 10, 0, DateTimeKind.Utc)
+            .AddHours(tuesday >= new DateTime(2026, 3, 8) ? 4 : 5);
+
+    /// <summary>The job's row from each of the three weeks before <paramref name="referenceUtc"/> (two passes in the hour, one bucket).</summary>
+    private static List<AnalysisFinding> WeeklyJobRows(DateTime referenceUtc)
+    {
+        var rows = new List<AnalysisFinding>();
+        for (var weeksAgo = 1; weeksAgo <= 3; weeksAgo++)
+        {
+            var start = EasternJobStartUtc(referenceUtc.Date.AddDays(-7 * weeksAgo));
+            rows.Add(Finding(DstJobChain, "RUNNING_JOBS", start, JobCard(DstJobName), DstServerId, DstServerName));
+            rows.Add(Finding(DstJobChain, "RUNNING_JOBS", start.AddMinutes(30), JobCard(DstJobName), DstServerId, DstServerName));
+        }
+
+        return rows;
+    }
+
+    private static Task SeedServerClockAsync(NpgsqlConnection connection, CancellationToken ct, DateTime collectionTimeUtc, int offsetMinutes, string? timeZoneId) =>
+        DarlingMcpTestData.ExecAsync(connection, ct,
+            @"INSERT INTO server_properties (collection_id, collection_time, server_id, server_name, edition, product_version, product_level, engine_edition, utc_offset_minutes, time_zone_id)
+VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5, $6)",
+            CollectionIdGenerator.Next(), DarlingMcpTestData.Naive(collectionTimeUtc), DstServerId, DstServerName, offsetMinutes, timeZoneId);
+
+    [Theory]
+    [InlineData(10)] // the first Tuesday after the change: every prior week is on the other side of it
+    [InlineData(17)] // the second: the two older weeks are
+    public async Task AWeeklyJobAtTwoPmLocal_WithASpringForwardInsideTheWindow_IsLabelledRecurring_AndNeverMoved(int referenceDay)
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live recurrence-read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            var referenceUtc = new DateTime(2026, 3, referenceDay, 18, 37, 12, DateTimeKind.Utc); // 14:37 EDT
+            var store = new PgFindingStore(postgres);
+            var context = new AnalysisContext { ServerId = DstServerId, ServerName = DstServerName, TimeRangeStart = referenceUtc.AddHours(-4), TimeRangeEnd = referenceUtc };
+            await SeedServerClockAsync(connection, ct, referenceUtc.AddDays(-1), -240, EasternWindowsId);
+            await store.InsertFindingsAsync(WeeklyJobRows(referenceUtc), context);
+
+            var read = await store.GetPriorOccurrencesAsync(context, referenceUtc);
+
+            var story = Story("RUNNING_JOBS", DstJobChain, severity: 0.5);
+            var jobFact = new Fact { Key = "RUNNING_JOBS", Source = "jobs", BaseSeverity = 0.5, Severity = 0.5, ObjectName = DstJobName, Metadata = new() { ["running_long_count"] = 1 } };
+            RecurrenceLabeler.Label(new[] { story }, new[] { jobFact }, referenceUtc, read);
+
+            var label = RecurrenceLabeler.TryReadLabel(story.StoryText);
+            Assert.NotNull(label);
+            Assert.Equal(4, label!.RecurrenceWeeks);
+            Assert.False(label.MaintenanceWindowMoved);
+            var investigation = FactAdvice.TryReadStoryText(story.StoryText)!.Investigation;
+            Assert.Contains("14:00 Tuesday, server local time", investigation, StringComparison.Ordinal);
+            Assert.DoesNotContain(RecurrenceLabeler.MovedWindowMarker, investigation, StringComparison.Ordinal);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task ATargetWithNoTimeZoneId_KeepsTheOneFixedOffset_AcrossASpringForward()
+    {
+        var cs = ConnectionString;
+        Assert.SkipWhen(string.IsNullOrEmpty(cs), "Set DARLING_TEST_PG to a Postgres connection string to run the live recurrence-read test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        using var connection = new NpgsqlConnection(cs);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DeleteRowsAsync(connection, ct);
+        await using var postgres = NpgsqlDataSource.Create(cs!);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* SQL Server before 2022 records the offset but no zone id, so nothing says when the offset changed and
+               the read keeps the one offset for every row - the behaviour before the zone was read. The older
+               weeks' 14:10 EST rows (19:10Z) therefore land at 15:00. */
+            var referenceUtc = new DateTime(2026, 3, 10, 18, 37, 12, DateTimeKind.Utc);
+            var store = new PgFindingStore(postgres);
+            var context = new AnalysisContext { ServerId = DstServerId, ServerName = DstServerName, TimeRangeStart = referenceUtc.AddHours(-4), TimeRangeEnd = referenceUtc };
+            await SeedServerClockAsync(connection, ct, referenceUtc.AddDays(-1), -240, null);
+            await store.InsertFindingsAsync(WeeklyJobRows(referenceUtc), context);
+
+            var read = await store.GetPriorOccurrencesAsync(context, referenceUtc);
+
+            Assert.Equal(-240, read.UtcOffsetMinutes);
+            Assert.Equal(
+                new[] { Local(2026, 2, 17, 15), Local(2026, 2, 24, 15), Local(2026, 3, 3, 15) },
+                read.Occurrences.Select(o => o.LocalBucket).OrderBy(x => x).ToArray());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(cs!, bodySucceeded, async (cleanup, cleanupCt) =>
+                await DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     /* ---------------- helpers ---------------- */
 
     private static DateTime Utc(int y, int mo, int d, int h, int mi) => new(y, mo, d, h, mi, 0, DateTimeKind.Utc);
@@ -358,8 +512,8 @@ VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5)",
     private static async Task DeleteRowsAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         using var cleanup = new NpgsqlCommand(
-            $"DELETE FROM analysis_findings WHERE server_id IN ({ServerId}, {UtcServerId});"
-            + $" DELETE FROM server_properties WHERE server_id IN ({ServerId}, {UtcServerId});", connection);
+            $"DELETE FROM analysis_findings WHERE server_id IN ({ServerId}, {UtcServerId}, {DstServerId});"
+            + $" DELETE FROM server_properties WHERE server_id IN ({ServerId}, {UtcServerId}, {DstServerId});", connection);
         await cleanup.ExecuteNonQueryAsync(ct);
     }
 }
