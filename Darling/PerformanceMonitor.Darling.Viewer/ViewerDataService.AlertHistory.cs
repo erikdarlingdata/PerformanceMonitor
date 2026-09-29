@@ -61,7 +61,8 @@ public sealed class ViewerAlertRow
 
     /// <summary>This row's own server's clock (its time zone where one is known, else its UTC offset; the viewer
     /// machine's offset while none is collected), set by <see cref="ViewerDataService.GetAlertHistoryAsync"/>
-    /// from one clock read per load (#4766). The all-servers list holds rows of many servers, so each converts on
+    /// from the fleet's clocks, which it reads at most once per <see cref="ViewerDataService.AlertClockLifetime"/>
+    /// (#4766). The all-servers list holds rows of many servers, so each converts on
     /// its own clock and not on the active server tab's. Null (a row built without one) falls back to the active
     /// server's clock.</summary>
     public ServerClock? Clock { get; init; }
@@ -170,6 +171,13 @@ AND   dismissed = FALSE
 ORDER BY alert_time DESC
 LIMIT $2";
 
+    /// <summary>How long the alert-history reads serve the fleet's server clocks before reading them again
+    /// (#4766). The shell polls the history on every refresh tick (30s by default, 10s at the fastest), and a
+    /// server's clock only changes with a new <c>server_properties</c> row, which lands when the server connects
+    /// and once a day after that. Five minutes is the longest a server added since the last read shows the
+    /// viewer machine's offset in Server mode.</summary>
+    internal static readonly TimeSpan AlertClockLifetime = TimeSpan.FromMinutes(5);
+
     /// <summary>
     /// Recent alerts newest first, excluding dismissed rows — the Alert History tab's read. With no
     /// <paramref name="serverId"/> it aggregates ALL servers (the tab's default); with one it scopes to
@@ -182,8 +190,10 @@ LIMIT $2";
 
         /* One clock read for the whole list (#4766): each row is stamped with its own server's clock, or the
            viewer machine's offset where none is collected, so the list's times are each server's own hour in
-           Server mode. */
-        var clocks = await GetServerClocksAsync(serverId, cancellationToken);
+           Server mode. The read is the fleet's, held for AlertClockLifetime (see ServerClockCache): this method
+           runs on every refresh tick, and re-sorting server_properties' whole retained history each time gave the
+           same answer each time. A server filter reads the same fleet snapshot and looks its rows up in it. */
+        var clocks = await _alertClocks.GetAsync(cancellationToken);
         var nowUtc = DateTime.UtcNow;
 
         await using var command = _dataSource.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);

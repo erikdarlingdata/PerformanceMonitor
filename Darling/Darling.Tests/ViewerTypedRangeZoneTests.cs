@@ -467,7 +467,10 @@ public sealed class ViewerMultiServerListClockTests
 
         Assert.DoesNotContain("ForDisplay", display);
         Assert.Contains("ConvertToDisplay(AlertTime, ViewerTimeHelper.CurrentDisplayMode, Clock", display);
-        Assert.Single(Regex.Matches(load, @"GetServerClocksAsync\("));
+        /* One ask per load, not per row - and the ask goes to the fleet's clocks held for AlertClockLifetime (#4766),
+           not to the store on every poll (ViewerAlertClockCacheTests pins the cache itself). */
+        Assert.Single(Regex.Matches(load, @"_alertClocks\.GetAsync\("));
+        Assert.DoesNotContain("GetServerClocksAsync", load);
         Assert.Contains("Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, rowServerId, TimeZoneInfo.Local, nowUtc)", load);
     }
 

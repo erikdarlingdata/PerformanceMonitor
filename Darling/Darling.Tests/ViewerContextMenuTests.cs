@@ -82,6 +82,19 @@ public sealed class ViewerChartContextMenuTests
     }
 
     [Fact]
+    public void ChartCsvDataLine_ShowsTheChartInstantInTheDisplayZone()
+    {
+        /* A chart's X is the naive-UTC instant (#4766). 06:30Z on 2026-11-01 is the SECOND 01:30 in US Eastern (the
+           clocks went back at 06:00Z), so the file reads 01:30 there and the instant itself in UTC. Not 06:30 in
+           Eastern (the raw X, which is what the export wrote before), and not 02:30 (a second shift). */
+        var eastern = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+        var x = new DateTime(2026, 11, 1, 6, 30, 0).ToOADate();
+
+        Assert.Equal("2026-11-01 01:30:00,CPU %,42.5", ViewerServerTab.ChartCsvDataLine(x, "CPU %", 42.5, ",", eastern));
+        Assert.Equal("2026-11-01 06:30:00,CPU %,42.5", ViewerServerTab.ChartCsvDataLine(x, "CPU %", 42.5, ",", TimeZoneInfo.Utc));
+    }
+
+    [Fact]
     public void FormatChartCsvLine_QuotesASeriesNameContainingTheSeparator()
     {
         /* A series label with the separator must be RFC-4180 quoted so the CSV column count stays right. */

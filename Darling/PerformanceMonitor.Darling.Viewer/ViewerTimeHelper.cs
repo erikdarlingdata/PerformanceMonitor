@@ -14,10 +14,11 @@ using PerformanceMonitor.Ui;
 namespace PerformanceMonitor.Darling.Viewer;
 
 /// <summary>
-/// The viewer's port of Lite's <c>ServerTimeHelper</c>: the single chokepoint every rendered timestamp
-/// routes through, converting a stored value to the user's chosen <see cref="TimeDisplayMode"/>. It
-/// replaces the viewer's old fixed machine-local conversion (the former <c>ViewerDataService.ToLocalTime</c>,
-/// which every call site now reaches as <see cref="ForDisplay"/>).
+/// The viewer's port of Lite's <c>ServerTimeHelper</c>: the single chokepoint every rendered TEXT timestamp
+/// (grid columns, captions, tooltips) routes through, converting a stored value to the user's chosen
+/// <see cref="TimeDisplayMode"/>. It replaces the viewer's old fixed machine-local conversion (the former
+/// <c>ViewerDataService.ToLocalTime</c>, which every call site now reaches as <see cref="ForDisplay"/>). A chart
+/// is the other path: it plots the naive-UTC instant as X and draws its labels in <see cref="CurrentDisplayZone"/>.
 ///
 /// <para>
 /// The Darling store is naive-UTC (every collected <c>timestamp</c> column is UTC with
@@ -40,9 +41,11 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <see cref="ActiveServerClock"/> is set by the active <see cref="ViewerServerTab"/> to ITS server's
 /// clock before that tab renders — only the visible tab renders (the viewer's visible-only rule), so the
 /// visible tab's offset always wins. Charts plot the naive-UTC instant as X (#4766) and draw their tick, hover
-/// and crosshair labels, and the CSV export, in <see cref="CurrentDisplayZone"/>; <see cref="ForDisplay"/> is for
-/// TEXT (grid columns, captions, tooltips). <see cref="UiTimeContext.ConvertForDisplay"/> is deliberately left at its
-/// identity default in the viewer (wiring it would convert the chart X a second time on hover/crosshair).
+/// and crosshair labels in <see cref="CurrentDisplayZone"/>, and the CSV export writes each point's X in that
+/// same zone (<c>DisplayZone.ToDisplay</c>); <see cref="ForDisplay"/> is for TEXT only (grid columns, captions,
+/// tooltips), never for a chart's X. <see cref="UiTimeContext.ConvertForDisplay"/> is deliberately left at its
+/// identity default in the viewer: every chart label takes the zone directly and never consults it, so wiring it
+/// would only put a second conversion on any label that did.
 /// </para>
 /// </summary>
 public static class ViewerTimeHelper
@@ -73,7 +76,8 @@ public static class ViewerTimeHelper
 
     /// <summary>
     /// Converts a stored naive-UTC timestamp to the current display mode + active server offset — the one
-    /// method every timestamp render routes through. Single overload on purpose so the many
+    /// method every TEXT timestamp render routes through. A chart's X is not one: it stays the instant and is
+    /// drawn in <see cref="CurrentDisplayZone"/> (#4766). Single overload on purpose so the many
     /// <c>&lt;see cref="ViewerTimeHelper.ForDisplay"/&gt;</c> doc references stay unambiguous.
     /// </summary>
     public static DateTime ForDisplay(DateTime naiveUtc) => ConvertToDisplay(naiveUtc, CurrentDisplayMode, _serverClock);

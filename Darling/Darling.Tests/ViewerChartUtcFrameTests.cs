@@ -177,18 +177,21 @@ public sealed class ViewerChartUtcFrameTests
     [Fact]
     public void TheSharedRenderersPlotTheInstantAndDrawInTheDisplayZone()
     {
+        /* Every host of a shared chart renderer, whatever the renderer is called: each passes X through untouched
+           (`static utc => utc`, so the renderer plots the instant it was given) and the display zone as the LAST
+           argument (so its ticks, hover and crosshair say the same time the grids do). Four hosts today; a fifth must
+           be pinned deliberately, not slip past a name list. */
         var offenders = new List<string>();
         var renderers = 0;
 
         foreach (var (file, code) in ViewerSources())
         {
-            foreach (var renderer in Regex.Matches(
-                code, @"new (?:CpuSchedulerChartRenderer|GroupedTrendChartRenderer|SessionStatsChartRenderer|SystemHealthChartRenderer)\s*\(").Cast<Match>())
+            foreach (var renderer in Regex.Matches(code, @"new \w*ChartRenderer\s*\(").Cast<Match>())
             {
                 renderers++;
                 var arguments = ArgumentsAt(code, renderer.Index + renderer.Length - 1);
                 if (arguments.Contains("ForDisplay", StringComparison.Ordinal)
-                    || !Regex.IsMatch(arguments, @",\s*ViewerTimeHelper\.CurrentDisplayZone\s*$"))
+                    || !Regex.IsMatch(arguments, @",\s*static\s+utc\s*=>\s*utc\s*,\s*ViewerTimeHelper\.CurrentDisplayZone\s*$"))
                 {
                     offenders.Add($"{file}: new renderer({arguments.Trim()})");
                 }
@@ -204,7 +207,11 @@ public sealed class ViewerChartUtcFrameTests
     {
         var code = ViewerSources().Single(s => s.File == "ViewerServerTab.ChartContextMenu.cs").Code;
 
-        Assert.Contains("DisplayZone.ToDisplay(DateTime.FromOADate(point.X), zone)", code, StringComparison.Ordinal);
+        /* The export writes every point through the pure ChartCsvDataLine (ViewerChartContextMenuTests pins what it
+           writes for a repeated hour), handing it the chart's X as plotted and the display zone; the seam applies
+           the zone to the instant. Neither the raw X nor a display-frame projection reaches FormatChartCsvLine. */
+        Assert.Contains("ChartCsvDataLine(point.X, seriesName, point.Y, sep, zone)", code, StringComparison.Ordinal);
+        Assert.Contains("DisplayZone.ToDisplay(DateTime.FromOADate(plottedX), zone)", code, StringComparison.Ordinal);
         Assert.DoesNotContain("FormatChartCsvLine(DateTime.FromOADate(", code, StringComparison.Ordinal);
     }
 
