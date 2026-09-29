@@ -29,6 +29,10 @@ namespace PerformanceMonitorLite.Tests;
 /// budget makes every file its own batch, so each group compacts into part files. The views were built while
 /// only the per-cycle glob matched, which is what makes them stale the moment a group is swapped.</para>
 ///
+/// <para>The same holds when a run is killed between a swap's file moves and its deletes, and the next run
+/// finishes or undoes that swap from its journal: the replay resolves the journals and rebuilds the views
+/// under one write lock, and takes no lock at all when there is no journal.</para>
+///
 /// <para>In the reset-gate collection because the write lock is one per process: a test that holds it for half a
 /// second while a reader is parked behind it should not run beside the reset and sentinel tests, some of which
 /// wait on it with a timeout.</para>
@@ -210,5 +214,146 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         var (count, error) = ReadTheView(initializer);
         Assert.Null(error);
         Assert.Equal(TotalRows, count);
+    }
+
+    private string P(string fileName) => Path.Combine(_archiveDir, fileName).Replace("\\", "/");
+
+    /* What a run killed after it moved a group's part files in and before it deleted the group's inputs leaves
+       behind: both part files are in place next to the two files they were merged from, and the journal names
+       them all. The views were built before any of this, so they know only the per-cycle files. */
+    private void PlantInterruptedSwap()
+    {
+        File.Copy(P("20260801_0000_collection_log.parquet"), P("202608_collection_log_pt001.parquet"));
+        File.Copy(P("20260801_0100_collection_log.parquet"), P("202608_collection_log_pt002.parquet"));
+        File.WriteAllLines(P("202608_collection_log.swap"),
+        [
+            "state|swapping",
+            "output|fresh|202608_collection_log_pt001.parquet",
+            "output|fresh|202608_collection_log_pt002.parquet",
+            "input|20260801_0000_collection_log.parquet",
+            "input|20260801_0100_collection_log.parquet"
+        ]);
+    }
+
+    /* Asks for the write lock from a thread of its own, for the reason the reader probe above does. */
+    private static bool WriteLockIsRefused(DuckDbInitializer initializer, TimeSpan wait)
+    {
+        var refused = false;
+        var probe = new Thread(() =>
+        {
+            try
+            {
+                using var writeLock = initializer.AcquireWriteLock(wait);
+            }
+            catch (TimeoutException)
+            {
+                refused = true;
+            }
+        });
+        probe.Start();
+        probe.Join();
+        return refused;
+    }
+
+    /// <summary>
+    /// The replay of a killed run's swap, at the moment its journal has been resolved and the views have not
+    /// been rebuilt: a second thread must be refused the write lock there. Without the lock the replay deleted
+    /// the inputs a view still had globs for, with no lock held, and a reader got the archive as it was between.
+    /// </summary>
+    [Fact]
+    public async Task TheWriteLockCoversTheReplayOfAnInterruptedSwap()
+    {
+        var (initializer, service) = await SetUpAsync();
+        PlantInterruptedSwap();
+
+        var replays = 0;
+        var refused = false;
+        var inputsGone = false;
+        service.AfterCompactionReplayForTests = () =>
+        {
+            replays++;
+            /* The replay finished the swap: the files the part files were merged from are gone, which is what
+               leaves a view built before it with nothing to read for that month. */
+            inputsGone = !File.Exists(P("20260801_0000_collection_log.parquet")) && !File.Exists(P("20260801_0100_collection_log.parquet"));
+
+            /* The lock is this replay's own, so a short wait is enough to see a probe refused. */
+            refused = WriteLockIsRefused(initializer, TimeSpan.FromMilliseconds(150));
+        };
+
+        service.CompactParquetFiles();
+
+        Assert.Equal(1, replays);
+        Assert.True(inputsGone, "the replay did not finish the planted swap");
+        Assert.True(refused, "a second thread was given the write lock while the replay had resolved a swap and not yet rebuilt the views");
+
+        var (count, error) = ReadTheView(initializer);
+        Assert.Null(error);
+        Assert.Equal(TotalRows, count);
+    }
+
+    /// <summary>
+    /// A reader that starts while a killed run's swap is being replayed must not see the archive between the
+    /// deletes and the rebuild. The two files the swap replaced are deleted by the replay; the views knew only
+    /// the per-cycle files, so a reader in between saw 25 of 45 rows (the part files were not in the views yet).
+    /// </summary>
+    [Fact]
+    public async Task AReaderStartedWhileAnInterruptedSwapIsReplayed_SeesEveryRow_AndNeverAFailure()
+    {
+        var (initializer, service) = await SetUpAsync();
+        PlantInterruptedSwap();
+
+        Task<(long Count, string? Error)>? reader = null;
+        service.AfterCompactionReplayForTests = () =>
+        {
+            /* Not disposed here: the parked reader still signals it after this wait times out. */
+            var done = new ManualResetEventSlim();
+            reader = Task.Run(() =>
+            {
+                try { return ReadTheView(initializer); }
+                finally { done.Set(); }
+            });
+
+            /* With the lock held the reader is parked behind it for the whole wait. Without it the reader is
+               through in milliseconds and has read the archive in its half-replayed state. */
+            done.Wait(TimeSpan.FromMilliseconds(500));
+        };
+
+        service.CompactParquetFiles();
+
+        Assert.NotNull(reader);
+        var (count, error) = await reader;
+        Assert.Null(error);
+        Assert.Equal(TotalRows, count);
+    }
+
+    /// <summary>
+    /// The common case is no journal at all, and then the replay must not take the write lock (or rebuild the
+    /// views): the compaction of an empty archive returns while another thread holds the write lock.
+    /// </summary>
+    [Fact]
+    public async Task WithNoJournalToReplay_TheReplayTakesNoWriteLock()
+    {
+        var (initializer, service) = await SetUpAsync();
+        foreach (var file in Directory.GetFiles(_archiveDir))
+        {
+            File.Delete(file);
+        }
+
+        var replays = 0;
+        service.AfterCompactionReplayForTests = () => replays++;
+
+        var compaction = new Thread(() => service.CompactParquetFiles());
+        bool finished;
+        using (initializer.AcquireWriteLock())
+        {
+            compaction.Start();
+            finished = compaction.Join(TimeSpan.FromSeconds(5));
+        }
+
+        /* Released above; a compaction that was parked on the lock finishes now instead of hanging the run. */
+        compaction.Join();
+
+        Assert.True(finished, "the replay waited for the write lock although there was no journal to replay");
+        Assert.Equal(0, replays);
     }
 }

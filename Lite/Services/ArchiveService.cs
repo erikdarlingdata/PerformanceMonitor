@@ -60,6 +60,10 @@ public class ArchiveService
        rebuilt (#4720): the moment a reader would find a glob that matches nothing. */
     internal Action<string>? AfterCompactionSwapForTests { get; set; }
 
+    /* Fires after the swap journals an earlier run left behind are resolved and before the archive views are
+       rebuilt (#4720): the same moment for a replay that the seam above marks for a swap. */
+    internal Action? AfterCompactionReplayForTests { get; set; }
+
     /* Replaces the minute-resolution file-name prefix, so a test can put two runs in different "minutes"
        without waiting for the clock. */
     internal string? TimestampForTests { get; set; }
@@ -614,6 +618,8 @@ COPY (
                 }
             }
         }
+
+        AfterCompactionReplayForTests?.Invoke();
 
         return (alreadyFolded, unresolvedGroups);
     }
