@@ -14,6 +14,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- #4748: the partial-database-failure note text lives in Common, beside the health band that reads it back. -->
+    <ProjectReference Include="..\PerformanceMonitor.Common\PerformanceMonitor.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- #4053 c3: the RDS plan ingestor calls PgPlanCaptureCollector.PlanRowsFromCsvEntries, which is internal
          because it is sound only over csv-parser entries (see its remarks). -->
     <InternalsVisibleTo Include="PerformanceMonitor.Darling.Service" />

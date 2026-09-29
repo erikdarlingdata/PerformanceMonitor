@@ -218,6 +218,16 @@ public sealed class TopProceduresHourlyRoutingLiveTests
             Assert.NotEmpty(procedures);
             Assert.All(procedures, p => Assert.Equal(System.Text.Json.JsonValueKind.Null, p.GetProperty("object_type").ValueKind));
 
+            /* every column the rollup lacks is null, never 0 or empty. */
+            foreach (var column in new[]
+            {
+                "sql_handle", "plan_handle", "total_logical_reads", "total_logical_writes", "total_physical_reads",
+                "total_spills", "avg_reads", "min_cpu_ms", "max_cpu_ms", "min_elapsed_ms", "max_elapsed_ms",
+            })
+            {
+                Assert.All(procedures, p => Assert.Equal(System.Text.Json.JsonValueKind.Null, p.GetProperty(column).ValueKind));
+            }
+
             bodySucceeded = true;
         }
         finally

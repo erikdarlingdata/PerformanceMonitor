@@ -255,6 +255,14 @@ public sealed class CollectorContext
     public bool PgReadBinaryFileGranted { get; set; }
 
     /// <summary>
+    /// How many bytes the text log tails move their read start forward (#4735), 0 for an ordinary read. A read with
+    /// no saved position starts <see cref="PgServerLogTail.TailBytes"/> before the end of the file, and PostgreSQL
+    /// refuses a <c>pg_read_file</c> slice whose first byte is inside a multi-byte character (22021). The host
+    /// repeats the read with 1, then 2, then 3 here, and <see cref="PgServerLogTail.WithResume"/> binds it.
+    /// </summary>
+    public int PgLogReadShiftBytes { get; set; }
+
+    /// <summary>
     /// Whether this target's <c>log_destination</c> includes <c>csvlog</c> (#4053 part a1b), resolved by the
     /// host through <see cref="PgLogFormatCapability.IsCsvlogEnabledAsync"/> BEFORE <c>BuildQuery</c> runs, for
     /// <c>pg_log_events</c> alone — the deadlock and plan-capture collectors never read this. False (the

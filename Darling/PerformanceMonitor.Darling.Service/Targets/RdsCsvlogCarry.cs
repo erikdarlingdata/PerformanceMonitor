@@ -372,7 +372,7 @@ internal sealed class RdsCsvlogCarryBook
 
     /// <summary>The instance half of a <c>ResumeMarker.Key</c> ("instance|file"), or null when the key itself
     /// is null/empty — #4053 review round 1's carry key.</summary>
-    private static string? InstanceKey(string? resumeKey)
+    internal static string? InstanceKey(string? resumeKey)
     {
         if (string.IsNullOrEmpty(resumeKey))
         {
@@ -384,7 +384,7 @@ internal sealed class RdsCsvlogCarryBook
     }
 
     /// <summary>The file half of a <c>ResumeMarker.Key</c>, or null when the key itself is null/empty.</summary>
-    private static string? ResumeFileName(string? resumeKey)
+    internal static string? ResumeFileName(string? resumeKey)
     {
         if (string.IsNullOrEmpty(resumeKey))
         {

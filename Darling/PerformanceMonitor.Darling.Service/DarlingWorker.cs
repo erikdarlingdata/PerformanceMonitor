@@ -10890,12 +10890,25 @@ LIMIT 1";
             return null;
         }
 
+        /* #4735 item 1: every 22021 that reaches this handler has already been retried with the read start moved forward
+           by 1, 2 and 3 bytes (DarlingCollectorRunner.RunWithSplitCharacterRetryAsync), either in this cycle or in the
+           cycle that first met it, after which each cycle makes one read until a read succeeds. The sentence says what
+           the attempts were and does not blame a planted byte alone. A 22P05 is a conversion fault, not a start offset. */
+        var splitCharacter = pg.SqlState == PgServerLogTail.EncodingRefusalSqlState
+            ? "A read with no saved position starts 4 MB before the end of the log, and that start can fall inside a "
+              + "multi-byte character, which PostgreSQL refuses the same way. The collector retried the read from 1, 2 and 3 "
+              + "bytes later and every attempt was refused. Until a read succeeds it reads once per cycle and does not retry. "
+              + "Once a read succeeds, every later read resumes from the start of a full line, so a split character clears "
+              + "by itself. "
+            : string.Empty;
+
         const string Planted = " A client can plant such a byte with nothing more than a failed login. The role or "
             + "database name that the client sends lands unescaped in the FATAL message (#4046).";
 
         if (pg.SqlState == "22P05" || PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(runtime.StorageName))
         {
-            return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte "
+            return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). " + splitCharacter
+                + "The log tail that this cycle read contains a byte "
                 + "that this database's encoding cannot pass to this collector, so PostgreSQL refused the whole read."
                 + Planted
                 + " Granting pg_read_binary_file does not help on this database. The binary route decodes the log in "
@@ -10904,7 +10917,8 @@ LIMIT 1";
                 + "The read fails until the line with the byte leaves the 4 MB tail window.";
         }
 
-        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte that "
+        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). " + splitCharacter
+            + "The log tail that this cycle read contains a byte that "
             + "is not valid UTF-8, so PostgreSQL refused the whole read. pg_read_file() returns text, and PostgreSQL "
             + "checks text before this collector sees a row, even when only one byte in the 4 MB window is bad."
             + Planted
