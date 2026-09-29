@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -176,14 +177,56 @@ public sealed class ViewerRecommendationServerClockTests
         };
     }
 
+    // ── a server with no collected clock yet ─────────────────────────────────────
+
+    /// <summary>
+    /// A server whose <c>server_properties</c> has no offset yet has no entry in the per-server clock read. The
+    /// viewer's own Server mode shows the viewer machine's offset for it, so the cards and the "Last analyzed" line
+    /// take that offset too and do not drop to UTC. The machine is at -240 here and the finding is at 15:00 UTC:
+    /// both read 11:00, where UTC would read 15:00 (UTC+0:00). Another server's clock is in the read, and is not
+    /// this server's.
+    /// </summary>
+    [Fact]
+    public void ClockForServerOrMachine_WithNoCollectedClock_UsesTheViewerMachinesOffset()
+    {
+        var machine = TimeZoneInfo.CreateCustomTimeZone("machine-minus-4", TimeSpan.FromHours(-4), "machine -4", "machine -4");
+        var clocks = new Dictionary<int, ServerClock> { [2] = ServerClock.FixedOffset(330) };
+        var analyzed = Utc(2026, 6, 1, 15, 0);
+
+        var clock = RecommendationsViewModel.ClockForServerOrMachine(clocks, 1, machine, analyzed);
+
+        Assert.Contains(
+            $"2026-06-01 11:00{Dash}13:00",
+            Prompt(analyzed, Utc(2026, 6, 1, 17, 0), clock),
+            StringComparison.Ordinal);
+        Assert.Equal(
+            "Last analyzed 2026-06-01 11:00:00 (UTC-4:00)",
+            RecommendationsViewModel.FormatLastAnalyzed(analyzed, TimeDisplayMode.ServerTime, clock));
+    }
+
+    [Fact]
+    public void ClockForServerOrMachine_WithACollectedClock_UsesItAndNotTheMachines()
+    {
+        var machine = TimeZoneInfo.CreateCustomTimeZone("machine-plus-9", TimeSpan.FromHours(9), "machine +9", "machine +9");
+        var clocks = new Dictionary<int, ServerClock> { [1] = Eastern };
+
+        var clock = RecommendationsViewModel.ClockForServerOrMachine(clocks, 1, machine, Utc(2026, 1, 15, 14, 0));
+
+        Assert.Contains(
+            $"2026-01-15 09:00{Dash}11:00",
+            Prompt(Utc(2026, 1, 15, 14, 0), Utc(2026, 1, 15, 16, 0), clock),
+            StringComparison.Ordinal);
+    }
+
     // ── the tab asks for the clock of the server it is showing ───────────────────
 
     /// <summary>
     /// The viewer's Recommendations tab reads findings for the server ITS selector names, so the card's clock has to
     /// be that server's, read through the per-server clock source the viewer's other reads use
-    /// (<c>GetServerClocksAsync</c> with <c>ClockFor</c>: the server's zone where known, else its offset, else UTC),
-    /// and not the viewer machine's offset. The tab is a WPF window this suite does not instantiate, so this is a
-    /// source pin on the loader.
+    /// (<c>GetServerClocksAsync</c>: the server's zone where known, else its offset), and not the viewer machine's
+    /// offset. A server with no collected clock gets the viewer machine's offset (<c>ClockForServerOrMachine</c>),
+    /// not the UTC that <c>ViewerDataService.ClockFor</c> gives the stored-times reads. The tab is a WPF window this
+    /// suite does not instantiate, so this is a source pin on the loader.
     /// </summary>
     [Fact]
     public void TheRecommendationsLoader_TakesTheSelectedServersClock_NotTheViewerMachinesOffset()
@@ -196,8 +239,9 @@ public sealed class ViewerRecommendationServerClockTests
         var body = CSharpSourceWalker.BraceBalanced(source, source.IndexOf('{', signature));
 
         Assert.DoesNotContain("LocalUtcOffsetMinutes", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("ViewerDataService.ClockFor(", body, StringComparison.Ordinal);
         Assert.Matches(
-            new Regex(@"ViewerDataService\s*\.\s*ClockFor\(\s*await\s+_dataService\s*\.\s*GetServerClocksAsync\(\s*server\s*\.\s*ServerId\s*,[^;]*,\s*server\s*\.\s*ServerId\s*\)"),
+            new Regex(@"RecommendationsViewModel\s*\.\s*ClockForServerOrMachine\(\s*await\s+_dataService\s*\.\s*GetServerClocksAsync\(\s*server\s*\.\s*ServerId\s*,[^;]*,\s*server\s*\.\s*ServerId\s*,\s*TimeZoneInfo\s*\.\s*Local\s*,\s*DateTime\s*\.\s*UtcNow\s*\)"),
             body);
         Assert.Matches(new Regex(@"FromFindings\(\s*rows\s*,\s*server\s*\.\s*DisplayName\s*,\s*serverClock\s*,"), body);
     }

@@ -12,11 +12,11 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Analysis;
 using PerformanceMonitorLite.Analysis.Recommendations;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitor.Ui;
-using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 
@@ -183,8 +183,8 @@ public partial class RecommendationsTab : UserControl
                    were read for. This tab has its own server selector, so it can show a server other than the one
                    whose tab the main window has open, and ServerTimeHelper's clock follows that tab; its offset
                    is also the one in force today, an hour off for a finding from before a daylight saving change.
-                   A server with no collected clock yet reads in UTC. */
-                var serverClock = await Task.Run(() => McpServerLocalWindow.ClockForAsync(_dataService, serverId));
+                   A server with no collected clock yet keeps the offset its own server tab shows, not UTC. */
+                var serverClock = await ReadCardClockAsync(_dataService, serverId);
 
                 ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
             }
@@ -200,6 +200,20 @@ public partial class RecommendationsTab : UserControl
         {
             _isBusy = false;
         }
+    }
+
+    /// <summary>
+    /// The clock the cards of the server with <paramref name="serverId"/> convert on (#4766): that server's own
+    /// collected clock, else the clock the server tabs are showing (see
+    /// <see cref="LiteRecommendationsViewModel.CardClock"/>). The read goes through the data service directly and
+    /// not through <c>McpServerLocalWindow.ClockForAsync</c>, whose UTC fallback is the MCP tools' and not the
+    /// desktop's: a server with no <c>server_properties</c> row yet is shown in UTC there and at the connect probe's
+    /// offset on its own tab.
+    /// </summary>
+    private static async Task<ServerClock> ReadCardClockAsync(LocalDataService dataService, int serverId)
+    {
+        var collected = await Task.Run(() => dataService.GetServerClockAsync(serverId));
+        return LiteRecommendationsViewModel.CardClock(collected, ServerTimeHelper.ActiveServerClock);
     }
 
     /// <summary>
@@ -280,7 +294,7 @@ public partial class RecommendationsTab : UserControl
             var items = LiteRecommendationsReader.MapFindings(findings, serverName);
 
             /* #4766: the selected server's own clock, by the serverId the analysis ran for (see RefreshDataAsync). */
-            var serverClock = await Task.Run(() => McpServerLocalWindow.ClockForAsync(_dataService, serverId));
+            var serverClock = await ReadCardClockAsync(_dataService, serverId);
 
             ApplyViewModel(LiteRecommendationsViewModel.FromItems(items, serverClock));
         }
