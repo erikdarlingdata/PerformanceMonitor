@@ -27,7 +27,7 @@ namespace Darling.Tests;
 /// <para><b>Why the wiring is pinned textually.</b> The three surfaces are WPF code-behind that the suite cannot
 /// stand up with a live store and a real edit. The dialog's own identity pins
 /// (<see cref="ServerIdentitySurvivesAnEditTests"/>) hold it at the same level, for the same reason. What the
-/// store does with the key is pinned behaviourally in <c>ViewerFavoriteKeyStoreTests</c>.</para>
+/// store does with the key is pinned behaviourally in <see cref="ViewerFavoriteKeyStoreTests"/>.</para>
 /// </summary>
 public sealed class ViewerFavoriteKeyWiringTests
 {
