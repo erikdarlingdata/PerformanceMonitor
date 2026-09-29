@@ -122,6 +122,9 @@ AND   v.delta_execution_count > 0";
         }
     }
 
+    /// <summary>The most offenders the PARAMETER_SENSITIVITY fact counts. Applied after the exact creation-time test (#4821), not in SQL.</summary>
+    private const int ParameterSensitivityOffenderCap = 20;
+
     /// <summary>
     /// Detects parameter-sensitive cached plans: a single query_plan_hash whose
     /// per-execution worker time varies wildly — one plan serving very different
@@ -151,18 +154,25 @@ WITH svr AS
     -- on-load collector, so an absent offset is the state every server passes through on its first
     -- cycle -- refusing the read there would pre-empt the two answers that outrank any window. The
     -- CTE returns exactly one row, so no plan is lost to it.
-    SELECT COALESCE
+    --
+    -- #4821: this offset is now only the ROUGH first filter. One offset for every row is an hour off for a
+    -- plan compiled before the last daylight-saving change, so the read also returns the raw creation_time
+    -- beside the zone (time_zone_id, SQL Server 2022 and later, from the same newest row) and the exact
+    -- test runs in C# with the offset in force when each plan was compiled (PlanCreationClock).
+    SELECT
+        COALESCE(p.utc_offset_minutes, 0) AS offset_minutes,
+        p.time_zone_id
+    FROM (SELECT 1) AS one
+    LEFT JOIN
     (
-        (
-            SELECT utc_offset_minutes
-            FROM v_server_properties
-            WHERE server_id = $1
-            AND   utc_offset_minutes IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+        SELECT utc_offset_minutes, time_zone_id
+        FROM v_server_properties
+        WHERE server_id = $1
+        AND   utc_offset_minutes IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+    ) AS p
+      ON 1 = 1
 ),
 latest AS
 (
@@ -171,7 +181,10 @@ latest AS
         query_plan_hash,
         database_name,
         execution_count,
+        creation_time,
         creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
+        svr.offset_minutes AS server_offset_minutes,
+        svr.time_zone_id AS server_time_zone_id,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -194,20 +207,24 @@ SELECT
     max_worker_time,
     max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
     max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
-    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence
+    CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
+    creation_time,
+    server_offset_minutes,
+    server_time_zone_id
 FROM latest
 WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time_utc <= $2
+AND   creation_time_utc <= $4
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-LIMIT 20";
+ORDER BY worker_ratio DESC";
 
             cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
             cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+            /* $4: the first filter's bound, opened by an hour (#4821). The exact test is made below, per row. */
+            cmd.Parameters.Add(new DuckDBParameter { Value = PlanCreationClock.RoughBound(context.TimeRangeStart) });
 
             var offenderCount = 0;
             var worstRatio = 0.0;
@@ -219,6 +236,21 @@ LIMIT 20";
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
+                /* The exact compiled-before-the-window test, with the offset in force when the plan was
+                   created (#4821). The SQL's own filter is only the rough first pass, so the cap of twenty
+                   is applied here, after it. */
+                if (reader.IsDBNull(5)
+                    || !PlanCreationClock.CompiledBeforeWindow(
+                        PlanCreationClock.ClockFrom(reader, 6, 7), reader.GetDateTime(5), context.TimeRangeStart))
+                {
+                    continue;
+                }
+
+                if (offenderCount >= ParameterSensitivityOffenderCap)
+                {
+                    break;
+                }
+
                 // Rows arrive ordered by worker_ratio DESC — the first row is the worst offender.
                 if (offenderCount == 0)
                 {

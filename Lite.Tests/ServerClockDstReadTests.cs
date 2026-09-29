@@ -277,12 +277,16 @@ public sealed class ServerClockDstReadTests : IClassFixture<SharedDuckDbFixture>
         Assert.Single(zoneRead.Matches(fact));
         Assert.Equal(2, zoneRead.Matches(drill).Count);
 
-        /* The subtraction stays only as the rough first filter; it is not what the read returns. */
+        /* The subtraction stays only as the rough first filter (its bound opened by an hour); what the reads
+           RETURN is the raw creation_time and the zone, and the exact test is the clock's, in C#. */
         foreach (var source in new[] { fact, drill })
         {
-            Assert.DoesNotContain("creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,", source, StringComparison.Ordinal);
-            Assert.Contains("ServerClock.Resolve(", source, StringComparison.Ordinal);
+            Assert.Contains("PlanCreationClock.RoughBound(", source, StringComparison.Ordinal);
+            Assert.Contains("PlanCreationClock.CompiledBeforeWindow(", source, StringComparison.Ordinal);
         }
+
+        var planCreation = File.ReadAllText(RepoPath("Lite/Analysis/PlanCreationClock.cs"));
+        Assert.Contains("ServerClock.Resolve(", planCreation, StringComparison.Ordinal);
 
         var jobs = File.ReadAllText(RepoPath("Lite/Services/LocalDataService.RunningJobs.cs"));
         Assert.Matches(zoneRead, jobs);
