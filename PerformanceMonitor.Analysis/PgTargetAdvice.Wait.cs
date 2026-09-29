@@ -219,6 +219,25 @@ public static partial class PgTargetAdvice
                               "understates the rate about tenfold; the baseline was built the same way.");
         }
 
+        /* #4731: read BEFORE is_new, as the Aurora composer and the deadlock ratio do. A sampled baseline that cleared its
+           floors and held nothing but zeros is never trustworthy, so the detector stamps is_new = 1 on it too, and the
+           first-occurrence words below say "too thin to trust" about a baseline the sampler measured as empty. */
+        if (fact.Metadata.GetValueOrDefault("baseline_zero_history") >= 1.0)
+        {
+            return s_sampledWaitProfileStatic with
+            {
+                Headline = $"The server's sampled wait profile reached {currentText} ms/sec — against a {s_baselineSpan} baseline in which the sampler saw no waiting in this hour (estimated from sampling)",
+                Investigation =
+                    $"The all-types wait rate estimated from sampling peaked at about {currentText} ms of sampled waiting per second the " +
+                    $"sampler was watching this window (mean {meanText} ms/sec; CPU/Running excluded), led by {led}. This server's " +
+                    $"{s_baselineSpan} sampled-wait baseline for this hour-of-week is not thin — it is a measured ZERO: {ZeroHistoryRestsOn(fact)}, " +
+                    "not one of them above zero. That makes this an extremity rather than a deviation to count in sigmas or a multiple of a " +
+                    "normal rate: the sampled wait rate went from never-happens to this, and a rate that is zero has no multiple to print. " +
+                    "It fired because the peak reached the sampled wait-profile bar on its absolute level, so the change itself is the " +
+                    "lead — the named contributors are where to look." + instrument + s_anomalyHedge,
+            };
+        }
+
         if (fact.Metadata.GetValueOrDefault("is_new") >= 1.0)
         {
             return s_sampledWaitProfileStatic with
