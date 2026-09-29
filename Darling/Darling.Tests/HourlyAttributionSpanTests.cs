@@ -49,6 +49,19 @@ public sealed class HourlyAttributionSpanTests
     }
 
     [Fact]
+    public void Hourly_NullCeiling_SaysUnknown_NotThatNoSpanWasServed()
+    {
+        var start = Day.AddHours(10);
+        var asOf = Day.AddHours(20);
+        var (from, to, note) = DarlingMcpDataTools.HourlyAttributionSpan(true, start, asOf, Day.AddHours(10), null);
+
+        Assert.Equal(start, from);
+        Assert.Equal(asOf, to);
+        Assert.Contains("ceiling unknown; the end edge is not verified", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("served no bucket span", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Raw_KeepsTheRequestedWindow_AndSaysNothing()
     {
         var start = Day.AddHours(10).AddMinutes(37);

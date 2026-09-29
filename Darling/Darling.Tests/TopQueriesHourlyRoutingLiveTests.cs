@@ -585,6 +585,18 @@ VALUES ($1,$2,$3,$4,'Enterprise Edition (64-bit)','15.0.4322.2','RTM',3,4,16,655
                 await props.ExecuteNonQueryAsync(ct);
             }
 
+            /* Busy samples OUTSIDE the served span: a read over the requested day would average them in. */
+            for (var extra = 0; extra < 7; extra++)
+            {
+                await using var busy = new NpgsqlCommand(
+                    "INSERT INTO cpu_utilization_stats (collection_id, collection_time, server_id, server_name, sample_time, sqlserver_cpu_utilization, other_process_cpu_utilization) VALUES ($1, $2, $3, $4, $2, 100, 0)", connection);
+                busy.Parameters.AddWithValue(CollectionIdGenerator.Next());
+                busy.Parameters.AddWithValue(WindowStart.AddHours(8 + extra));
+                busy.Parameters.AddWithValue(ServerId);
+                busy.Parameters.AddWithValue(ServerName);
+                await busy.ExecuteNonQueryAsync(ct);
+            }
+
             for (var minute = 0; minute <= 60; minute += 10)
             {
                 await using var cpu = new NpgsqlCommand(
