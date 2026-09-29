@@ -1061,6 +1061,14 @@ public sealed class DarlingWorker : BackgroundService
        site for why an unconditional per-sweep read would be a real cost, not just noise. */
     private readonly ConcurrentDictionary<string, bool> _postgresAlertHistorySeeded = new(StringComparer.Ordinal);
 
+    /* #4795: the failure streaks behind "a PostgreSQL alert whose every channel failed is tried again sooner
+       than its cooldown", the twin of AlertEngine's own _failedSends (#4752) for the SQL Server families. The
+       six PostgreSQL families stamp their cooldown BEFORE they deliver, so a send that reached nobody (an HTTP
+       429 or 5xx, a timeout, an unreachable mail server) used to leave the alert silent for the whole
+       cooldown. Keyed (metric name, the family's own cooldown key). In memory only: a restart starts every
+       streak over, which is the safe direction, because the first retry after a restart is only ever earlier. */
+    private readonly FailedSendBackoff _pgFailedSends = new();
+
     /// <summary>
     /// Held for the same reason <see cref="_alertDeliverer"/> is: the Postgres Deadlocks/Blocking alerts
     /// (#2711) need to write a resolution history row on the active→inactive transition, exactly like
@@ -5303,6 +5311,79 @@ public sealed class DarlingWorker : BackgroundService
             _readFailures.RecordReadFailure(
                 runtime.ServerId.ToString(CultureInfo.InvariantCulture),
                 "shared engine sweep", sweepReadClock.ElapsedMilliseconds);
+        }
+    }
+
+    /// <summary>
+    /// Runs after a PostgreSQL family's fire (#4795), the twin of <c>AlertEngine.AfterFire</c> (#4752) for the
+    /// six families that fire from this file. They stamp their cooldown BEFORE delivery, so an alert whose
+    /// every channel failed (<see cref="FailedSendBackoff.EveryChannelFailed"/>) used to be silent for the
+    /// whole cooldown. When it did, this counts the failure in <c>_pgFailedSends</c> and back-dates the stamp
+    /// so the cooldown opens again after the streak's delay (a minute, doubling, never more than the
+    /// cooldown): every family's check is <c>now - last &gt;= cooldown</c>, so
+    /// <c>last = now - cooldown + delay</c> opens exactly <c>delay</c> after this fire, and the next sweep
+    /// that still sees the condition fires it again. Any other result (delivered, partly delivered, muted,
+    /// throttled, folded, unreported) ends the streak and leaves the stamp alone.
+    /// <para>Returns true when every channel failed. The families with a second "already reported" marker
+    /// (the deadlock and blocking count watermarks, the poison wait collection time) put it back at their own
+    /// call site on true; this method only knows the cooldown.</para>
+    /// </summary>
+    private bool AfterPgFire(
+        string family, ConcurrentDictionary<string, DateTime> stamps, string key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery) =>
+        AfterPgFireCore(_pgFailedSends, _logger, family, stamps, key, now, cooldown, delivery);
+
+    /// <summary>
+    /// The body of <see cref="AfterPgFire"/> as an internal static method, so <c>Darling.Tests</c> can drive it
+    /// without a whole <see cref="DarlingWorker"/> (the arms that call it are private and read a live store).
+    /// The instance method is a one-line forward that threads <c>_pgFailedSends</c> and <c>_logger</c> through.
+    /// </summary>
+    internal static bool AfterPgFireCore(
+        FailedSendBackoff failedSends, ILogger logger, string family,
+        ConcurrentDictionary<string, DateTime> stamps, string key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery)
+    {
+        if (!FailedSendBackoff.EveryChannelFailed(delivery))
+        {
+            failedSends.RecordDelivered(family, key);
+            return false;
+        }
+
+        var delay = failedSends.RecordFailure(family, key, now, cooldown, out var failures);
+        stamps[key] = now - cooldown + delay;
+        logger.LogInformation(
+            "Every channel failed for {Family} on {Key} (failure {Failures}); trying again in {Delay}",
+            family, key, failures, delay);
+        return true;
+    }
+
+    /// <summary>
+    /// The count watermark a Deadlocks or Blocking fire whose every channel failed leaves behind (#4795): the
+    /// value from BEFORE the fire, decayed the way <see cref="RollingCountAlertGate"/> decays it (a watermark
+    /// above the current count drops to the count). The gate advances the watermark to the fired count, and the
+    /// caller saves it, before delivery; left there, the retry sweep would see no new events and the alert
+    /// would stay lost until the count rose. At the pre-fire value the retry sees the count above the
+    /// watermark and fires again at the same count. The SQL Server twins do the same (#4752).
+    /// </summary>
+    internal static int PgUnannouncedWatermark(int preFireWatermark, int count) =>
+        Math.Min(preFireWatermark, count);
+
+    /// <summary>
+    /// Puts a poison wait subject's last-fired-on collection time back to what it was before a fire (#4795):
+    /// the prior time when there was one, no entry when the failed fire was the first. The time was recorded
+    /// before delivery, and the retry sweep would otherwise read the same collection as already reported and
+    /// never fire on it. Mirrors <c>AlertEngine.RestoreAlertedLevel</c>'s prior-or-remove shape.
+    /// </summary>
+    internal static void RestorePgPoisonCollectionTime(
+        ConcurrentDictionary<string, DateTime> collectionTimes, string key, DateTime? prior)
+    {
+        if (prior is { } time)
+        {
+            collectionTimes[key] = time;
+        }
+        else
+        {
+            collectionTimes.TryRemove(key, out _);
         }
     }
 
