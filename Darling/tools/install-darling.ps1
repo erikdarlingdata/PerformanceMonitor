@@ -768,7 +768,7 @@ if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrat
     Fail 'Run this script from an ELEVATED PowerShell (service creation and Event Log registration require it).'
 }
 
-if (-not (Test-Path $serviceExe)) {
+if (-not (Test-Path -LiteralPath $serviceExe)) {
     Fail "PerformanceMonitor.Darling.Service.exe not found beside this script. Extract the full Darling zip and run install-darling.ps1 from the extracted folder."
 }
 
@@ -1033,9 +1033,9 @@ this gate and the --test-connection probe together.
     }
 }
 
-if (-not (Test-Path $configPath)) {
-    if (Test-Path $samplePath) {
-        Copy-Item $samplePath $configPath
+if (-not (Test-Path -LiteralPath $configPath)) {
+    if (Test-Path -LiteralPath $samplePath) {
+        Copy-Item -LiteralPath $samplePath -Destination $configPath
         Write-Host ''
         Write-Host 'darling.json did not exist, so darling.sample.json was copied to darling.json.' -ForegroundColor Yellow
         Write-Host 'EDIT IT NOW (servers to monitor, auth) and re-run this script. The sample is heavily commented.' -ForegroundColor Yellow
@@ -1155,9 +1155,12 @@ else {
 # edits the DACL and drops that grant. Done AFTER the DACL and in its own try, so a SeRestorePrivilege
 # failure cannot take the DACL down with it - the failure mode we are fixing came from a permissions call
 # that silently did nothing.
+# Every path here is named with -LiteralPath (#4745). PowerShell reads [ and ] in a -Path value as wildcard
+# characters, so under an install folder named with either, -Path finds no .bak files at all, and Get-Acl or
+# Set-Acl -Path can resolve to a same-named file in a sibling folder (a[bc]d to abd) and harden that instead.
 $hardened = @()
 $failed = @()
-foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'darling.json.bak-*' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })) {
+foreach ($secretFile in @($configPath) + @(Get-ChildItem -LiteralPath $root -Filter 'darling.json.bak-*' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })) {
     try {
         $wk = [System.Security.Principal.WellKnownSidType]
         $systemSid      = New-Object System.Security.Principal.SecurityIdentifier($wk::LocalSystemSid, $null)
@@ -1183,7 +1186,7 @@ foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'da
         if ($secretFile -eq $configPath) {
             $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($interactiveSid, $read, $allow)))
         }
-        Set-Acl -Path $secretFile -AclObject $acl
+        Set-Acl -LiteralPath $secretFile -AclObject $acl
 
         # The owner goes onto the file's CURRENT descriptor, never a fresh FileSecurity (#1957). Set-Acl applies
         # the whole descriptor it is handed, so a bare object carrying nothing but an owner also wrote an empty,
@@ -1197,9 +1200,9 @@ foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'da
         # looked correct and only the installer disagreed. Re-reading first keeps the DACL written above in the
         # descriptor that gets applied, which is what makes the verified state the FINAL state.
         try {
-            $owner = Get-Acl -Path $secretFile
+            $owner = Get-Acl -LiteralPath $secretFile
             $owner.SetOwner($serviceSid)
-            Set-Acl -Path $secretFile -AclObject $owner
+            Set-Acl -LiteralPath $secretFile -AclObject $owner
         }
         catch {
             # Not fatal: the explicit FullControl grant above already carries WRITE_DAC.
@@ -1207,7 +1210,7 @@ foreach ($secretFile in @($configPath) + @(Get-ChildItem -Path $root -Filter 'da
 
         # VERIFY rather than assume. A permissions call that appears to succeed and leaves the file
         # readable is exactly what went unnoticed for months on a field box.
-        $after = Get-Acl -Path $secretFile
+        $after = Get-Acl -LiteralPath $secretFile
         $exposed = $after.Access | Where-Object {
             $_.AccessControlType -eq 'Allow' -and
             $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).IsWellKnown($wk::BuiltinUsersSid)
@@ -1332,7 +1335,7 @@ if ($Network) {
 
 # -- 6. Viewer shortcuts --------------------------------------------------------------------------
 if (-not $NoShortcuts) {
-    if (Test-Path $viewerExe) {
+    if (Test-Path -LiteralPath $viewerExe) {
         # GetFolderPath returns '' for Desktop/StartMenu whenever there is no loaded user profile - a
         # Windows service, a scheduled task, a CI runner, a remote/SSM session - and Join-Path then
         # throws. Guard it: keep only the targets whose folder resolves, and skip cleanly otherwise.
