@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitor.Darling.Service.Mcp;
 
@@ -347,6 +349,7 @@ internal static class DarlingObjectStatsReader
         NpgsqlDataSource postgres, int serverId, int top, string? databaseName = null, CancellationToken cancellationToken = default)
     {
         var rows = new List<IndexUsageRow>();
+        var clock = await DarlingServerClockReader.ReadAsync(postgres, serverId, cancellationToken);
         await using var command = postgres.CreateCommand(IndexUsageSql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         DarlingMcpReadParameters.AddInt(command, serverId);
@@ -355,25 +358,29 @@ internal static class DarlingObjectStatsReader
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(new IndexUsageRow(
-                reader.IsDBNull(0) ? "" : reader.GetString(0),
-                reader.IsDBNull(1) ? "" : reader.GetString(1),
-                reader.IsDBNull(2) ? "" : reader.GetString(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
-                reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
-                reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
-                reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
-                reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
-                reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
-                reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
-                reader.IsDBNull(12) ? null : reader.GetDateTime(12),
-                reader.IsDBNull(13) ? "" : reader.GetString(13)));
+            rows.Add(MapIndexUsageRow(reader, clock));
         }
 
         return rows;
     }
+
+    /// <summary>Maps one row of <see cref="IndexUsageSql"/> (14 columns, in the SELECT's order).</summary>
+    internal static IndexUsageRow MapIndexUsageRow(DbDataReader reader, ServerClock clock) =>
+        new(
+            reader.IsDBNull(0) ? "" : reader.GetString(0),
+            reader.IsDBNull(1) ? "" : reader.GetString(1),
+            reader.IsDBNull(2) ? "" : reader.GetString(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            reader.IsDBNull(4) ? null : reader.GetString(4),
+            reader.IsDBNull(5) ? 0 : reader.GetDouble(5),
+            reader.IsDBNull(6) ? 0 : reader.GetInt64(6),
+            reader.IsDBNull(7) ? 0 : reader.GetInt64(7),
+            reader.IsDBNull(8) ? 0 : reader.GetInt64(8),
+            reader.IsDBNull(9) ? 0 : reader.GetInt64(9),
+            reader.IsDBNull(10) ? 0 : reader.GetInt64(10),
+            reader.IsDBNull(11) ? 0 : reader.GetInt64(11),
+            reader.IsDBNull(12) ? null : reader.GetDateTime(12),
+            reader.IsDBNull(13) ? "" : reader.GetString(13));
 
     /// <summary>
     /// How many index rows the same server and database filter match at the latest snapshot, ignoring the
