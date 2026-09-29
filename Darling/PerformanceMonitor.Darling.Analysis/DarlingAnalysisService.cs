@@ -135,6 +135,12 @@ public sealed class DarlingAnalysisService
     private readonly ILogger? _logger;
 
     /// <summary>
+    /// #4726: the shared baseline tier this instance was handed (null when it keeps a private one). The MCP host
+    /// builds one service per call, so a test reads this to prove every one of them shares the host's ONE cache.
+    /// </summary>
+    internal BaselineCache? SharedBaselineCache { get; }
+
+    /// <summary>
     /// Minimum hours of collected data required before analysis will run.
     /// Short collection windows distort fraction-of-period calculations —
     /// 5 seconds of THREADPOOL looks alarming in a 16-minute window.
@@ -248,6 +254,7 @@ public sealed class DarlingAnalysisService
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _logger = logger;
+        SharedBaselineCache = baselineCache;
         _findingStore = new PgFindingStore(postgres, logger);
         _scorer = new FactScorer();
 
@@ -1265,16 +1272,23 @@ ORDER BY event_time_utc";
                 ? null
                 : ComparisonBanding.Compare(before, after, dispersion, ConfigChangeAttribution.CoverageCaveatFor(beforeCoverage, afterCoverage));
 
-            facts.Add(ConfigChangeAttribution.BuildFact(
-                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor));
+            var attributionFact = ConfigChangeAttribution.BuildFact(
+                context.ServerId, latest, events.Count - 1, windows, compare, beforeCoverage, afterCoverage, anchor);
+            facts.Add(attributionFact);
+
+            /* The log reports the CARD's counts, not the compare's raw ones: a pass whose card says "not yet
+               comparable" must not log "1 better" for the same row (#4729). Stable stays the compare's. */
+            var worse = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaWorse);
+            var better = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaBetter);
+            var notYetComparable = (int)attributionFact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
 
             _logger?.LogInformation(
-                "[DarlingAnalysisService] Configuration change attributed for {Server} ({Families}): {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better, {Stable} stable{Unavailable}",
+                "[DarlingAnalysisService] Configuration change attributed for {Server} ({Families}): {Settings} {Verb} {AnchorAt:u} ({AnchorSource}), compare over ±{Hours} h ({AfterHours:0.#} h after so far) — {Worse} worse, {Better} better{NotYetComparable}, {Stable} stable{Unavailable}",
                 context.ServerName, latest.Families, string.Join(ConfigChangeAttribution.SettingSeparator, latest.Changes.Select(c => c.Name)),
                 anchor is null ? "first observed at" : "changed at", anchorTime,
                 anchor is null ? "configuration snapshot" : "default trace, msg 15457",
                 ConfigChangeAttribution.CompareWindowHours, windows.AfterHoursObserved,
-                compare?.Worse ?? 0, compare?.Better ?? 0, compare?.Stable ?? 0,
+                worse, better, notYetComparable > 0 ? $", {notYetComparable} not yet comparable" : string.Empty, compare?.Stable ?? 0,
                 compare is null ? " (compare unavailable this pass)" : string.Empty);
         }
         catch (Exception ex) when (!AnalysisShutdown.IsExpectedAbandon(ex, context.CancellationToken))

@@ -128,7 +128,11 @@ public sealed class PerfmonCounterTypeTests
         Assert.True(start >= 0, "DuckDbInitializer has no v62 block");
         var block = source[start..];
 
-        Assert.Contains("\"ALTER TABLE perfmon_stats ADD COLUMN IF NOT EXISTS cntr_type INTEGER\"", block, StringComparison.Ordinal);
+        /* #4727: the entry lives in DuckDbInitializer.AddedColumns; the step adds it through the shared
+           AddMissingColumnsAsync, one idempotent ADD COLUMN IF NOT EXISTS. */
+        Assert.Contains("(62, \"perfmon_stats\", \"cntr_type\", \"INTEGER\")", block, StringComparison.Ordinal);
+        Assert.Contains("AddMissingColumnsAsync(connection, AddedColumnsForVersion(62))", block, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS {column} {type}", block, StringComparison.Ordinal);
         Assert.Contains("Running migration to v62", block, StringComparison.Ordinal);
         foreach (var phrase in new[] { "COUNTS", "LEVELS", "falling level", "counter reset", "NULL delta and NULL interval", "name-suffix proxy", "Appended at the end", "Nothing to backfill", "REQUIRED on this side" })
         {

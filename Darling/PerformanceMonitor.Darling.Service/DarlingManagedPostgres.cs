@@ -461,8 +461,8 @@ public sealed class DarlingManagedPostgres
     /// bring-your-own store's WAL is its owner's to size, consistent with the BYO posture everywhere else in
     /// this class.</para>
     ///
-    /// <para><b>What it does when the disk cannot be read.</b> Nothing — the v8 rule. An unreadable
-    /// <c>DriveInfo</c> is not evidence the headroom is unchanged, it is the absence of evidence either way,
+    /// <para><b>What it does when the disk cannot be read.</b> Nothing — the v8 rule. An unreadable data
+    /// volume is not evidence the headroom is unchanged, it is the absence of evidence either way,
     /// and re-deriving the WAL ceiling from a figure this service could not read is worse than leaving the
     /// last good block (or v4's 4 GB, on a store that has never healed) in force. The skip is logged as a
     /// warning naming what stays in force.</para>
@@ -716,6 +716,12 @@ public sealed class DarlingManagedPostgres
     /// <summary>What the runtime probe did with the shipped zip this start (#1706) — non-null only when a
     /// newer runtime was extracted, and its PreviousBinDirectory is pg_upgrade's --old-bindir.</summary>
     private DarlingStoreUpgrade.RuntimeAdvance? _runtimeAdvance;
+
+    /// <summary>Whether this instance has run the retained-copy sweep. A service start is one instance, and the
+    /// worker re-enters <see cref="EnsureRunningAsync"/> on the same instance when a retryable failure sends it
+    /// round again, so the sweep runs once per instance or a retried start would count as two of the starts a
+    /// rollback copy is kept for.</summary>
+    private bool _retainedSweepDone;
 
     /// <summary>The bundled runtime's identity, read once the runtime is settled and used by the post-start
     /// verification and the same-major TimescaleDB update.</summary>
@@ -2742,8 +2748,13 @@ public sealed class DarlingManagedPostgres
 
         /* Age out any pre-upgrade rollback copy BEFORE this start's own upgrade can create a new one.
            Running it afterwards would bump the brand-new copy's counter on the very start that produced
-           it, costing it one of the two starts it is supposed to survive. */
-        _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
+           it, costing it one of the two starts it is supposed to survive. Once per instance, for the same
+           reason: a re-entry after a retryable failure is the same start, not another one. */
+        if (!_retainedSweepDone)
+        {
+            _storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);
+            _retainedSweepDone = true;
+        }
 
         /* The install directory's own housekeeping report, beside the store's. Deliberately adjacent: the
            two answer the same operator question about two different parents, and a field instance proved
@@ -2763,6 +2774,18 @@ public sealed class DarlingManagedPostgres
         var existingCluster = File.Exists(Path.Combine(_dataDirectory, "PG_VERSION"));
         if (!existingCluster)
         {
+            /* No cluster at the data directory, but one beside it under a name the upgrade's directory swap
+               gives a moved-aside store: the store is that sibling, not a fresh install. Initializing here
+               would write a new superuser credential over the store's own, and the retention sweep would
+               later delete the store as an expired rollback copy. Refused for good, not retried: nothing
+               changes between attempts but an operator's hand. The credential file alone is not evidence
+               either way, because it is written before initdb (see InitializeClusterAsync). */
+            var displaced = DarlingStoreUpgrade.FindDisplacedStoreCopies(_dataDirectory);
+            if (displaced.Count > 0)
+            {
+                throw new InvalidOperationException(DarlingStoreUpgrade.DescribeDisplacedStore(_dataDirectory, displaced));
+            }
+
             await InitializeClusterAsync(binDirectory, cancellationToken);
 
             /* Read here too, so this first start records the new store's TimescaleDB state under this runtime and
@@ -3093,8 +3116,11 @@ public sealed class DarlingManagedPostgres
                             "resume: no backup file found for a PendingVerify conf");
                     }
 
+                    /* The NEWEST backup. An attempt that finds postgresql.conf edited since the last
+                       snapshot takes another one (ManagedConfMigrationSteps.BackupOriginal), and a restore
+                       from an older backup would put the file back as it was before those edits. */
                     Array.Sort(backupPath, StringComparer.Ordinal);
-                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[0], cancellationToken, _logger);
+                    outcome = await ManagedConfMigrationRunner.ResumePending(_dataDirectory, snapshot, backupPath[^1], cancellationToken, _logger);
                     break;
                 }
 
@@ -3683,7 +3709,7 @@ public sealed class DarlingManagedPostgres
            upgrade's callback (#1706) sizes the freshly-initdb'd cluster from ITS volume and ITS major.
            The major comes from PG_VERSION — readable without executing anything, the DarlingStoreUpgrade rule
            — and an unreadable one derives as 0, which pins the checkpoint target (a no-op on 14+, the fix
-           on anything older). The disk figure is the gate: without an authoritative DriveInfo reading this does NOTHING,
+           on anything older). The disk figure is the gate: without an authoritative reading of the data volume this does NOTHING,
            exactly as v8 does without an authoritative RAM reading, because re-deriving a production WAL ceiling
            from a figure we could not read is worse than leaving the block in force. All three settings are
            SIGHUP-context and this runs before pg_ctl start, so a service-owned start applies them at once. */
@@ -4089,37 +4115,34 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// The AUTHORITATIVE free/total read of the volume holding <paramref name="dataDirectory"/> (#3802): the
-    /// same <c>DriveInfo</c>-on-the-path-root idiom the store upgrade's headroom check and the disk-pressure
-    /// self-alert already use, so three readers of one volume cannot disagree about which volume.
-    /// <c>AvailableFreeSpace</c> rather than <c>TotalFreeSpace</c>: it honours a quota on the service account,
-    /// and the WAL is written by the postmaster running AS that account, so it is the figure that bounds what
-    /// the server can actually write — the upgrade's headroom decision makes the same choice.
+    /// The AUTHORITATIVE free/total read of the volume holding <paramref name="dataDirectory"/> (#3802), made
+    /// for the directory's own volume through <see cref="DarlingStoreUpgrade.ReadVolumeSpace"/>, the call the
+    /// store upgrade's headroom check makes. A data directory on a volume mounted at a folder is sized from that
+    /// volume, not from the one behind its drive letter. The free figure is the one available to the caller
+    /// rather than the volume's total free space: it honours a quota on the service account, and the WAL is
+    /// written by the postmaster running AS that account, so it is the figure that bounds what the server can
+    /// actually write — the upgrade's headroom decision makes the same choice.
     ///
-    /// <para>False, with both figures zero, when the root cannot be resolved, the drive is not ready, or the
-    /// read throws — and false is the v8 discipline's "do nothing" signal, not a value to size from. Logged at
-    /// Warning here so the skip in <see cref="EnsureConfAppended"/> has its cause beside it.</para>
+    /// <para>False, with both figures zero, when the directory cannot be asked, the volume reports no size, or
+    /// the read throws — and false is the v8 discipline's "do nothing" signal, not a value to size from. Logged
+    /// at Warning here so the skip in <see cref="EnsureConfAppended"/> has its cause beside it.
+    /// <paramref name="readVolumeSpace"/> replaces the read, so a test can say what the volume holds and what
+    /// a failed read looks like.</para>
     /// </summary>
-    private bool TryReadDataVolumeSpace(string dataDirectory, out long freeBytes, out long totalBytes)
+    [SupportedOSPlatform("windows")]
+    internal bool TryReadDataVolumeSpace(
+        string dataDirectory, out long freeBytes, out long totalBytes,
+        Func<string, (long AvailableFreeBytes, long TotalBytes)>? readVolumeSpace = null)
     {
         try
         {
-            var root = Path.GetPathRoot(Path.GetFullPath(dataDirectory));
-            if (!string.IsNullOrEmpty(root))
+            (freeBytes, totalBytes) = (readVolumeSpace ?? DarlingStoreUpgrade.ReadVolumeSpace)(dataDirectory);
+            if (freeBytes >= 0 && totalBytes > 0)
             {
-                var drive = new DriveInfo(root);
-                if (drive.IsReady)
-                {
-                    freeBytes = drive.AvailableFreeSpace;
-                    totalBytes = drive.TotalSize;
-                    if (freeBytes >= 0 && totalBytes > 0)
-                    {
-                        return true;
-                    }
-                }
+                return true;
             }
 
-            _logger.LogWarning("Could not read the free space on the volume holding {DataDirectory} (root {Root} not ready or reported no size).", dataDirectory, root ?? "(unresolved)");
+            _logger.LogWarning("Could not read the free space on the volume holding {DataDirectory} (the volume reported no size).", dataDirectory);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -4330,15 +4353,22 @@ public sealed class DarlingManagedPostgres
                 "Install the newer package again, or restore the store from a backup taken with a matching runtime.");
         }
 
-        var previousBin = _runtimeAdvance?.PreviousBinDirectory;
+        /* The runtime advance reports a previous runtime only on the start that swapped. After an interrupted
+           upgrade (the process died between the stamp write and the commit, or the revert was refused), the
+           next start's stamp matches the package and nothing is reported, although the store's binaries are
+           still in the rescued copy. Ask for them there before declaring them gone; a runtime restored by
+           hand at that path is found the same way, which is what the refusal below tells the operator to do. */
+        var previousBin = _runtimeAdvance?.PreviousBinDirectory
+            ?? await _storeUpgrade.FindRescuedRuntimeBinAsync(_runtimeRoot, _dataDirectory, cancellationToken);
         if (previousBin is null || !File.Exists(Path.Combine(previousBin, "pg_ctl.exe")))
         {
             throw new InvalidOperationException(
                 $"The store data directory {_dataDirectory} was created by PostgreSQL {dataMajor} and this package bundles PostgreSQL {bundledMajor}, " +
                 $"but the PostgreSQL {dataMajor} binaries are not on this host, so an in-place upgrade is impossible " +
                 "(pg_upgrade needs both runtimes). This happens when the pg-runtime directory was deleted before the upgrade ran. " +
-                $"Restore a PostgreSQL {dataMajor} runtime at {PreviousRuntimeHint()}, then restart the service to upgrade; " +
-                "or restore the store from backup.");
+                $"Put a PostgreSQL {dataMajor} runtime at {PreviousRuntimeHint()}, so that {Path.Combine(PreviousRuntimeHint(), "bin", "pg_ctl.exe")} runs; " +
+                "every start looks there for the store's own binaries when the live runtime is newer than the store, and the next one upgrades from them. " +
+                "Or restore the store from backup.");
         }
 
         var outcome = await _storeUpgrade.UpgradeDataDirectoryAsync(
@@ -4366,6 +4396,16 @@ public sealed class DarlingManagedPostgres
             cancellationToken);
 
         LastUpgradeOutcome = outcome;
+
+        /* A failure that could not put the data directory back, or could not revert the runtime, leaves no
+           store this start can run: going on would reach the first-run initdb with the store sitting beside
+           an empty data directory, or start the new binaries on the old cluster. Stop here, and for good: a
+           retry in the same process would reach the same two places. The worker does not retry an
+           InvalidOperationException, and the message names the hand step. */
+        if (DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(outcome, _dataDirectory, _runtimeRoot) is { } unrecovered)
+        {
+            throw new InvalidOperationException(unrecovered);
+        }
 
         if (outcome.Status == DarlingStoreUpgrade.StoreUpgradeStatus.Failed)
         {

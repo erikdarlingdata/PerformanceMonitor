@@ -47,6 +47,31 @@ public sealed class McpHostService : BackgroundService
         _scheduleManager = scheduleManager;
     }
 
+    /// <summary>
+    /// #4726: registers the analysis service TRANSIENT, so every MCP call gets its own instance. One shared instance
+    /// answered a second, overlapping analyze_server call with an empty list (its busy check) and the tool then read
+    /// the FIRST call's running state, so the second server got "No significant findings" for a server it never
+    /// analyzed. The scheduler and the Recommendations tab keep their own instances. Every instance is handed the
+    /// store's ONE shared baseline tier (#3941), so an analysis hour a scheduled pass already computed reads no
+    /// 30-day baseline. Extracted so a test resolves the service from the production registration instead of a
+    /// hand-copied one that could drift from it.
+    /// </summary>
+    internal static void RegisterAnalysisService(
+        IServiceCollection services,
+        DuckDbInitializer duckDb,
+        IPlanFetcher planFetcher,
+        ServerManager serverManager,
+        ScheduleManager? schedules)
+    {
+        services.AddTransient<AnalysisService>(_ => new AnalysisService(
+            duckDb,
+            planFetcher,
+            collectorFrequencyMinutes: schedules is null
+                ? null
+                : (serverId, collector) => schedules.GetFrequencyForStorageServer(serverManager, serverId, collector),
+            baselineCache: BaselineCache.For(duckDb)));
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         try
@@ -67,16 +92,8 @@ public sealed class McpHostService : BackgroundService
             builder.Services.AddSingleton(_serverManager);
             builder.Services.AddSingleton(_muteRuleService);
             var planFetcher = new SqlPlanFetcher(_serverManager);
-            var schedules = _scheduleManager;
-            /* #3941: the store's shared baseline tier, so analyze_server and compare_analysis inside an analysis hour
-               a scheduled pass already computed read no 30-day baseline. */
-            builder.Services.AddSingleton(new AnalysisService(
-                _duckDb,
-                planFetcher,
-                collectorFrequencyMinutes: schedules is null
-                    ? null
-                    : (serverId, collector) => schedules.GetFrequencyForStorageServer(_serverManager, serverId, collector),
-                baselineCache: BaselineCache.For(_duckDb)));
+            /* #4726: registered PER CALL, through the method a test also calls (see RegisterAnalysisService). */
+            RegisterAnalysisService(builder.Services, _duckDb, planFetcher, _serverManager, _scheduleManager);
 
             /* Register MCP server with all tool classes */
             builder.Services

@@ -2742,6 +2742,93 @@ public sealed class DarlingManagedPostgresTests
     }
 
     /// <summary>
+    /// The volume the WAL sizing reads is the data directory's own: the read is asked for the directory itself,
+    /// never for the drive root above it, and both figures come back from that one call. A data directory on a
+    /// volume mounted at a folder is on a different volume from its drive root, so the drive root's free space
+    /// would size the WAL ceiling from another disk.
+    /// </summary>
+    [Fact]
+    public void TryReadDataVolumeSpace_AsksTheDataDirectoryItself_NotItsDriveRoot()
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("pm-wal-volume-").FullName;
+        try
+        {
+            var pg = new DarlingManagedPostgres(
+                new PostgresConfig { Managed = true, Port = 5997, DataDirectory = dataDirectory }, NullLogger.Instance);
+            var asked = new List<string>();
+
+            var read = pg.TryReadDataVolumeSpace(dataDirectory, out var freeBytes, out var totalBytes, directory =>
+            {
+                asked.Add(directory);
+                return (64 * OneGb, 120 * OneGb);
+            });
+
+            Assert.True(read);
+            Assert.Equal(64 * OneGb, freeBytes);
+            Assert.Equal(120 * OneGb, totalBytes);
+            Assert.Equal(new[] { dataDirectory }, asked);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory);
+        }
+    }
+
+    /// <summary>
+    /// A directory that is not there has no volume to ask, so the read fails the way an unreadable disk always
+    /// has: false, both figures zero, and one warning that names the directory, which is the "do nothing"
+    /// signal the WAL sizing waits for. Asked of the drive letter above it, the same read answers for any path
+    /// under the drive, which is how a wrong volume's free space got through.
+    /// </summary>
+    [Fact]
+    public void TryReadDataVolumeSpace_DirectoryThatIsNotThere_IsUnreadable_AndWarnsOnce()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "pm-wal-volume-missing-" + Guid.NewGuid().ToString("N"));
+        var logger = new CapturingTestLogger();
+        var pg = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = 5997, DataDirectory = missing }, logger);
+
+        var read = pg.TryReadDataVolumeSpace(missing, out var freeBytes, out var totalBytes);
+
+        Assert.False(read);
+        Assert.Equal(0L, freeBytes);
+        Assert.Equal(0L, totalBytes);
+        var line = Assert.Single(logger.Joined.Split(" | "));
+        Assert.StartsWith("Warning: ", line, StringComparison.Ordinal);
+        Assert.Contains(missing, line, StringComparison.Ordinal);
+    }
+
+    /// <summary>A read that throws, and a volume that reports no size, are both unreadable: false, both figures
+    /// zero, and a warning that says which of the two it was.</summary>
+    [Fact]
+    public void TryReadDataVolumeSpace_FailedReadOrNoSize_IsUnreadable_AndWarnsWithTheReason()
+    {
+        var dataDirectory = Directory.CreateTempSubdirectory("pm-wal-volume-").FullName;
+        try
+        {
+            var config = new PostgresConfig { Managed = true, Port = 5997, DataDirectory = dataDirectory };
+
+            var failed = new CapturingTestLogger();
+            Assert.False(new DarlingManagedPostgres(config, failed).TryReadDataVolumeSpace(
+                dataDirectory, out var failedFree, out var failedTotal, _ => throw new IOException("the volume is not ready")));
+            Assert.Equal(0L, failedFree);
+            Assert.Equal(0L, failedTotal);
+            Assert.Contains("the volume is not ready", failed.Joined, StringComparison.Ordinal);
+
+            var noSize = new CapturingTestLogger();
+            Assert.False(new DarlingManagedPostgres(config, noSize).TryReadDataVolumeSpace(
+                dataDirectory, out var noSizeFree, out var noSizeTotal, _ => (OneGb, 0)));
+            Assert.Equal(0L, noSizeFree);
+            Assert.Equal(0L, noSizeTotal);
+            Assert.Contains("reported no size", noSize.Joined, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dataDirectory);
+        }
+    }
+
+    /// <summary>
     /// THE HEAL-DOWN CASE the issue asked for (#3802): a block written at 16384MB on a roomy volume, a volume
     /// that has since shrunk to 32 GB free. The last stamp is stale, the block is re-authored, and the value in
     /// force is 4096MB by last-occurrence-wins — the old block is preserved, never edited. Then the resize-back
@@ -3779,6 +3866,171 @@ public sealed class DarlingManagedPostgresTests
 
         var withOperatorLine = initdbSample + "\n# an operator's own line\nmaintenance_work_mem = 2048MB\n";
         Assert.Equal("2048MB", Assert.Single(ActiveValues(withOperatorLine, "maintenance_work_mem")));
+    }
+
+    /* ==================== a start after an upgrade that did not finish ==================== */
+
+    /// <summary>
+    /// The bootstrap's four recovery seams, pinned in order in the source: initdb is refused while the store
+    /// sits beside an empty data directory; the rescued runtime is asked for before the store's binaries
+    /// are declared gone; a failed upgrade that left no startable store stops the start; and the retained
+    /// copy sweep runs once per instance. Each is a call into <see cref="DarlingStoreUpgrade"/> whose own
+    /// behaviour has unit tests; this pins that the bootstrap makes the call where it matters.
+    /// </summary>
+    [Fact]
+    public void EnsureRunningAsync_RecoversFromAnUnfinishedUpgrade_AtEachSeam()
+    {
+        var source = ReadManagedPostgresSource();
+
+        var method = source.IndexOf("public async Task<string> EnsureRunningAsync(", StringComparison.Ordinal);
+        var refusal = source.IndexOf("DarlingStoreUpgrade.FindDisplacedStoreCopies(_dataDirectory)", StringComparison.Ordinal);
+        var initdb = source.IndexOf("await InitializeClusterAsync(binDirectory, cancellationToken);", StringComparison.Ordinal);
+        Assert.True(method >= 0 && refusal > method && initdb > refusal,
+            "EnsureRunningAsync must refuse a first-run initdb while a moved-aside store sits beside the empty data directory.");
+
+        var sweep = source.IndexOf("_storeUpgrade.SweepRetainedDataDirectories(_dataDirectory);", StringComparison.Ordinal);
+        var onceGate = source.IndexOf("if (!_retainedSweepDone)", StringComparison.Ordinal);
+        Assert.True(onceGate > method && sweep > onceGate && sweep < refusal,
+            "the retained copy sweep must run once per instance, and before the upgrade can create a new copy.");
+
+        var probe = source.IndexOf("?? await _storeUpgrade.FindRescuedRuntimeBinAsync(_runtimeRoot, _dataDirectory, cancellationToken)", StringComparison.Ordinal);
+        var gone = source.IndexOf("binaries are not on this host", StringComparison.Ordinal);
+        Assert.True(probe >= 0 && gone > probe,
+            "the rescued runtime must be asked for before the store's binaries are declared gone.");
+
+        var outcome = source.IndexOf("LastUpgradeOutcome = outcome;", StringComparison.Ordinal);
+        var stop = source.IndexOf("DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(outcome, _dataDirectory, _runtimeRoot) is { } unrecovered", StringComparison.Ordinal);
+        var rethrow = source.IndexOf("throw new InvalidOperationException(unrecovered);", StringComparison.Ordinal);
+        Assert.True(outcome >= 0 && stop > outcome && rethrow > stop,
+            "a failed upgrade that could not put the store back, or revert the runtime, must stop the start with a failure the worker does not retry.");
+    }
+
+    /// <summary>
+    /// A start that finds no cluster at the data directory and the store beside it under the upgrade's
+    /// retained name refuses to initialize: initdb does not run, the superuser credential the real first
+    /// run wrote is byte for byte what it was, the moved-aside store and its start counter are untouched,
+    /// and the failure is one the worker does not retry. Gated on DARLING_TEST_PGRUNTIME.
+    /// </summary>
+    [Fact]
+    public async Task EnsureRunning_RefusesInitdb_WhileTheStoreSitsBesideAnEmptyDataDirectory_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-displaced-live-");
+        var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+        var config = new PostgresConfig { Managed = true, Port = FindFreeTcpPort(), DataDirectory = dataDirectory };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+        var owner = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        try
+        {
+            await owner.EnsureRunningAsync(timeout.Token);
+            await owner.StopIfStartedByThisProcessAsync();
+
+            var credentialPath = DarlingManagedPostgres.CredentialPathFor(dataDirectory);
+            var credentialBefore = File.ReadAllBytes(credentialPath);
+
+            /* The swap's first rename happened and nothing put the store back. One start already counted. */
+            var retained = DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, 17);
+            Directory.Move(dataDirectory, retained);
+            File.WriteAllText(retained + ".starts", "1");
+
+            var next = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            var refusal = await Assert.ThrowsAsync<InvalidOperationException>(() => next.EnsureRunningAsync(timeout.Token));
+
+            Assert.Contains(retained, refusal.Message, StringComparison.Ordinal);
+            Assert.False(StartupFailureTriage.IsRetryable(refusal));
+            Assert.False(Directory.Exists(dataDirectory));
+            Assert.True(File.Exists(Path.Combine(retained, "PG_VERSION")));
+            Assert.Equal("1", File.ReadAllText(retained + ".starts"));
+            Assert.Equal(credentialBefore, File.ReadAllBytes(credentialPath));
+        }
+        finally
+        {
+            await owner.StopIfStartedByThisProcessAsync();
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The retained rollback copy survives the two service starts it is kept for, counted as starts of the
+    /// service and not as entries into <see cref="DarlingManagedPostgres.EnsureRunningAsync"/>: the worker
+    /// re-enters on the same instance after a retryable failure, and that re-entry used to spend one of the
+    /// copy's two starts. Gated on DARLING_TEST_PGRUNTIME.
+    /// </summary>
+    [Fact]
+    public async Task EnsureRunning_TwiceOnOneInstance_CountsOneStartAgainstTheRollbackCopy_Gated()
+    {
+        var runtimeRoot = Environment.GetEnvironmentVariable("DARLING_TEST_PGRUNTIME");
+        Assert.SkipWhen(string.IsNullOrWhiteSpace(runtimeRoot),
+            "Set DARLING_TEST_PGRUNTIME to an assembled pg-runtime directory (the folder containing pgsql\\bin\\pg_ctl.exe).");
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The bundled runtime is Windows-only.");
+        Assert.SkipUnless(File.Exists(Path.Combine(runtimeRoot!, "pgsql", "bin", "pg_ctl.exe")),
+            $"DARLING_TEST_PGRUNTIME={runtimeRoot} does not contain pgsql\\bin\\pg_ctl.exe.");
+
+        var root = Directory.CreateTempSubdirectory("darling-sweep-once-");
+        var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+        var config = new PostgresConfig { Managed = true, Port = FindFreeTcpPort(), DataDirectory = dataDirectory };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(8));
+        var first = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+        DarlingManagedPostgres? second = null;
+        DarlingManagedPostgres? third = null;
+        try
+        {
+            await first.EnsureRunningAsync(timeout.Token);
+            await first.StopIfStartedByThisProcessAsync();
+
+            var retained = DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, 17);
+            Directory.CreateDirectory(retained);
+            File.WriteAllText(Path.Combine(retained, "PG_VERSION"), "17\n");
+            var counter = retained + ".starts";
+
+            second = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await second.EnsureRunningAsync(timeout.Token);
+            Assert.Equal("1", File.ReadAllText(counter));
+
+            /* The worker's re-entry after a retryable failure: the same instance, so the same start. */
+            await second.EnsureRunningAsync(timeout.Token);
+            Assert.True(Directory.Exists(retained));
+            Assert.Equal("1", File.ReadAllText(counter));
+            await second.StopIfStartedByThisProcessAsync();
+
+            /* The next real start is the second one the copy is kept for, and the one that ages it out. */
+            third = new DarlingManagedPostgres(config, NullLogger.Instance, runtimeRoot);
+            await third.EnsureRunningAsync(timeout.Token);
+            Assert.False(Directory.Exists(retained));
+        }
+        finally
+        {
+            await first.StopIfStartedByThisProcessAsync();
+            if (second is not null)
+            {
+                await second.StopIfStartedByThisProcessAsync();
+            }
+
+            if (third is not null)
+            {
+                await third.StopIfStartedByThisProcessAsync();
+            }
+
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    private static void TryDeleteTree(string path)
+    {
+        try
+        {
+            Directory.Delete(path, recursive: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            /* A leftover temp tree is not a test failure. */
+        }
     }
 
     private static int CountOccurrences(string text, string value)

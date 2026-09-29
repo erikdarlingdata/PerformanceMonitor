@@ -588,9 +588,17 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Contains("a per-checkpoint sync average past 10s", storm, StringComparison.Ordinal);
         Assert.Contains("25.2 s and 14.0 s sync phases", storm, StringComparison.Ordinal);
 
-        /* Requested arm: low sync average, but one requested checkpoint still fires. */
+        /* Requested arm: low sync average, but one requested checkpoint still fires. The note says what the alert
+           says (#4758): a requested checkpoint comes from WAL volume, a base backup or a CHECKPOINT statement, the
+           counters do not say which, and raising max_wal_size is the remedy for the first cause only. */
         var forced = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 2_000, 3_000, 6, Timed: 5), new(t0, 1_000, 1_000, 5, Timed: 0)));
-        Assert.Contains("a requested checkpoint means the store wrote more WAL between checkpoints than max_wal_size allows", forced, StringComparison.Ordinal);
+        Assert.Contains("a requested checkpoint comes from WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement", forced, StringComparison.Ordinal);
+        Assert.Contains("counters do not say which", forced, StringComparison.Ordinal);
+        Assert.Contains("log_checkpoints", forced, StringComparison.Ordinal);
+        Assert.Contains("Raising max_wal_size is the remedy only for the first cause", forced, StringComparison.Ordinal);
+        Assert.DoesNotContain("WAL-forced", forced, StringComparison.Ordinal);
+        Assert.DoesNotContain("means the store wrote more WAL", forced, StringComparison.Ordinal);
+        Assert.Contains("The informational Store Checkpointer Pressure self-alert says the same.", forced, StringComparison.Ordinal);
 
         /* Zero checkpoints in the interval: no average to state, unmeasured, not judged either way. */
         var idle = DarlingMcpStoreMetricsTools.CheckpointerNote(DarlingStoreMetricsReader.CheckpointerReading.From(new(t1, 1_000, 1_000, 5, Timed: 0), new(t0, 1_000, 1_000, 5, Timed: 0)));
@@ -899,12 +907,25 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Equal("average sync > 10s per checkpoint, or any requested checkpoint", fired.ThresholdValue);
         Assert.Contains("25.2 s and 14.0 s sync phases", fired.DetailText!, StringComparison.Ordinal);
 
-        /* The other arm alone: one WAL-forced checkpoint with a short average sync. */
+        /* The other arm alone: one requested checkpoint with a short average sync. A requested checkpoint comes
+           from WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement, and the counters do not
+           say which (#4758), so the alert calls it "requested", names all three causes and the log_checkpoints
+           lines that say which, and offers max_wal_size as the remedy for the first cause only. */
         var forced = new Harness();
         await forced.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 1, timed: 1), Ct);
         var forcedFire = Assert.Single(forced.Deliverer.Outcomes);
-        Assert.Contains("1 WAL-forced checkpoint(s)", forcedFire.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("more WAL between checkpoints than max_wal_size allows", forcedFire.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("1 requested checkpoint(s)", forcedFire.CurrentValue, StringComparison.Ordinal);
+        Assert.DoesNotContain("WAL-forced", forcedFire.CurrentValue, StringComparison.Ordinal);
+        Assert.DoesNotContain("WAL-forced", forcedFire.ShortMessage!, StringComparison.Ordinal);
+        Assert.Contains("WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement", forcedFire.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("base backup", forcedFire.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("CHECKPOINT statement", forcedFire.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("counters do not say which", forcedFire.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("log_checkpoints", forcedFire.DetailText!, StringComparison.Ordinal);
+        Assert.Contains("Raising max_wal_size is the remedy only for the first cause", forcedFire.DetailText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("forced by WAL volume", forcedFire.DetailText!, StringComparison.Ordinal);
+        Assert.Null(forcedFire.Severity);
+        Assert.Equal("average sync > 10s per checkpoint, or any requested checkpoint", forcedFire.ThresholdValue);
 
         /* Exactly the bar, no forced checkpoint: quiet. */
         var quiet = new Harness();
@@ -1013,7 +1034,7 @@ public sealed class StoreToastAndCheckpointerTests
         await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 800, requested: 2, restarted: false, timed: 1), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
-        Assert.Contains("2 WAL-forced checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("2 requested checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("restart", fired.ShortMessage!, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("RESTARTED", fired.DetailText!, StringComparison.Ordinal);
     }
@@ -1040,7 +1061,7 @@ public sealed class StoreToastAndCheckpointerTests
         await h.Build().ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 1, restarted: false, timed: 1), Ct);
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("average sync", fired.CurrentValue, StringComparison.Ordinal);
-        Assert.Contains("1 WAL-forced checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("1 requested checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
         Assert.DoesNotContain("restart", fired.ShortMessage!, StringComparison.OrdinalIgnoreCase);
     }
 

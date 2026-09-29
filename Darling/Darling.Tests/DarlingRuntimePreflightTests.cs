@@ -62,7 +62,7 @@ public class DarlingRuntimePreflightTests
         foreach (var (marker, what) in new[]
         {
             ("& $serviceExe --test-connection", "the --test-connection pre-flight, which is what surfaces the raw host error today"),
-            ("Copy-Item $samplePath $configPath", "copying darling.sample.json to darling.json"),
+            ("Copy-Item -LiteralPath $samplePath -Destination $configPath", "copying darling.sample.json to darling.json"),
             ("New-EventLog -LogName Application", "registering the Event Log source"),
             ("& sc.exe create $serviceName", "creating the service"),
             ("Start-Service -Name $serviceName", "starting the service"),

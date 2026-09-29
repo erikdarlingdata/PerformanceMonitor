@@ -81,14 +81,39 @@ public sealed record NotificationRouteDecision(
     public bool IsAllDefaults => All.All(d => d.Source is RouteSource.Default or RouteSource.None);
 
     /// <summary>The persisted projection for the alert-history row's context (design point 3): the family,
-    /// the winning route, and each DELIVERED channel with the route that supplied it. Channels that resolved
-    /// to nothing are omitted — the row says where the post went, not where it did not.</summary>
-    public AlertRouteDto ToDto() => new(
+    /// the winning route, and each channel that RESOLVED to a destination with the route that supplied it.
+    /// Channels that resolved to nothing are omitted — the row says where the post went, not where it did not.
+    ///
+    /// <para>#4750: <paramref name="outcomes"/> is what each channel's send did, keyed by the channel names
+    /// above. With it every listed channel says <see cref="AlertRouteOutcomes.Delivered"/> or
+    /// <see cref="AlertRouteOutcomes.Failed"/>, and a channel the map does not name — or names as anything but
+    /// those two, such as a cooldown or a fold — says <see cref="AlertRouteOutcomes.NotAttempted"/>. Without
+    /// it the outcome stays null, "this row does not say". Only that word is stored, never the error text: a
+    /// webhook failure message can carry the endpoint's URL, which is a secret, so <c>send_error</c> remains
+    /// the one place a reason is written.</para></summary>
+    public AlertRouteDto ToDto(IReadOnlyDictionary<string, AlertChannelOutcome>? outcomes = null) => new(
         Family,
         RouteId,
         All.Where(d => d.IsDelivered)
-           .Select(d => new AlertRouteDestinationDto(d.Channel, d.RouteId, d.Source.ToString()))
+           .Select(d => new AlertRouteDestinationDto(d.Channel, d.RouteId, d.Source.ToString(), OutcomeText(d.Channel, outcomes)))
            .ToList());
+
+    private static string? OutcomeText(string channel, IReadOnlyDictionary<string, AlertChannelOutcome>? outcomes)
+    {
+        if (outcomes is null)
+        {
+            return null;
+        }
+
+        return outcomes.TryGetValue(channel, out var outcome)
+            ? outcome switch
+            {
+                AlertChannelOutcome.Delivered => AlertRouteOutcomes.Delivered,
+                AlertChannelOutcome.Failed => AlertRouteOutcomes.Failed,
+                _ => AlertRouteOutcomes.NotAttempted,
+            }
+            : AlertRouteOutcomes.NotAttempted;
+    }
 }
 
 /// <summary>
@@ -188,6 +213,9 @@ public static class NotificationRouter
         var pagerDuty = ResolveChannel(
             PagerDutyChannel, exact, byFamily, r => r.PagerDutyRoutingKey,
             defaults.PagerDutyEnabled ? defaults.PagerDutyRoutingKey : null);
+        /* #4751: SmtpEnabled no longer implies a non-blank default recipient list, so the default arm can be
+           blank here; ResolveChannel's last arm turns a blank default into a null destination, and the email
+           path reads null (or blank) as "no recipients for this firing". */
         var email = ResolveChannel(
             EmailChannel, exact, byFamily, r => r.SmtpRecipients,
             defaults.SmtpEnabled ? defaults.SmtpRecipients : null);
@@ -200,6 +228,12 @@ public static class NotificationRouter
     /// Configuration only; never resolves a metric.</summary>
     public static bool AnyRouteConfiguresAWebhook(IReadOnlyList<NotificationRoute>? routes) =>
         routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasAnyWebhookDestination);
+
+    /// <summary>Whether any enabled route names email recipients (#4751) — the email path's counterpart of
+    /// <see cref="AnyRouteConfiguresAWebhook"/>: with a blank default recipient list, a route's recipients are
+    /// what make email worth attempting at all. Configuration only; never resolves a metric.</summary>
+    public static bool AnyRouteConfiguresEmail(IReadOnlyList<NotificationRoute>? routes) =>
+        routes is not null && routes.Any(r => r is not null && r.Enabled && r.HasEmailDestination);
 
     private static RoutedDestination ResolveChannel(
         string channel,

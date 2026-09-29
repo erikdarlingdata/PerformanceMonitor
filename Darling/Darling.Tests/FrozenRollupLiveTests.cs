@@ -880,6 +880,111 @@ public sealed class FrozenRollupLiveTests
     }
 
     /// <summary>
+    /// #4716: a closed seam range whose day the successor daily ALREADY holds a bucket for is refreshed once and
+    /// counted once. The 30-hour off-midnight seam of <see
+    /// cref="Outage_SeamWiderThanTheCap_OffMidnight_HourlySeamDefersTheChaseUntilItsOwnHoleCloses"/> splits into
+    /// the newest 24 buckets (pass 1) and the oldest 6, the first six hours of the seam's first day. Between the
+    /// passes the successor daily is refreshed over that day, so it holds a PARTIAL bucket for it (18 of its 24
+    /// hours, the shape an earlier hole repair left). Pass 2 closes the six hours: the dependent-daily refresh
+    /// forces the day whole, and the older successor-daily chase, whose range is the same day, must leave it out
+    /// rather than refresh it again and count it a second time.
+    /// </summary>
+    [Fact]
+    public async Task Outage_SeamCapSplit_TheDayTheDailyAlreadyHolds_IsRefreshedOnceByTheClosedRangeAndCountedOnce()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live A6 freeze test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live A6 freeze test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var bodySucceeded = false;
+        try
+        {
+            /* The same 30-hour seam as the pin above: S is 05:00 on the fourth day, so the seam runs from
+               midnight of the third day (its first six hours are the oldest 6 buckets, deferred by pass 1's
+               cap) to 06:00 on the fourth. */
+            var s = D0.AddDays(3).AddHours(5);
+
+            for (var hour = 0; hour <= 29; hour++)
+            {
+                await InsertProcedureStatsAsync(connection, s.AddHours(-hour), $"seamonce_proc_{hour}", 900, 9, 3600, ct);
+            }
+
+            await InsertProcedureStatsAsync(connection, s.AddMinutes(30), "seamonce_proc_restart", 0, 0, 0, ct);
+
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsHourlyView, s.AddHours(-29), s.AddHours(-1), ct);
+
+            var firstStart = await TimescaleSupport.RepairMaterializationHolesAsync(connection, null, s.AddHours(1), ct);
+            Assert.Equal(0, firstStart.BucketsRepaired);
+
+            var u = s.AddDays(5);
+            await InsertProcedureStatsAsync(connection, u.AddHours(-1), "seamonce_proc_successor_floor", 900, 9, 3600, ct);
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, u.AddDays(-1), u, ct);
+
+            /* Pass 1: the newest 24 buckets close, the oldest 6 are deferred, and no daily chase runs. */
+            var pass1 = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(24, pass1.BucketsRepaired);
+            Assert.Equal(6, pass1.BucketsDeferred);
+            Assert.Equal(0, pass1.DailyBucketsChained);
+
+            /* Between the passes the successor daily materializes the seam's first day from the 18 hours pass 1
+               repaired: a partial bucket, the day an earlier hole repair left short. */
+            var firstDay = TimescaleSupport.AlignDown(s.AddHours(-29), TimeSpan.FromDays(1));
+            await RefreshAsync(connection, TimescaleSupport.ProcedureStatsIntervalDailyView, firstDay, firstDay.AddDays(1), ct);
+            var partial = await ReadDailyTotalsAsync(connection, TimescaleSupport.ProcedureStatsIntervalDailyView, ServerId, firstDay, firstDay.AddDays(1), ct);
+            Assert.Single(partial);
+            Assert.Equal(18 * 900L, partial[0].WorkerSum);
+
+            /* Pass 2 closes the oldest 6 buckets. The closed range's day is one the daily holds a bucket for, so
+               the dependent-daily refresh rebuilds it whole and counts it once; the chase's range is that same
+               day (older than the daily's 3-day window), so it has nothing left to refresh or count. */
+            var pass2 = await TimescaleSupport.RepairMaterializationSeamsAsync(connection, null, u, ct);
+            Assert.Equal(6, pass2.BucketsRepaired);
+            Assert.Equal(0, pass2.HolesRemaining);
+            Assert.Equal(0, pass2.Failures);
+            Assert.Equal(1, pass2.DailyBucketsChained);
+
+            var whole = await ReadDailyTotalsAsync(connection, TimescaleSupport.ProcedureStatsIntervalDailyView, ServerId, firstDay, firstDay.AddDays(1), ct);
+            var hourly = await ReadDailyTotalsAsync(connection, TimescaleSupport.ProcedureStatsIntervalHourlyView, ServerId, firstDay, firstDay.AddDays(1), ct);
+            Assert.Single(whole);
+            Assert.Equal(24 * 900L, hourly.Sum(r => r.WorkerSum));
+            Assert.Equal(hourly.Sum(r => r.WorkerSum), whole[0].WorkerSum);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+    /// <summary>
     /// #4300: the CATCH-UP path, not the event path — a successor hourly whose own seam is already
     /// CLOSED (no legacy/successor gap this pass), but whose dependent successor daily was left behind by an
     /// earlier chase that never ran (the shape a thrown chase, a budget-cut chase, or a restart between the

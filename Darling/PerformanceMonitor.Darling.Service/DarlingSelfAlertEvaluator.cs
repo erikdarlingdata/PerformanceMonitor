@@ -966,7 +966,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <c>checkpoint_timeout</c> covers about twelve timed checkpoints, so judging the sum against a
     /// per-checkpoint bar breached on a healthy store whose checkpoints each synced five to eight seconds and
     /// never recovered (#4037's own measured population). The second arm, <c>checkpoints_requested &gt; 0</c>,
-    /// has no threshold to tune: one WAL-forced checkpoint in an hour says the store outran <c>max_wal_size</c>.
+    /// has no threshold to tune: one requested checkpoint in an hour is worth a look, and it is a look, not a
+    /// verdict, because a requested checkpoint comes from WAL volume reaching <c>max_wal_size</c>, a base backup,
+    /// or a <c>CHECKPOINT</c> statement and the counters do not say which (#4758).
     /// Both arms are judged on an interval with no postmaster restart inside it: across one, the shutdown
     /// checkpoint is in the requested count and in the phase times alike, so neither is judged (#3955); and the
     /// average arm needs a TIMED count on both samples of the pair (V140), so a row from before that rung
@@ -1024,14 +1026,38 @@ internal sealed class DarlingSelfAlertEvaluator
     private const char AgKeySeparator = '\u001f';
 
 
-    /* Whether the service has successfully connected to this server at least once THIS process-run. Guards
-       collection-stopped: unlike the Dashboard (whose target-side collection_log keeps filling regardless of
-       the app), Darling IS the collector, so the service's own downtime makes collection_log stale. Without
-       this guard a service restart after >30 min of downtime would false-alarm "Collection Stopped" on a
-       perfectly healthy server before its first fresh collection lands. Gating on a prior successful connect
-       makes collection-stopped a clean "was collecting, then stopped" transition (the same philosophy as the
-       connection-lost edge and the Dashboard's skip-first-check) rather than a judgement on pre-restart data. */
+    /* Whether the service has successfully connected to this server at least once THIS process-run. Arms only
+       the consecutive-failure arm of collection-stopped (see JudgeCollectionStopped): that arm counts the last
+       N STORED runs, which are pre-restart rows until a fresh run lands, so it waits for the first online edge
+       the way the connection-lost alert does.
+
+       The staleness arm is not gated on it. Unlike the Dashboard (whose target-side collection_log keeps
+       filling regardless of the app), Darling IS the collector, so the service's own downtime makes
+       collection_log stale, and a restart after >30 min of downtime would false-alarm "Collection Stopped"
+       on a perfectly healthy server before its first fresh collection lands. Skipping the check until the
+       server had been seen online avoided that, but it also meant a server that stays down across the
+       restart never alerted at all (#4757). Staleness is instead judged from the LATER of the server's last
+       success and the moment the service began watching it (_serviceStartUtc), so a healthy server is judged
+       from its fresh rows and a down one fires one staleness window after the watch began. */
     private readonly ConcurrentDictionary<string, bool> _hasBeenOnline = new();
+
+    /// <summary>
+    /// When this evaluator was built, which is when the service began watching every server it holds no
+    /// tombstone for (#4757). The evaluator's state is in memory by design, so a restart moves it.
+    /// </summary>
+    private readonly DateTime _serviceStartUtc;
+
+    /// <summary>
+    /// The moment collection-stopped began watching a server that left the monitored set and came back
+    /// (#4757). <see cref="Forget"/> writes <see cref="Unstamped"/>; the next pass for that server replaces it
+    /// with that pass's own time. A re-enabled server keeps its <c>server_id</c> and its old
+    /// <c>collection_log</c> rows, and without this they would be judged from the service start and page at
+    /// once. Absent means the service start. Nothing here is persisted.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTime> _collectionWatchStart = new();
+
+    /// <summary>The tombstone <see cref="Forget"/> leaves in <see cref="_collectionWatchStart"/>.</summary>
+    private static readonly DateTime Unstamped = DateTime.MinValue;
 
     public DarlingSelfAlertEvaluator(
         IAlertEngineSettings settings,
@@ -1061,6 +1087,7 @@ internal sealed class DarlingSelfAlertEvaluator
         _isAlertMuted = isAlertMuted ?? throw new ArgumentNullException(nameof(isAlertMuted));
         _logger = logger;
         _utcNow = utcNow ?? (() => DateTime.UtcNow);
+        _serviceStartUtc = _utcNow();
         _notifyConnectionChanges = notifyConnectionChanges ?? (() => true);
         _notifyConnectionDownAtStartup = notifyConnectionDownAtStartup ?? (() => false);
         _connectionRefireMinutes = connectionRefireMinutes ?? (() => 0);
@@ -1190,33 +1217,29 @@ internal sealed class DarlingSelfAlertEvaluator
            pass that never looked at the store is not in the denominator. */
         _readFailures?.RecordPass(Key(serverId));
 
-        /* Only judge collection-stopped once the service has actually collected from this server this run
-           (see _hasBeenOnline) — otherwise pre-restart / pre-re-add stale rows would false-alarm before the
-           first fresh collection lands. */
-        if (_hasBeenOnline.ContainsKey(Key(serverId)))
+        /* Collection-stopped is judged on every pass, whether or not the service has seen this server online
+           this run (#4757): JudgeCollectionStopped measures staleness from the later of the last success and
+           the moment the service began watching, so pre-restart / pre-re-add rows cannot false-alarm before
+           the first fresh collection lands, and a server that stays down across a restart still fires. */
+        var collectionReadClock = Stopwatch.StartNew();
+        try
         {
-            var collectionReadClock = Stopwatch.StartNew();
-            try
-            {
-                /* #2107: store-backed window/threshold (clamped on read); the constants remain
-                   only as the shipped defaults. */
-                var (lastSuccess, recentRuns, recentSuccess) =
-                    await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
-                collectionReadClock.Restart();
-                bool stopped = IsCollectionStopped(
-                    lastSuccess, recentRuns, recentSuccess, _utcNow(),
-                    SettingsStaleWindow, _settings.CollectionFailureThreshold, out var reason);
-                await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
-                _readFailures?.RecordReadFailure(Key(serverId), CollectionSignalsReadName, collectionReadClock.ElapsedMilliseconds);
-            }
+            /* #2107: store-backed window/threshold (clamped on read); the constants remain
+               only as the shipped defaults. */
+            var (lastSuccess, recentRuns, recentSuccess) =
+                await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
+            collectionReadClock.Restart();
+            bool stopped = JudgeCollectionStopped(serverId, lastSuccess, recentRuns, recentSuccess, out var reason);
+            await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("[{Server}] Collection-health self-alert failed after {ElapsedMs} ms: {Message}", serverName, collectionReadClock.ElapsedMilliseconds, ex.Message);
+            _readFailures?.RecordReadFailure(Key(serverId), CollectionSignalsReadName, collectionReadClock.ElapsedMilliseconds);
         }
 
         if (!connected)
@@ -1371,6 +1394,56 @@ internal sealed class DarlingSelfAlertEvaluator
 
         reason = "";
         return false;
+    }
+
+    /// <summary>
+    /// The collection-stopped decision for one server as the SERVICE sees it (#4757): the pure
+    /// <see cref="IsCollectionStopped(DateTime?, int, int, DateTime, TimeSpan, int, out string)"/> rule, fed
+    /// the store-backed window and threshold and a staleness basis the service's own downtime cannot spoil.
+    /// <para>Darling IS the collector, so <c>collection_log</c> goes stale whenever the service is down. The
+    /// staleness basis is therefore the LATER of the server's last success and the moment the service began
+    /// watching it (the service start, or the first pass after <see cref="Forget"/>). A healthy server is
+    /// judged from its fresh rows and stays silent at startup; a server that stays down across a restart
+    /// reads as "no success since the watch began" and fires once the window has passed. A NEVER-succeeded
+    /// server (null) stays null, so the documented rule that the staleness backstop does not flag it holds.</para>
+    /// <para>The consecutive-failure arm counts the last N STORED runs, which are pre-restart rows until a
+    /// fresh run lands, so it stays behind the first successful connect (its threshold is
+    /// <see cref="int.MaxValue"/> until then) — a stored failure streak must not page at the first pass,
+    /// including on a re-enable.</para>
+    /// </summary>
+    internal bool JudgeCollectionStopped(
+        int serverId, DateTime? lastSuccessUtc, int recentRunCount, int recentSuccessCount, out string reason)
+    {
+        var key = Key(serverId);
+        var now = _utcNow();
+        var watchStart = WatchStartFor(key, now);
+
+        var staleBasis = lastSuccessUtc.HasValue && lastSuccessUtc.Value < watchStart
+            ? watchStart
+            : lastSuccessUtc;
+        var failureThreshold = _hasBeenOnline.ContainsKey(key)
+            ? _settings.CollectionFailureThreshold
+            : int.MaxValue;
+
+        return IsCollectionStopped(
+            staleBasis, recentRunCount, recentSuccessCount, now, SettingsStaleWindow, failureThreshold, out reason);
+    }
+
+    /// <summary>
+    /// When collection-stopped began watching this server: the service start, unless <see cref="Forget"/>
+    /// left a tombstone, in which case this call (the first pass since) stamps <paramref name="now"/> and every
+    /// later call returns it.
+    /// </summary>
+    private DateTime WatchStartFor(string key, DateTime now)
+    {
+        if (!_collectionWatchStart.TryGetValue(key, out var stamped))
+        {
+            return _serviceStartUtc;
+        }
+
+        return stamped != Unstamped
+            ? stamped
+            : _collectionWatchStart.AddOrUpdate(key, now, (_, current) => current == Unstamped ? now : current);
     }
 
     /// <summary>
@@ -3522,8 +3595,9 @@ internal sealed class DarlingSelfAlertEvaluator
         var previous = _connectionState.TryGetValue(key, out var s) ? s : ConnectionState.Unknown;
         _connectionState[key] = online ? ConnectionState.Online : ConnectionState.Offline;
 
-        /* Record that collection is now possible for this server this run — arms the collection-stopped
-           check (tracked regardless of the alerts switch, so re-enabling has a correct baseline). */
+        /* Record that collection is now possible for this server this run — arms the consecutive-failure arm
+           of the collection-stopped check (tracked regardless of the alerts switch, so re-enabling has a
+           correct baseline). The staleness arm needs no arming: see JudgeCollectionStopped. */
         if (online)
         {
             _hasBeenOnline[key] = true;
@@ -5851,10 +5925,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Applies the fleet-level Store Checkpointer Pressure condition (#3783) from the store's last measured
     /// checkpointer interval: the sync (fsync) phase held more than <see cref="CheckpointSyncBarMs"/> inside the
-    /// interval, OR at least one checkpoint was REQUESTED — forced by WAL volume reaching <c>max_wal_size</c>
-    /// rather than by the clock. Three unattributed read kills on a production store in one day all sat inside
-    /// checkpoint sync phases of 25.2 s and 14.0 s with nothing recording that the checkpointer had been there;
-    /// this is that record, as an alert. A STANDING condition (the Store Job Over Cadence idiom): fire once on
+    /// interval, OR at least one checkpoint was REQUESTED — started by WAL volume reaching <c>max_wal_size</c>, a
+    /// base backup, or a <c>CHECKPOINT</c> statement rather than by the clock. PostgreSQL's counters do not record
+    /// which, only its <c>log_checkpoints</c> lines do, so the text names all three causes and offers raising
+    /// <c>max_wal_size</c> as the remedy for the first only (#4758). Three unattributed read kills on a
+    /// production store in one day all sat inside checkpoint sync phases of 25.2 s and 14.0 s with nothing
+    /// recording that the checkpointer had been there; this is that record, as an alert. A STANDING condition (the Store Job Over Cadence idiom): fire once on
     /// breach, re-fire on the shared alert cooldown while each new interval keeps breaching, one "Store
     /// Checkpointer Pressure Recovered" resolution when an interval reads clean. INFORMATIONAL, fired with no
     /// severity override: the two levers are configuration — #3802's WAL sizing (<c>max_wal_size</c> /
@@ -5871,7 +5947,7 @@ internal sealed class DarlingSelfAlertEvaluator
     ///
     /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
     /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
-    /// stopped the store fired this alert as "WAL-forced" pressure the store did not have; and that checkpoint's
+    /// stopped the store fired this alert as requested-checkpoint pressure the store did not have; and that checkpoint's
     /// own write and sync phases land in the same counters, where nothing can separate them from the live
     /// checkpoints' (a fast shutdown flushes every dirty buffer at once, with every client already gone, so a
     /// long one is not a stall anyone's read sat inside). The reader therefore calls such an interval
@@ -5913,9 +5989,9 @@ internal sealed class DarlingSelfAlertEvaluator
                 var averageSecondsText = averageSyncMs is double a ? (a / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) : "unmeasured";
                 var arms = (averageOverBar, requested > 0) switch
                 {
-                    (true, true) => $"average sync {averageSecondsText}s per checkpoint and {requested} WAL-forced checkpoint(s)",
+                    (true, true) => $"average sync {averageSecondsText}s per checkpoint and {requested} requested checkpoint(s)",
                     (true, false) => $"average sync {averageSecondsText}s per checkpoint",
-                    _ => $"{requested} WAL-forced checkpoint(s)",
+                    _ => $"{requested} requested checkpoint(s)",
                 };
                 await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
@@ -5924,15 +6000,17 @@ internal sealed class DarlingSelfAlertEvaluator
                     detail: $"The store's own checkpointer ran {checkpointCount} checkpoint(s) over the {intervalMinutes} minutes " +
                         $"between the last two self-metrics sweeps, spending {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s " +
                         $"total in its sync (fsync) phase and {writeSeconds}s in its write phase — an average of {averageSecondsText}s of sync " +
-                        $"per checkpoint — and {requested} of those checkpoints were REQUESTED — forced by WAL volume reaching " +
-                        "max_wal_size rather than by checkpoint_timeout. " +
+                        $"per checkpoint — and {requested} of those checkpoints were REQUESTED — started by something other than " +
+                        "checkpoint_timeout: WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement. " +
                         (averageOverBar
                             ? $"A per-checkpoint sync average past {barSeconds}s means at least some of this interval's checkpoints ran " +
                               "an I/O stall every reader on the store shares: on one production store, three read kills in a day that " +
                               "nothing else explained all sat inside 25.2 s and 14.0 s sync phases, and the MCP host's read deadline is " +
                               $"the {barSeconds}s this line is drawn at. "
-                            : "A requested checkpoint means the store wrote more WAL between checkpoints than max_wal_size " +
-                              "allows, so the checkpointer ran early and the next one is closer — checkpoint pressure compounds. ") +
+                            : "PostgreSQL's counters do not say which of those started a requested checkpoint; the log_checkpoints " +
+                              "lines do. Raising max_wal_size is the remedy only for the first cause: when WAL volume did it, the " +
+                              "store wrote more WAL between checkpoints than max_wal_size allows, so the checkpointer ran early and " +
+                              "the next one is closer — checkpoint pressure compounds. ") +
                         "The interval series is collect.store_metrics (object_kind = 'checkpointer'; the stored columns are the " +
                         "server's cumulative counters, and get_store_metrics' checkpointer block publishes the per-interval " +
                         "differences and the same per-checkpoint average). This alert re-fires on the alert cooldown while each " +
@@ -6518,7 +6596,10 @@ internal sealed class DarlingSelfAlertEvaluator
     }
 
     /// <summary>Drops all edge state for a server removed from the monitored set (reconcile), so a later
-    /// re-add starts fresh at the Unknown baseline rather than inheriting a stale connection/active flag.</summary>
+    /// re-add starts fresh at the Unknown baseline rather than inheriting a stale connection/active flag.
+    /// Collection-stopped starts watching the server afresh too (#4757): the next pass judges it from that
+    /// pass, not from the service start or from the <c>collection_log</c> rows the server kept while it was
+    /// out of the set.</summary>
     public void Forget(int serverId)
     {
         var key = Key(serverId);
@@ -6530,6 +6611,7 @@ internal sealed class DarlingSelfAlertEvaluator
         _lastAgentDownAlert.TryRemove(key, out _);
         _connectionState.TryRemove(key, out _);
         _hasBeenOnline.TryRemove(key, out _);
+        _collectionWatchStart[key] = Unstamped;
 
         /* AG state is keyed by the AG GRAIN, not by server (#1696), so there is deliberately nothing here to
            drop: an Availability Group outlives any one of its monitored nodes, and another node may still be

@@ -126,7 +126,7 @@ route instead — that is the IAM subsection below.
 **Proof:** as the monitoring login, in the same database, mirror the collectors' own read:
 
 ```sql
-SELECT pg_catalog.pg_read_file('log/' || name, 0, 64) FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC LIMIT 1;
+SELECT pg_catalog.pg_read_file('log/' || name, 0, 64) FROM pg_catalog.pg_ls_logdir() ORDER BY modification DESC, name DESC LIMIT 1;
 ```
 
 A log line comes back. `permission denied for function pg_read_file` means the EXECUTE half is missing

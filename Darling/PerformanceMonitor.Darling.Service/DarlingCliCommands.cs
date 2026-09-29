@@ -1969,25 +1969,36 @@ public static class DarlingCliCommands
 
         /* Build the edit through the comment-preserving surgeon. */
         var newText = originalText;
+
+        /* #4743: replacing a live network block keeps every member the wizard does not ask about (the web
+           block's tls and oidc among them); the paths of what was kept are collected here and named after
+           the write, so a refusal below never claims anything was kept. */
+        var kept = new List<string>();
         if (store is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "postgres",
-                DarlingNetworkConfigEditor.BuildStoreNetworkBlock(store.Value.Listen, store.Value.AllowFrom, store.Value.Role));
+                DarlingNetworkConfigEditor.BuildStoreNetworkBlock(store.Value.Listen, store.Value.AllowFrom, store.Value.Role),
+                DarlingNetworkConfigEditor.StoreNetworkOwnedKeys, out var keptStore);
+            kept.AddRange(keptStore.Select(key => $"postgres.network.{key}"));
         }
 
         if (mcp is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "mcp",
-                DarlingNetworkConfigEditor.BuildMcpNetworkBlock(mcp.Value.Listen, mcp.Value.AllowFrom, mcp.Value.EncryptedToken, mcp.Value.PlainToken));
+                DarlingNetworkConfigEditor.BuildMcpNetworkBlock(mcp.Value.Listen, mcp.Value.AllowFrom, mcp.Value.EncryptedToken, mcp.Value.PlainToken),
+                DarlingNetworkConfigEditor.McpNetworkOwnedKeys, out var keptMcp);
+            kept.AddRange(keptMcp.Select(key => $"mcp.network.{key}"));
         }
 
         if (web is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "web",
-                DarlingNetworkConfigEditor.BuildWebNetworkBlock(web.Value.Listen, web.Value.AllowFrom, web.Value.EncryptedToken, web.Value.PlainToken));
+                DarlingNetworkConfigEditor.BuildWebNetworkBlock(web.Value.Listen, web.Value.AllowFrom, web.Value.EncryptedToken, web.Value.PlainToken),
+                DarlingNetworkConfigEditor.WebNetworkOwnedKeys, out var keptWeb);
+            kept.AddRange(keptWeb.Select(key => $"web.network.{key}"));
         }
 
         /* Guard 1: the edited text must PARSE (comments/trailing-commas tolerated). */
@@ -2038,6 +2049,13 @@ public static class DarlingCliCommands
         if (!await WriteWithBackupAsync(resolvedPath, newText, output, error, cancellationToken))
         {
             return 1;
+        }
+
+        /* #4743: one line naming what the rebuilt blocks kept; nothing at all when nothing was kept. */
+        var keptLine = DarlingNetworkConfigEditor.FormatKeptLine(kept);
+        if (keptLine is not null)
+        {
+            output.WriteLine(keptLine);
         }
 
         /* The generated token plaintexts — STDOUT exactly once each; the save-this warning on STDERR so a
@@ -3578,6 +3596,9 @@ public static class DarlingCliCommands
             /* #4253/#4280 Low 2: the last major upgrade's pre-upgrade postgresql.auto.conf, which File.Copy does
                not ACL on its own. Kept until the NEXT major upgrade replaces it (DarlingStoreUpgrade.CarryAutoConfAsync). */
             targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeAutoConfFileName), false, false, "the pre-upgrade postgresql.auto.conf"));
+            /* The same for the last major upgrade's pre-upgrade postgresql.conf, which carries the operator's own
+               lines below the darling-managed.conf include (DarlingStoreUpgrade.CarryConfAfterSwapAsync). */
+            targets.Add(new(Path.Combine(storeRoot, DarlingStoreUpgrade.PreUpgradeConfFileName), false, false, "the pre-upgrade postgresql.conf"));
         }
 
         /* #4004: a bring-your-own service keeps its log-hash key in darling-keys beside darling.json, a directory the
@@ -5507,7 +5528,8 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     /// <para><b>Scope.</b> No <c>--server</c> = the fleet-wide row (<c>server_id</c> NULL), the executor's own
     /// default when a command carries no target. <c>--server</c> resolves a display name or storage name against
     /// the enabled <c>servers</c> registry the MCP read tools resolve against, but by the WRITE rule
-    /// <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/> uses (#3541 A14): every exact match counts, a
+    /// <see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/> uses (#3541 A14): a storage name that matches one
+    /// registration exactly (case-sensitive) picks it, otherwise every exact match counts, a
     /// partial match is honored only when unique, and anything ambiguous is refused with the candidates named —
     /// the read resolver's first-wins partial is a coin an operator did not know was being flipped.</para>
     ///
@@ -6098,6 +6120,20 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         var dataDirectory = await RollupBackfill.DataDirectoryAsync(connection, cancellationToken);
+        return ResolveDirectoryFreeSpace(dataDirectory);
+    }
+
+    /// <summary>
+    /// <see cref="ResolveStoreFreeSpaceAsync"/> once the data directory is known. On Windows the free space is
+    /// read for the volume that holds the directory, so a data directory on a volume mounted at a folder is
+    /// judged by its own volume and not by the one behind its drive letter, which is the number that decides
+    /// whether a materialization or a rewrite has room. Elsewhere the free-space call does not exist and the read is the
+    /// path root's. <paramref name="readAvailableFreeBytes"/> replaces the read, so a test can say what the
+    /// volume holds and what a failed read looks like.
+    /// </summary>
+    internal static (long FreeBytes, string? Error) ResolveDirectoryFreeSpace(
+        string? dataDirectory, Func<string, long>? readAvailableFreeBytes = null)
+    {
         if (string.IsNullOrWhiteSpace(dataDirectory))
         {
             return (0, "could not read the store's data_directory, so the free space on the volume that will grow is unknown. The login needs superuser or pg_read_all_settings.");
@@ -6110,7 +6146,19 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
         try
         {
-            return (new DriveInfo(Path.GetPathRoot(Path.GetFullPath(dataDirectory))!).AvailableFreeSpace, null);
+            if (readAvailableFreeBytes is null)
+            {
+                if (OperatingSystem.IsWindows())
+                {
+                    readAvailableFreeBytes = DarlingStoreUpgrade.ReadAvailableFreeBytes;
+                }
+                else
+                {
+                    readAvailableFreeBytes = directory => new DriveInfo(Path.GetPathRoot(Path.GetFullPath(directory))!).AvailableFreeSpace;
+                }
+            }
+
+            return (readAvailableFreeBytes(dataDirectory), null);
         }
         catch (Exception ex)
         {
