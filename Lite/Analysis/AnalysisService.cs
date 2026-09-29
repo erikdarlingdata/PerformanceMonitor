@@ -1091,7 +1091,7 @@ ORDER BY event_time";
     /// the values cannot disagree about which clock they are in (the discipline
     /// <c>LocalDataService.GetDefaultTraceEventsAsync</c> states for its own parameter).</para>
     /// </summary>
-    private async Task<ConfigChangeAttribution.TraceAnchor?> ResolveTraceAnchorAsync(
+    internal async Task<ConfigChangeAttribution.TraceAnchor?> ResolveTraceAnchorAsync(
         AnalysisContext context, ConfigChangeAttribution.ChangeEvent change)
     {
         try
