@@ -724,6 +724,9 @@ FROM (
 
     private static int _gapReads;
 
+    /// <summary>The clock the settled-window rule reads; tests replace it.</summary>
+    internal static Func<DateTime> GapCacheClock = static () => DateTime.UtcNow;
+
     private static readonly ConcurrentDictionary<string, int> GapReadsByStore = new();
 
     private static string GapStoreKey(NpgsqlConnection connection) => connection.Host + ":" + connection.Port + "/" + connection.Database;
@@ -740,6 +743,7 @@ FROM (
         GapCache.Clear();
         Volatile.Write(ref _gapReads, 0);
         GapReadsByStore.Clear();
+        GapCacheClock = static () => DateTime.UtcNow;
     }
 
     /// <summary>
@@ -748,8 +752,13 @@ FROM (
     /// <c>collection_log</c> chunks, so each uncached read decompresses them. Caching is exact because the
     /// range is in the past and <c>collection_log</c> rows are only ever inserted with the wall-clock
     /// <c>collection_time</c> of the insert (DarlingObservability.InsertCollectionLogSql callers pass
-    /// UtcNow), never backdated. One entry is kept per (store, server): storing a new floor day or cadence
-    /// removes that server's older entries. A read that yields no value is not cached.
+    /// UtcNow), never backdated. Only a SETTLED verdict is cached: the window's end (floor day + 3 d) must be at
+    /// least <see cref="WatermarkPolicy.MaxCatchup"/> in the past, because new rows only shrink gaps, so a lifted
+    /// verdict is stable but a clamped one over a window still filling is not. An unsettled window is reachable
+    /// only on a young table (its oldest interval under about three days old); such a decision re-reads. The
+    /// window derives from the key's floor day, never from the raw floor, so a verdict cached for day D can
+    /// never serve a floor in day D+1. One entry is kept per (store, server): storing a new floor day or
+    /// cadence removes that server's older entries. A read that yields no value is not cached.
     /// </summary>
     private static async Task<TimeSpan?> MaxCollectionGapCachedAsync(
         NpgsqlConnection connection, int serverId, DateTime tableFloor, int frequencyMinutes, int commandTimeoutSeconds, CancellationToken cancellationToken)
@@ -776,7 +785,7 @@ FROM (
             }
         }
 
-        if (gap is not null)
+        if (gap is not null && floorDay.AddDays(GapCacheWindowDays) <= GapCacheClock() - WatermarkPolicy.MaxCatchup)
         {
             foreach (var stale in GapCache.Keys)
             {

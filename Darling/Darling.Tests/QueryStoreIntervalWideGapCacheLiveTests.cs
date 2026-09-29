@@ -71,7 +71,7 @@ public sealed class QueryStoreIntervalWideGapCacheLiveTests
     }
 
     [Fact]
-    public async Task MovedFloorDay_Recomputes()
+    public async Task MovedFloorDay_Recomputes_AVerdictForDayD_NeverServesDayDPlusOne()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var rig = await QueryStoreIntervalWideBelowFloorLiveTests.StartAsync(timescale: true, ct);
@@ -92,6 +92,29 @@ public sealed class QueryStoreIntervalWideGapCacheLiveTests
         var plan = await QueryStoreIntervalWideBelowFloorLiveTests.ResolveAsync(rig, ct);
         Assert.True(plan.UseTable && plan.BelowFloorStart is not null, $"{plan.UseTable} {plan.StartBound} {plan.ReadStart:o} below {plan.BelowFloorStart:o} floor {after:o}");
         Assert.Equal(2, QueryStoreIntervalWide.GapReadsForStoreForTests(rig.Connection));
+    }
+
+    [Fact]
+    public async Task WindowStillFilling_IsNotCached_TheNextDecisionRereads()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var rig = await QueryStoreIntervalWideBelowFloorLiveTests.StartAsync(timescale: true, ct);
+        await QueryStoreIntervalWideBelowFloorLiveTests.DropRawChunksOlderThanAsync(rig, QueryStoreIntervalWideBelowFloorLiveTests.S.AddDays(1), ct);
+        QueryStoreIntervalWide.ResetGapCacheForTests();
+        try
+        {
+            var floor = await FloorAsync(rig, ct);
+            /* The clock sits 30 minutes past the window end: inside the catch-up margin. */
+            var now = floor.Date.AddDays(QueryStoreIntervalWide.GapCacheWindowDays).AddMinutes(30);
+            QueryStoreIntervalWide.GapCacheClock = () => now;
+            await QueryStoreIntervalWideBelowFloorLiveTests.ResolveAsync(rig, ct);
+            await QueryStoreIntervalWideBelowFloorLiveTests.ResolveAsync(rig, ct);
+            Assert.Equal(2, QueryStoreIntervalWide.GapReadsForStoreForTests(rig.Connection));
+        }
+        finally
+        {
+            QueryStoreIntervalWide.ResetGapCacheForTests();
+        }
     }
 
     [Fact]
