@@ -26,8 +26,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// is that one sample's own integer value, unchanged).
 /// <c>SampleTime</c> is naive UTC: the store's <c>sample_time_utc</c> where the row carries one (V134, #3653
 /// item 13), else the server-LOCAL <c>sample_time</c> de-skewed to naive UTC by the read
-/// (see <see cref="CpuUtilizationSql"/>, #1262), so both consumers plot it through
-/// <see cref="ViewerTimeHelper.ForDisplay"/> like every other Darling series.
+/// (see <see cref="CpuUtilizationSql"/>, #1262), so both consumers plot it as the UTC instant
+/// like every other Darling series.
 /// </summary>
 public sealed record CpuUtilizationSample(DateTime SampleTime, double SqlServerCpu, double OtherProcessCpu);
 
@@ -42,8 +42,8 @@ public sealed partial class ViewerDataService
     ///
     /// <para><b>sample_time de-skew (#1262).</b> Unlike every other stored column, <c>sample_time</c> is
     /// the MONITORED SERVER'S LOCAL wall clock (<c>SYSDATETIME()</c> on the server, minus each
-    /// ring-buffer sample's age), NOT naive UTC — so feeding it straight to <see cref="ViewerTimeHelper.ForDisplay"/>
-    /// (which assumes naive-UTC input) shifts the whole CPU series by the server's UTC offset relative
+    /// ring-buffer sample's age), NOT naive UTC — so plotting it as is
+    /// (a chart X is naive UTC) shifts the whole CPU series by the server's UTC offset relative
     /// to every <c>collection_time</c>-based lane — a visible misalignment in the correlated Overview
     /// (e.g. a Pacific-time server, offset -7/-8h, sits 7-8h off).
     /// The viewer has no per-server timezone config the way Lite does
@@ -55,7 +55,7 @@ public sealed partial class ViewerDataService
     /// the server's UTC offset plus that sub-minute anchor age; rounding to 15 minutes recovers the exact
     /// whole/half/quarter-hour offset and absorbs the anchor age (and any few-second clock skew).
     /// Subtracting that per-batch offset turns each local <c>sample_time</c> into true naive UTC, so
-    /// <see cref="ViewerTimeHelper.ForDisplay"/> then aligns the CPU series with every other lane. A UTC server yields
+    /// the chart then aligns the CPU series with every other lane. A UTC server yields
     /// offset 0 — byte-identical to the pre-fix read. The per-batch derivation handles a DST transition
     /// BETWEEN batches (each batch recovers its own offset) but not one INSIDE a batch: the poll that
     /// straddles the change rounds to one side and places the samples on the other side an hour wrong,

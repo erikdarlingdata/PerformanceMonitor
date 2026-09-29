@@ -30,10 +30,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>ContextMenuHelper</c>, in ViewerServerTab.ChartContextMenu.cs) — <see cref="BuildChartContextMenu"/>
 /// builds that menu and takes right-click over from ScottPlot (<see cref="RemoveScottPlotContextMenuResponses"/>),
 /// then <see cref="AddChartDrillDownMenuItem"/> adds the drill-down item to the SAME menu, so both coexist.
-/// (2) The chart X axis is display-time (every viewer chart plots through
-/// <see cref="ViewerTimeHelper.ForDisplay"/>), so the nearest-series time the <see cref="ChartHoverHelper"/>
-/// returns is converted back to the store's naive UTC via <see cref="ViewerTimeHelper.DisplayToNaiveUtc"/>
-/// before the +/-30-minute window is read.</para>
+/// (2) The chart X axis is the naive-UTC instant (the display zone only relabels it, #4766), so the
+/// nearest-series time the <see cref="ChartHoverHelper"/> returns is already the store's naive UTC, and the
+/// +/-30-minute window is read around it as is.</para>
 /// </summary>
 public partial class ViewerServerTab
 {
@@ -106,8 +105,8 @@ public partial class ViewerServerTab
         AddChartDrillDownMenuItem(CurrentWaitsBlockedChart, BuildChartContextMenu(CurrentWaitsBlockedChart, "Current_Waits_Blocked"), () => _currentWaitsBlockedHover, "Show _Active Queries at This Time", OnActiveQueriesDrillDown);
 
         /* Darling-only time-series charts Lite lacks — CPU Scheduler, Latch/Spinlock contention, Plan Cache,
-           Session Counts, and the eight System Events (system_health XE) counter charts. All plot display-time
-           on X, so "Show Active Queries at This Time" navigates to the correlated +/-30-minute active-queries
+           Session Counts, and the eight System Events (system_health XE) counter charts. All plot the UTC
+           instant on X, so "Show Active Queries at This Time" navigates to the correlated +/-30-minute active-queries
            window exactly like their sibling resource/trend charts. Peer-consistency (these previously had only
            the copy/export menu); no per-latch/per-spinlock-type drill (no correlation data captured). Only
            CollectorDuration stays menu-only, matching Lite's drill-less collector-duration chart. */
@@ -133,9 +132,9 @@ public partial class ViewerServerTab
     /// <c>Insert(0, separator)</c>, so the menu reads [drill-down] [separator] [copy/save/export]). The menu's
     /// right-click was already taken over by <see cref="BuildChartContextMenu"/>; this only adds the item +
     /// its Opened/Click behavior, so the two coexist in one menu. The Opened handler resolves the
-    /// nearest-series display-time under the cursor via the chart's hover helper (disabling the item off any
-    /// series); the Click routes that time to <paramref name="handler"/>, which converts it back to UTC and
-    /// reads the window. <paramref name="hoverAccessor"/> is read at Opened time (not captured) so
+    /// nearest-series time under the cursor via the chart's hover helper (disabling the item off any
+    /// series); the Click routes that time (a UTC instant) to <paramref name="handler"/>, which reads the
+    /// window around it. <paramref name="hoverAccessor"/> is read at Opened time (not captured) so
     /// lazily-created hovers resolve.
     /// </summary>
     private void AddChartDrillDownMenuItem(
@@ -150,7 +149,7 @@ public partial class ViewerServerTab
             var nearest = hoverAccessor()?.GetNearestSeries(Mouse.GetPosition(chart));
             if (nearest.HasValue)
             {
-                item.Tag = nearest.Value.Time;   /* display-time (the chart X runs through ForDisplay) */
+                item.Tag = nearest.Value.Time;   /* the chart X is the naive-UTC instant */
                 item.IsEnabled = true;
             }
             else
@@ -162,8 +161,8 @@ public partial class ViewerServerTab
 
         item.Click += (_, _) =>
         {
-            if (item.Tag is DateTime displayTime)
-                handler(displayTime);
+            if (item.Tag is DateTime centreUtc)
+                handler(centreUtc);
         };
     }
 
@@ -234,11 +233,11 @@ public partial class ViewerServerTab
             r.GetType().Name.Contains("Menu", StringComparison.Ordinal));
     }
 
-    /// <summary>The store's naive-UTC +/-30-minute window around a chart display-time (pure, unit-tested).</summary>
-    internal static (DateTime FromUtc, DateTime ToUtc) DrillWindowUtc(DateTime displayTime)
+    /// <summary>The store's naive-UTC +/-30-minute window around a clicked chart time. The chart X is the UTC
+    /// instant, so the time is the centre as is (pure, unit-tested).</summary>
+    internal static (DateTime FromUtc, DateTime ToUtc) DrillWindowUtc(DateTime centreUtc)
     {
-        var utc = ViewerTimeHelper.DisplayToNaiveUtc(displayTime);
-        return (utc.AddMinutes(-DrillDownHalfWindowMinutes), utc.AddMinutes(DrillDownHalfWindowMinutes));
+        return (centreUtc.AddMinutes(-DrillDownHalfWindowMinutes), centreUtc.AddMinutes(DrillDownHalfWindowMinutes));
     }
 
     /// <summary>
@@ -246,11 +245,11 @@ public partial class ViewerServerTab
     /// window around the clicked point (Lite's OnActiveQueriesDrillDown). Also the target of the Overview
     /// lanes' <c>ShowActiveQueriesRequested</c> event.
     /// </summary>
-    private async void OnActiveQueriesDrillDown(DateTime displayTime)
+    private async void OnActiveQueriesDrillDown(DateTime centreUtc)
     {
         try
         {
-            var (fromUtc, toUtc) = DrillWindowUtc(displayTime);
+            var (fromUtc, toUtc) = DrillWindowUtc(centreUtc);
             var indicator = $"Drill-down: {ViewerTimeHelper.ForDisplay(fromUtc):HH:mm} → {ViewerTimeHelper.ForDisplay(toUtc):HH:mm}";
             await NavigateToActiveQueriesForWindowAsync(fromUtc, toUtc, indicator);
         }
@@ -265,9 +264,9 @@ public partial class ViewerServerTab
     /// +/-30-minute window (Lite's OnBlockingDrillDown, targeting Darling's existing
     /// <see cref="LoadBlockedProcessReportsAsync"/> loader).
     /// </summary>
-    private async void OnBlockingDrillDown(DateTime displayTime)
+    private async void OnBlockingDrillDown(DateTime centreUtc)
     {
-        var (fromUtc, toUtc) = DrillWindowUtc(displayTime);
+        var (fromUtc, toUtc) = DrillWindowUtc(centreUtc);
         _suppressDrillDownAutoRefresh = true;
         try
         {
@@ -293,9 +292,9 @@ public partial class ViewerServerTab
     /// "Show Deadlocks at This Time" — navigates to Blocking -> Deadlocks filtered to the +/-30-minute window
     /// (Lite's OnDeadlockDrillDown, targeting Darling's existing <see cref="LoadDeadlocksAsync"/> loader).
     /// </summary>
-    private async void OnDeadlockDrillDown(DateTime displayTime)
+    private async void OnDeadlockDrillDown(DateTime centreUtc)
     {
-        var (fromUtc, toUtc) = DrillWindowUtc(displayTime);
+        var (fromUtc, toUtc) = DrillWindowUtc(centreUtc);
         _suppressDrillDownAutoRefresh = true;
         try
         {
@@ -322,9 +321,9 @@ public partial class ViewerServerTab
     /// ShowQueriesForWaitType_Click). Owned by this tab's window so the shared plan window it spawns floats
     /// above it; the drill window reads correlated snapshots from Postgres (no live SQL).
     /// </summary>
-    private void ShowQueriesForWaitType(string waitType, DateTime displayTime)
+    private void ShowQueriesForWaitType(string waitType, DateTime centreUtc)
     {
-        var (fromUtc, toUtc) = DrillWindowUtc(displayTime);
+        var (fromUtc, toUtc) = DrillWindowUtc(centreUtc);
         var window = new WaitDrillDownWindow(_dataService, _server.ServerId, waitType, fromUtc, toUtc)
         {
             Owner = Window.GetWindow(this),

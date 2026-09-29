@@ -17,11 +17,12 @@
  *   - PerformanceMonitorLite.Analysis BaselineBucket + MetricNames -> the structurally-identical
  *     PerformanceMonitor.Darling.Analysis twins (PgBaselineProvider.cs).
  *   - AppLogger -> Debug.WriteLine.
- *   - Time axis: every lane plots collection_time (naive-UTC) through ViewerTimeHelper.ForDisplay, the
- *     viewer's mode-aware Server/Local/UTC conversion (Server mode adds the collected
+ *   - Time axis: every lane plots collection_time (naive-UTC) as the UTC instant (#4766). The viewer's
+ *     mode-aware Server/Local/UTC zone (ViewerTimeHelper.CurrentDisplayZone) only draws the tick labels and
+ *     the crosshair label (Server mode uses the collected server time zone or
  *     server_properties.utc_offset_minutes, matching Lite's per-server ServerTimeHelper shift).
  *     The CPU lane's sample_time is the monitored server's LOCAL wall clock, so GetCpuUtilizationAsync
- *     de-skews it to naive UTC in SQL before it too goes through ForDisplay (#1262: per-batch offset =
+ *     de-skews it to naive UTC in SQL before it is plotted too (#1262: per-batch offset =
  *     round(MAX(sample_time) over the batch - collection_time) to 15 min, recovered from the batch — a
  *     data correction independent of the display mode). The CPU lane therefore aligns with the
  *     collection_time lanes on any server timezone; a UTC server is unchanged.
@@ -81,7 +82,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             SetupLaneDrillDown(chart);
         }
 
-        _crosshairManager = new CorrelatedCrosshairManager();
+        _crosshairManager = new CorrelatedCrosshairManager { DisplayZoneProvider = ViewerTimeHelper.CurrentDisplayZone };
         _crosshairManager.AddLane(CpuChart, "SQL CPU", "%");
         _crosshairManager.AddLane(WaitStatsChart, "Wait Stats", "ms/sec");
         _crosshairManager.AddLane(BlockingChart, "Blocking", "events");
@@ -91,7 +92,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
     /// <summary>
     /// Raised when the user picks "Show Active Queries at This Time" on a lane. The argument is the
-    /// clicked time in the lanes' (viewer-local) X-axis space. The host ServerTab subscribes this
+    /// clicked time, a naive-UTC instant (the lanes' X axis is UTC). The host ServerTab subscribes this
     /// (ViewerServerTab.xaml.cs) to OnActiveQueriesDrillDown, which navigates to the Active Queries surface.
     /// </summary>
     public event Action<DateTime>? ShowActiveQueriesRequested;
@@ -209,8 +210,8 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             {
                 /* Total non-idle CPU = SQL + other-process (Lite's CpuUtilizationData.TotalCpu). The
                    viewer's raw read exposes the two components; sum them here for the Total series. */
-                var sqlSeries = cpuTask.Result.Select(d => (ViewerTimeHelper.ForDisplay(d.SampleTime).ToOADate(), (double)d.SqlServerCpu)).ToList();
-                var totalSeries = cpuTask.Result.Select(d => (ViewerTimeHelper.ForDisplay(d.SampleTime).ToOADate(), (double)(d.SqlServerCpu + d.OtherProcessCpu))).ToList();
+                var sqlSeries = cpuTask.Result.Select(d => (d.SampleTime.ToOADate(), (double)d.SqlServerCpu)).ToList();
+                var totalSeries = cpuTask.Result.Select(d => (d.SampleTime.ToOADate(), (double)(d.SqlServerCpu + d.OtherProcessCpu))).ToList();
                 UpdateCpuLane(sqlSeries, totalSeries, cpuBaseline);
             }
             else
@@ -218,24 +219,24 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             if (waitTask.IsCompletedSuccessfully)
                 UpdateLane(WaitStatsChart, "Wait ms/sec",
-                    waitTask.Result.Select(d => (ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
+                    waitTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
                     "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100);
             else
                 ShowEmpty(WaitStatsChart, "Wait ms/sec");
 
             {
                 var blockingData = blockingTask.IsCompletedSuccessfully
-                    ? blockingTask.Result.Select(d => (ViewerTimeHelper.ForDisplay(d.Time).ToOADate(), (double)d.Count)).ToList()
+                    ? blockingTask.Result.Select(d => (d.Time.ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
                 var deadlockData = deadlockTask.IsCompletedSuccessfully
-                    ? deadlockTask.Result.Select(d => (ViewerTimeHelper.ForDisplay(d.Time).ToOADate(), (double)d.Count)).ToList()
+                    ? deadlockTask.Result.Select(d => (d.Time.ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
                 UpdateBlockingLane(blockingData, deadlockData, blockingBaseline);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
                 UpdateLane(MemoryChart, "Buffer Pool MB",
-                    memoryTask.Result.Select(d => (ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate(), d.BufferPoolMb)).ToList(),
+                    memoryTask.Result.Select(d => (d.CollectionTime.ToOADate(), d.BufferPoolMb)).ToList(),
                     "#CE93D8");
             else
                 ShowEmpty(MemoryChart, "Memory MB");
@@ -245,7 +246,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var ioGrouped = fileIoTask.Result
                     .GroupBy(d => d.CollectionTime)
                     .OrderBy(g => g.Key)
-                    .Select(g => (ViewerTimeHelper.ForDisplay(g.Key).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                    .Select(g => (g.Key.ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
                     .ToList();
                 UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
             }
@@ -342,7 +343,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             meanLine.LineWidth = 1;
         }
 
-        BlockingChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        BlockingChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         BlockingChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
         ReapplyAxisColors(BlockingChart);
 
@@ -440,7 +441,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             sqlScatter.ConnectStyle = ScottPlot.ConnectStyle.Straight;
         }
 
-        CpuChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        CpuChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         if (CpuChart != FileIoChart)
             CpuChart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
 
@@ -518,7 +519,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
         _crosshairManager?.SetLaneData(chart, times, values);
 
-        chart.Plot.Axes.DateTimeTicksBottomDateChange();
+        chart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         // Hide bottom tick labels on all lanes except the last (File I/O)
         if (chart != FileIoChart)
             chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
@@ -545,20 +546,18 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
-    /// #4766: the X-axis window every lane is pinned to, in the display frame the lanes plot in (each sample goes
-    /// through <see cref="ViewerTimeHelper.ForDisplay"/>). A custom range's bounds are UTC instants. A preset range is
-    /// hoursBack REAL hours ending now: its start is the display time of (now - hoursBack), not the display end minus
-    /// hoursBack of wall clock, which is an hour off when a clock change in the display zone falls inside the window and
-    /// would cut the first hour off the axis while its samples are still plotted. mode/clock/utcNow are explicit
-    /// parameters so a test can drive this on either side of a change without touching the process-wide statics.
+    /// #4766: the X-axis window every lane is pinned to. The lanes plot the UTC instant, so the window is UTC as is:
+    /// a custom range's bounds are UTC instants, and a preset range is hoursBack REAL hours ending at
+    /// <paramref name="utcNow"/> (no wall-clock arithmetic in the display zone, so a clock change inside the window
+    /// cannot move the start). utcNow is an explicit parameter so a test can pin the clock.
     /// </summary>
     internal static (DateTime Start, DateTime End) GetXAxisWindow(
-        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, TimeDisplayMode mode, ServerClock clock)
+        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow)
     {
         var custom = fromDate.HasValue && toDate.HasValue;
         var startUtc = custom ? fromDate!.Value : utcNow.AddHours(-hoursBack);
         var endUtc = custom ? toDate!.Value : utcNow;
-        return (ViewerTimeHelper.ConvertToDisplay(startUtc, mode, clock), ViewerTimeHelper.ConvertToDisplay(endUtc, mode, clock));
+        return (startUtc, endUtc);
     }
 
     /// <summary>
@@ -568,8 +567,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     /// </summary>
     private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
-        var (xStart, xEnd) = GetXAxisWindow(
-            hoursBack, fromDate, toDate, DateTime.UtcNow, ViewerTimeHelper.CurrentDisplayMode, ViewerTimeHelper.ActiveServerClock);
+        var (xStart, xEnd) = GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow);
 
         double xMin = xStart.ToOADate();
         double xMax = xEnd.ToOADate();
@@ -603,7 +601,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
        for call-site readability. */
     private void ShowEmpty(ScottPlot.WPF.WpfPlot chart, string title)
     {
-        chart.Plot.Axes.DateTimeTicksBottomDateChange();
+        chart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         // Only the bottom (File I/O) lane shows time labels; the upper lanes hide them (matches UpdateLane).
         if (chart != FileIoChart)
             chart.Plot.Axes.Bottom.TickLabelStyle.IsVisible = false;
