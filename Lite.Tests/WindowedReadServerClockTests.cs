@@ -7,6 +7,9 @@
  */
 
 using System;
+using System.IO;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
@@ -97,6 +100,26 @@ public sealed class WindowedReadServerClockTests : IClassFixture<SharedDuckDbFix
         Assert.Equal(anchor, end);
     }
 
+    /// <summary>
+    /// A custom bound reaches every read as the UTC instant the tab holds, so nothing under <c>Lite/Services</c> turns a
+    /// <c>fromDate</c> or a <c>toDate</c> into UTC through a server clock. A wall-clock bound cannot say which
+    /// occurrence of the hour that repeats after a fall-back it meant, and the conversion picked the first. Comments
+    /// are stripped, so a sentence that names the old shape cannot fail the pin.
+    /// </summary>
+    [Fact]
+    public void NoServiceConvertsACustomBoundToUtcThroughAClock()
+    {
+        var files = Directory.GetFiles(ServicesDir(), "*.cs", SearchOption.AllDirectories);
+        Assert.Contains(files, f => Path.GetFileName(f) == "LocalDataService.cs");
+
+        var conversion = new Regex(@"\bToUtc\(\s*(fromDate|toDate)\b");
+        foreach (var file in files)
+        {
+            Assert.False(conversion.IsMatch(CodeOnly(File.ReadAllText(file))),
+                $"{Path.GetFileName(file)} converts a custom bound to UTC through a clock; the bound is already UTC (#4766).");
+        }
+    }
+
     // ── GetTimeRangeServerLocal: the server-local rendering of a UTC window ──
 
     [Fact]
@@ -168,6 +191,17 @@ public sealed class WindowedReadServerClockTests : IClassFixture<SharedDuckDbFix
         Assert.Equal(2, deadlocks);
         Assert.Equal(At(2026, 3, 8, 7, 59), latest);
     }
+
+    /* Line and block comments removed, and line endings normalised, so a pin reads code only. */
+    private static string CodeOnly(string source)
+    {
+        var lf = source.Replace("\r\n", "\n");
+        lf = Regex.Replace(lf, @"/\*.*?\*/", string.Empty, RegexOptions.Singleline);
+        return Regex.Replace(lf, @"//[^\n]*", string.Empty);
+    }
+
+    private static string ServicesDir([CallerFilePath] string thisFile = "") =>
+        Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile)!, "..", "Lite", "Services"));
 
     private async Task SeedDeadlockAsync(DateTime collectionTimeUtc)
     {

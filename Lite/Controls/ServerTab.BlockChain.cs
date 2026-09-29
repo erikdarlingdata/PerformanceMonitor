@@ -124,7 +124,7 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// The current Blocking-tab server-local range, used when the slicer has no narrowed selection /
+    /// The current Blocking-tab window as UTC instants (#4766), used when the slicer has no narrowed selection /
     /// no data. Mirrors LoadBlockingSlicerAsync's range computation.
     /// </summary>
     private (DateTime start, DateTime end) GetBlockingServerRange()

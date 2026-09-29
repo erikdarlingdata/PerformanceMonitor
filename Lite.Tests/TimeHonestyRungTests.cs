@@ -462,8 +462,8 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         Assert.Equal(utcPost, summary.CpuSampleTimeUtc ?? summary.CpuSampleTime);
     }
 
-    /// <summary>The picker branch (server-local from/to) converts its bounds back to UTC for the twin exactly
-    /// as <c>GetTimeRange</c> does, so a post-rung row is selected by its instant there too.</summary>
+    /// <summary>The custom-range branch takes a naive-UTC from/to, the pair <c>GetTimeRange</c> returns as it came,
+    /// so a post-rung row is selected by its instant there too.</summary>
     [Fact]
     public async Task TheCpuWindow_PickerRange_SelectsAPostRungRowByItsInstant()
     {
@@ -473,11 +473,11 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         var utcB = now.AddMinutes(-30);
         await SeedCpuAsync(_serverId, "TimeHonestySrv", utcB.AddMinutes(SampleOffsetAtTheInstant), utcB, 22);
 
-        /* A server-time range of [now - 1 h, now] expressed in the COLLECTED offset's frame. */
-        var fromLocal = now.AddHours(-1).AddMinutes(CollectedOffset);
-        var toLocal = now.AddMinutes(CollectedOffset);
+        /* A custom range is a naive-UTC pair (#4766): [now - 1 h, now] as the two instants. */
+        var fromUtc = now.AddHours(-1);
+        var toUtc = now;
 
-        var rows = await _dataService.GetCpuUtilizationAsync(_serverId, fromDate: fromLocal, toDate: toLocal, serverClock: ServerClock.FixedOffset(CollectedOffset));
+        var rows = await _dataService.GetCpuUtilizationAsync(_serverId, fromDate: fromUtc, toDate: toUtc, serverClock: ServerClock.FixedOffset(CollectedOffset));
         var row = Assert.Single(rows);
         Assert.Equal(22, row.SqlServerCpu);
         Assert.Equal(utcB.AddMinutes(SampleOffsetAtTheInstant), row.SampleTime);
@@ -518,9 +518,12 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         await SeedPreRungRowsAsync(clock, new DateTime(2026, 3, 7, 16, 0, 0), new DateTime(2026, 3, 9, 17, 0, 0));
         await SeedCpuAsync(_serverId, "TimeHonestySrv", new DateTime(2026, 3, 8, 6, 7, 0), new DateTime(2026, 3, 1, 11, 7, 0), 99);
 
+        /* The range is held as two UTC instants (#4766): 12:00 EST on the 7th is 17:00 UTC, 12:00 EDT on the 9th is
+           16:00 UTC. The rows' stamps are the server's wall clock, so the read renders each bound on that clock. */
         var from = new DateTime(2026, 3, 7, 12, 0, 0);
         var to = new DateTime(2026, 3, 9, 12, 0, 0);
-        var rows = await _dataService.GetCpuUtilizationAsync(_serverId, fromDate: from, toDate: to, serverClock: clock);
+        var rows = await _dataService.GetCpuUtilizationAsync(
+            _serverId, fromDate: clock.ToUtc(from), toDate: clock.ToUtc(to), serverClock: clock);
 
         Assert.Equal(47 * 4 + 1, rows.Count);
         Assert.Equal(from, rows[0].SampleTime);

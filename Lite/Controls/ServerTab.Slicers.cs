@@ -39,7 +39,6 @@ public partial class ServerTab : UserControl
     {
         try
         {
-
             var bpr = await Task.Run(() => _dataService.GetRecentBlockedProcessReportsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
             _blockedProcessFilterMgr!.UpdateData(bpr);
         }
@@ -53,7 +52,6 @@ public partial class ServerTab : UserControl
     {
         try
         {
-
             var dlr = await Task.Run(() => _dataService.GetRecentDeadlocksAsync(_serverId, 0, e.StartUtc, e.EndUtc));
             _deadlockFilterMgr!.UpdateData(await ParseDeadlocksOffUiThreadAsync(dlr));
         }
@@ -100,7 +98,6 @@ public partial class ServerTab : UserControl
     {
         try
         {
-
             var snapshots = await Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, e.StartUtc, e.EndUtc, SelectedDatabaseFilter));
             _querySnapshotsFilterMgr!.UpdateData(snapshots);
             LiveSnapshotIndicator.Text = "";

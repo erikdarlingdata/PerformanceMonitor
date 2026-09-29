@@ -344,6 +344,27 @@ public sealed class OverviewComparisonWindowOffsetTests
             lanesSource);
     }
 
+    /// <summary>
+    /// The Overview's ghost lines are "the same hours yesterday", a window the wall clock defines: the server-local
+    /// current window shifted by whole days. The reads take UTC windows (#4766), so RefreshAsync puts each end of that
+    /// window on the UTC line once, through the clock, and all five ghost reads take the converted pair. A read that
+    /// still took the server-local pair would land an hour or more off on any server not on UTC.
+    /// </summary>
+    [Fact]
+    public void TheGhostReads_TakeTheComparisonWindowInUtc_ConvertedOnceThroughTheClock()
+    {
+        var lanesSource = File.ReadAllText(ControlsFile("CorrelatedTimelineLanesControl.xaml.cs"));
+
+        Assert.Contains("var refFromUtc = serverClock.ToUtc(refFrom);", lanesSource, StringComparison.Ordinal);
+        Assert.Contains("var refToUtc = serverClock.ToUtc(refTo);", lanesSource, StringComparison.Ordinal);
+        foreach (var read in new[] { "GetCpuUtilizationAsync", "GetTotalWaitTrendAsync", "GetBlockingTrendAsync", "GetMemoryTrendAsync", "GetFileIoLatencyTrendAsync" })
+        {
+            Assert.Contains($"_dataService.{read}(_serverId, 0, refFromUtc, refToUtc)", lanesSource, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotContain("(_serverId, 0, refFrom, refTo)", lanesSource, StringComparison.Ordinal);
+    }
+
     private static string ControlsFile(string name) => Path.Combine(ControlsDir(), name);
 
     private static string ControlsDir([CallerFilePath] string thisFile = "") =>

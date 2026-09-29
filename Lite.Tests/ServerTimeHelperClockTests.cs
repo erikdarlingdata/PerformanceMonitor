@@ -81,6 +81,14 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         Assert.Equal(Utc(2026, 11, 1, 1, 30), ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 5, 30), clock));
         Assert.Equal(Utc(2026, 11, 1, 1, 30), ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 6, 30), clock));
         Assert.Equal(Utc(2026, 11, 1, 2, 30), ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 7, 30), clock));
+
+        /* And the rendered string the grids use. Both instants of the repeated hour read "01:30" on the server's clock,
+           so this text cannot tell 05:30 UTC from 06:30 UTC; the naive-UTC value is what keeps them apart (#4766). */
+        ServerTimeHelper.ActiveServerClock = clock;
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal("2026-11-01 01:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 6, 30)));
+        Assert.Equal("2026-11-01 02:30:00", ServerTimeHelper.FormatServerTime(Utc(2026, 11, 1, 7, 30)));
     }
 
     [Fact]
@@ -132,6 +140,14 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         var repeated = Utc(2026, 11, 1, 1, 30);
         Assert.Equal(Utc(2026, 11, 1, 5, 30), clock.ToUtc(repeated));
         Assert.Equal(Utc(2026, 11, 1, 5, 30), ServerTimeHelper.ConvertForDisplay(repeated, TimeDisplayMode.UTC, clock));
+
+        /* The second occurrence, 06:30 UTC, is the same 01:30 on the server's clock, so this inverse cannot name it. A
+           range bound typed as 01:30 is the one place that can: it takes the first occurrence for the start of a
+           range and the second for the end (#4766). */
+        Assert.Equal(repeated, ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 6, 30), clock));
+        Assert.Equal(Utc(2026, 11, 1, 5, 30), clock.ToUtc(ServerTimeHelper.ToServerTime(Utc(2026, 11, 1, 6, 30), clock)));
+        Assert.Equal(Utc(2026, 11, 1, 5, 30), DisplayZone.ToUtcBound(repeated, clock.AsTimeZone(), BoundSide.From));
+        Assert.Equal(Utc(2026, 11, 1, 6, 30), DisplayZone.ToUtcBound(repeated, clock.AsTimeZone(), BoundSide.To));
     }
 
     [Fact]
