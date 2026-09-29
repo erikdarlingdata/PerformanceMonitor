@@ -39,9 +39,6 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
     private const string EasternZone = "Eastern Standard Time";
     private const int WinterOffset = -300;
 
-    /* The server tab files whose text is worded in the tab's zone. */
-    private static readonly string[] TextFiles = ["ServerTab.Comparison.cs", "ServerTab.DrillDown.cs", "ServerTab.xaml.cs"];
-
     private readonly ServerClock _savedClock = ServerTimeHelper.ActiveServerClock;
     private readonly TimeDisplayMode _savedMode = ServerTimeHelper.CurrentDisplayMode;
 
@@ -185,16 +182,16 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
     }
 
     /// <summary>
-    /// The server tab files that word a time say it in the tab's own zone: every
-    /// <c>ServerTimeHelper.FormatServerTime(</c> call is gone from them, and so is a <c>DateTime.Now:HH</c> printed
-    /// into text (the machine's clock is neither the server's nor the display mode's). A tab words its times with
-    /// <c>DisplayZone.Format</c> in <c>GetPickerZone()</c>.
+    /// No server tab file words a time on the active server's clock or on the machine's: every
+    /// <c>ServerTimeHelper.FormatServerTime(</c> call is gone from <c>ServerTab*.cs</c>, and so is a
+    /// <c>DateTime.Now:HH</c> printed into text (the machine's clock is neither the server's nor the display mode's).
+    /// A tab words its times with <c>DisplayZone.Format</c> in <c>GetPickerZone()</c>.
     /// </summary>
     [Fact]
-    public void ServerTabTextFiles_WordNoTimeOnTheActiveClockOrTheMachineClock()
+    public void NoServerTabFile_WordsATimeOnTheActiveClockOrTheMachineClock()
     {
         var offenders = new List<string>();
-        foreach (var (name, code) in ServerTabCode().Where(f => TextFiles.Contains(f.Name)))
+        foreach (var (name, code) in ServerTabCode())
         {
             foreach (Match m in Regex.Matches(code, @"\bServerTimeHelper\s*\.\s*FormatServerTime\s*\("))
             {
@@ -211,6 +208,26 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
             offenders.Count == 0,
             "These word a time on the active server's clock or the machine's; use DisplayZone.Format(instant, " +
             "GetPickerZone(), format): " + string.Join(", ", offenders));
+    }
+
+    /// <summary>
+    /// The header's "Last refresh" line takes ONE instant, prints it in the tab's display zone and labels it with the
+    /// tab's own clock at that instant, and the "Showing since" banner is handed the tab's zone. The active clock
+    /// follows whichever tab is selected, so neither may read it.
+    /// </summary>
+    [Fact]
+    public void TheRefreshHeaderAndTheTruncationBanner_UseTheTabsOwnClockAndZone()
+    {
+        var refresh = ServerTabCode().Single(f => f.Name == "ServerTab.Refresh.cs").Code;
+
+        Assert.Contains("var refreshedUtc = DateTime.UtcNow;", refresh, StringComparison.Ordinal);
+        Assert.Contains(
+            "ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode, _serverClock, refreshedUtc)", refresh, StringComparison.Ordinal);
+        Assert.Contains("DisplayZone.ToDisplay(refreshedUtc, GetPickerZone())", refresh, StringComparison.Ordinal);
+        Assert.Contains("SetWindowTruncatedBanner(banner, truncated, floor ?? startUtc, GetPickerZone());", refresh, StringComparison.Ordinal);
+        Assert.Contains(
+            "internal static void SetWindowTruncatedBanner(TextBlock banner, bool truncated, DateTime effectiveStart, TimeZoneInfo zone)",
+            refresh, StringComparison.Ordinal);
     }
 
     /// <summary>

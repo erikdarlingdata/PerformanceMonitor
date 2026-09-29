@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
@@ -35,15 +36,17 @@ namespace PerformanceMonitorLite.Tests;
 /// tests need control of the database's archive directory, to COPY hot rows out to parquet exactly like
 /// <c>ArchiveViewDedupTests</c> does.
 ///
-/// <para>One test formats the same time twice with <c>ServerTimeHelper.FormatServerTime</c> (once inside
-/// <c>ServerTab.SetWindowTruncatedBanner</c>, once in its assertion), and that reads two settings shared by the
-/// whole test process, <c>UtcOffsetMinutes</c> and <c>CurrentDisplayMode</c>. This class joins the
-/// <c>server-time-helper</c> collection so a class that changes either setting cannot run between the two
-/// calls (#4776).</para>
+/// <para>The banner tests hand <c>ServerTab.SetWindowTruncatedBanner</c> the zone to word the time in, and one of
+/// them sets the active server's clock and the display mode, two settings shared by the whole test process, to
+/// something else to show the text does not read them (#4766). This class joins the <c>server-time-helper</c>
+/// collection so a class that changes either setting cannot run in the middle of it (#4776), and restores both in
+/// <c>Dispose</c>.</para>
 /// </summary>
 [Collection("server-time-helper")]
 public sealed class QueryWindowTruncationTests : IDisposable
 {
+    private readonly ServerClock _savedClock = ServerTimeHelper.ActiveServerClock;
+    private readonly TimeDisplayMode _savedMode = ServerTimeHelper.CurrentDisplayMode;
     private readonly int ServerId;
     private readonly string _tempDir;
     private readonly string _archivePath;
@@ -68,6 +71,8 @@ public sealed class QueryWindowTruncationTests : IDisposable
 
     public void Dispose()
     {
+        ServerTimeHelper.ActiveServerClock = _savedClock;
+        ServerTimeHelper.CurrentDisplayMode = _savedMode;
         try { if (Directory.Exists(_tempDir)) Directory.Delete(_tempDir, recursive: true); }
         catch { /* best-effort cleanup */ }
     }
@@ -318,12 +323,44 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
         var (visibility, text) = OnStaThread(() =>
         {
             var banner = new System.Windows.Controls.TextBlock();
-            ServerTab.SetWindowTruncatedBanner(banner, truncated: true, effectiveStart);
+            ServerTab.SetWindowTruncatedBanner(banner, truncated: true, effectiveStart, TimeZoneInfo.Utc);
             return (banner.Visibility, banner.Text);
         });
 
         Assert.Equal(System.Windows.Visibility.Visible, visibility);
-        Assert.Equal($"Showing since {ServerTimeHelper.FormatServerTime(effectiveStart)}", text);
+        Assert.Equal("Showing since 2026-01-15 08:30:00", text);
+    }
+
+    /// <summary>
+    /// #4766: the zone the banner is given decides its text, not the active server's clock. Another server nine hours
+    /// ahead is the active one in Server mode, and the same instant still reads 08:30 in a UTC zone and 03:30 in a
+    /// US Eastern zone. Through the autumn repeated hour, 05:30Z and 06:30Z both read 01:30 in Eastern and the
+    /// offset tells them apart.
+    /// </summary>
+    [Fact]
+    public void SetWindowTruncatedBanner_WordsTheInstantInTheZoneItIsGiven_NotTheActiveClock()
+    {
+        ServerTimeHelper.ActiveServerClock = ServerClock.Resolve(null, 540);
+        ServerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        var eastern = ServerClock.Resolve("Eastern Standard Time", -300).AsTimeZone();
+
+        string BannerText(DateTime instant, TimeZoneInfo zone) => OnStaThread(() =>
+        {
+            var banner = new System.Windows.Controls.TextBlock();
+            ServerTab.SetWindowTruncatedBanner(banner, truncated: true, instant, zone);
+            return banner.Text;
+        });
+
+        var winter = new DateTime(2026, 1, 15, 8, 30, 0, DateTimeKind.Unspecified);
+        Assert.Equal("Showing since 2026-01-15 08:30:00", BannerText(winter, TimeZoneInfo.Utc));
+        Assert.Equal("Showing since 2026-01-15 03:30:00", BannerText(winter, eastern));
+
+        Assert.Equal(
+            "Showing since 2026-11-01 01:30:00 -04:00",
+            BannerText(new DateTime(2026, 11, 1, 5, 30, 0, DateTimeKind.Unspecified), eastern));
+        Assert.Equal(
+            "Showing since 2026-11-01 01:30:00 -05:00",
+            BannerText(new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Unspecified), eastern));
     }
 
     /// <summary>#4231: a floor inside the slack (or no truncation at all) must hide the banner and clear stale text.</summary>
@@ -337,7 +374,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
                 Visibility = System.Windows.Visibility.Visible,
                 Text = "Showing since 2020-01-01 00:00:00"
             };
-            ServerTab.SetWindowTruncatedBanner(banner, truncated: false, DateTime.UtcNow);
+            ServerTab.SetWindowTruncatedBanner(banner, truncated: false, DateTime.UtcNow, TimeZoneInfo.Utc);
             return (banner.Visibility, banner.Text);
         });
 

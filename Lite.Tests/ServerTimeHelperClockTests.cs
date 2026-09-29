@@ -226,18 +226,23 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The label names the zone AT THE INSTANT it labels: a US Eastern clock reads "UTC-4:00" in July and "UTC-5:00"
+    /// in December, not the zone's standard name ("Eastern Standard Time" reads wrong on a July time) and not the
+    /// offset in force now. The active clock is another one entirely, to show the label reads the clock it is given.
+    /// </summary>
     [Fact]
-    public void GetTimezoneLabel_ServerMode_NamesTheZone_OfAClockThatHasOne()
+    public void GetTimezoneLabel_ServerMode_ShowsTheOffsetAtTheInstant_OnEachSideOfADaylightSavingChange()
     {
         var clock = Eastern();
-        var name = clock.AsTimeZone().StandardName;
+        ServerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(540);
 
-        Assert.Equal(name, ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock));
+        Assert.Equal("UTC-4:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 7, 1, 12, 0)));
+        Assert.Equal("UTC-5:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 12, 1, 12, 0)));
 
-        /* The one-argument form reads the active clock. */
-        ServerTimeHelper.ActiveServerClock = clock;
-        Assert.Equal(name, ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime));
-        Assert.DoesNotMatch(@"^UTC[+-]\d", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime));
+        /* The repeated hour: 05:30Z is still on daylight time, 06:30Z is not. */
+        Assert.Equal("UTC-4:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 11, 1, 5, 30)));
+        Assert.Equal("UTC-5:00", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 11, 1, 6, 30)));
     }
 
     [Theory]
@@ -248,26 +253,45 @@ public sealed class ServerTimeHelperClockTests : IDisposable
     [InlineData(0, "UTC+0:00")]
     public void GetTimezoneLabel_ServerMode_ShowsTheOffset_OfAFixedOffsetClock(int offsetMinutes, string expected)
     {
-        Assert.Equal(expected, ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, ServerClock.FixedOffset(offsetMinutes)));
+        Assert.Equal(
+            expected,
+            ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, ServerClock.FixedOffset(offsetMinutes), Utc(2026, 7, 1, 12, 0)));
     }
 
     /// <summary>
-    /// A zone that never observes daylight saving has one offset for all time, so the offset is exact, and shorter
-    /// than "India Standard Time" for the header line it shows on.
+    /// A zone that never observes daylight saving has one offset for all time, so the label is the same on either
+    /// side of the year.
     /// </summary>
     [Fact]
     public void GetTimezoneLabel_ServerMode_ShowsTheOffset_OfAZoneWithNoDaylightSaving()
     {
-        Assert.Equal("UTC+5:30", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, ServerClock.Resolve("India Standard Time", 330)));
+        var clock = ServerClock.Resolve("India Standard Time", 330);
+
+        Assert.Equal("UTC+5:30", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 7, 1, 12, 0)));
+        Assert.Equal("UTC+5:30", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.ServerTime, clock, Utc(2026, 12, 1, 12, 0)));
     }
 
+    /// <summary>
+    /// UTC mode is "UTC" whatever the server's clock is. Local mode names this machine's zone at the instant, its
+    /// daylight name in summer and its standard name in winter, and not the server's zone.
+    /// </summary>
     [Fact]
     public void GetTimezoneLabel_UtcAndLocalModes_AreNotTheServers()
     {
         var clock = Eastern();
+        var summer = Utc(2026, 7, 1, 12, 0);
+        var winter = Utc(2026, 12, 1, 12, 0);
 
-        Assert.Equal("UTC", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.UTC, clock));
-        Assert.Equal(TimeZoneInfo.Local.StandardName, ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.LocalTime, clock));
+        Assert.Equal("UTC", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.UTC, clock, summer));
+        Assert.Equal("UTC", ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.UTC, clock, winter));
+
+        var local = TimeZoneInfo.Local;
+        Assert.Equal(
+            local.IsDaylightSavingTime(DateTime.SpecifyKind(summer, DateTimeKind.Utc)) ? local.DaylightName : local.StandardName,
+            ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.LocalTime, clock, summer));
+        Assert.Equal(
+            local.IsDaylightSavingTime(DateTime.SpecifyKind(winter, DateTimeKind.Utc)) ? local.DaylightName : local.StandardName,
+            ServerTimeHelper.GetTimezoneLabel(TimeDisplayMode.LocalTime, clock, winter));
     }
 
     [Fact]
