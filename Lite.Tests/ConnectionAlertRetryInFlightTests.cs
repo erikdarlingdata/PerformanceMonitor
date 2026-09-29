@@ -347,12 +347,18 @@ public sealed class ConnectionAlertRetryInFlightTests
     }
 
     [Fact]
-    public void ARemovedServer_DropsItsPendingRetry_AndItsConnectionMarks()
+    public void ARemovedServer_DropsItsPendingRetry_ItsConnectionMarks_AndItsCollectorErrorAndXeSessionMarks()
     {
         var forget = Member(WindowSource(), "private async Task ForgetServerRuntimeStateAsync(ServerConnection server)");
 
         Assert.Contains("_connectionAlertRetries.Clear(server.Id);", forget, StringComparison.Ordinal);
         Assert.Contains("_previousConnectionStates.Remove(server.Id);", forget, StringComparison.Ordinal);
         Assert.Contains("_lastConnectionDownAlertUtc.Remove(server.Id);", forget, StringComparison.Ordinal);
+
+        /* #4795: the two marks the tick keeps beside the connection state, keyed the same way. Left behind they
+           are never read again for a server that is gone and are inherited by a re-add, whose first tick would
+           then compare its first collector-error and XE-session readings against the removed server's. */
+        Assert.Contains("_previousCollectorErrorStates.Remove(server.Id);", forget, StringComparison.Ordinal);
+        Assert.Contains("_previousXeSessionFailureStates.Remove(server.Id);", forget, StringComparison.Ordinal);
     }
 }

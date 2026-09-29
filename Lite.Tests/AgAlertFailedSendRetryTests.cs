@@ -300,4 +300,131 @@ public sealed class AgAlertFailedSendRetryTests
         At(TimeSpan.FromSeconds(60));
         Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
     }
+
+    /* ---------------- a send that answers after its server was removed ---------------- */
+
+    [Fact]
+    public void AFailedAnswerThatArrivesAfterTheServerWasForgotten_RecordsNoRetry_SoAReAddedOneTakesTheSilentBaseline()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") });
+        var lost = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+
+        /* The send is still running when the server is removed, and its answer arrives afterwards. */
+        e.Forget(ServerId);
+        At(TimeSpan.FromSeconds(10));
+        e.NoteSent(lost, Failed(), Cooldown);
+
+        /* Added again with the replica still down: a first sighting, silent. The answer belonged to the outage
+           the removed server had, so it must not leave a retry that comes due here. */
+        At(TimeSpan.FromMinutes(2));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+        At(TimeSpan.FromMinutes(3));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+    }
+
+    [Fact]
+    public void ADeliveredAnswerThatArrivesAfterTheServerWasForgotten_OpensNoRefireWindow_SoAReAddedOneStillAnnouncesItsStandingOutage()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+        var lost = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+
+        e.Forget(ServerId);
+        At(TimeSpan.FromSeconds(10));
+        e.NoteSent(lost, Delivered(), Cooldown);
+
+        /* With re-fire on, a replica already down at its first sighting announces. The window the removed server's
+           answer would have opened must not swallow that. */
+        At(TimeSpan.FromSeconds(20));
+        var announced = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        Assert.Equal(AgAlertPolicy.ReplicaDisconnectedMetric, announced.MetricName);
+    }
+
+    [Fact]
+    public void NoteDelivered_IgnoresAnAlertThatWasDecidedBeforeItsServerWasForgotten()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+        var lost = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+
+        e.Forget(ServerId);
+        At(TimeSpan.FromSeconds(10));
+        e.NoteDelivered(lost);
+
+        At(TimeSpan.FromSeconds(20));
+        Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+    }
+
+    [Fact]
+    public void AFailedSyncBehindAnswerThatArrivesAfterTheServerWasForgotten_DoesNotHoldBackTheReAddedServersFirstAlert()
+    {
+        var e = Evaluator();
+        var behind = new[] { Database(lagSeconds: 900) };
+        var first = Single(e.EvaluateDatabases(ServerId, behind, 300, 0, Cooldown));
+
+        e.Forget(ServerId);
+        e.NoteSent(first, Failed(), Cooldown);
+
+        /* A standing condition has no silent baseline: the re-added server's first sweep announces it, and a retry
+           the removed server's answer left behind would hold that back for the failed-send delay. */
+        At(TimeSpan.FromSeconds(10));
+        Single(e.EvaluateDatabases(ServerId, behind, 300, 0, Cooldown));
+    }
+
+    [Fact]
+    public void AnOldAnswer_DoesNotConsumeThePutBackOfTheReAddedServersOwnAlertForTheSameGrain()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(role: "SECONDARY") });
+        var old = Single(e.EvaluateReplicas(ServerId, new[] { Replica(role: "PRIMARY") }));
+
+        /* Removed and added again while that send runs, and the re-added server sees the same change, so its alert is
+           registered under the same key. Checking whether the grain still has state cannot tell the two apart. */
+        e.Forget(ServerId);
+        e.EvaluateReplicas(ServerId, new[] { Replica(role: "SECONDARY") });
+        var current = Single(e.EvaluateReplicas(ServerId, new[] { Replica(role: "PRIMARY") }));
+
+        e.NoteSent(old, Delivered(), Cooldown);
+        e.NoteSent(current, Failed(), Cooldown);
+
+        /* The current alert's send failed, so its marker went back and the change is announced again once due. */
+        At(TimeSpan.FromSeconds(60));
+        Single(e.EvaluateReplicas(ServerId, new[] { Replica(role: "PRIMARY") }));
+    }
+
+    [Fact]
+    public void AnAlertDecidedAfterTheForget_StillRecordsItsFailedSend()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") });
+        e.Forget(ServerId);
+
+        /* The server is added again: its own baseline, its own outage, its own send. */
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") });
+        var lost = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+        e.NoteSent(lost, Failed(), Cooldown);
+
+        At(TimeSpan.FromSeconds(59));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+        At(TimeSpan.FromSeconds(60));
+        Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }));
+    }
+
+    [Fact]
+    public void AnAlertDecidedAfterTheForget_StillOpensItsRefireWindowWhenDelivered()
+    {
+        var e = Evaluator();
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+        e.Forget(ServerId);
+
+        e.EvaluateReplicas(ServerId, new[] { Replica(connected: "CONNECTED") }, Refire);
+        var lost = Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        e.NoteSent(lost, Delivered(), Cooldown);
+
+        At(Refire - TimeSpan.FromSeconds(1));
+        Assert.Empty(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+        At(Refire);
+        Single(e.EvaluateReplicas(ServerId, new[] { Replica(connected: "DISCONNECTED") }, Refire));
+    }
 }
