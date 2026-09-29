@@ -60,7 +60,7 @@ namespace PerformanceMonitor.Collectors;
 /// <param name="DetailComplete">Whether the DETAIL is proven whole (#3996's review): another companion followed it
 /// in this entry and nothing cut into its lines. <see cref="PgLogTextRedactor.RedactDetail"/> trusts a deadlock
 /// report's later query heads after one that does not read to its end only then.</param>
-/// <param name="Location">The reporting function's own name — csvlog's <c>location</c> column (index 21 of 26,
+/// <param name="Location">The reporting function's own name — csvlog's <c>location</c> column (index 21 of the 24 or 26 columns,
 /// rendered <c>funcname, file:line</c>) or jsonlog's <c>func_name</c> key — filled only under
 /// <c>log_error_verbosity = verbose</c>, and null on every other verbosity and on the stderr transport, which
 /// carries no such field at all (#4058 item 2). A genuine deadlock report is written by PostgreSQL's own
@@ -68,6 +68,10 @@ namespace PerformanceMonitor.Collectors;
 /// verified on a live 18 target — so a RAISE built to imitate either carries the reporting PL/pgSQL frame's own
 /// function, <c>exec_stmt_raise</c>, instead. LAST member, added rather than inserted, so every existing
 /// positional construction of this record stays source-compatible.</param>
+/// <param name="QueryIdText">csvlog's <c>query_id</c> column as written (index 25 of 26, PostgreSQL 14 and later), or
+/// null when the record has no such column: a PostgreSQL 13 record has 24 fields and stops at <c>backend_type</c>
+/// (#4709). Null means ABSENT and is never a shifted value. Also null on the stderr and jsonlog transports, which
+/// carry no such field here. LAST member, added rather than inserted, the way <paramref name="Location"/> was.</param>
 public readonly record struct PgLogEntry(
     string TimestampText,
     string ZoneText,
@@ -85,7 +89,8 @@ public readonly record struct PgLogEntry(
     string? SqlState,
     string RawText,
     bool DetailComplete = false,
-    string? Location = null)
+    string? Location = null,
+    string? QueryIdText = null)
 {
     /// <summary>
     /// PostgreSQL's severity labels ranked by SERIOUSNESS, which is the order a reader filtering on
