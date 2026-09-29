@@ -854,7 +854,9 @@ public static class FactAdvice
            under the floor's own, so an after half of 59.7 minutes never reads "60 minutes" beside a "1 h" floor. */
         var notYetComparable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
         var afterMinutes = Math.Min(Math.Round(afterHours * 60), Math.Ceiling(ConfigChangeAttribution.MinComparableAfterHours * 60) - 1);
-        var youngAfterClause = $"the after half covers only {Plural(afterMinutes, "minute")}, under the {ConfigChangeAttribution.MinComparableAfterHours:0.#} h the compare needs before a missing metric means anything";
+        /* An after half under 30 seconds rounds to 0 minutes, and "covers only 0 minutes" reads as no data at all. */
+        var afterCovers = afterMinutes < 1 ? "under a minute" : $"only {Plural(afterMinutes, "minute")}";
+        var youngAfterClause = $"the after half covers {afterCovers}, under the {ConfigChangeAttribution.MinComparableAfterHours:0.#} h the compare needs before a missing metric means anything";
 
         string verdict;
         if (unavailable)
