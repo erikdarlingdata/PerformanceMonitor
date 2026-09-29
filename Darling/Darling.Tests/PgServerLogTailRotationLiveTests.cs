@@ -20,6 +20,7 @@ namespace Darling.Tests;
 /// pg_read_server_files). Each test runs the shipped query through the collector's own read and carries the
 /// staged state into the next cycle the way the runner does after a successful write.
 /// </summary>
+[Collection("pg-log-rotation")]
 public sealed class PgServerLogTailRotationLiveTests
 {
     private static string? Target => Environment.GetEnvironmentVariable("DARLING_TEST_PG_LOGROTATE");

@@ -141,7 +141,7 @@ public sealed class CollectorStateContractTests
            DB) so the next cycle can tell "nothing arrived" from a stale watermark and skip the cast+shred.
            Also no host code: change-only, generic wiring. */
         Assert.Equal(
-            new[] { "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" },
+            new[] { "blocked_process_report", "cpu_utilization", "deadlocks", "default_trace_events", "pg_deadlocks", "pg_log_events", "pg_plan_capture", "pg_statement_stats", "pg_wait_sampling", "pg_wait_stats", "wait_stats" },
             CollectorCatalog.All
                 .Where(c => c.StateKeys.Count > 0)
                 .Select(c => c.Name)

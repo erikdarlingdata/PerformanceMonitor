@@ -206,11 +206,22 @@ public sealed class PgServerLogPathPinTests
              Text: "/* pg_ls_logdir() returns names relative to log_directory, so 'log/' is an assumption. */"),
             (Name: "NoLogRead.cs",
              Text: "const string Q = @\"SELECT 'log/' AS assumed_prefix\";"),
+            /* Assembled by const concatenation: the listing is in the first chunk, the question to the
+               server in a later one, as PgServerLogTail spells it. Judged as a whole, so it is spared. */
+            (Name: "ConcatAsks.cs",
+             Text: "const string Q = @\"SELECT n.name FROM pg_ls_logdir() AS n WHERE n.size > \" + Bytes + @\""
+                 + " SELECT pg_catalog.pg_read_file(pg_catalog.current_setting('log_directory') || '/' || n.name)\";"),
+            /* Assembled the same way but NO chunk asks the server: still reported, both ways, as one declaration. */
+            (Name: "ConcatSilent.cs",
+             Text: "const string Q = @\"SELECT n.name FROM pg_ls_logdir() AS n WHERE n.size > \" + Bytes + @\""
+                 + " SELECT pg_catalog.pg_read_file('log/' || n.name)\";"),
         });
 
-        Assert.Equal(new[] { "Assuming.cs", "Clean.cs" }, files);
-        Assert.Equal(2, faults.Count);
-        Assert.All(faults, fault => Assert.StartsWith("Assuming.cs", fault, StringComparison.Ordinal));
+        Assert.Equal(new[] { "Assuming.cs", "Clean.cs", "ConcatAsks.cs", "ConcatSilent.cs" }, files);
+        Assert.Equal(4, faults.Count);
+        Assert.All(faults, fault => Assert.Matches("^(Assuming|ConcatSilent)\\.cs", fault));
+        Assert.Equal(2, faults.Count(fault => fault.StartsWith("ConcatSilent.cs", StringComparison.Ordinal)));
+        Assert.DoesNotContain(faults, fault => fault.StartsWith("ConcatAsks.cs", StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -224,26 +235,53 @@ public sealed class PgServerLogPathPinTests
 
         foreach (var source in sources)
         {
-            var listing = CSharpSourceWalker.StringLiteralBodies(source.Text)
-                .Where(body => body.Text.Contains(ListsTheLogDirectory, StringComparison.Ordinal))
+            /* SQL is judged per DECLARATION, not per literal. A query assembled by const concatenation
+               (`@"...pg_ls_logdir()..." + TailBytesLiteral + @"...current_setting('log_directory')..."`)
+               lists the directory in one chunk and asks the server in a later one; judged chunk by chunk the
+               listing half reds for a question the other half answers. Literals belong together when the
+               same statement-ending semicolon (in code, not in a string or comment) follows them. */
+            var code = CSharpSourceWalker.CodeMask(source.Text);
+            var declarations = CSharpSourceWalker.StringLiteralBodies(source.Text)
+                .GroupBy(body => TerminatorOf(source.Text, code, body.Start + body.Text.Length))
+                .Select(group => group.OrderBy(body => body.Start).ToArray())
+                .Where(group => group.Any(body => body.Text.Contains(ListsTheLogDirectory, StringComparison.Ordinal)))
+                .OrderBy(group => group[0].Start)
                 .ToArray();
 
-            if (listing.Length == 0)
+            if (declarations.Length == 0)
             {
                 continue;
             }
 
             files.Add(source.Name);
 
-            foreach (var body in listing)
+            foreach (var declaration in declarations)
             {
+                var whole = string.Concat(declaration.Select(body => body.Text));
+                var first = declaration.First(body => body.Text.Contains(ListsTheLogDirectory, StringComparison.Ordinal));
+
                 faults.AddRange(
-                    DirectoryFaults(body.Text)
-                        .Select(fault => $"{source.Name} (literal at offset {body.Start}) {fault}"));
+                    DirectoryFaults(whole)
+                        .Select(fault => $"{source.Name} (declaration at offset {first.Start}) {fault}"));
             }
         }
 
         return (files.OrderBy(f => f, StringComparer.Ordinal).ToArray(), faults);
+    }
+
+    /// <summary>The index of the first semicolon in CODE at or after <paramref name="from"/> - the end of the
+    /// statement holding the literal - or the text length when there is none.</summary>
+    private static int TerminatorOf(string text, bool[] code, int from)
+    {
+        for (var i = from; i < text.Length; i++)
+        {
+            if (code[i] && text[i] == ';')
+            {
+                return i;
+            }
+        }
+
+        return text.Length;
     }
 
     private static string RepoRoot()
