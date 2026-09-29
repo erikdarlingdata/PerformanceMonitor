@@ -762,6 +762,7 @@ public static class FactRemediation
             if (!isIncumbent)
                 order.Add(key);
 
+            var bestPlanLastSeen = GetDateTime(row, "best_plan_last_seen");
             winners[key] = new ForcePlanTarget(
                 Database: database,
                 QueryId: queryId,
@@ -773,7 +774,10 @@ public static class FactRemediation
                 RegressionFactor: GetDouble(row, "regression_factor"),
                 ReplicaRole: string.IsNullOrEmpty(replicaRole) ? null : replicaRole,
                 ParameterSensitivityCoFired: GetBool(row, "parameter_sensitivity_cofired"),
-                BestPlanLastSeenUtc: GetDateTime(row, "best_plan_last_seen"));
+                BestPlanLastSeenUtc: bestPlanLastSeen,
+                BestPlanAgeDays: bestPlanLastSeen is DateTime seen && finding.TimeRangeEnd is DateTime windowEnd
+                    ? Math.Max(0.0, (windowEnd - seen).TotalDays)
+                    : null);
         }
 
         foreach (var key in order)
@@ -814,6 +818,7 @@ public static class FactRemediation
                 sb.AppendLine($"--   latest plan hash: {target.LatestPlanHash} (cpu/exec {target.LatestCpuPerExecUs:F0} us)");
             if (!string.IsNullOrEmpty(target.BestPlanHash))
                 sb.AppendLine($"--   best plan hash:   {target.BestPlanHash}   (cpu/exec {target.BestCpuPerExecUs:F0} us)");
+            AppendBestPlanAge(sb, target);
             sb.AppendLine($"--   regression factor: {target.RegressionFactor:F1}x");
             if (!string.IsNullOrEmpty(target.ReplicaRole))
                 sb.AppendLine($"--   measured on replica: {target.ReplicaRole}");
@@ -830,6 +835,35 @@ public static class FactRemediation
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    /// <summary>
+    /// #4736: one comment line saying when the target's best plan last ran and how long before the analysis
+    /// window's end that was, so every target in a multi-target script carries the age the advice prose
+    /// gives only for the worst offender. Emitted only for a target that has a last-seen time (a finding
+    /// from before the column, or a collector that never wrote it, adds nothing, which keeps those scripts
+    /// byte-for-byte what they were). Informational: an old best plan is not a blocker for a person, and
+    /// the unattended bot applies its own age gate (<see cref="ForcePlanBotPolicy.MaxBestPlanAgeDays"/>).
+    /// </summary>
+    private static void AppendBestPlanAge(StringBuilder sb, ForcePlanTarget target)
+    {
+        if (target.BestPlanLastSeenUtc is not DateTime lastSeen)
+            return;
+
+        sb.AppendLine(target.BestPlanAgeDays is double ageDays
+            ? $"--   best plan last ran {DescribeBestPlanAge(ageDays)} ({Stamp(lastSeen)})"
+            : $"--   best plan last ran at {Stamp(lastSeen)}");
+    }
+
+    /// <summary>The age in the advice prose's words (<c>FactAdvice.ComposePlanRegression</c>): whole days,
+    /// floored, or "within the past day" under one.</summary>
+    private static string DescribeBestPlanAge(double ageDays)
+    {
+        if (ageDays < 1)
+            return "within the past day";
+
+        var days = (long)Math.Floor(ageDays);
+        return days == 1 ? "1 day ago" : $"{days.ToString(CultureInfo.InvariantCulture)} days ago";
     }
 
     /// <summary>
@@ -1014,7 +1048,10 @@ public static class FactRemediation
     /// <para>An <c>Active</c> recommendation (FORCE_LAST_GOOD_PLAN off, the engine offering the script)
     /// blocks nothing: when it names the target plan the manual force is exactly what the engine
     /// suggests, and when it names another plan the disagreement is stated in the target's guidance
-    /// rather than as a blocker — the operator has two candidate plans and the evidence for both.</para>
+    /// rather than as a blocker — the operator has two candidate plans and the evidence for both. When it
+    /// names the TARGET as the regressed plan the guidance says that too (#4736), and it is still the
+    /// operator's call here: only the unattended bot, which has no one to hand the decision to, gets a
+    /// blocker (<see cref="ForcePlanBotPolicy.ReasonApcNamesPlanAsRegressed"/>).</para>
     /// </summary>
     public static IReadOnlyList<ForcePlanBlocker> ForcePlanBlockers(ForcePlanTarget target, ForcePlanTargetState? state)
     {
@@ -1142,6 +1179,22 @@ public static class FactRemediation
     private static bool IsAutoForcing(string? forcingType) =>
         string.Equals(forcingType, ForcePlanTargetState.ForcingTypeAuto, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// #4736: the engine's own OPEN (<c>Active</c>) recommendation names the proposed plan as the regressed,
+    /// worse one (<c>regressedPlanId</c> equals the target's plan). One predicate for the two readers: the
+    /// target's guidance says so to a person, and <see cref="ForcePlanBotPolicy.Blockers"/> stops the bot,
+    /// so what the page says and what the bot enforces cannot drift apart (#2146).
+    ///
+    /// <para><b>Only <c>Active</c>.</b> <c>Reverted</c> and <c>Expired</c> are the engine withdrawing the
+    /// claim (no gain, or the situation changed), so the row no longer says the plan is worse.
+    /// <c>Verifying</c> and <c>Success</c> already block through <c>apc_owns_it</c> and
+    /// <c>apc_resolved_differently</c>, because the engine is forcing (or has forced) a different plan.</para>
+    /// </summary>
+    internal static bool ApcNamesPlanAsRegressed(ForcePlanTarget target, ForcePlanTargetState state) =>
+        string.Equals(state.ApcState, "Active", StringComparison.OrdinalIgnoreCase)
+        && state.ApcRegressedPlanId is long regressed
+        && regressed == target.PlanId;
+
     /// <summary>The snapshot stamp every blocker's evidence ends with — ISO-8601 UTC, or a stated
     /// absence, never an empty string that could read as "now". Internal so the bot's own blockers
     /// (<see cref="ForcePlanBotPolicy.Blockers"/>, #3654) stamp their evidence the same way.</summary>
@@ -1229,7 +1282,9 @@ public static class FactRemediation
                     t.RegressionFactor,
                     t.LatestCpuPerExecUs,
                     t.BestCpuPerExecUs,
-                    t.ParameterSensitivityCoFired),
+                    t.ParameterSensitivityCoFired,
+                    t.BestPlanLastSeenUtc is DateTime bestLastSeen ? Stamp(bestLastSeen) : null,
+                    t.BestPlanAgeDays is double bestAgeDays ? Math.Round(bestAgeDays, 1) : null),
                 ForceSql: $"USE {QuoteName(t.Database)};{Environment.NewLine}" +
                     $"EXEC sys.sp_query_store_force_plan @query_id = {t.QueryId}, @plan_id = {t.PlanId};",
                 UnforceSql: $"USE {QuoteName(t.Database)};{Environment.NewLine}" +
@@ -1253,8 +1308,9 @@ public static class FactRemediation
     /// The per-target verb (#3652): when FORCE_LAST_GOOD_PLAN is ON for the database the remediation is no
     /// longer "run this" but "the engine is doing X for this query; intervene only if it reverts or
     /// expires" — stated with the engine's own state and reason. When the enablement is OFF or unknown,
-    /// the only guidance is the non-blocking disagreement case (an <c>Active</c> recommendation naming a
-    /// different plan). Null when there is nothing to add to the blockers.
+    /// the only guidance is the non-blocking disagreement cases (an <c>Active</c> recommendation naming a
+    /// different plan, or naming this plan as the regressed one — #4736). Null when there is nothing to add
+    /// to the blockers.
     /// </summary>
     private static string? BuildForcePlanGuidance(ForcePlanTarget t, ForcePlanTargetState? state)
     {
@@ -1265,6 +1321,7 @@ public static class FactRemediation
 
         var apcState = state.ApcState;
         var reason = string.IsNullOrEmpty(state.ApcStateReason) ? string.Empty : $" ({state.ApcStateReason})";
+        var namedAsRegressed = ApcNamesPlanAsRegressed(t, state);
 
         if (state.ApcIsOn)
         {
@@ -1282,7 +1339,21 @@ public static class FactRemediation
                 sb.Append($" and is currently {apcState}{reason} for query {t.QueryId}{via} as of {Stamp(state.ApcObservedAtUtc)}; intervene only if it reverts or expires.");
             }
 
+            if (namedAsRegressed)
+            {
+                sb.Append($" The engine names plan {t.PlanId} (the plan proposed here) as the regressed, worse plan.");
+            }
+
             return sb.ToString();
+        }
+
+        /* #4736: an OPEN recommendation that calls the proposed plan the regressed one is the engine's verdict
+           against this page's, and "two candidate plans" undersells it. Said first, before the plain
+           disagreement below; a human still decides (the bot alone carries the blocker). */
+        if (namedAsRegressed)
+        {
+            var better = state.ApcLastGoodPlanId is long good ? $" and plan {good} as the better one" : string.Empty;
+            return $"The engine's own open recommendation{reason} for query {t.QueryId} names plan {t.PlanId} (the plan proposed here) as the regressed, worse plan{better}, as of {Stamp(state.ApcObservedAtUtc)} — the engine disagrees with this page's choice; compare both plans before forcing either.";
         }
 
         if (string.Equals(apcState, "Active", StringComparison.OrdinalIgnoreCase) &&

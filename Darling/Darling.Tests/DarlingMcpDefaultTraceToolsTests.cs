@@ -71,9 +71,10 @@ public sealed class DarlingMcpDefaultTraceToolsSurfaceAndSqlTests
     /// <c>last_collection</c>. At UTC-4 that renders a 04:28 event as 00:28, which reads as having PRECEDED
     /// the 04:28 collector error it actually coincided with.
     ///
-    /// <para>Asserted as the same three expressions <c>ViewerSystemEventsTests</c> pins on
-    /// <c>ViewerDataService.DefaultTraceEventsByWindowSql</c>, because the two constants read the same column
-    /// out of the same store and a second convention on one of them is worse than either convention.
+    /// <para>Asserted as three expressions in the SQL. The viewer's twin
+    /// <c>ViewerDataService.DefaultTraceEventsByWindowSql</c> no longer carries all three (#4766): it returns
+    /// the local time raw and converts each row in C# with the server's time zone, keeping the offset only as
+    /// an hour-wide pre-filter, which <c>ViewerSystemEventsTests</c> pins. This service read is unchanged.
     /// <c>ServerLocalReadFrameDisciplineTests</c> holds the corpus-level version of that.</para>
     /// </summary>
     [Fact]
