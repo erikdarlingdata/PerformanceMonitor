@@ -966,7 +966,9 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <c>checkpoint_timeout</c> covers about twelve timed checkpoints, so judging the sum against a
     /// per-checkpoint bar breached on a healthy store whose checkpoints each synced five to eight seconds and
     /// never recovered (#4037's own measured population). The second arm, <c>checkpoints_requested &gt; 0</c>,
-    /// has no threshold to tune: one WAL-forced checkpoint in an hour says the store outran <c>max_wal_size</c>.
+    /// has no threshold to tune: one requested checkpoint in an hour is worth a look, and it is a look, not a
+    /// verdict, because a requested checkpoint comes from WAL volume reaching <c>max_wal_size</c>, a base backup,
+    /// or a <c>CHECKPOINT</c> statement and the counters do not say which (#4758).
     /// Both arms are judged on an interval with no postmaster restart inside it: across one, the shutdown
     /// checkpoint is in the requested count and in the phase times alike, so neither is judged (#3955); and the
     /// average arm needs a TIMED count on both samples of the pair (V140), so a row from before that rung
@@ -5923,10 +5925,12 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>
     /// Applies the fleet-level Store Checkpointer Pressure condition (#3783) from the store's last measured
     /// checkpointer interval: the sync (fsync) phase held more than <see cref="CheckpointSyncBarMs"/> inside the
-    /// interval, OR at least one checkpoint was REQUESTED — forced by WAL volume reaching <c>max_wal_size</c>
-    /// rather than by the clock. Three unattributed read kills on a production store in one day all sat inside
-    /// checkpoint sync phases of 25.2 s and 14.0 s with nothing recording that the checkpointer had been there;
-    /// this is that record, as an alert. A STANDING condition (the Store Job Over Cadence idiom): fire once on
+    /// interval, OR at least one checkpoint was REQUESTED — started by WAL volume reaching <c>max_wal_size</c>, a
+    /// base backup, or a <c>CHECKPOINT</c> statement rather than by the clock. PostgreSQL's counters do not record
+    /// which, only its <c>log_checkpoints</c> lines do, so the text names all three causes and offers raising
+    /// <c>max_wal_size</c> as the remedy for the first only (#4758). Three unattributed read kills on a
+    /// production store in one day all sat inside checkpoint sync phases of 25.2 s and 14.0 s with nothing
+    /// recording that the checkpointer had been there; this is that record, as an alert. A STANDING condition (the Store Job Over Cadence idiom): fire once on
     /// breach, re-fire on the shared alert cooldown while each new interval keeps breaching, one "Store
     /// Checkpointer Pressure Recovered" resolution when an interval reads clean. INFORMATIONAL, fired with no
     /// severity override: the two levers are configuration — #3802's WAL sizing (<c>max_wal_size</c> /
@@ -5943,7 +5947,7 @@ internal sealed class DarlingSelfAlertEvaluator
     ///
     /// <para><b>An interval that spans a postmaster restart judges neither arm (#3955).</b> PostgreSQL counts the
     /// shutdown checkpoint as requested and keeps the count across the restart, so every service restart that
-    /// stopped the store fired this alert as "WAL-forced" pressure the store did not have; and that checkpoint's
+    /// stopped the store fired this alert as requested-checkpoint pressure the store did not have; and that checkpoint's
     /// own write and sync phases land in the same counters, where nothing can separate them from the live
     /// checkpoints' (a fast shutdown flushes every dirty buffer at once, with every client already gone, so a
     /// long one is not a stall anyone's read sat inside). The reader therefore calls such an interval
@@ -5985,9 +5989,9 @@ internal sealed class DarlingSelfAlertEvaluator
                 var averageSecondsText = averageSyncMs is double a ? (a / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) : "unmeasured";
                 var arms = (averageOverBar, requested > 0) switch
                 {
-                    (true, true) => $"average sync {averageSecondsText}s per checkpoint and {requested} WAL-forced checkpoint(s)",
+                    (true, true) => $"average sync {averageSecondsText}s per checkpoint and {requested} requested checkpoint(s)",
                     (true, false) => $"average sync {averageSecondsText}s per checkpoint",
-                    _ => $"{requested} WAL-forced checkpoint(s)",
+                    _ => $"{requested} requested checkpoint(s)",
                 };
                 await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
@@ -5996,15 +6000,17 @@ internal sealed class DarlingSelfAlertEvaluator
                     detail: $"The store's own checkpointer ran {checkpointCount} checkpoint(s) over the {intervalMinutes} minutes " +
                         $"between the last two self-metrics sweeps, spending {(syncMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture)}s " +
                         $"total in its sync (fsync) phase and {writeSeconds}s in its write phase — an average of {averageSecondsText}s of sync " +
-                        $"per checkpoint — and {requested} of those checkpoints were REQUESTED — forced by WAL volume reaching " +
-                        "max_wal_size rather than by checkpoint_timeout. " +
+                        $"per checkpoint — and {requested} of those checkpoints were REQUESTED — started by something other than " +
+                        "checkpoint_timeout: WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement. " +
                         (averageOverBar
                             ? $"A per-checkpoint sync average past {barSeconds}s means at least some of this interval's checkpoints ran " +
                               "an I/O stall every reader on the store shares: on one production store, three read kills in a day that " +
                               "nothing else explained all sat inside 25.2 s and 14.0 s sync phases, and the MCP host's read deadline is " +
                               $"the {barSeconds}s this line is drawn at. "
-                            : "A requested checkpoint means the store wrote more WAL between checkpoints than max_wal_size " +
-                              "allows, so the checkpointer ran early and the next one is closer — checkpoint pressure compounds. ") +
+                            : "PostgreSQL's counters do not say which of those started a requested checkpoint; the log_checkpoints " +
+                              "lines do. Raising max_wal_size is the remedy only for the first cause: when WAL volume did it, the " +
+                              "store wrote more WAL between checkpoints than max_wal_size allows, so the checkpointer ran early and " +
+                              "the next one is closer — checkpoint pressure compounds. ") +
                         "The interval series is collect.store_metrics (object_kind = 'checkpointer'; the stored columns are the " +
                         "server's cumulative counters, and get_store_metrics' checkpointer block publishes the per-interval " +
                         "differences and the same per-checkpoint average). This alert re-fires on the alert cooldown while each " +
