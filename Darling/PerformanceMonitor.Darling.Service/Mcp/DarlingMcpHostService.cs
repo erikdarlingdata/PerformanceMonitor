@@ -677,7 +677,16 @@ public sealed class DarlingMcpHostService : BackgroundService
            (which passes none) keeps building and running with its own throwaway accumulator instead of a
            null-reference. Production's one real call site (TryStartServerAsync) resolves the DI singleton and
            passes it here explicitly. */
-        var toolLatency = new McpToolLatencyFilter(readLatency ?? new ReadLatencyAccumulator(), readLatencyLogger);
+        var hostReadLatency = readLatency ?? new ReadLatencyAccumulator();
+        var toolLatency = new McpToolLatencyFilter(hostReadLatency, readLatencyLogger);
+
+        /* #4782: run_custom_view_panel records its composed-panel run through the shared runner, which used to
+           find the accumulator in a process-wide static that only the web host set -- so the run was dropped
+           whenever the web host was off, and was tied to whichever web server was mapped last when several
+           were set up in one process. The tool now takes this seat as a DI service parameter, over the SAME
+           accumulator the filter above records into. Typed-generic AddSingleton<T>, as the seat census
+           (McpServiceParameterDiSeatCensusTests) greps this file's source text for it. */
+        services.AddSingleton<ReadLatencyRecorder>(new ReadLatencyRecorder(hostReadLatency, readLatencyLogger));
 
         services
             .AddMcpServer(options =>

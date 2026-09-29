@@ -451,6 +451,13 @@ public sealed class DarlingWorker : BackgroundService
        catalog-function reads plus ~30 narrow INSERTs. */
     private static readonly TimeSpan s_storeMetricsInterval = TimeSpan.FromHours(1);
 
+    /* #4823: the checkpointer's cumulative sync time is read once a minute, so the hourly Store Checkpointer Pressure
+       evaluation can judge the LONGEST single sync as well as the hour's average (a difference of two hourly rows is
+       the hour's total, which an average over the hour's checkpoints spreads thin). One trivial single-row read; the
+       budget bounds the whole sample, connection wait included, because it is awaited on the main loop. */
+    private static readonly TimeSpan s_checkpointSyncSampleInterval = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan s_checkpointSyncSampleBudget = TimeSpan.FromSeconds(10);
+
     /* The Query Store backfill worker's tick (#2022): its OWN loop like the command plane, so a slow
        byte-budgeted slice can never delay or starve the collection sweep — the two share only the
        cancellation token and the guarded server snapshot. One slice per server per tick keeps it a
@@ -861,8 +868,14 @@ public sealed class DarlingWorker : BackgroundService
        awaited on this loop, that is 346-400s in which NO server's sweep body launches and the whole fleet
        reads stale — the same shape as the oversized-plan backlog's field incident, one maintenance step
        over. Tracked (not fire-and-forget) so the launch loop can see it is still running and skip a second
-       launch, and so shutdown can drain it instead of abandoning a live DELETE. */
+       launch, and so shutdown can drain it instead of abandoning a live DELETE.
+
+       #4825: purge_now runs in this SAME slot (TryStartPurgeNow), so a manual purge and the daily one can
+       never overlap, and a manual purge is drained at shutdown like the daily one. The slot is now read and
+       set from two threads (the launch loop for the daily purge, the command loop for purge_now), so the
+       check-then-set in both launchers holds _purgeTaskLock. */
     private Task? _purgeTask;
+    private readonly object _purgeTaskLock = new();
 
     /* MinValue = the first sweep after startup evaluates the compression-job self-heal check (#1581), then
        every s_compressionCheckInterval, pinned to :30 past the minute by TimescaleSupport.NextCompressionCheckUtc
@@ -898,6 +911,11 @@ public sealed class DarlingWorker : BackgroundService
        gated on _timescaleAvailable at the loop: the dimension and whole-store rows apply to plain-PG stores
        too; only the per-hypertable arm inside the sweep needs (and gets) the flag. */
     private DateTime _nextStoreMetricsUtc = DateTime.MinValue;
+
+    /* #4823: the once-a-minute checkpointer sync-time sample. MinValue = the first sample is taken on the first pass,
+       which only sets the sampler's baseline. The sampler is in memory: a service restart starts a new baseline. */
+    private DateTime _nextCheckpointSyncSampleUtc = DateTime.MinValue;
+    private readonly CheckpointSyncSampler _checkpointSyncSampler = new();
 
     /* #2674: per-collector cost on the monitored servers, accumulated in memory and flushed hourly on the
        store-metrics tick. Held here (not in the runner) so its lifetime matches the sweep that drains it. */
@@ -2661,7 +2679,7 @@ public sealed class DarlingWorker : BackgroundService
            analysis pieces) without the executor touching that mutable state directly; every other command
            only writes the config.* tables and rides the reload beacon. Launched here and awaited after the
            collection loop stops so both drain cleanly on shutdown. */
-        var commandHost = new WorkerCommandHost(this, servers, runner, planFetcher, notificationService, config);
+        var commandHost = new WorkerCommandHost(this, servers, runner, planFetcher, notificationService, config, stoppingToken);
         var serviceInstance = $"{Environment.MachineName}:{Environment.ProcessId.ToString(CultureInfo.InvariantCulture)}";
         var commandExecutor = new DarlingCommandExecutor(postgres, commandHost, serviceInstance, _logger);
         var commandLoop = RunCommandLoopAsync(commandExecutor, stoppingToken);
@@ -3253,14 +3271,30 @@ public sealed class DarlingWorker : BackgroundService
                     config.Alerts.Enabled, _logger, stoppingToken);
             }
 
+            /* #4823: the once-a-minute checkpointer sync-time sample, AHEAD of the hourly tick below so the sample taken
+               on a tick's own pass is inside the window that tick takes. #4834: whether or not a self-alert evaluator
+               exists, because the hourly checkpointer row stores the window's maximum either way. A failed read is a
+               Debug line and a skipped minute inside SampleCheckpointSyncAsync, never a stopped loop. */
+            if (DateTime.UtcNow >= _nextCheckpointSyncSampleUtc)
+            {
+                _nextCheckpointSyncSampleUtc = NextGridStamp(_nextCheckpointSyncSampleUtc, DateTime.UtcNow, s_checkpointSyncSampleInterval);
+                await SampleCheckpointSyncAsync(stoppingToken);
+            }
+
             if (DateTime.UtcNow >= _nextStoreMetricsUtc)
             {
                 _nextStoreMetricsUtc = NextGridStamp(_nextStoreMetricsUtc, DateTime.UtcNow, s_storeMetricsInterval);
 
+                /* #4834: the longest single checkpoint sync the minute samples saw since the last tick, taken ONCE and
+                   here, so the window closes on the hour whatever the sweep below goes on to do. The sweep stores it on
+                   the hour's checkpointer row; the checkpointer evaluation and get_store_metrics both read it back from
+                   that row, so neither is handed a window. */
+                var checkpointWindow = _checkpointSyncSampler.TakeWindowMax();
+
                 /* #4012's review: the deadlock re-mask inside the sweep keys an alert whose report is gone under the
                    same log-hash key the runner's log-event runs share. */
                 _pgDeadlockRemaskKey = runner.LogHashKey;
-                await SweepStoreSelfMetricsAsync(stoppingToken);
+                await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);
 
                 /* #2674: right after the flush wrote the latest hour, evaluate whether any of our collectors
                    regressed in cost on a target — a fleet-level self-alert, failure-isolated like the sweep. */
@@ -3280,7 +3314,9 @@ public sealed class DarlingWorker : BackgroundService
                        evaluator says why) and the checkpointer's last interval, differenced from the newest
                        two checkpointer rows. Same tick as the sweep on purpose: the rows are seconds old, so
                        the alert judges the hour the sweep measured rather than the one before it. Both
-                       master-gated inside and failure-isolated inside; the outer catch is the belt. */
+                       master-gated inside and failure-isolated inside; the outer catch is the belt.
+                       #4834: the checkpointer check reads the hour's longest single sync from the row the
+                       sweep just wrote, the same value get_store_metrics publishes. */
                     try
                     {
                         await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);
@@ -8256,6 +8292,35 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
+    /// The #4823 once-a-minute checkpointer sample: one read of the store's cumulative checkpoint sync time, handed to
+    /// <see cref="CheckpointSyncSampler"/>, which differences consecutive reads to find the longest single sync in the
+    /// hour. Awaited on the main loop, so the whole sample - connection wait included - runs under one short budget. A
+    /// failure (a store that is down, a permission the bring-your-own store lacks, the budget expiring) is a Debug line
+    /// and a skipped minute: the sampler keeps its previous baseline, and the next successful read differences against
+    /// it, which can only lengthen the difference it reports. Never throws except for the service stopping.
+    /// </summary>
+    private async Task SampleCheckpointSyncAsync(CancellationToken cancellationToken)
+    {
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(s_checkpointSyncSampleBudget);
+
+        try
+        {
+            await using var connection = await _postgres!.OpenConnectionAsync(budget.Token);
+            var syncMs = await StoreSelfMetrics.ReadCheckpointerSyncTimeMsAsync(connection, budget.Token);
+            if (syncMs is long sampled)
+            {
+                _checkpointSyncSampler.Observe(DateTime.UtcNow, sampled);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException
+            || (budget.IsCancellationRequested && !cancellationToken.IsCancellationRequested))
+        {
+            _logger.LogDebug(ex, "checkpoint sync sample failed and was skipped");
+        }
+    }
+
+    /// <summary>
     /// The #2068 store self-metrics sweep (fleet-level, hourly): one <see cref="StoreSelfMetrics"/> run —
     /// per-hypertable size/compression rows (Timescale stores only, gated on the cached
     /// <see cref="_timescaleAvailable"/> flag INSIDE the sweep so plain-PG stores still record their
@@ -8269,7 +8334,10 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// The shared budget is what bounds the whole tick — three passes on one
     /// <see cref="StoreSelfMetrics.SweepTimeoutSeconds"/> linked CTS, not one each.</para>
     /// </summary>
-    private async Task SweepStoreSelfMetricsAsync(CancellationToken cancellationToken)
+    /// <param name="checkpointLongestSync">(#4834) The longest single checkpoint sync the minute sampler saw since the
+    /// previous tick, or null when it took no difference; the sweep stores it on the hour's checkpointer row.</param>
+    /// <param name="cancellationToken">The service's stop.</param>
+    private async Task SweepStoreSelfMetricsAsync(CheckpointSyncMax? checkpointLongestSync, CancellationToken cancellationToken)
     {
         /* #2327 review catch: this sweep is AWAITED on the main loop, unlike the fire-and-track
            per-server sweeps — so its worst case stalls per-server dispatch and the disk-pressure and
@@ -8297,7 +8365,8 @@ AND   j.hypertable_name = '{relation}'", connection))
                usable, which is what the two passes after it need. */
             try
             {
-                await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger, budget.Token);
+                await StoreSelfMetrics.SweepAsync(connection, _timescaleAvailable, DateTime.UtcNow, _logger,
+                    checkpointLongestSync?.SyncMs, checkpointLongestSync?.SampledUtc, budget.Token);
             }
             catch (PostgresException ex) when (!PgBaselineProvider.IsCommandTimeout(ex)
                                                && connection.State == ConnectionState.Open)
@@ -9039,6 +9108,11 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// silently pushing the purge out by a whole day. A slow purge that overruns one 24h cycle simply gets
     /// its next attempt on the very next tick once it completes, rather than piling up a second instance on
     /// top of the first. Returns whether it launched.</para>
+    ///
+    /// <para>#4825: the slot is shared with <c>purge_now</c> (<see cref="TryStartPurgeNow"/>). A manual purge that
+    /// is still running when the daily one comes due holds it off exactly like a slow daily run does: the launch
+    /// is skipped, the stamp stays where it was, and the next tick tries again. The check and the set happen
+    /// under <c>_purgeTaskLock</c> because the other launcher runs on the command loop's thread.</para>
     /// </summary>
     internal bool TryStartScheduledPurge(
         DateTime nowUtc, Func<CancellationToken, Task> startPurge, CancellationToken stoppingToken)
@@ -9048,23 +9122,108 @@ AND   j.hypertable_name = '{relation}'", connection))
             return false;
         }
 
-        if (_purgeTask is { IsCompleted: false })
+        lock (_purgeTaskLock)
         {
-            _logger.LogInformation(
-                "daily retention purge was still running at its next scheduled time — skipping this launch; "
-                + "it will be retried on the next tick once the current run completes");
-            return false;
-        }
+            if (_purgeTask is { IsCompleted: false })
+            {
+                _logger.LogInformation(
+                    "a retention purge (the previous daily run, or a manual purge_now) was still running at the "
+                    + "daily purge's next scheduled time — skipping this launch; it will be retried on the next "
+                    + "tick once the current run completes");
+                return false;
+            }
 
-        _nextPurgeUtc = nowUtc.AddHours(24);
-        _purgeTask = RunTrackedAsync(startPurge, stoppingToken);
-        return true;
+            _nextPurgeUtc = nowUtc.AddHours(24);
+            _purgeTask = RunTrackedAsync(startPurge, stoppingToken);
+            return true;
+        }
     }
 
     /// <summary>
-    /// Wraps a purge delegate so <see cref="_purgeTask"/> can never fault unobserved (the launch loop never
-    /// awaits it, so an unhandled fault here would otherwise surface only as an UnobservedTaskException at
-    /// GC time). <see cref="OperationCanceledException"/> is swallowed too — that is the normal shutdown-drain
+    /// #4825: the <c>purge_now</c> command's launch decision, extracted so it is testable the way
+    /// <see cref="TryStartScheduledPurge"/> is. The purge used to run inline on the command loop
+    /// (<c>RunCommandLoopAsync</c> runs one command at a time), so every other command waited behind it, and it ran
+    /// unpaced, so its deletes could stall collection on every server. It now starts in the SAME slot the daily
+    /// purge uses (<see cref="_purgeTask"/>) and this returns at once.
+    ///
+    /// <para>If that slot is still running, whether the daily purge or an earlier <c>purge_now</c>, nothing
+    /// starts: the reply is a success with <c>started: false, alreadyRunning: true</c>. Otherwise it is a success
+    /// with <c>started: true</c> and <c>startedAtUtc</c>. Both carry <c>customRetentionDays</c> as asked. It does
+    /// not touch <c>_nextPurgeUtc</c>: a manual purge neither counts as the day's purge nor delays it.</para>
+    ///
+    /// <para><c>startedAtUtc</c> is this service's <c>DateTime.UtcNow</c>, taken just before the purge starts, as
+    /// naive UTC in the round-trip ("o") form: the same clock and the same shape as the <c>collection_time</c> the
+    /// run's records are stamped with (<see cref="DarlingObservability.LogRetentionRunAsync"/>). The viewer reads
+    /// the run's totals back from collection_log with it as the lower bound, so no viewer or database clock enters
+    /// the comparison. The already-running reply has none: nothing started, so there is no run of this caller's to
+    /// look for.</para>
+    ///
+    /// <para><paramref name="stoppingToken"/> must be the SERVICE's stopping token. The token the command loop
+    /// hands a command is a per-command one, and the purge outlives the command, so binding it to that one would
+    /// cancel the purge the moment the command reported.</para>
+    /// </summary>
+    internal CommandOutcome TryStartPurgeNow(
+        Func<CancellationToken, Task> startPurge, int? customRetentionDays, CancellationToken stoppingToken)
+    {
+        DateTime startedAtUtc;
+        lock (_purgeTaskLock)
+        {
+            if (_purgeTask is { IsCompleted: false })
+            {
+                _logger.LogInformation(
+                    "purge_now: a retention purge (the daily run, or an earlier purge_now) is already running — starting nothing");
+                return new CommandOutcome(
+                    true,
+                    "purge already running",
+                    JsonSerializer.Serialize(new { success = true, started = false, alreadyRunning = true, customRetentionDays }));
+            }
+
+            /* #4825: taken before the purge starts, so every record it writes is stamped at or after this. Naive
+               UTC (Kind Unspecified), the form collection_time is stored in. */
+            startedAtUtc = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified);
+            _purgeTask = RunTrackedAsync(startPurge, stoppingToken);
+        }
+
+        return new CommandOutcome(
+            true,
+            "purge started",
+            JsonSerializer.Serialize(new
+            {
+                success = true,
+                started = true,
+                customRetentionDays,
+                startedAtUtc = startedAtUtc.ToString("o", CultureInfo.InvariantCulture),
+            }));
+    }
+
+    /// <summary>
+    /// The plain-text collection_log run-record for <c>purge_now</c>'s raw-table step (#4825): a header line naming
+    /// the run, then one line per relation with its outcome and note. Status is WARNING when a relation ended
+    /// <c>gate_error</c> or <c>run_failed</c> (the step itself failed), otherwise SUCCESS, because a relation the
+    /// gate holds on purpose (<c>not_covered</c>, <c>hole</c>, <c>epoch_stale</c>, <c>gate_unknown</c>) is the gate
+    /// doing its job, not a failure to warn about. Pure so it is testable without a store.
+    /// </summary>
+    internal static (string Status, string Message) BuildRawPurgeNowRunRecord(
+        string runLabel, IReadOnlyList<RawPurgeNowEntry> entries)
+    {
+        var lines = new List<string>(entries.Count + 1) { $"{runLabel}, raw tables:" };
+        var failed = false;
+        foreach (var entry in entries)
+        {
+            lines.Add($"{entry.Relation}: {entry.Outcome} - {entry.Note}");
+            failed |= entry.Outcome is "gate_error" or "run_failed";
+        }
+
+        return (failed ? "WARNING" : "SUCCESS", string.Join("\n", lines));
+    }
+
+    /// <summary>One relation's line in <c>purge_now</c>'s raw-table report (#4427, #4825).</summary>
+    internal readonly record struct RawPurgeNowEntry(string Relation, string Outcome, string Note);
+
+    /// <summary>
+    /// Wraps a purge delegate (the daily one or a <c>purge_now</c>, #4825) so <see cref="_purgeTask"/> can never
+    /// fault unobserved (nothing awaits it while it runs, so an unhandled fault here would otherwise surface only
+    /// as an UnobservedTaskException at GC time). <see cref="OperationCanceledException"/> is swallowed too — that is the normal shutdown-drain
     /// outcome once <c>stoppingToken</c> is cancelled, not a failure to log as one.
     /// </summary>
     private async Task RunTrackedAsync(Func<CancellationToken, Task> startPurge, CancellationToken stoppingToken)
@@ -9079,7 +9238,7 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "daily retention purge failed");
+            _logger.LogError(ex, "retention purge failed");
         }
     }
 
@@ -9095,10 +9254,15 @@ AND   j.hypertable_name = '{relation}'", connection))
            on CollectorScheduleDefaults; a per-server override can't apply to a shared-table purge.
            Empty overrides (Stage 1 seeds none) resolve to the defaults — identical behavior. */
         var overrides = _scheduleOverrides;
+
+        /* #4823: the daily sweep paces its WAL. Its deletes used to run flat out and put 6.89 GB of WAL into
+           one checkpoint interval, which stalled collection while that checkpoint caught up. This runs off
+           the collection loop (_purgeTask), so a longer, paced purge delays nothing. */
         await DarlingRetention.PurgeAsync(
             postgres, _timescaleAvailable, _logger, stoppingToken,
             name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides),
-            config.PlanContentRetentionDays);
+            config.PlanContentRetentionDays,
+            paceWal: true);
 
         /* AN3: findings retention. Both apps' finding stores declare a cleanup but neither
            app schedules it (Lite's DuckDB archive-reset bounds it incidentally); a 24/7
@@ -9193,17 +9357,39 @@ AND   j.hypertable_name = '{relation}'", connection))
     }
 
     /// <summary>
-    /// The <c>purge_now</c> command handler (the daily retention purge on demand): runs
-    /// <see cref="DarlingRetention.PurgeAsync"/> over the shared store immediately and reports the tables +
-    /// rows purged. Fleet-wide over the SHARED tables (no target server). When
+    /// The <c>purge_now</c> command handler (the daily retention purge on demand): starts
+    /// <see cref="RunPurgeNowBackgroundAsync"/> in the daily purge's own slot (<see cref="TryStartPurgeNow"/>)
+    /// and answers at once, with <c>started</c> or <c>alreadyRunning</c>. Fleet-wide over the SHARED tables (no
+    /// target server). Takes NO collection gate: unlike snapshot_now a purge writes no collector state and races
+    /// no delta baseline, and PurgeAsync is idempotent + failure-isolated per table.
+    /// </summary>
+    private CommandOutcome StartPurgeNow(DarlingConfig config, int? customRetentionDays, CancellationToken stoppingToken)
+    {
+        return TryStartPurgeNow(
+            token => RunPurgeNowBackgroundAsync(_postgres!, _timescaleAvailable, config, customRetentionDays, token),
+            customRetentionDays,
+            stoppingToken);
+    }
+
+    /// <summary>
+    /// The work behind <c>purge_now</c> (#4825), run in the background in <see cref="_purgeTask"/>: the paced
+    /// <see cref="DarlingRetention.PurgeAsync"/> over the shared store, then the #4427 raw-table step. When
     /// <paramref name="customRetentionDays"/> is set it purges every collector to that horizon (a
     /// <c>_ =&gt; customDays</c> resolver — PurgeAsync clamps a sub-1-day horizon at its destructive sink, so a
     /// bad custom-N can never wipe a table); otherwise it uses the SAME fleet resolver the scheduled daily
-    /// purge uses (<see cref="StoreConfigProvider.ResolveFleetRetentionDays"/> over the live overrides). Takes
-    /// NO collection gate: unlike snapshot_now a purge writes no collector state and races no delta baseline,
-    /// and PurgeAsync is idempotent + failure-isolated per table, so it may safely overlap the daily sweep.
+    /// purge uses (<see cref="StoreConfigProvider.ResolveFleetRetentionDays"/> over the live overrides).
+    ///
+    /// <para>The command's reply no longer carries the totals, so they go where the daily purge's already go:
+    /// PurgeAsync's own run-record (labelled as a manual purge, naming a custom horizon), and a second run-record
+    /// written after the raw step with one line per raw relation. Both are also logged at Information. A service
+    /// stop that cuts the run short is logged as one warning naming the run (its label carries a custom horizon)
+    /// and saying that the next daily purge uses the configured horizons.
+    /// <paramref name="writeRawRunRecord"/> is a TEST SEAM (status, duration ms, message, token): null writes it
+    /// to the store with <see cref="DarlingObservability.LogRetentionRunAsync"/>.</para>
     /// </summary>
-    private async Task<CommandOutcome> RunPurgeNowAsync(DarlingConfig config, int? customRetentionDays, CancellationToken cancellationToken)
+    internal async Task RunPurgeNowBackgroundAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, DarlingConfig config, int? customRetentionDays,
+        CancellationToken stoppingToken, Func<string, long, string, CancellationToken, Task>? writeRawRunRecord = null)
     {
         /* Reference read of the live overrides, matching the daily purge caller (never held under a lock —
            the reload swaps the whole list atomically). */
@@ -9211,34 +9397,46 @@ AND   j.hypertable_name = '{relation}'", connection))
         Func<string, int> resolver = customRetentionDays is int days
             ? _ => days
             : name => StoreConfigProvider.ResolveFleetRetentionDays(name, overrides);
+        var runLabel = DarlingRetention.BuildManualPurgeLabel(customRetentionDays);
 
-        var summary = await DarlingRetention.PurgeAsync(
-            _postgres!, _timescaleAvailable, _logger, cancellationToken, resolver,
-            config.PlanContentRetentionDays);
-
-        _logger.LogInformation(
-            "purge_now purged {Tables} table(s), {Rows} row(s)/chunk(s){Custom}",
-            summary.TablesPurged, summary.TotalPurged,
-            customRetentionDays is int cd ? $" (custom retention {cd}d)" : string.Empty);
-
-        /* #4427: the sweep above (DarlingRetention.PurgeAsync) no longer drops the three raw tables on a
-           TimescaleDB store — they left its drop path entirely. purge_now must not go silent about them:
-           run the SAME gated trigger the daily fleet-loop tick uses (TriggerRawPurgeCoreAsync), on a pooled
-           connection, then read back what each relation's pass just decided (or held at). Plain-PostgreSQL
-           mode has no gate and no rollups — the sweep's DELETE fallback already purged raw there, so
-           rawTables is omitted rather than reporting on a trigger that never runs off Timescale.
-
-           The whole raw step is wrapped: if opening rawConnection or the trigger itself throws, the sweep
-           summary above already ran and must not be discarded — the command reports it plus a single
-           gate_error entry rather than failing the whole purge_now over a step that is, from the caller's
-           side, purely additional reporting. A shutdown OperationCanceledException still propagates; that
-           is the service stopping, not a raw-step failure to report around. */
-        List<object>? rawTables = null;
-        if (_timescaleAvailable)
+        try
         {
+            /* #4825: paced, like the daily sweep. This used to run inline on the command loop, unpaced (#4823's
+               note), because a paced purge would have held pause, resume and test_connect for as long as the pacing
+               takes. It runs off the command loop now, in the daily purge's slot, so it can pace its WAL and delay
+               nothing. */
+            var summary = await DarlingRetention.PurgeAsync(
+                postgres, timescaleAvailable, _logger, stoppingToken, resolver,
+                config.PlanContentRetentionDays,
+                paceWal: true,
+                runLabel: runLabel);
+
+            _logger.LogInformation(
+                "{Label} purged {Tables} table(s), {Rows} row(s)/chunk(s)",
+                runLabel, summary.TablesPurged, summary.TotalPurged);
+
+            /* #4427: the sweep above (DarlingRetention.PurgeAsync) no longer drops the three raw tables on a
+               TimescaleDB store — they left its drop path entirely. purge_now must not go silent about them:
+               run the SAME gated trigger the daily fleet-loop tick uses (TriggerRawPurgeCoreAsync), on a pooled
+               connection, then read back what each relation's pass just decided (or held at). Plain-PostgreSQL
+               mode has no gate and no rollups — the sweep's DELETE fallback already purged raw there, so no raw
+               record is written rather than reporting on a trigger that never runs off Timescale.
+
+               The whole raw step is wrapped: if opening rawConnection or the trigger itself throws, the sweep
+               record above already ran and must not be discarded — the raw record carries a single gate_error line
+               rather than the whole purge failing over a step that is, from the caller's side, purely additional
+               reporting. A shutdown OperationCanceledException still propagates; that is the service stopping, not
+               a raw-step failure to report around. */
+            if (!timescaleAvailable)
+            {
+                return;
+            }
+
+            var rawTimer = Stopwatch.StartNew();
+            List<RawPurgeNowEntry> rawTables;
             try
             {
-                await using var rawConnection = await _postgres!.OpenConnectionAsync(cancellationToken);
+                await using var rawConnection = await postgres.OpenConnectionAsync(stoppingToken);
 
                 /* #4427 H1: read the clock BEFORE the trigger runs, on the SAME connection the trigger and the
                    report both use. RecordRawLastPurgeOutcomeAsync never throws (TimescaleSupport, logs at
@@ -9250,11 +9448,11 @@ AND   j.hypertable_name = '{relation}'", connection))
                 DateTime passStartUtc;
                 await using (var nowCommand = new NpgsqlCommand("SELECT now()", rawConnection) { CommandTimeout = 30 })
                 {
-                    passStartUtc = (DateTime)(await nowCommand.ExecuteScalarAsync(cancellationToken))!;
+                    passStartUtc = (DateTime)(await nowCommand.ExecuteScalarAsync(stoppingToken))!;
                 }
 
-                await TriggerRawPurgeCoreAsync(rawConnection, _logger, cancellationToken);
-                rawTables = await BuildRawTablePurgeNowReportAsync(rawConnection, customRetentionDays, passStartUtc, _logger, cancellationToken);
+                await TriggerRawPurgeCoreAsync(rawConnection, _logger, stoppingToken);
+                rawTables = await BuildRawTablePurgeNowReportAsync(rawConnection, customRetentionDays, passStartUtc, _logger, stoppingToken);
             }
             catch (OperationCanceledException)
             {
@@ -9262,25 +9460,38 @@ AND   j.hypertable_name = '{relation}'", connection))
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "purge_now's raw-table reporting step failed; the sweep above still ran and is reported");
-                rawTables = new List<object>
+                _logger.LogWarning(ex, "purge_now's raw-table reporting step failed; the sweep above still ran and is recorded");
+                rawTables = new List<RawPurgeNowEntry>
                 {
-                    new { relation = "(all three raw tables)", outcome = "gate_error", note = $"Could not report on the gated raw purge this pass: {ex.Message}" },
+                    new("(all three raw tables)", "gate_error", $"Could not report on the gated raw purge this pass: {ex.Message}"),
                 };
             }
-        }
 
-        var json = JsonSerializer.Serialize(new
+            foreach (var entry in rawTables)
+            {
+                _logger.LogInformation(
+                    "{Label} raw table {Relation}: {Outcome} - {Note}",
+                    runLabel, entry.Relation, entry.Outcome, entry.Note);
+            }
+
+            var (rawStatus, rawMessage) = BuildRawPurgeNowRunRecord(runLabel, rawTables);
+            var writeRecord = writeRawRunRecord
+                ?? ((status, durationMs, message, token) =>
+                    DarlingObservability.LogRetentionRunAsync(postgres, status, 0, durationMs, message, _logger, token));
+            await writeRecord(rawStatus, rawTimer.ElapsedMilliseconds, rawMessage, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            success = true,
-            tablesPurged = summary.TablesPurged,
-            rowsPurged = summary.TotalPurged,
-            rowsDeleted = summary.RowsDeleted,
-            chunksDropped = summary.ChunksDropped,
-            customRetentionDays,
-            rawTables,
-        });
-        return new CommandOutcome(true, "purge complete", json);
+            /* The service is stopping. RunTrackedAsync swallows this as the normal shutdown drain, and the command
+               row already said "purge started", so without this line a purge cut short would leave no trace. It may
+               have written its totals record already (a stop during the raw step), or neither record. The next daily
+               purge uses the configured horizons, not this run's custom one, and purges whatever this one left. */
+            _logger.LogWarning(
+                "{Label} was cut short because the service is stopping; its run record may be missing or incomplete. "
+                + "The next daily purge uses the configured retention horizons",
+                runLabel);
+            throw;
+        }
     }
 
     /// <summary>
@@ -9292,7 +9503,9 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// <c>run_failed</c> — with a plain-language note. A record that was never written or could not be read
     /// reports as <c>gate_unknown</c>: the trigger just ran on this same connection, so either state means the
     /// gate's own answer for this relation cannot be confirmed, the same fail-closed reading
-    /// <see cref="TriggerRawPurgeCoreAsync"/> gives an unresolvable successor.
+    /// <see cref="TriggerRawPurgeCoreAsync"/> gives an unresolvable successor. #4825: the entries are typed
+    /// (<see cref="RawPurgeNowEntry"/>) because they now feed the run-record
+    /// (<see cref="BuildRawPurgeNowRunRecord"/>) rather than a JSON reply.
     ///
     /// <para><b>#4427 H1:</b> <paramref name="passStartUtc"/> is a timestamp read on <paramref name="connection"/>
     /// BEFORE the trigger ran this pass. <c>RecordRawLastPurgeOutcomeAsync</c> never throws — a failed write is
@@ -9308,13 +9521,13 @@ AND   j.hypertable_name = '{relation}'", connection))
     /// means the same thing for the opposite reason — the gated horizon still applies, so a longer custom
     /// value is not honored either.</para>
     /// </summary>
-    internal static async Task<List<object>> BuildRawTablePurgeNowReportAsync(
+    internal static async Task<List<RawPurgeNowEntry>> BuildRawTablePurgeNowReportAsync(
         NpgsqlConnection connection, int? customRetentionDays, DateTime passStartUtc, ILogger? logger, CancellationToken cancellationToken)
     {
         var gatedHorizonDays = (int)TimescaleSupport.RawRetentionSpan.TotalDays;
         var customDiffersFromGatedHorizon = customRetentionDays is int days && days != gatedHorizonDays;
         var customBelowGatedHorizon = customRetentionDays is int belowDays && TimeSpan.FromDays(belowDays) < TimescaleSupport.RawRetentionSpan;
-        var reports = new List<object>(TimescaleSupport.RawRelations.Count);
+        var reports = new List<RawPurgeNowEntry>(TimescaleSupport.RawRelations.Count);
 
         foreach (var relation in TimescaleSupport.RawRelations)
         {
@@ -9342,7 +9555,7 @@ AND   j.hypertable_name = '{relation}'", connection))
                     : $" Raw tables are purged only at the gated horizon ({gatedHorizonDays} days) and only when the gate passes; the longer custom retention does not apply to them.";
             }
 
-            reports.Add(new { relation, outcome, note });
+            reports.Add(new RawPurgeNowEntry(relation, outcome, note));
         }
 
         return reports;
@@ -9383,10 +9596,12 @@ AND   j.hypertable_name = '{relation}'", connection))
         private readonly PgPlanFetcher _planFetcher;
         private readonly AnalysisNotificationService _notificationService;
         private readonly DarlingConfig _config;
+        private readonly CancellationToken _stoppingToken;
 
         public WorkerCommandHost(
             DarlingWorker worker, List<ServerLoopState> servers, DarlingCollectorRunner runner,
-            PgPlanFetcher planFetcher, AnalysisNotificationService notificationService, DarlingConfig config)
+            PgPlanFetcher planFetcher, AnalysisNotificationService notificationService, DarlingConfig config,
+            CancellationToken stoppingToken)
         {
             _worker = worker;
             _servers = servers;
@@ -9394,6 +9609,7 @@ AND   j.hypertable_name = '{relation}'", connection))
             _planFetcher = planFetcher;
             _notificationService = notificationService;
             _config = config;
+            _stoppingToken = stoppingToken;
         }
 
         public Task<CommandOutcome> SnapshotNowAsync(int serverId, CancellationToken cancellationToken)
@@ -9403,7 +9619,11 @@ AND   j.hypertable_name = '{relation}'", connection))
             => _worker.RunAnalyzeNowAsync(_servers, _planFetcher, _notificationService, _config, serverId, cancellationToken);
 
         public Task<CommandOutcome> PurgeNowAsync(int? customRetentionDays, CancellationToken cancellationToken)
-            => _worker.RunPurgeNowAsync(_config, customRetentionDays, cancellationToken);
+        {
+            /* #4825: starts the purge in the background and answers at once. The purge outlives this command,
+               so it gets the service's own stopping token — the command's token ends with the command. */
+            return Task.FromResult(_worker.StartPurgeNow(_config, customRetentionDays, _stoppingToken));
+        }
 
         public Task<CommandOutcome> FetchPlanAsync(int serverId, PlanFetchRequest request, CancellationToken cancellationToken)
             => _worker.RunFetchPlanAsync(_servers, _planFetcher, serverId, request, cancellationToken);

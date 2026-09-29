@@ -1582,6 +1582,9 @@ LIMIT $1";
     /// <c>postmaster_start_time</c> (V139, #3955) rides along so <see cref="CheckpointerReading.From"/> can tell an
     /// interval that spans a restart; it is NULL on a row written before the rung, which the rule reads as no
     /// evidence on the newer row and as "compare its time" on the older one.
+    /// <c>checkpoint_longest_sync_ms</c> and <c>checkpoint_longest_sync_at</c> (V156, #4834) are the hour's longest
+    /// single sync; <see cref="CheckpointerReading.From"/> reads them off the NEWER row only, and a NULL pair (a row
+    /// from before the rung, or an hour the sampler took no difference in) is no evidence.
     /// </summary>
     public const string CheckpointerPairSql = $@"
 SELECT
@@ -1590,7 +1593,9 @@ SELECT
     checkpoint_sync_ms,
     checkpoints_requested,
     postmaster_start_time,
-    checkpoints_timed
+    checkpoints_timed,
+    checkpoint_longest_sync_ms,
+    checkpoint_longest_sync_at
 FROM collect.store_metrics
 WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}'
 AND   checkpoint_write_ms IS NOT NULL
@@ -1607,7 +1612,11 @@ LIMIT $1";
     /// <param name="Timed">(V140, #4037) The cumulative COUNT of TIMED checkpoints as the server reported it,
     /// null on a row written before the rung. <see cref="CheckpointerReading.From"/> reads a null on either
     /// sample as no evidence for the average-per-checkpoint arm, never as zero.</param>
-    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null);
+    /// <param name="LongestSyncMs">(V156, #4834) The hour's longest single checkpoint sync in milliseconds, as the sweep
+    /// stored it with this row; null on a row written before the rung or in an hour the sampler took no difference in.</param>
+    /// <param name="LongestSyncAt">(V156, #4834) The naive-UTC time of the minute sample that saw it; null with
+    /// <paramref name="LongestSyncMs"/>.</param>
+    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null, long? LongestSyncMs = null, DateTime? LongestSyncAt = null);
 
     /// <summary>
     /// Whether the pair yielded an interval (#3783). Five states rather than a nullable delta, for the reason
@@ -1676,6 +1685,13 @@ LIMIT $1";
     /// the rung — <see cref="IsPressure"/> then has no denominator for the average arm and states no pressure
     /// from sync alone, never falling back to the old summed-sync rule.</param>
     /// <param name="CumulativeTimed">The newest row's raw timed-checkpoint counter. Null when Absent or the row predates V140.</param>
+    /// <param name="LongestSyncMs">(V156, #4834) The longest single checkpoint sync inside the interval, in milliseconds,
+    /// as the worker's once-a-minute sample found it and the sweep stored it on the NEWER row. Null unless
+    /// <see cref="CheckpointerDeltaStatus.Observed"/> (a restart-spanning interval's sync includes the shutdown
+    /// checkpoint), and null on a row from before the rung or in an hour the sampler took no difference in - no
+    /// evidence, never zero. <see cref="IsPressure"/> judges it against the same per-checkpoint bar.</param>
+    /// <param name="LongestSyncAtUtc">(V156, #4834) The time of the minute sample that saw it, UTC; null with
+    /// <paramref name="LongestSyncMs"/>.</param>
     public sealed record CheckpointerReading(
         CheckpointerDeltaStatus Status,
         DateTime? ObservedAt,
@@ -1690,7 +1706,9 @@ LIMIT $1";
         bool PostmasterRestarted = false,
         DateTime? PostmasterStartTime = null,
         long? Timed = null,
-        long? CumulativeTimed = null)
+        long? CumulativeTimed = null,
+        long? LongestSyncMs = null,
+        DateTime? LongestSyncAtUtc = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =
@@ -1763,6 +1781,16 @@ LIMIT $1";
                 ? newestTimed - previousTimed
                 : null;
 
+            /* (V156, #4834) The hour's longest single sync rides on the NEWER row, and counts only as the pair it is
+               stored as; the older row's pair described the hour before this interval. */
+            long? longestMs = null;
+            DateTime? longestAt = null;
+            if (newest.LongestSyncMs is long storedMs && newest.LongestSyncAt is DateTime storedAt)
+            {
+                longestMs = storedMs;
+                longestAt = DateTime.SpecifyKind(storedAt, DateTimeKind.Utc);
+            }
+
             return new CheckpointerReading(
                 CheckpointerDeltaStatus.Observed, observedAt, previousAt, Math.Round(span, 1),
                 newest.WriteMs - previous.WriteMs,
@@ -1770,7 +1798,8 @@ LIMIT $1";
                 newest.Requested - previous.Requested,
                 newest.WriteMs, newest.SyncMs, newest.Requested,
                 PostmasterRestarted: false, PostmasterStartTime: startedAt,
-                Timed: timedDelta, CumulativeTimed: newest.Timed);
+                Timed: timedDelta, CumulativeTimed: newest.Timed,
+                LongestSyncMs: longestMs, LongestSyncAtUtc: longestAt);
         }
 
         /// <summary>(V140, #4037) Checkpoints inside the interval, timed plus requested — the average arm's
@@ -1796,12 +1825,18 @@ LIMIT $1";
         /// <see cref="Timed"/> null; the average arm then states no pressure from sync alone rather than falling
         /// back to the old sum, and the requested arm still fires on any requested checkpoint. Zero checkpoints
         /// in the interval judges neither arm. False on every other status — an unmeasured interval is not a
-        /// finding, and that includes one that spans a postmaster restart (#3955).
+        /// finding, and that includes one that spans a postmaster restart (#3955). Since V156 (#4834) a third arm:
+        /// the interval's LONGEST single sync, stored on the newer row, held more than the same bar - an average
+        /// spreads one long sync over the interval's short ones, so a store whose one 23.5 s sync averaged 5.9 s
+        /// read as clean while the alert fired on it. A NULL longest sync (a row from before the rung, or an hour
+        /// the sampler took no difference in) is no evidence and leaves the other two arms to decide exactly as
+        /// they did.
         /// </summary>
         public bool IsPressure =>
             Status == CheckpointerDeltaStatus.Observed
             && ((Requested is long requested && requested > 0)
-                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
+                || (AverageSyncMsPerCheckpoint is double average && average > DarlingSelfAlertEvaluator.CheckpointSyncBarMs)
+                || (LongestSyncMs is long longest && longest > DarlingSelfAlertEvaluator.CheckpointSyncBarMs));
     }
 
     /// <summary>
@@ -1825,7 +1860,9 @@ LIMIT $1";
             var sample = new CheckpointerSample(
                 reader.GetDateTime(0), reader.GetInt64(1), reader.GetInt64(2), reader.GetInt64(3),
                 reader.IsDBNull(4) ? null : reader.GetDateTime(4),
-                reader.IsDBNull(5) ? null : reader.GetInt64(5));
+                reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                reader.IsDBNull(7) ? null : reader.GetDateTime(7));
             if (newest is null)
             {
                 newest = sample;

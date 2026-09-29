@@ -94,8 +94,10 @@ namespace PerformanceMonitor.Darling.Storage;
 /// <c>checkpoint_sync_ms</c>, <c>checkpoints_requested</c> — hold the server's CUMULATIVE counters as the
 /// sweep read them, NOT the interval's delta, and since V139 (#3955) <c>postmaster_start_time</c> holds the
 /// <c>pg_postmaster_start_time()</c> of the postmaster that produced them, as naive UTC, so a reader can tell an
-/// interval that spans a restart; every other kind leaves all four NULL, and the two TOAST columns
-/// are filled on <c>dimension</c> rows only. That is the same convention every <c>pg_stat_*</c>-sourced
+/// interval that spans a restart, and since V156 (#4834) <c>checkpoint_longest_sync_ms</c> and
+/// <c>checkpoint_longest_sync_at</c> hold the hour's LONGEST single sync and the naive-UTC time of the minute sample
+/// that saw it (both NULL when the sampler took no difference in the hour); every other kind leaves all of
+/// them NULL, and the two TOAST columns are filled on <c>dimension</c> rows only. That is the same convention every <c>pg_stat_*</c>-sourced
 /// collector table in this store follows (the columns are raw counters; the read differences them), and
 /// <see cref="CheckpointerInsertSql"/> says why it was chosen over an in-process baseline here.</para>
 ///
@@ -528,11 +530,18 @@ AND   m.toast_bytes IS NOT NULL";
     /// every interval even though no single checkpoint came near it. A row from before this rung carries a
     /// NULL timed count, which the average arm reads as unmeasured, never as zero.</para>
     ///
-    /// <para>Single-row view, so no join and no filter. $1 metric_time.</para>
+    /// <para><b>And the hour's longest single sync (V156, #4834).</b> The worker's once-a-minute sample finds the
+    /// longest single checkpoint sync inside the hour and the sweep stores it on this row, as milliseconds
+    /// ($2) and the naive-UTC time of the sample that saw it ($3), so the tool and the self-alert read one value
+    /// from the stored row. Both are NULL when the sampler took no difference in the hour, which a reader takes as
+    /// no evidence. The types are cast because a parameter in a SELECT list is otherwise inferred as text.</para>
+    ///
+    /// <para>Single-row view, so no join and no filter. $1 metric_time, $2 the longest sync in milliseconds (or
+    /// NULL), $3 the sample's time, naive UTC (or NULL).</para>
     /// </summary>
     public const string CheckpointerInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)
 SELECT
     $1,
     '{CheckpointerObjectName}',
@@ -541,7 +550,9 @@ SELECT
     round(c.sync_time)::bigint,
     c.num_requested,
     pg_postmaster_start_time() AT TIME ZONE 'UTC',
-    c.num_timed
+    c.num_timed,
+    $2::bigint,
+    $3::timestamp
 FROM pg_stat_checkpointer AS c";
 
     /// <summary>
@@ -550,11 +561,12 @@ FROM pg_stat_checkpointer AS c";
     /// through 16 — <c>checkpoint_write_time</c>, <c>checkpoint_sync_time</c>, <c>checkpoints_req</c> — written
     /// under the SAME object name and kind so the series is one series. The bundled store is 18 and never
     /// runs this arm; a bring-your-own store on 14–16 does. Same row shape, same reader, the same postmaster
-    /// start time beside the counters (<c>checkpoints_req</c> counts the shutdown checkpoint too). $1 metric_time.
+    /// start time beside the counters (<c>checkpoints_req</c> counts the shutdown checkpoint too), and the same two
+    /// longest-sync parameters. $1 metric_time, $2 the longest sync in milliseconds, $3 its sample's time.
     /// </summary>
     public const string CheckpointerBgwriterInsertSql = $@"
 INSERT INTO collect.store_metrics
-    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed)
+    (metric_time, object_name, object_kind, checkpoint_write_ms, checkpoint_sync_ms, checkpoints_requested, postmaster_start_time, checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)
 SELECT
     $1,
     '{CheckpointerObjectName}',
@@ -563,8 +575,51 @@ SELECT
     round(b.checkpoint_sync_time)::bigint,
     b.checkpoints_req,
     pg_postmaster_start_time() AT TIME ZONE 'UTC',
-    b.checkpoints_timed
+    b.checkpoints_timed,
+    $2::bigint,
+    $3::timestamp
 FROM pg_stat_bgwriter AS b";
+
+    /// <summary>
+    /// The checkpointer's CUMULATIVE sync time alone, in milliseconds, PostgreSQL 17+ (#4823): the one-column read
+    /// the worker takes once a minute so the longest SINGLE checkpoint sync inside an hour can be found. The hourly
+    /// checkpointer row (<see cref="CheckpointerInsertSql"/>) cannot show it: two cumulative counters an hour apart
+    /// difference to the hour's TOTAL sync time, and the Store Checkpointer Pressure alert divides that by the
+    /// hour's checkpoint count, so one 23.5 s sync among four checkpoints averaged 5.9 s and read as clean. Rounded
+    /// the way the hourly row rounds it (<c>sync_time</c> is <c>double precision</c> milliseconds), so a minute's
+    /// difference and the hour's compare. Nothing is written: <c>CheckpointSyncSampler</c> keeps the previous value
+    /// in memory.
+    /// </summary>
+    public const string CheckpointerSyncTimeSql = "SELECT round(sync_time)::bigint FROM pg_stat_checkpointer";
+
+    /// <summary>
+    /// <see cref="CheckpointerSyncTimeSql"/> for PostgreSQL below <see cref="CheckpointerViewMajorVersion"/> (#4823):
+    /// the same counter under the name <c>pg_stat_bgwriter</c> carried it by through 16, <c>checkpoint_sync_time</c>.
+    /// </summary>
+    public const string CheckpointerBgwriterSyncTimeSql = "SELECT round(checkpoint_sync_time)::bigint FROM pg_stat_bgwriter";
+
+    /// <summary>
+    /// The statement for a server of major version <paramref name="postgreSqlMajor"/> (#4823): the rule
+    /// <see cref="SweepAsync"/> applies to the hourly checkpointer row, the view's own statement from
+    /// <see cref="CheckpointerViewMajorVersion"/> on and the <c>pg_stat_bgwriter</c> one below it, because a
+    /// statement naming a view the catalog lacks fails at analysis.
+    /// </summary>
+    public static string CheckpointerSyncTimeSqlFor(int postgreSqlMajor) =>
+        postgreSqlMajor >= CheckpointerViewMajorVersion ? CheckpointerSyncTimeSql : CheckpointerBgwriterSyncTimeSql;
+
+    /// <summary>
+    /// Reads the checkpointer's cumulative sync time in milliseconds (#4823), by the connection's reported major
+    /// version (Npgsql takes it from the startup parameters, no round trip). Null when the view returns no row.
+    /// The per-statement <see cref="SweepTimeoutSeconds"/> is the belt for a caller that passes no token; the
+    /// once-a-minute caller passes a token that cancels after a few seconds, which is the bound that matters on
+    /// its loop. NOT failure-isolated: the caller decides what a failed read costs.
+    /// </summary>
+    public static async Task<long?> ReadCheckpointerSyncTimeMsAsync(
+        NpgsqlConnection connection, CancellationToken cancellationToken = default)
+    {
+        using var command = new NpgsqlCommand(CheckpointerSyncTimeSqlFor(connection.PostgreSqlVersion.Major), connection) { CommandTimeout = SweepTimeoutSeconds };
+        return await command.ExecuteScalarAsync(cancellationToken) is long syncMs ? syncMs : null;
+    }
 
     /// <summary>The <c>object_kind</c> of the named plain-table rows (#3582). See
     /// <see cref="HypertableObjectKind"/> for why it is a const.</summary>
@@ -1117,7 +1172,10 @@ WHERE metric_time < $1";
     /// catch-all rows (the TimescaleDB or plain variant, by the same flag), the store summary row, then the
     /// retention DELETE, all stamped with one <paramref name="utcNow"/>. Returns the number of metric rows
     /// written (the caller logs it at Debug); the live-bytes UPDATE rewrites rows already counted and adds
-    /// nothing to it.
+    /// nothing to it. <paramref name="checkpointLongestSyncMs"/> and <paramref name="checkpointLongestSyncAt"/>
+    /// (#4834) are the hour's longest single checkpoint sync and the time of the sample that saw it, as the worker's
+    /// minute sampler found them (the sampler is the Service's, so the sweep takes primitives); they are written to
+    /// the checkpointer row only, and both are null when the sampler took no difference in the hour.
     ///
     /// <para><b>Order matters for the reconciliation, and it is stated rather than relied on.</b> Every
     /// sizing statement runs before <see cref="StoreInsertSql"/>'s <c>pg_database_size</c>, so the
@@ -1132,6 +1190,8 @@ WHERE metric_time < $1";
         bool timescaleAvailable,
         DateTime utcNow,
         ILogger? logger,
+        long? checkpointLongestSyncMs,
+        DateTime? checkpointLongestSyncAt,
         CancellationToken cancellationToken = default)
     {
         if (connection is null)
@@ -1207,6 +1267,18 @@ WHERE metric_time < $1";
         using (var checkpointer = new NpgsqlCommand(checkpointerSql, connection) { CommandTimeout = SweepTimeoutSeconds })
         {
             checkpointer.Parameters.AddWithValue(metricTime);
+            /* #4834: the hour's longest single sync, typed explicitly because a NULL carries no type of its own. The
+               instant is naive UTC like every stamp in this table. */
+            checkpointer.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bigint,
+                Value = checkpointLongestSyncMs is long longestMs ? longestMs : DBNull.Value,
+            });
+            checkpointer.Parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
+                Value = checkpointLongestSyncAt is DateTime longestAt ? DateTime.SpecifyKind(longestAt, DateTimeKind.Unspecified) : DBNull.Value,
+            });
             written += await checkpointer.ExecuteNonQueryAsync(cancellationToken);
         }
 

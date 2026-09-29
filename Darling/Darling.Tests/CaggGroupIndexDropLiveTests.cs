@@ -342,6 +342,15 @@ public sealed class CaggGroupIndexDropLiveTests
                 "ALTER TABLE collect.query_store_interval_wide DROP COLUMN IF EXISTS interval_end_time_utc", connection);
             await dropEnd.ExecuteNonQueryAsync(ct);
         }
+
+        if (simulatedVersion < CheckpointLongestSyncRungTests.RungVersion)
+        {
+            /* V156 (#4834) - the hour's longest checkpoint sync. Both columns arrive in the one statement; the
+               milliseconds column is the probe's sentinel. */
+            await using var dropLongest = new NpgsqlCommand(
+                "ALTER TABLE collect.store_metrics DROP COLUMN IF EXISTS checkpoint_longest_sync_ms, DROP COLUMN IF EXISTS checkpoint_longest_sync_at", connection);
+            await dropLongest.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static async Task<int> ProbedVersionAsync(NpgsqlConnection connection, CancellationToken ct)
