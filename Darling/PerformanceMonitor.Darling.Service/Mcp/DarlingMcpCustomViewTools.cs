@@ -261,7 +261,8 @@ public sealed class DarlingMcpCustomViewTools
         "read back a SAVED view, call get_custom_view and run each of its composed panels here.")]
     public static async Task<string> RunCustomViewPanel(
         NpgsqlDataSource postgres,
-        [Description("The composed-panel run spec as JSON (see the tool description for the shape). Only 'panel' is required.")] string spec)
+        [Description("The composed-panel run spec as JSON (see the tool description for the shape). Only 'panel' is required.")] string spec,
+        ReadLatencyRecorder? readLatency = null)
     {
         try
         {
@@ -280,7 +281,10 @@ public sealed class DarlingMcpCustomViewTools
                 return Outcome("invalid", "spec must be a JSON object with a 'panel'.");
             }
 
-            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None);
+            /* #4782: readLatency is a DI service (never in the advertised schema), the MCP host's read-latency
+               seat; the shared runner records this run into it as one Compose sample. Optional, so a direct
+               caller (a test) records nothing. */
+            var outcome = await DarlingWebEndpoints.RunComposedPanelAsync(postgres, body, CancellationToken.None, readLatency);
             return outcome.Payload is not null
                 ? outcome.Payload.ToJsonString(McpHelpers.JsonOptions)
                 : Outcome(outcome.IsServerError ? "error" : "invalid", outcome.Error!);
