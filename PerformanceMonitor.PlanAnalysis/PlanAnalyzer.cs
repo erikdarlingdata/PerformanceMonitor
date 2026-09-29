@@ -1221,17 +1221,20 @@ public static partial class PlanAnalyzer
         }
 
         // Rule 33: Estimated plan CE guess detection — scans with telltale default selectivity
-        // When the optimizer uses a local variable or can't sniff, it falls back to density-based
-        // guesses: 30% (equality), 10% (inequality), 9% (LIKE/between), ~16.43% (sqrt(30%)),
-        // 1% (multi-inequality). On large tables, these guesses can hide the need for an index.
+        // When the optimizer has no statistics to use (a local variable it can't sniff, a column with
+        // no statistics, an expression), it falls back on fixed guesses: 30% for an inequality, 9%
+        // for BETWEEN or LIKE, ~16.4% for two inequalities, 10% for comparing two columns, and an
+        // equality guess that grows with the table. DetectCeGuess has the measured details and
+        // which estimator (CE 70 or 120+) each one belongs to. On large tables, these guesses can
+        // hide the need for an index (#4687).
         if (!cfg.IsRuleDisabled(33) && !node.HasActualStats && IsRowstoreScan(node)
-            && node.TableCardinality >= 100_000 && node.EstimateRows > 0
+            && node.TableCardinality >= CeGuessMinTableRows && node.EstimateRows > 0
             && !string.IsNullOrEmpty(node.Predicate))
         {
             var impact = BuildScanImpactDetails(node, stmt);
             if (impact.CostPct >= 50)
             {
-                var guessDesc = DetectCeGuess(node.EstimateRows, node.TableCardinality);
+                var guessDesc = DetectCeGuess(node.EstimateRows, node.TableCardinality, stmt.CardinalityEstimationModelVersion);
                 if (guessDesc != null)
                 {
                     node.Warnings.Add(new PlanWarning
@@ -3009,23 +3012,72 @@ public static partial class PlanAnalyzer
         return null;
     }
 
+    // Rule 33 only looks at tables with at least this many rows, and DetectCeGuess relies on that:
+    // the equality guess is a power of the row count, so on a small table it lands on the fixed
+    // guesses below, and from this size up it stays clear of them (0.3% and 5.6% at this size,
+    // falling as the table grows).
+    private const double CeGuessMinTableRows = 100_000;
+
     /// <summary>
     /// Detects well-known CE default selectivity guesses by comparing EstimateRows to TableCardinality.
     /// Returns a description of the guess pattern, or null if no known pattern matches.
+    ///
+    /// Where each guess comes from was measured on SQL Server 2025: a 100,000-row heap with no
+    /// statistics, estimated plans through SET SHOWPLAN_XML, CE 70 through
+    /// FORCE_LEGACY_CARDINALITY_ESTIMATION and CE 120 to 170 through the compatibility level. The
+    /// versions from 120 to 170 agree except where a row says otherwise.
+    ///   equality, a = 5 or a IS NULL       CE 120+: rows^0.5        CE 70: rows^0.75
+    ///   inequality, a &gt; 5                 30%, every CE
+    ///   BETWEEN or a two-sided range       CE 70: 9%               CE 120+: 9% on a column with known values
+    ///   LIKE                               CE 120+: 9%              CE 70: not a fixed guess
+    ///   two inequalities, two columns      CE 120+: 16.43%          CE 70: 9%
+    ///   range on variables, or on an expression, ABS(a) BETWEEN 5 AND 10   CE 120+: 16.43%   CE 70: 9%
+    ///   one column compared with another   10%, every CE
+    ///   equality on an expression, ABS(a) = 5   CE 130+: 10%        CE 120: rows^0.5    CE 70: rows^0.75
+    ///   two 10% guesses, a = b AND c = d   CE 120+: 3.16%           CE 70: 1%
+    /// The 16.43% is 30% times the square root of 30%, how CE 120+ combines two 30% guesses.
     /// </summary>
-    private static string? DetectCeGuess(double estimateRows, double tableCardinality)
+    /// <param name="estimateRows">The scan's estimated row count.</param>
+    /// <param name="tableCardinality">The table's row count.</param>
+    /// <param name="ceModelVersion">
+    /// The statement's CardinalityEstimationModelVersion: 70 is the legacy estimator, 120 and later
+    /// the current one, and 0 means the plan did not say, so both stay possible.
+    /// </param>
+    private static string? DetectCeGuess(double estimateRows, double tableCardinality, int ceModelVersion = 0)
     {
         if (tableCardinality <= 0) return null;
         var selectivity = estimateRows / tableCardinality;
+        var pct = $"{selectivity * 100:N1}%";
+        var legacy = ceModelVersion == 70;
+        var current = ceModelVersion >= 120;
 
-        // Known CE guess selectivities with a 2% tolerance band
+        // Equality is not a fixed share of the table, so it is checked on its own, to 1%. The two
+        // estimators use different powers of the row count, so a plan that names its estimator only
+        // gets the one that estimator uses.
+        static bool Near(double rows, double guess) => Math.Abs(rows - guess) <= guess * 0.01;
+
+        if (!legacy && Near(estimateRows, Math.Sqrt(tableCardinality)))
+            return $"matches the equality guess (an equality or IS NULL with no statistics to use), the square root of the row count ({pct})";
+        if (!current && Near(estimateRows, Math.Pow(tableCardinality, 0.75)))
+            return $"matches the equality guess (an equality or IS NULL with no statistics to use), the row count to the power 0.75 ({pct})";
+
+        // The fixed guesses, with a 2% tolerance band
         return selectivity switch
         {
-            >= 0.29 and <= 0.31 => $"matches the 30% equality guess ({selectivity * 100:N1}%)",
-            >= 0.098 and <= 0.102 => $"matches the 10% inequality guess ({selectivity * 100:N1}%)",
-            >= 0.088 and <= 0.092 => $"matches the 9% LIKE/BETWEEN guess ({selectivity * 100:N1}%)",
-            >= 0.155 and <= 0.175 => $"matches the ~16.4% compound predicate guess ({selectivity * 100:N1}%)",
-            >= 0.009 and <= 0.011 => $"matches the 1% multi-inequality guess ({selectivity * 100:N1}%)",
+            >= 0.29 and <= 0.31 =>
+                $"matches the 30% guess for an inequality such as > or < ({pct})",
+            >= 0.088 and <= 0.092 =>
+                current ? $"matches the 9% guess for BETWEEN or a two-sided range on a column with known values, or for LIKE ({pct})"
+                : legacy ? $"matches the 9% guess for BETWEEN, a two-sided range, or two inequalities on different columns ({pct})"
+                : $"matches the 9% guess for BETWEEN or a two-sided range ({pct})",
+            >= 0.098 and <= 0.102 =>
+                ceModelVersion is 0 or >= 130
+                    ? $"matches the 10% guess for comparing one column with another, or for an equality on an expression such as a function of a column ({pct})"
+                    : $"matches the 10% guess for comparing one column with another ({pct})",
+            >= 0.155 and <= 0.175 when !legacy =>
+                $"matches the 16.4% guess for two inequalities on different columns, or for a BETWEEN or range on variables or on an expression ({pct})",
+            >= 0.009 and <= 0.011 when !current =>
+                $"matches the 1% guess that CE 70 gets from multiplying two 10% guesses, as when two predicates each compare one column with another ({pct})",
             _ => null
         };
     }
