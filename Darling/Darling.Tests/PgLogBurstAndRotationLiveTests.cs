@@ -51,6 +51,28 @@ public sealed class PgLogBurstAndRotationLiveTests
         return (rows, context);
     }
 
+    /// <summary>
+    /// #4704: the logging collector writes from a pipe asynchronously, so right after a large burst the tail can
+    /// still be unwritten when the read runs. Repeats ONE logical read (the same carried state every attempt) until
+    /// <paramref name="ready"/> holds or 30 s pass, then returns the last read; the caller's assertions stay exact.
+    /// </summary>
+    private static async Task<(List<T> Rows, CollectorContext Context)> CycleUntilAsync<T>(
+        CollectorDefinitionBase<T> definition, NpgsqlConnection connection, IReadOnlyDictionary<string, string>? state, bool csv,
+        Func<List<T>, bool> ready, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            var cycle = await CycleAsync(definition, connection, state, csv, ct);
+            if (ready(cycle.Rows) || DateTime.UtcNow >= deadline)
+            {
+                return cycle;
+            }
+
+            await Task.Delay(500, ct);
+        }
+    }
+
     private static Task<(List<PgDeadlocksCollector.Row> Rows, CollectorContext Context)> DeadlockCycleAsync(
         NpgsqlConnection c, IReadOnlyDictionary<string, string>? state, bool csv, CancellationToken ct) =>
         CycleAsync(PgDeadlocksCollector.Instance, c, state, csv, ct);
@@ -174,7 +196,7 @@ public sealed class PgLogBurstAndRotationLiveTests
         await DeadlocksAsync(false, burst, 540, 16, ct);
         await DeadlocksAsync(false, newest, 1, 1, ct);
 
-        var cycle = await DeadlockCycleAsync(connection, Carry(baseline.Context), false, ct);
+        var cycle = await CycleUntilAsync(PgDeadlocksCollector.Instance, connection, Carry(baseline.Context), false, rows => rows.Any(r => Names(r, newest)), ct);
 
         Assert.True(cycle.Context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey), "the marker advances on a capped read");
         Assert.True(Limited(cycle.Context));
@@ -334,7 +356,7 @@ public sealed class PgLogBurstAndRotationLiveTests
             "DO $$ BEGIN RAISE EXCEPTION '%', '" + tag + "' || chr(10) || (SELECT string_agg(repeat('m', 98), chr(10)) FROM generate_series(1, 20000)); END $$;", ct);
         await ExecAsync(connection, "SELECT pg_sleep(0.3)", ct);
 
-        var cycle1 = await EventCycleAsync(connection, Carry(baseline.Context), true, ct);
+        var cycle1 = await CycleUntilAsync(PgLogEventsCollector.Instance, connection, Carry(baseline.Context), true, rows => rows.Any(r => r.Message.Contains(tag, StringComparison.Ordinal)), ct);
         var tag2 = Tag();
         await RaiseErrorAsync(connection, "DO $$ BEGIN RAISE EXCEPTION 'after " + tag2 + "'; END $$", ct);
         var cycle2 = await EventCycleAsync(connection, Carry(cycle1.Context), true, ct);

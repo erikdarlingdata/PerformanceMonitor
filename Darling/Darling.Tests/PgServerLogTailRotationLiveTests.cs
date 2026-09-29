@@ -108,6 +108,39 @@ public sealed class PgServerLogTailRotationLiveTests
     private static int Count(IEnumerable<PgLogEvent> rows, int pid) =>
         rows.Count(r => r.Pid == pid && r.Message.Contains("still waiting", StringComparison.Ordinal));
 
+    /// <summary>
+    /// #4704: PostgreSQL's logging collector writes from a pipe asynchronously, so right after a multi-MB burst
+    /// the last line can still be unwritten when the read runs. This repeats ONE logical read (the same carried
+    /// state every attempt, never advanced) until the entry for <paramref name="pid"/> is in the rows or the
+    /// deadline passes; the assertions on the returned cycle stay exact.
+    /// </summary>
+    private static async Task<(List<PgLogEvent> Rows, CollectorContext Context)> CycleUntilLoggedAsync(
+        NpgsqlConnection connection, IReadOnlyDictionary<string, string>? state, bool binary, int pid, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        var attempts = 0;
+        while (true)
+        {
+            attempts++;
+            var cycle = await CycleAsync(connection, state, binary, ct);
+            if (Count(cycle.Rows, pid) > 0)
+            {
+                return cycle;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                var skipped = cycle.Context.Measurements.Where(m => m.Label == PgServerLogTail.BytesSkippedMeasurement).Select(m => m.Value).DefaultIfEmpty(0).Max();
+                var file = cycle.Context.PendingState.TryGetValue(PgServerLogTail.ResumeStateKey, out var staged) ? staged : "(no staged marker)";
+                Assert.Fail($"the lock-wait entry for pid {pid} never reached the log file read ({file}) after {attempts} attempts over 30 s; {rows(cycle)} rows read, bytes skipped {skipped}");
+            }
+
+            await Task.Delay(500, ct);
+        }
+
+        static int rows((List<PgLogEvent> Rows, CollectorContext Context) c) => c.Rows.Count;
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -188,7 +221,7 @@ public sealed class PgServerLogTailRotationLiveTests
             "DO $$ BEGIN FOR i IN 1..6500 LOOP RAISE LOG '%', repeat('x', 1000); END LOOP; END $$;", ct);
         var pid = await LogAsync(connection, Marker(), ct);
 
-        var cycle = await CycleAsync(connection, Carry(first.Context), false, ct);
+        var cycle = await CycleUntilLoggedAsync(connection, Carry(first.Context), false, pid, ct);
 
         Assert.Contains(cycle.Context.Measurements, m => m.Label == PgServerLogTail.BytesSkippedMeasurement && m.Value > 0);
         Assert.Equal(1, Count(cycle.Rows, pid));
