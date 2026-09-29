@@ -174,7 +174,9 @@ public sealed class QueryStoreBackfill
     /// <summary>
     /// Runs AT MOST one backfill slice for one server: the first database found with a pending
     /// hole or an undrained first-contact tail gets one byte-budgeted slice; everything else waits
-    /// for a later tick. Returns true when a slice (or an exhaustion probe) ran, false when the
+    /// for a later tick. A database that has failed
+    /// <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/> slices in a row is skipped
+    /// while any other database has work, then retried on a tick where none does. Returns true when a slice (or an exhaustion probe) ran, false when the
     /// server had no backfill work — the common steady state, costing one candidate query and a
     /// few MIN() lookups.
     /// </summary>
@@ -216,6 +218,10 @@ public sealed class QueryStoreBackfill
            QueryStoreBackfillState.MergeHoleDatabases for why the union is required, not just cheaper. */
         var databases = await GetCandidateDatabasesAsync(server.ServerId, floorLimit, state, cancellationToken);
 
+        /* Databases whose slices keep failing: their slice is held back while any other database has work
+           (see QueryStoreBackfillFailureLedger), then one of them is retried after the walk. */
+        List<(string Database, DateTime Floor, DateTime Ceiling, bool IsHole)>? skipped = null;
+
         foreach (var databaseName in databases)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -233,6 +239,12 @@ public sealed class QueryStoreBackfill
                 }
 
                 var holeFloor = holeFrom > floorLimit ? holeFrom : floorLimit;
+                if (_sliceFailures.IsSkipped(server.ServerId, databaseName))
+                {
+                    (skipped ??= []).Add((databaseName, holeFloor, holeTo, true));
+                    continue;
+                }
+
                 await RunCountedSliceAsync(server, databaseName, holeFloor, holeTo, isHole: true, cancellationToken);
                 return true;
             }
@@ -259,7 +271,32 @@ public sealed class QueryStoreBackfill
                 continue;
             }
 
+            if (_sliceFailures.IsSkipped(server.ServerId, databaseName))
+            {
+                (skipped ??= []).Add((databaseName, floorLimit, storedFloor.Value, false));
+                continue;
+            }
+
             await RunCountedSliceAsync(server, databaseName, floorLimit, storedFloor.Value, isHole: false, cancellationToken);
+            return true;
+        }
+
+        /* No other database had work, so retry a skipped one: the one whose last failure is the oldest, so
+           several skipped databases take turns instead of the first in the list starving the rest. This costs
+           at most one failed slice per tick on an otherwise idle server, exactly what the stall cost before. */
+        if (skipped is { Count: > 0 })
+        {
+            var retry = skipped[0];
+            for (var i = 1; i < skipped.Count; i++)
+            {
+                if (_sliceFailures.LastFailureTicket(server.ServerId, skipped[i].Database)
+                    < _sliceFailures.LastFailureTicket(server.ServerId, retry.Database))
+                {
+                    retry = skipped[i];
+                }
+            }
+
+            await RunCountedSliceAsync(server, retry.Database, retry.Floor, retry.Ceiling, retry.IsHole, cancellationToken);
             return true;
         }
 
@@ -276,6 +313,22 @@ public sealed class QueryStoreBackfill
     /// </summary>
     private readonly ConcurrentDictionary<int, int> _consecutiveSliceFailures = new();
 
+    /// <summary>
+    /// Consecutive failed slices per (server, database), used ONLY to decide which database to skip: one that
+    /// fails <see cref="QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures"/> slices in a row is served
+    /// after the databases behind it instead of ahead of them, so it can no longer stall them. Reset by that
+    /// database's completed slice. It does not size the slice window: that stays the per-server count
+    /// above, because a command timeout usually means the whole server is loaded, and narrowing per database
+    /// would add timed-out queries per database against a server that is already struggling. In memory on
+    /// purpose, like the live counters.
+    /// </summary>
+    private readonly QueryStoreBackfillFailureLedger _sliceFailures = new();
+
+    /// <summary>Test-only seam: when set, replaces the slice body (called with the database and the
+    /// window span the slice would have used). A throw counts as a failed slice and a normal return as a
+    /// completed one, through the same accounting. Null in production, where it changes nothing.</summary>
+    internal Func<string, TimeSpan, Task>? SliceOverrideForTests { get; set; }
+
     /// <summary>Runs one slice with the failure accounting wrapped around it — the worker's outer
     /// catch still logs the throw exactly as before.</summary>
     private async Task RunCountedSliceAsync(
@@ -285,10 +338,22 @@ public sealed class QueryStoreBackfill
         {
             await RunSliceAsync(server, databaseName, floorUtc, ceilingUtc, isHole, cancellationToken);
             _consecutiveSliceFailures.TryRemove(server.ServerId, out _);
+            _sliceFailures.RecordCompletion(server.ServerId, databaseName);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _consecutiveSliceFailures.AddOrUpdate(server.ServerId, 1, static (_, count) => count + 1);
+            var failures = _sliceFailures.RecordFailure(server.ServerId, databaseName);
+
+            /* Logged at the failure that crosses the threshold, so it is once per stretch of failures and
+               needs no extra state: the count only grows until a completed slice clears it. */
+            if (failures == QueryStoreBackfillState.SkipAfterConsecutiveSliceFailures)
+            {
+                _logger?.LogWarning(
+                    "query_store backfill on '{Server}' [{Database}]: {Failures} consecutive slice failures; serving the other databases first and retrying this one only when none has work.",
+                    server.Config.DisplayName, databaseName, failures);
+            }
+
             throw;
         }
     }
@@ -314,6 +379,12 @@ public sealed class QueryStoreBackfill
             QueryStoreBackfillState.MaxSliceSpan,
             _consecutiveSliceFailures.TryGetValue(server.ServerId, out var recentFailures) ? recentFailures : 0);
         var sliceFloor = QueryStoreBackfillState.BoundSliceFloor(floorUtc, ceilingUtc, sliceSpan);
+
+        if (SliceOverrideForTests is { } sliceOverride)
+        {
+            await sliceOverride(databaseName, sliceSpan);
+            return;
+        }
 
         var definition = QueryStoreCollector.Instance;
         var context = new CollectorContext
@@ -463,6 +534,59 @@ public sealed class QueryStoreBackfill
     internal const string CandidateSql =
         "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time > $2 ORDER BY database_name";
 
+    /// <summary>#4662, TimescaleDB store, step 1: the chunk of <c>collect.query_store_stats</c> that holds the
+    /// floor, read from the catalog at run time. NEVER derived from a constant: <c>set_chunk_time_interval</c>
+    /// changes only chunks created after it, so a chunk width is wrong for every older chunk. <c>{floor}</c> is
+    /// replaced by the floor formatted <c>yyyy-MM-dd HH:mm:ss.ffffff</c> (invariant culture) - a literal, like
+    /// the statement below, so chunk exclusion happens at plan time. No row means no chunk holds the floor.</summary>
+    internal const string CutChunkCatalogSql =
+        "SELECT range_start AT TIME ZONE 'UTC' AS cut_start, range_end AT TIME ZONE 'UTC' AS cut_end FROM timescaledb_information.chunks WHERE hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats' AND range_start <= TIMESTAMP '{floor}' AT TIME ZONE 'UTC' AND range_end > TIMESTAMP '{floor}' AT TIME ZONE 'UTC'";
+
+    /// <summary>#4662, TimescaleDB store, step 2: the database list from the cut chunk's start. Inside the chunk
+    /// that holds the floor a <c>collection_time &gt; floor</c> bound can only FILTER (it is the fifth key column
+    /// of the index), so the old read walked the chunk's index entry by entry; a bound at the chunk start lets
+    /// the skip scan seek once per name. <c>{cut_start}</c> is the catalog's <c>cut_start</c>, formatted as above.</summary>
+    internal const string CutChunkCandidateSql =
+        "SELECT DISTINCT database_name FROM query_store_stats WHERE server_id = $1 AND collection_time >= TIMESTAMP '{cut_start}' ORDER BY database_name";
+
+    /// <summary>#4662, plain PostgreSQL store: no chunks, so no time bound - a walk down the index, one seek per
+    /// database. Every name stored for the server is listed, and each is marked done once.</summary>
+    internal const string WalkCandidateSql =
+        "WITH RECURSIVE walk AS ((SELECT s.database_name FROM query_store_stats AS s WHERE s.server_id = $1 AND s.database_name IS NOT NULL ORDER BY s.database_name LIMIT 1) UNION ALL SELECT (SELECT s.database_name FROM query_store_stats AS s WHERE s.server_id = $1 AND s.database_name > w.database_name ORDER BY s.database_name LIMIT 1) FROM walk AS w WHERE w.database_name IS NOT NULL) SELECT database_name FROM walk WHERE database_name IS NOT NULL";
+
+    private static string TimestampLiteral(DateTime value)
+        => value.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
+
+    /// <summary>Picks the candidate statement for this store (#4662). Plain PostgreSQL: the walk. TimescaleDB:
+    /// the cut-chunk read when the catalog names a chunk that holds the floor; otherwise (no such chunk, or the
+    /// catalog read failed) <see cref="CandidateSql"/>, unchanged. A catalog failure never reaches the caller's
+    /// catch, which would drop the whole store list.</summary>
+    private async Task<string> ChooseCandidateSqlAsync(NpgsqlConnection connection, DateTime floorLimit, CancellationToken cancellationToken)
+    {
+        if (!_hasContinuousAggregates())
+        {
+            return WalkCandidateSql;
+        }
+
+        try
+        {
+            using var catalog = new NpgsqlCommand(
+                CutChunkCatalogSql.Replace("{floor}", TimestampLiteral(floorLimit), StringComparison.Ordinal), connection);
+            catalog.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
+            await using var catalogReader = await catalog.ExecuteReaderAsync(cancellationToken);
+            if (await catalogReader.ReadAsync(cancellationToken) && !catalogReader.IsDBNull(0))
+            {
+                return CutChunkCandidateSql.Replace("{cut_start}", TimestampLiteral(catalogReader.GetDateTime(0)), StringComparison.Ordinal);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogDebug(ex, "query_store backfill cut-chunk catalog read failed; using the floor-bound candidate read");
+        }
+
+        return CandidateSql;
+    }
+
     /// <summary>Databases that shipped query_store rows since <paramref name="floorLimit"/>, unioned
     /// with every database a hole key already names — the backfill universe.
     ///
@@ -485,12 +609,18 @@ public sealed class QueryStoreBackfill
         try
         {
             await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
-            using var command = new NpgsqlCommand(CandidateSql, connection);
+            var sql = await ChooseCandidateSqlAsync(connection, floorLimit, cancellationToken);
+            using var command = new NpgsqlCommand(sql, connection);
             /* #2874: the enclosing BackfillSliceDeadline ABANDONS rather than cancels, so this is the only
                bound that reaches the statement. */
             command.CommandTimeout = ServiceCommandDeadlines.QueryStoreBackfillReadSeconds;
             command.Parameters.AddWithValue(serverId);
-            command.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
+            if (string.Equals(sql, CandidateSql, StringComparison.Ordinal))
+            {
+                /* Only the floor-bound statement takes the floor as a parameter; the cut-chunk read and the
+                   walk carry no second placeholder, and a surplus parameter is a bind error. */
+                command.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
+            }
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {

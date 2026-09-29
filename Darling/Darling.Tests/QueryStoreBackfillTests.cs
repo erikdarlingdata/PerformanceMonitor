@@ -290,6 +290,33 @@ public sealed class QueryStoreBackfillTests
         Assert.DoesNotContain(
             "$\"SELECT MIN({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2\"",
             source, StringComparison.Ordinal);
+
+        /* #4662: Darling's store switch (a cut-chunk read on TimescaleDB, a walk on plain PostgreSQL) does not
+           apply to DuckDB, which has no chunks. Lite's candidate statement is Darling's fallback statement,
+           character for character - referenced, not copied. */
+        Assert.Contains("\"" + global::PerformanceMonitor.Darling.Service.QueryStoreBackfill.CandidateSql + "\"", source, StringComparison.Ordinal);
+    }
+
+    /// <summary>#4662: the three statements the store switch runs. The cut-chunk read is bound at the chunk START
+    /// (a <c>&gt;=</c> against the catalog's value) rather than <c>&gt; floor</c>, which inside the chunk that holds
+    /// the floor can only filter; the catalog read is qualified to the hypertable and applies UTC on both sides; the
+    /// walk carries no time bound at all and never lists a NULL name.</summary>
+    [Fact]
+    public void Sql_StoreSwitchStatements_AreBoundAtTheChunkStart_ReadTheCatalogInUtc_AndWalkWithoutATimeBound()
+    {
+        const string cutChunk = global::PerformanceMonitor.Darling.Service.QueryStoreBackfill.CutChunkCandidateSql;
+        const string catalog = global::PerformanceMonitor.Darling.Service.QueryStoreBackfill.CutChunkCatalogSql;
+        const string walk = global::PerformanceMonitor.Darling.Service.QueryStoreBackfill.WalkCandidateSql;
+
+        Assert.Contains("collection_time >= TIMESTAMP '{cut_start}'", cutChunk, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time >", cutChunk.Replace("collection_time >=", "", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.Contains("hypertable_schema = 'collect' AND hypertable_name = 'query_store_stats'", catalog, StringComparison.Ordinal);
+        Assert.Contains("range_start AT TIME ZONE 'UTC' AS cut_start", catalog, StringComparison.Ordinal);
+        Assert.Contains("range_start <= TIMESTAMP '{floor}' AT TIME ZONE 'UTC'", catalog, StringComparison.Ordinal);
+        Assert.Contains("range_end > TIMESTAMP '{floor}' AT TIME ZONE 'UTC'", catalog, StringComparison.Ordinal);
+        Assert.StartsWith("WITH RECURSIVE walk AS", walk, StringComparison.Ordinal);
+        Assert.DoesNotContain("collection_time", walk, StringComparison.Ordinal);
+        Assert.Contains("database_name IS NOT NULL", walk, StringComparison.Ordinal);
     }
 
 }
