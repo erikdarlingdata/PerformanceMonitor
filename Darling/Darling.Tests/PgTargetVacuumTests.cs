@@ -742,12 +742,16 @@ public sealed class PgTargetVacuumTests
     /// server-wide switch is off too — and none of them may send a managed-platform reader to a postgresql.conf
     /// they cannot edit. On RDS, Aurora, Azure and Cloud SQL the setting lives in the parameter group or the
     /// server parameters; the engine kind is <c>postgres</c> on all of them but Aurora, so the wording is neutral
-    /// rather than chosen per platform. The <c>pg_reload_conf()</c> step each sentence already carried stays.
+    /// rather than chosen per platform. The reload belongs to the postgresql.conf path only: on a managed service
+    /// the provider applies a parameter-group or server-parameter change itself (a dynamic RDS parameter takes
+    /// effect at once, with no reboot), and a managed login usually cannot run <c>pg_reload_conf()</c>, so no
+    /// sentence may close its managed clause with a reload step.
     /// </summary>
     [Fact]
     public void TheTurnAutovacuumBackOnAdvice_NamesTheProvidersParameterGroup_InAllThreePlaces()
     {
-        const string neutral = "in postgresql.conf, or in your provider's parameter group or server parameters";
+        const string fileClause = "autovacuum = on in postgresql.conf";
+        const string managedClause = "on a managed service, set it in your provider's parameter group or server parameters, which applies it";
 
         var backlog = Backlog(5.0, 4, (PgTargetScorer.BacklogDeadTuplesKey, 5250));
         backlog.ObjectName = "public.hot";
@@ -771,8 +775,12 @@ public sealed class PgTargetVacuumTests
             ("disabled", disabledCard.Remediation),
         })
         {
-            Assert.True(remediation.Contains($"autovacuum = on {neutral}", StringComparison.Ordinal), $"{card}: {remediation}");
-            Assert.True(remediation.Contains("pg_reload_conf()", StringComparison.Ordinal), $"{card}: {remediation}");
+            var managed = remediation.IndexOf(managedClause, StringComparison.Ordinal);
+            var file = remediation.IndexOf(fileClause, StringComparison.Ordinal);
+            var reload = remediation.IndexOf("pg_reload_conf()", StringComparison.Ordinal);
+            Assert.True(managed >= 0, $"{card} names the provider's parameter group and server parameters: {remediation}");
+            Assert.True(file >= 0 && file < reload && reload < managed, $"{card} keeps the reload on the postgresql.conf path, before the managed clause: {remediation}");
+            Assert.True(remediation.IndexOf("pg_reload_conf", managed, StringComparison.Ordinal) < 0, $"{card} has no reload after the managed clause: {remediation}");
         }
     }
 
