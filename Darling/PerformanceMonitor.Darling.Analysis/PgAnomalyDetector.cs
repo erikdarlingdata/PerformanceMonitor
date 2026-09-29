@@ -282,15 +282,21 @@ SELECT
     /* #3653 A8 option B (lane L2a): the tiled I/O window read — ONE read feeds both the read-latency
        and write-latency gates, each scored through EvaluateTiles with its own WindowTile list built
        from this one row set (design's I/O row: "ONE tiled read feeds both gates"). Column order
-       (0 local_hour, 1 peak_read, 2 avg_read, 3 peak_write, 4 avg_write, 5 count) is the reader's
-       ordinal contract. $4..$6 bind from the ANALYSIS window's clock. */
+       (0 local_hour, 1 peak_read, 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write,
+       6 write_sample_count) is the reader's ordinal contract. $4..$6 bind from the ANALYSIS window's clock.
+
+       #4731: each side counts its OWN samples, as Lite's twin does. The one COUNT(*) over the (reads OR
+       writes) rows counted a write-only row as a read sample (its read peak and mean NULL, read as 0), so the
+       read gate admitted tiles Lite rejects and window_samples differed between the products. A tile whose
+       side has no rows now carries 0 samples for that side and never enters that side's gate. */
     public const string IoTileWindowSql = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat,
        AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat,
+       COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count,
        MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat,
        AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat,
-       COUNT(*) AS sample_count
+       COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count
 FROM v_file_io_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 AND   (delta_reads > 0 OR delta_writes > 0)
@@ -945,6 +951,18 @@ ORDER BY ms_delta DESC LIMIT 1";
     }
 
     /// <summary>
+    /// #4731: turns one <see cref="IoTileWindowSql"/> row into the read tile and the write tile, each with its
+    /// OWN sample count (ordinals 3 and 6) - Lite's twin makes the same two <see cref="WindowTiles.ReadTile"/>
+    /// calls, and the parity pin in <c>DarlingAnomalyBaselineTests</c> holds the two products to it. Static and
+    /// internal so a unit test can feed it a hand-built row with unequal read and write counts.
+    /// </summary>
+    internal static void ReadIoTiles(System.Data.IDataRecord reader, List<WindowTile> readTiles, List<WindowTile> writeTiles)
+    {
+        readTiles.Add(WindowTiles.ReadTile(reader, 0, 1, 2, 3));
+        writeTiles.Add(WindowTiles.ReadTile(reader, 0, 4, 5, 6));
+    }
+
+    /// <summary>
     /// Detects I/O latency anomalies using z-score against time-bucketed baseline.
     /// </summary>
     private async Task DetectIoAnomalies(AnalysisContext context, List<Fact> anomalies)
@@ -959,7 +977,7 @@ ORDER BY ms_delta DESC LIMIT 1";
 
             // #3653 A8 option B (lane L2a): ONE tiled read feeds both gates (design's I/O row) — each
             // family builds its own WindowTile list from the same rows (0 local_hour, 1 peak_read,
-            // 2 avg_read, 3 peak_write, 4 avg_write, 5 count).
+            // 2 avg_read, 3 read_sample_count, 4 peak_write, 5 avg_write, 6 write_sample_count - #4731).
             var readTiles = new List<WindowTile>();
             var writeTiles = new List<WindowTile>();
             using (var cmd = new NpgsqlCommand(IoTileWindowSql, connection) { CommandTimeout = DarlingAnalysisService.AnalysisCommandTimeoutSeconds })
@@ -968,18 +986,7 @@ ORDER BY ms_delta DESC LIMIT 1";
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
-                    var localHour = reader.GetDateTime(0);
-                    var samples = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5));
-                    readTiles.Add(new WindowTile(
-                        localHour,
-                        reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1)),
-                        reader.IsDBNull(2) ? 0.0 : Convert.ToDouble(reader.GetValue(2)),
-                        samples));
-                    writeTiles.Add(new WindowTile(
-                        localHour,
-                        reader.IsDBNull(3) ? 0.0 : Convert.ToDouble(reader.GetValue(3)),
-                        reader.IsDBNull(4) ? 0.0 : Convert.ToDouble(reader.GetValue(4)),
-                        samples));
+                    ReadIoTiles(reader, readTiles, writeTiles);
                 }
             }
 

@@ -431,6 +431,68 @@ public sealed class DarlingAnomalyBaselineTests
     }
 
     /// <summary>
+    /// #4731: a window where reads and writes have DIFFERENT sample counts. Hour A has 12 read samples and 4
+    /// write samples; hour B is write-only (5 write samples, no read sample, its read peak and mean NULL). Each
+    /// side's tile carries its own count, so the whole-window read count is 12 - not 17 - and the write count
+    /// is 9; and a window with no read rows at all reads 0 read samples, so the read gate never sees it (the
+    /// shared count it replaced handed that gate the write rows' count). Fed to the detector's own row reader
+    /// through a hand-built table in the <see cref="PgAnomalyDetector.IoTileWindowSql"/> column order.
+    /// </summary>
+    [Fact]
+    public void IoTileReader_GivesEachSideItsOwnSampleCount_AWriteOnlyTileIsNotAReadSample()
+    {
+        static System.Data.DataTable IoTable()
+        {
+            var table = new System.Data.DataTable();
+            table.Columns.Add("local_hour", typeof(DateTime));
+            table.Columns.Add("peak_read_lat", typeof(double));
+            table.Columns.Add("avg_read_lat", typeof(double));
+            table.Columns.Add("read_sample_count", typeof(long));
+            table.Columns.Add("peak_write_lat", typeof(double));
+            table.Columns.Add("avg_write_lat", typeof(double));
+            table.Columns.Add("write_sample_count", typeof(long));
+            return table;
+        }
+
+        var hourA = new DateTime(2026, 9, 24, 5, 0, 0, DateTimeKind.Unspecified);
+        var hourB = hourA.AddHours(1);
+        var table = IoTable();
+        table.Rows.Add(hourA, 30.0, 12.5, 12L, 8.0, 3.0, 4L);
+        table.Rows.Add(hourB, DBNull.Value, DBNull.Value, 0L, 9.0, 4.0, 5L);
+
+        var readTiles = new List<WindowTile>();
+        var writeTiles = new List<WindowTile>();
+        using (var reader = table.CreateDataReader())
+        {
+            while (reader.Read())
+                PgAnomalyDetector.ReadIoTiles(reader, readTiles, writeTiles);
+        }
+
+        Assert.Equal(new long[] { 12, 0 }, readTiles.Select(t => t.Samples).ToArray());
+        Assert.Equal(new long[] { 4, 5 }, writeTiles.Select(t => t.Samples).ToArray());
+        Assert.Equal(30.0, readTiles[0].Peak);
+        Assert.Equal(12.5, readTiles[0].Mean);
+        Assert.Equal(8.0, writeTiles[0].Peak);
+        Assert.Equal(3.0, writeTiles[0].Mean);
+        Assert.Equal(12L, WindowTiles.WholeWindow(readTiles).Samples);
+        Assert.Equal(9L, WindowTiles.WholeWindow(writeTiles).Samples);
+
+        // A window whose every row is write-only: the read side reads 0 samples, so the detector's
+        // wholeRead.Samples > 0 guard skips the read gate - the tile Darling used to admit and Lite rejects.
+        var writeOnly = IoTable();
+        writeOnly.Rows.Add(hourA, DBNull.Value, DBNull.Value, 0L, 9.0, 4.0, 6L);
+        var onlyReadTiles = new List<WindowTile>();
+        var onlyWriteTiles = new List<WindowTile>();
+        using (var reader = writeOnly.CreateDataReader())
+        {
+            while (reader.Read())
+                PgAnomalyDetector.ReadIoTiles(reader, onlyReadTiles, onlyWriteTiles);
+        }
+        Assert.Equal(0L, WindowTiles.WholeWindow(onlyReadTiles).Samples);
+        Assert.Equal(6L, WindowTiles.WholeWindow(onlyWriteTiles).Samples);
+    }
+
+    /// <summary>
     /// #3741 (the last leg of #3653 Q1 / #3724): the wait-profile window read hands the detector the PEAK and
     /// the MEAN all-types ms/sec, and the trusted robust arm is the shared gate's PAIR call rather than the
     /// inline peak-only test it kept through #3724. Structural pin on the PG const (the two aggregates share
