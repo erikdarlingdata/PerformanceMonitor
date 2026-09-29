@@ -499,10 +499,11 @@ public class ScenarioTests : IClassFixture<SharedDuckDbFixture>
 
     /// <summary>
     /// #4731: the real detector path. The scenario's baseline holds no blocking or deadlock rows at all, and
-    /// the event baselines group the rows that exist, so a quiet history reaches the detector as an EMPTY
-    /// bucket: not trustworthy, so both facts fire on the count alone as first occurrences, and not a measured
-    /// zero, so <c>baseline_zero_history</c> is stamped 0. The measured-zero arm itself is pinned on a
-    /// hand-built bucket in <c>CountFamilyZeroHistoryTests</c>.
+    /// the collection log holds no run of either collector, so no hour of the baseline window is covered and a
+    /// quiet history reaches the detector as an EMPTY bucket: not trustworthy, so both facts fire on the count
+    /// alone as first occurrences, and not a measured zero, so <c>baseline_zero_history</c> is stamped 0. The
+    /// measured-zero case, an hour the collector covered and saw nothing in, is pinned in
+    /// <c>EventBaselineCoveredDaysTests</c>.
     /// </summary>
     [Fact]
     public async Task BlockingSpikeAnomaly_OnAnEmptyBaseline_IsAFirstOccurrence_AndNotStampedZeroHistory()
