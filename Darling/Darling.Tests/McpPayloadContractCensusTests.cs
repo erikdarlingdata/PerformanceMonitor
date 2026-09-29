@@ -2077,6 +2077,8 @@ public sealed class McpPayloadContractCensusTests
             "audit_config's edition-NAME fallback (Enterprise / Standard / … / Unknown) — a name, spelled as the canon by coincidence"),
         ("Unknown", "McpAnalysisTools.cs",
             "audit_config's edition-NAME fallback — the Lite twin of the above"),
+        ("unknown", "DarlingMcpTools.cs",
+            "mute_analysis_finding's kind (plain / read-only / per-database) for a resolved server that has no definition row in the store (one defined in darling.json) — a registration kind, not a band"),
         ("unknown", "DarlingMcpPgWaitSamplingTools.cs",
             "the wait-instrument token for an arm this build does not know (PgWaitInstrument's service_sampled / pg_wait_sampling / … vocabulary) — an instrument, not a band"),
         ("unknown", "DarlingPgLoggingAudit.cs",

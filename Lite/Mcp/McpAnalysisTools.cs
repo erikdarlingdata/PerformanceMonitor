@@ -1049,6 +1049,7 @@ public sealed class McpAnalysisTools
                 story_path_hash,
                 story_path = write.StoryPath,
                 server = scope.Label,
+                kind = scope.Kind,
                 reason,
                 registered,
                 already_muted = !registered,
@@ -1068,10 +1069,11 @@ public sealed class McpAnalysisTools
 
     /// <summary>
     /// Where a <c>mute_analysis_finding</c> call writes: either the fleet-wide scope (<see cref="All"/>), a single
-    /// enabled server (<see cref="ServerId"/> and the storage name to echo as <see cref="Label"/>), or a ready-to-return
+    /// enabled server (<see cref="ServerId"/>, the storage name to echo as <see cref="Label"/> and which kind of
+    /// registration it is as <see cref="Kind"/>: plain, read-only or per-database), or a ready-to-return
     /// <see cref="Answer"/> that refuses the write because the name matched no server or more than one.
     /// </summary>
-    internal sealed record MuteScope(int? ServerId, string Label, string? Answer)
+    internal sealed record MuteScope(int? ServerId, string Label, string? Answer, string? Kind = null)
     {
         /// <summary>The scope of a call that names no server: the mute row is written for every server.</summary>
         internal static readonly MuteScope All = new(null, "(all servers)", null);
@@ -1079,9 +1081,9 @@ public sealed class McpAnalysisTools
 
     /// <summary>
     /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> to EXACTLY ONE enabled server, with the rule Darling's
-    /// twin applies (<see cref="ServerResolver.MatchCandidates"/>): every exact match if there is one, otherwise every
-    /// partial match, servers counted by storage identity, and anything other than one server is refused with nothing
-    /// written. #4734: the tool used <see cref="ServerResolver.ResolveOrError"/>, whose first-match rule picks whichever
+    /// twin applies (<see cref="ServerResolver.MatchCandidates"/>): the one registration whose storage name matches
+    /// exactly (case-sensitive) if there is one, else every exact match if there is one, otherwise every partial match,
+    /// servers counted by storage identity, and anything other than one server is refused with nothing written. #4734: the tool used <see cref="ServerResolver.ResolveOrError"/>, whose first-match rule picks whichever
     /// registration the list holds first, so a partial name (or a display name that several registrations of one machine
     /// share) muted the pattern on an arbitrary sibling and echoed the caller's spelling, not the server it had picked.
     /// The read rule stays for the read tools; only this write leaves it.
@@ -1104,7 +1106,7 @@ public sealed class McpAnalysisTools
         if (match.Candidates.Count == 1)
         {
             var resolved = match.Candidates[0];
-            return new MuteScope(resolved.ServerId, resolved.ServerName, null);
+            return new MuteScope(resolved.ServerId, resolved.ServerName, null, resolved.Kind);
         }
 
         if (match.Candidates.Count == 0)

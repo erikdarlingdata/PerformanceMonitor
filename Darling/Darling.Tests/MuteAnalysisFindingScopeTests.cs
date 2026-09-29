@@ -246,6 +246,40 @@ public sealed class MuteAnalysisFindingScopeTests
         Assert.DoesNotContain("server_name ?? \"(all servers)\"", body, StringComparison.Ordinal);
     }
 
+    /// <summary>The registry rows the resolver reads carry no database or read-only intent, so the tool reads the two
+    /// facts for the RESOLVED server_id from its definition row (and reports <c>unknown</c> when it has none), before any
+    /// write, and puts the kind in the success answer beside the storage name.</summary>
+    [Fact]
+    public void TheTool_ReadsTheKindOfTheResolvedServer_AndAnswersWithIt()
+    {
+        var sql = DarlingMcpTools.RegistrationKindSql;
+        Assert.Contains("FROM config_monitored_servers", sql, StringComparison.Ordinal);
+        Assert.Contains("d.database, d.read_only_intent", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE d.server_id = $1", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("@", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("N'", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("now(", sql.ToLowerInvariant(), StringComparison.Ordinal);
+
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpTools.cs");
+        Assert.Contains("return \"unknown\";", source, StringComparison.Ordinal);
+        Assert.Contains("DescribeKind(database, readOnlyIntent)", source, StringComparison.Ordinal);
+
+        var start = source.IndexOf("public static async Task<string> MuteAnalysisFinding(", StringComparison.Ordinal);
+        var end = source.IndexOf("McpHelpers.FormatError(\"mute_analysis_finding\"", start, StringComparison.Ordinal);
+        Assert.True(start > 0 && end > start, "could not locate the MuteAnalysisFinding body");
+        var body = source[start..end];
+
+        Assert.True(
+            body.IndexOf("ReadRegistrationKindAsync(postgres, scope.ServerId!.Value)", StringComparison.Ordinal)
+                > body.IndexOf("return scope.Answer;", StringComparison.Ordinal),
+            "the kind is read for the resolved server, after the refusals");
+        Assert.True(
+            body.IndexOf("ReadRegistrationKindAsync(", StringComparison.Ordinal)
+                < body.IndexOf("analysisService.MuteFindingAsync(", StringComparison.Ordinal),
+            "the kind is read before the write");
+        Assert.Equal(1, CountOf(body, " kind,"));
+    }
+
     [Fact]
     public void TheToolGuide_NamesTheTwoRefusals_AndTheRemovalRule()
     {

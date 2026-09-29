@@ -85,9 +85,11 @@ internal static class ServerResolver
     /// One server a name answers to, for a write that must not guess which one the caller meant (#4734).
     /// <paramref name="ServerName"/> is the STORAGE name (<see cref="RemoteCollectorService.GetServerNameForStorage"/>:
     /// the database and <c>:RO</c> suffixes included), the identity <paramref name="ServerId"/> is hashed from and
-    /// the name a caller can pass back to pick exactly this registration.
+    /// the name a caller can pass back to pick exactly this registration. <paramref name="Kind"/> says which of a
+    /// machine's registrations it is (<see cref="PerformanceMonitor.Common.ServerIdHelper.DescribeKind"/>: plain,
+    /// read-only, per-database), read from the database name and read-only intent the storage name was built from.
     /// </summary>
-    internal sealed record ServerCandidate(int ServerId, string ServerName, string DisplayName);
+    internal sealed record ServerCandidate(int ServerId, string ServerName, string DisplayName, string Kind);
 
     /// <summary>
     /// What <see cref="MatchCandidates"/> found: every server the name answers to, and the rule that found them
@@ -99,11 +101,20 @@ internal static class ServerResolver
     /// Every enabled server a name answers to, for a WRITE (#4734: <c>mute_analysis_finding</c>). <see cref="Resolve"/>
     /// takes the first match, which is right for a read (a wrong sibling shows its name in the payload and the caller
     /// re-asks) and wrong for a write that persists a row against whichever server the name landed on. This is the
-    /// same rule Darling's <c>mute_analysis_finding</c> applies: every EXACT match (case-insensitive) on the server
-    /// name, the display name or the storage name if there is at least one, otherwise every PARTIAL match
-    /// (<c>Contains</c>, case-insensitive) on the server name or display name. The storage name is an exact key so a
-    /// candidate's own <c>server</c> value, as listed in an <c>ambiguous</c> answer, selects that registration when the
-    /// caller passes it back; the read rule does not know it and is left alone.
+    /// same rule Darling's <c>mute_analysis_finding</c> applies: the ONE registration whose storage name equals the name
+    /// exactly (case-sensitive), if there is one; otherwise every EXACT match (case-insensitive) on the server name, the
+    /// display name or the storage name, if there is at least one; otherwise every PARTIAL match (<c>Contains</c>,
+    /// case-insensitive) on the server name or display name. The storage name is an exact key so a candidate's own
+    /// <c>server</c> value, as listed in an <c>ambiguous</c> answer, selects that registration when the caller passes it
+    /// back; the read rule does not know it and is left alone.
+    ///
+    /// <para><b>Why the first tier is case-sensitive and stops at one (#4734).</b> The plain registration's storage
+    /// name IS the machine name that its read-only and per-database siblings share as their <c>ServerName</c>, so
+    /// without this tier the value the ambiguous answer lists for the plain registration tied with its own siblings
+    /// and no name could pick it. A storage name is unique (the server_id is hashed from it), so an exact match names
+    /// one registration by construction. The tier is narrow on purpose: the same name in another case, a display-name
+    /// match and a partial match all fall through to the matching below and still answer ambiguous when they name
+    /// several registrations.</para>
     ///
     /// <para><b>Servers are counted by storage identity.</b> Two entries that share one storage name
     /// (<see cref="RemoteCollectorService.GetServerNameForStorage"/>) hash to one server_id, so they are ONE candidate;
@@ -119,6 +130,13 @@ internal static class ServerResolver
         if (name.Length == 0)
         {
             return new CandidateMatch(Array.Empty<ServerCandidate>(), "none");
+        }
+
+        var byStorageName = DistinctByStorageName(servers.Where(s =>
+            string.Equals(RemoteCollectorService.GetServerNameForStorage(s), name, StringComparison.Ordinal)));
+        if (byStorageName.Count == 1)
+        {
+            return new CandidateMatch(byStorageName, "exact");
         }
 
         var exact = DistinctByStorageName(servers.Where(s =>
@@ -151,7 +169,8 @@ internal static class ServerResolver
                 candidates.Add(new ServerCandidate(
                     RemoteCollectorService.GetDeterministicHashCode(storageName),
                     storageName,
-                    server.DisplayName));
+                    server.DisplayName,
+                    PerformanceMonitor.Common.ServerIdHelper.DescribeKind(server.DatabaseName, server.ReadOnlyIntent)));
             }
         }
 

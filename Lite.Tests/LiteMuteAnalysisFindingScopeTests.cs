@@ -125,6 +125,38 @@ public sealed class LiteMuteAnalysisFindingScopeTests
         Assert.Equal(IdOf(registry[0]), scope.ServerId);
     }
 
+    [Theory]
+    [InlineData(null, false, "plain")]
+    [InlineData("", false, "plain")]
+    [InlineData("  ", true, "read-only")]
+    [InlineData(null, true, "read-only")]
+    [InlineData("sales", false, "per-database")]
+    [InlineData("sales", true, "per-database, read-only")]
+    [InlineData("RO", false, "per-database")]
+    public void TheKind_IsReadFromTheDatabaseNameAndTheReadOnlyIntent_NotFromTheStorageName(string? database, bool readOnly, string expected)
+    {
+        /* A database that happens to be called RO is per-database, not read-only: the kind is never parsed back out of
+           the storage-name string, where that database's name would read as the read-only suffix. */
+        Assert.Equal(expected, PerformanceMonitor.Common.ServerIdHelper.DescribeKind(database, readOnly));
+    }
+
+    [Fact]
+    public void TheResolvedScope_CarriesTheKindOfTheRegistrationItPicked()
+    {
+        var registry = MachineWithSiblings();
+        var expected = new[] { "plain", "read-only", "per-database", "per-database, read-only" };
+
+        for (var i = 0; i < registry.Length; i++)
+        {
+            var scope = McpAnalysisTools.ResolveMuteScope(registry, RemoteCollectorService.GetServerNameForStorage(registry[i]), Hash);
+
+            Assert.Null(scope.Answer);
+            Assert.Equal(expected[i], scope.Kind);
+        }
+
+        Assert.Null(McpAnalysisTools.MuteScope.All.Kind);
+    }
+
     [Fact]
     public void APartialOfTheMachineName_StillRefuses_AsATie()
     {

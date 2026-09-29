@@ -1314,6 +1314,7 @@ public sealed class DarlingMcpTools
                resolved to, so a name two servers answer to used to mute the pattern on whichever sorted first and
                say so only afterwards. The read rule itself is untouched (it is pinned as Lite parity). */
             var scope = MuteScope.All;
+            string? kind = null;
             if (server_name != null)
             {
                 var (registry, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres);
@@ -1321,6 +1322,11 @@ public sealed class DarlingMcpTools
 
                 scope = ResolveMuteScope(registry, server_name, story_path_hash);
                 if (scope.Answer != null) return scope.Answer;
+
+                /* Which of the machine's registrations the name picked (plain, read-only, per-database), so a wrong
+                   pick shows in the answer. The registry rows the resolver reads carry no database or read-only
+                   intent, so the two facts come from the definition row of the resolved server_id. */
+                kind = await ReadRegistrationKindAsync(postgres, scope.ServerId!.Value);
             }
 
             var serverId = scope.ServerId;
@@ -1369,6 +1375,7 @@ public sealed class DarlingMcpTools
                 story_path_hash,
                 story_path = write.StoryPath,
                 server = scope.Label,
+                kind,
                 reason,
                 registered,
                 already_muted = !registered,
@@ -1387,6 +1394,38 @@ public sealed class DarlingMcpTools
     }
 
     /// <summary>
+    /// The definition row's database name and read-only intent for one server (#4734): the two facts
+    /// <see cref="PerformanceMonitor.Common.ServerIdHelper.BuildStorageName"/> suffixes the storage name for, read from
+    /// the table <c>remove_server</c> deletes from. Exposed const so Darling.Tests can pin the dialect ungated.
+    /// </summary>
+    public const string RegistrationKindSql = @"
+SELECT d.database, d.read_only_intent
+FROM config_monitored_servers d
+WHERE d.server_id = $1";
+
+    /// <summary>
+    /// Which kind of registration <paramref name="serverId"/> is (<see cref="PerformanceMonitor.Common.ServerIdHelper.DescribeKind"/>:
+    /// plain, read-only, per-database, or per-database read-only), read from its definition row. A server with no
+    /// definition row — one defined in darling.json rather than the store — reports <c>unknown</c>: the registry row the
+    /// name resolved against records neither fact, and guessing plain would name a wrong pick as a right one.
+    /// </summary>
+    internal static async Task<string> ReadRegistrationKindAsync(NpgsqlDataSource postgres, int serverId)
+    {
+        await using var command = postgres.CreateCommand(RegistrationKindSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return "unknown";
+        }
+
+        var database = reader.IsDBNull(0) ? null : reader.GetString(0);
+        var readOnlyIntent = !reader.IsDBNull(1) && reader.GetBoolean(1);
+        return PerformanceMonitor.Common.ServerIdHelper.DescribeKind(database, readOnlyIntent);
+    }
+
+    /// <summary>
     /// Where a <c>mute_analysis_finding</c> call writes: either the fleet-wide scope (<see cref="All"/>), a single
     /// registered server (<see cref="ServerId"/> and the storage name to echo as <see cref="Label"/>), or a ready-to-return
     /// <see cref="Answer"/> that refuses the write because the name matched no server or more than one.
@@ -1399,9 +1438,10 @@ public sealed class DarlingMcpTools
 
     /// <summary>
     /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> with the REMOVAL rule
-    /// (<see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one <c>remove_server</c> applies): every exact
-    /// match on the storage name or display name if there is one, otherwise every partial match, and anything other than
-    /// exactly one match is refused with the candidates named. #4734: the tool used the read resolver, whose first-match
+    /// (<see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one <c>remove_server</c> applies): the one
+    /// registration whose storage name matches exactly (case-sensitive) if there is one, else every exact match on the
+    /// storage name or display name if there is one, otherwise every partial match, and anything other than exactly
+    /// one match is refused with the candidates named. #4734: the tool used the read resolver, whose first-match
     /// rule picks whichever registration sorts first, so a partial name (or a display name that per-database and
     /// <c>:RO</c> registrations of one host share) muted the pattern on an arbitrary sibling and echoed the caller's
     /// spelling, not the server it had picked. The read resolver's rule is Lite parity and stays; only this write leaves it.
