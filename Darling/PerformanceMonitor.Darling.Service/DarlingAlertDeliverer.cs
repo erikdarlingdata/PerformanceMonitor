@@ -202,11 +202,16 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
            a row that consulted no destination records none. The context is created here if the alert had
            none (every self-alert fires with Context: null), exactly as #2090 does for the severity above;
            the Viewer's detail window falls back to detail_text for a context with no detail items, so an
-           empty-Details context carrying only provenance costs the operator nothing. */
+           empty-Details context carrying only provenance costs the operator nothing.
+
+           #4750: the record also says what each channel's send DID. One success used to stand for the whole
+           fan-out, so a channel that failed beside a channel that delivered read as delivered on the row and
+           nowhere else. Only the outcome word is stored: a webhook error can carry its endpoint's URL, so the
+           reason stays in send_error and out of the context. */
         if (result.Route is { } route)
         {
             context ??= new AlertContext();
-            context.Route = route.ToDto();
+            context.Route = route.ToDto(result.ChannelOutcomes);
         }
 
         /* Always log the alert, regardless of channel status (EmailAlertService.cs:82-94). */
