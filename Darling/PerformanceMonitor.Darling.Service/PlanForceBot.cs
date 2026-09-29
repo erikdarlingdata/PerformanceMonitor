@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -153,6 +154,10 @@ public sealed class PlanForceBot
         var (states, stateUnavailableReason) = await _store.TryGetTargetStatesAsync(
             runtime.ServerId, candidates, nowUtc, ct);
 
+        /* #4770: does the plan_correction collector run for this server? Asked of the runner's own gate with the
+           runtime's target, never a copied version number, so the answer moves with the collector. */
+        var enablementIsCollected = CollectorCatalog.AppliesTo(PlanCorrectionCollector.Instance, runtime.Target);
+
         foreach (var target in candidates)
         {
             ForcePlanTargetState? state = null;
@@ -185,7 +190,7 @@ public sealed class PlanForceBot
                (`apc_enabled_for_database`), because two forcers on one database is the failure #3652
                documented and the bot cannot be the one who read the guidance. */
             var blockers = ForcePlanBotPolicy.Blockers(
-                target, state, states is null ? stateUnavailableReason : null);
+                target, state, states is null ? stateUnavailableReason : null, enablementIsCollected);
             var history = await _store.GetQueryHistoryAsync(
                 runtime.ServerId, target.Database, target.QueryId, _settings, nowUtc, ct);
 

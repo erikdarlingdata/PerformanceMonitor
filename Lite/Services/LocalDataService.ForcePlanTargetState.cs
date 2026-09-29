@@ -53,16 +53,17 @@ public partial class LocalDataService
 /// one forced plan per query and a manual force of the target would replace it silently.</item>
 /// <item><b>The newest <c>plan_correction</c> RECOMMENDATION row for (database, query_id)</b> —
 /// <c>recommendation_name IS NOT NULL</c> drops the enablement-only rows, as the grid read does.</item>
-/// <item><b>The database's FORCE_LAST_GOOD_PLAN enablement at the server's newest capture</b> — the
-/// Automatic Tuning grid's own read, joined by database.</item>
+/// <item><b>The database's newest FORCE_LAST_GOOD_PLAN enablement row inside the lookback</b>, joined by
+/// database.</item>
 /// </list>
 ///
 /// <para>Both scans are bounded by <c>collection_time &gt; $2</c>, the caller's clock minus
 /// <see cref="ForcePlanTargetState.Lookback"/>, BOUND rather than written <c>now() - INTERVAL</c>:
 /// <c>collection_time</c> is naive UTC and <c>now()</c> is TIMESTAMP WITH TIME ZONE, so the mixed
 /// comparison would resolve in the host's session zone (the <see cref="LocalDataService.ForcePlanFailuresSql"/> remarks
-/// carry the measurement). The enablement half deliberately ignores the lookback — it is a latest-snapshot
-/// read, exactly as the grid's is.</para>
+/// carry the measurement). The enablement half takes each database's newest row inside the lookback (#4770), not only the
+/// server's newest capture: a capture lands one database at a time, so the newest one can lack a database an
+/// earlier one had, and a database with no row at all inside the lookback comes back unknown.</para>
 /// </summary>
 public static class ForcePlanTargetStateReader
 {
@@ -136,13 +137,21 @@ apc_latest AS (
     WHERE p.recommendation_name IS NOT NULL
 ),
 enablement AS (
-    SELECT DISTINCT
-        e.database_name,
-        e.force_last_good_plan_actual_state,
-        e.collection_time
-    FROM v_plan_correction AS e
-    WHERE e.server_id = $1
-    AND   e.collection_time = (SELECT MAX(collection_time) FROM v_plan_correction WHERE server_id = $1)
+    SELECT
+        el.database_name,
+        el.force_last_good_plan_actual_state,
+        el.collection_time
+    FROM (
+        SELECT
+            e.database_name,
+            e.force_last_good_plan_actual_state,
+            e.collection_time,
+            ROW_NUMBER() OVER (PARTITION BY e.database_name ORDER BY e.collection_time DESC) AS rn
+        FROM v_plan_correction AS e
+        WHERE e.server_id = $1
+        AND   e.collection_time > $2
+    ) AS el
+    WHERE el.rn = 1
 )
 SELECT
     t.database_name,
