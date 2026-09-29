@@ -303,7 +303,8 @@ public static class DarlingRetention
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
-        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false)
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false,
+        string? runLabel = null)
     {
         /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
            table is touched. */
@@ -311,7 +312,7 @@ public static class DarlingRetention
 
         return await PurgeWithPacerAsync(
             postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
-            livenessTouchedTablePruneRowCap, walPacer);
+            livenessTouchedTablePruneRowCap, walPacer, runLabel);
     }
 
     /// <summary>
@@ -322,7 +323,8 @@ public static class DarlingRetention
     internal static async Task<PurgeSummary> PurgeWithPacerAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
-        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null)
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null,
+        string? runLabel = null)
     {
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -1050,7 +1052,7 @@ public static class DarlingRetention
     /// </summary>
     internal static (string Status, string Message) BuildRunRecordSummary(
         int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed,
-        bool paced = false, long walBytes = 0, double pacedSeconds = 0)
+        bool paced = false, long walBytes = 0, double pacedSeconds = 0, string? runLabel = null)
     {
         var status = tablesFailed == 0 ? "SUCCESS" : "WARNING";
         var message = tablesFailed == 0
@@ -1066,6 +1068,9 @@ public static class DarlingRetention
 
         return (status, message);
     }
+
+    internal static string BuildManualPurgeLabel(int? customRetentionDays)
+        => throw new NotImplementedException("#4825");
 
     /// <summary>
     /// The batched purge statement for one collector table — deletes expired rows one time slice at a time

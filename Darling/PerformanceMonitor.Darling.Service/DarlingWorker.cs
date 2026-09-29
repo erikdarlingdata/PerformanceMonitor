@@ -8974,6 +8974,25 @@ AND   j.hypertable_name = '{relation}'", connection))
         return true;
     }
 
+    /// <summary>#4825 (compile stub): purge_now still runs inline until the next commit.</summary>
+    internal CommandOutcome TryStartPurgeNow(
+        Func<CancellationToken, Task> startPurge, int? customRetentionDays, CancellationToken stoppingToken)
+        => throw new NotImplementedException("#4825");
+
+    /// <summary>#4825 (compile stub).</summary>
+    internal Task RunPurgeNowBackgroundAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, DarlingConfig config, int? customRetentionDays,
+        CancellationToken stoppingToken, Func<string, long, string, CancellationToken, Task>? writeRawRunRecord = null)
+        => throw new NotImplementedException("#4825");
+
+    /// <summary>#4825 (compile stub).</summary>
+    internal static (string Status, string Message) BuildRawPurgeNowRunRecord(
+        string runLabel, IReadOnlyList<RawPurgeNowEntry> entries)
+        => throw new NotImplementedException("#4825");
+
+    /// <summary>One relation's line in purge_now's raw-table report (#4427).</summary>
+    internal readonly record struct RawPurgeNowEntry(string Relation, string Outcome, string Note);
+
     /// <summary>
     /// Wraps a purge delegate so <see cref="_purgeTask"/> can never fault unobserved (the launch loop never
     /// awaits it, so an unhandled fault here would otherwise surface only as an UnobservedTaskException at

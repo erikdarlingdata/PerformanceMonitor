@@ -441,7 +441,7 @@ public sealed class RetentionWalPacerTests
     /* ---------------- the callers ---------------- */
 
     [Fact]
-    public void TheDailyPurgePacesItsWal_AndPurgeNowDoesNot()
+    public void TheDailyPurge_AndPurgeNow_BothPaceTheirWal()
     {
         var worker = ReadServiceFile("DarlingWorker.cs");
 
@@ -449,14 +449,15 @@ public sealed class RetentionWalPacerTests
         Assert.True(dailyAt >= 0, "RunScheduledPurgeAsync moved");
         Assert.Contains("paceWal: true", CallText(worker, dailyAt), StringComparison.Ordinal);
 
-        /* purge_now runs on the command loop, which runs nothing else until it returns: a paced purge would
-           hold pause, resume and test_connect for the length of the pacing. */
-        var nowAt = worker.IndexOf("private async Task<CommandOutcome> RunPurgeNowAsync(", StringComparison.Ordinal);
-        Assert.True(nowAt >= 0, "RunPurgeNowAsync moved");
-        var nowCall = CallText(worker, nowAt);
-        Assert.DoesNotContain("paceWal: true", nowCall, StringComparison.Ordinal);
-        var callAt = worker.IndexOf("DarlingRetention.PurgeAsync(", nowAt, StringComparison.Ordinal);
-        Assert.Contains("command loop", worker[(callAt - 900)..callAt], StringComparison.Ordinal);
+        /* #4825: purge_now used to run inline on the command loop, which runs nothing else until it returns, so
+           it could not be paced without holding pause, resume and test_connect for the length of the pacing.
+           It now starts in the daily purge's own slot and answers at once, so it paces its WAL the same way. */
+        var nowAt = worker.IndexOf("internal async Task RunPurgeNowBackgroundAsync(", StringComparison.Ordinal);
+        Assert.True(nowAt >= 0, "RunPurgeNowBackgroundAsync moved");
+        var nowEnd = worker.IndexOf("\n    /// <summary>", nowAt, StringComparison.Ordinal);
+        var nowCallAt = worker.IndexOf("DarlingRetention.PurgeAsync(", nowAt, StringComparison.Ordinal);
+        Assert.True(nowCallAt >= 0 && nowCallAt < nowEnd, "RunPurgeNowBackgroundAsync no longer calls PurgeAsync itself");
+        Assert.Contains("paceWal: true", CallText(worker, nowAt), StringComparison.Ordinal);
     }
 
     private static string CallText(string source, int methodAt)

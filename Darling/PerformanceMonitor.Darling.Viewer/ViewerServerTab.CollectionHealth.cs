@@ -125,7 +125,7 @@ public partial class ViewerServerTab
             }
             else
             {
-                PurgeNowIndicator.Text = FormatPurgeSummary(result.ResultJson);
+                PurgeNowIndicator.Text = FormatPurgeSummary(result.ResultJson, out _);
                 /* Reflect the purge in the grids + duration chart. */
                 await LoadHealthAsync();
             }
@@ -150,8 +150,9 @@ public partial class ViewerServerTab
     /// Formats the <c>purge_now</c> result_json (<c>{ tablesPurged, rowsPurged, ... }</c>) into the one-line
     /// summary the indicator shows. Degrades to a plain "Purge complete" if the JSON is missing/unparseable.
     /// </summary>
-    private static string FormatPurgeSummary(string? resultJson)
+    internal static string FormatPurgeSummary(string? resultJson, out bool purgeFinished)
     {
+        purgeFinished = true;
         if (string.IsNullOrWhiteSpace(resultJson))
         {
             return "Purge complete";
