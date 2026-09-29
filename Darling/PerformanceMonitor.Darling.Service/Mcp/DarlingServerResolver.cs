@@ -97,8 +97,12 @@ ORDER BY server_name";
     /// error. Deliberately not the <c>invalid</c> envelope and not <c>FormatError</c>: it is a store fault, not
     /// the caller's request, and this seam knows no tool name to put under <c>hints.operation</c>. It maps to
     /// the web surface's bare-string arm, which is the pre-#3739 behaviour, unchanged.
+    ///
+    /// <para>Internal since #4734 so a write that must not take this resolver's first-match rule
+    /// (<c>mute_analysis_finding</c>, which matches with the removal rule instead) still reports a registry-read
+    /// fault as this same sentence rather than inventing a second spelling of it.</para>
     /// </summary>
-    private static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadEnabledOrFaultAsync(
+    internal static async Task<(List<RegisteredServer> Servers, string? Fault)> LoadEnabledOrFaultAsync(
         NpgsqlDataSource postgres, CancellationToken cancellationToken = default)
     {
         try

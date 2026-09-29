@@ -858,6 +858,13 @@ public static class FactAdvice
         var moved = ConfigChangeAttribution.MovedKeys(fact);
         var stable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaStable);
         var omitted = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaMovedKeysOmitted);
+        /* #4729: presence-only rows a young after half cannot judge yet. The minutes are rounded and held one
+           under the floor's own, so an after half of 59.7 minutes never reads "60 minutes" beside a "1 h" floor. */
+        var notYetComparable = fact.Metadata.GetValueOrDefault(ConfigChangeAttribution.MetaNotYetComparable);
+        var afterMinutes = Math.Min(Math.Round(afterHours * 60), Math.Ceiling(ConfigChangeAttribution.MinComparableAfterHours * 60) - 1);
+        /* An after half under 30 seconds rounds to 0 minutes, and "covers only 0 minutes" reads as no data at all. */
+        var afterCovers = afterMinutes < 1 ? "under a minute" : $"only {Plural(afterMinutes, "minute")}";
+        var youngAfterClause = $"the after half covers {afterCovers}, under the {ConfigChangeAttribution.MinComparableAfterHours:0.#} h the compare needs before a missing metric means anything";
 
         string verdict;
         if (unavailable)
@@ -874,6 +881,11 @@ public static class FactAdvice
             if (pendingRestart.Count == changes.Count)
             {
                 verdict = "Nothing should have moved yet: the engine is still running the old value until the next restart, and the compare is a control for that pass, not a verdict on this one.";
+            }
+            else if (moved.Count == 0 && notYetComparable > 0)
+            {
+                var one = notYetComparable == 1;
+                verdict = $"{Plural(notYetComparable, "metric")} appeared in or vanished from the compare, but {youngAfterClause}, so {(one ? "it is" : "they are")} not yet comparable and later passes compare {(one ? "it" : "them")}.";
             }
             else if (moved.Count == 0)
             {
@@ -897,6 +909,8 @@ public static class FactAdvice
                 verdict = $"Moved beyond its band after the change: {string.Join("; ", parts)}"
                           + (omitted > 0 ? $"; and {Plural(omitted, "more key")} (see the fact's metadata)" : string.Empty)
                           + (stable > 0 ? $". {Plural(stable, "other compared key")} stayed inside band." : ".");
+                if (notYetComparable > 0)
+                    verdict += $" {Plural(notYetComparable, "more metric")} appeared in or vanished from the compare and {(notYetComparable == 1 ? "is" : "are")} not yet comparable: {youngAfterClause}.";
             }
         }
         inv.Append(' ').Append(verdict);
@@ -917,9 +931,11 @@ public static class FactAdvice
             ? $"{family}: {subject} — effect not yet compared"
             : pendingRestart.Count == changes.Count
                 ? $"{family}: {subject} — takes effect at the next restart"
-                : moved.Count == 0
-                    ? $"{family}: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
-                    : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
+                : moved.Count == 0 && notYetComparable > 0
+                    ? $"{family}: {subject} — effect not yet comparable"
+                    : moved.Count == 0
+                        ? $"{family}: {subject} — nothing moved beyond band in the ±{beforeHours:0} h compare"
+                        : $"{family}: {subject} — {Plural(moved.Count, "metric")} moved beyond band after it";
 
         // ── remediation: the history read(s) of the families present, the compare, and each family's grader ──
         var historyTools = new List<string>(3);
