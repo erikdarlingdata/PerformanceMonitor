@@ -190,7 +190,7 @@ public partial class PlanViewerControl
     /// </summary>
     private SolidColorBrush GetLinkColorBrush(PlanNode child, double clampedDivergenceLimit)
     {
-        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.ActualExecutions, child.EstimateRows, clampedDivergenceLimit);
+        var key = PlanEdgeColour.ForChild(child, clampedDivergenceLimit);
         return key switch
         {
             PlanEdgeColourKey.LightOrange => EdgeLightOrangeBrush,

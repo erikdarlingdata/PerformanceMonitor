@@ -142,17 +142,27 @@ public sealed class ComposeParameterCoverageTests
     /// restated as a function of the author's intent rather than read back off the compiler's own output.
     /// Two for the naive-UTC window, one more when the run names servers, one per filter (every
     /// <c>BuildFilterClause</c> arm binds exactly one value, whether a text array or a scalar), and one for
-    /// <c>topN</c> in the two ranked modes.
+    /// <c>topN</c> in the two ranked modes, and one for the Query Store wide-start bound (#4689) exactly when
+    /// the run is wide-eligible with a start later than the window's and the measure reads the Query Store table.
     ///
     /// <para>An extra bind anywhere raises what the compiler produced and leaves this where it was, which is
     /// what makes it see the spelling coverage cannot. It is deliberately NOT derived from
     /// <c>Parameters.Count</c> — a prediction taken from the thing it is checking agrees with it always.</para>
     /// </summary>
-    internal static int PredictedParameterCount(PanelPlan plan, bool serverScoped) =>
+    internal static int PredictedParameterCount(PanelPlan plan, bool serverScoped, ComposeRunContext context) =>
         2
         + (serverScoped ? 1 : 0)
+        + (PredictsWideStartBind(plan, context) ? 1 : 0)
         + plan.Filters.Count
         + (plan.Mode is PanelMode.Ranked or PanelMode.RankedTimeSeries ? 1 : 0);
+
+    /// <summary>The #4689 rule from intent alone: a wide-eligible run whose common start is later than the
+    /// window start, reading the Query Store table. Not read back from the compiler's parameters.</summary>
+    internal static bool PredictsWideStartBind(PanelPlan plan, ComposeRunContext context) =>
+        context.QueryStoreWideEligible
+        && context.QueryStoreWideStart is DateTime wideStart
+        && wideStart > context.StartUtc
+        && string.Equals(plan.Measure.SourceTable, "query_store_stats", StringComparison.Ordinal);
 
     /// <summary>
     /// The same prediction for an annotation query, whose whole parameter set is the window plus the
@@ -234,6 +244,13 @@ public sealed class ComposeParameterCoverageTests
 
         Assert.True(corpus.Any(c => c.UsesVariable), "the corpus compiled no variable-resolved filter");
 
+        /* #4689: the wide-start bind must be in the population, both bound and (for a start that is not later)
+           not bound, or the sweep could lose the rule without noticing. */
+        Assert.True(corpus.Any(c => c.WideStartBound), "the corpus compiled no statement carrying the Query Store wide-start bind");
+        Assert.True(
+            corpus.Any(c => !c.WideStartBound && c.Label.Contains(" wide:", StringComparison.Ordinal)),
+            "the corpus compiled no wide-eligible Query Store statement whose start was not later than the window");
+
         /* Parameter-free statements cannot exhibit the defect, so a corpus that had quietly become all
            fleet-wide-scalar would pass the sweep having asserted nothing about binding at all. */
         Assert.True(
@@ -311,11 +328,12 @@ public sealed class ComposeParameterCoverageTests
     /// <summary>
     /// <see cref="PredictedParameterCount"/> restates a rule that lives in another file, so it can be
     /// outgrown. This counts the <c>ParamList</c> call sites in <c>ComposeCompiler.cs</c> and pins the
-    /// total: fifteen, which is the three window/scope binds and one <c>topN</c> per ranked arm in
-    /// <c>Compile</c>, the seven <c>BuildFilterClause</c> operator arms, and the three window/scope binds in
+    /// total: sixteen, which is the three window/scope binds and one <c>topN</c> per ranked arm in
+    /// <c>Compile</c>, the Query Store wide-start bind in <c>Compile</c> when the run reads the interval table
+    /// from a later start, the seven <c>BuildFilterClause</c> operator arms, and the three window/scope binds in
     /// <c>CompileAnnotation</c>.
     ///
-    /// <para>A sixteenth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
+    /// <para>A seventeenth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
     /// whether the prediction grows with it — rather than in the sweep, where it would read as a compiler
     /// bug. Comments and string literals are stripped first, because this file's reasoning names
     /// <c>p.AddTextArray</c> in prose.</para>
@@ -334,7 +352,7 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        Assert.Equal(15, sites);
+        Assert.Equal(16, sites);
     }
 
     /// <summary>
@@ -389,7 +407,8 @@ public sealed class ComposeParameterCoverageTests
         string? Measure,
         string? Annotation,
         string? FilterOp,
-        bool UsesVariable);
+        bool UsesVariable,
+        bool WideStartBound = false);
 
     /// <summary>
     /// Every measure in every mode its archetype and dimensions allow, fleet-wide and server-scoped; every
@@ -495,6 +514,33 @@ public sealed class ComposeParameterCoverageTests
             }
         }
 
+        /* #4689: Query Store statements compiled wide-eligible. A start LATER than the window binds one extra
+           timestamp; a start that is not later binds nothing extra. */
+        foreach (var measure in MeasureCatalog.Measures.Where(m => string.Equals(m.SourceTable, "query_store_stats", StringComparison.Ordinal)))
+        {
+            var keyword = measure.Kind == MeasureKind.Ratio ? "ratio" : "measure";
+            var aggregate = measure.Kind == MeasureKind.Ratio ? null : MeasureCatalog.WireName(measure.ValidAggs[0]);
+            var aggregateJson = aggregate is null ? "" : $",\"aggregate\":\"{aggregate}\"";
+            var head = $"{{\"source\":\"{measure.SourceTable}\",\"{keyword}\":\"{measure.Key}\"{aggregateJson}";
+            var dimension = measure.AllowedDimensions.Count > 0 ? measure.AllowedDimensions[0] : "server";
+
+            foreach (var wideStart in new DateTime?[] { WindowStart.AddHours(2), WindowStart, WindowStart.AddHours(-1) })
+            {
+                foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+                {
+                    Add(corpus, $"{head},\"timeBucket\":\"hour\",\"viz\":\"line\"}}", servers, measure.Key, wide: (true, wideStart));
+                    Add(corpus, $"{head},\"viz\":\"stat\"}}", servers, measure.Key, wide: (true, wideStart));
+                    Add(corpus, $"{head},\"topN\":5,\"groupBy\":[\"{dimension}\"],\"viz\":\"bar\"}}", servers, measure.Key, wide: (true, wideStart));
+                    Add(
+                        corpus,
+                        $"{head},\"timeBucket\":\"hour\",\"topN\":5,\"groupBy\":[\"{dimension}\"],\"includeOther\":true,\"viz\":\"line\"}}",
+                        servers,
+                        measure.Key,
+                        wide: (true, wideStart));
+                }
+            }
+        }
+
         /* A variable-resolved filter value: the same bind, reached through the $var path rather than a
            literal, so a future divergence between the two resolutions is in the population. */
         Add(
@@ -544,7 +590,8 @@ public sealed class ComposeParameterCoverageTests
         string measureKey,
         string? filterOp = null,
         IReadOnlyDictionary<string, string?>? variables = null,
-        string[]? declaredVariables = null)
+        string[]? declaredVariables = null,
+        (bool Eligible, DateTime? Start)? wide = null)
     {
         var (plan, parseError) = ComposeSpec.TryParsePanel(
             (JsonObject)JsonNode.Parse(json)!,
@@ -557,7 +604,8 @@ public sealed class ComposeParameterCoverageTests
             return;
         }
 
-        var (compiled, compileError) = ComposeCompiler.Compile(plan!, Context(servers, variables));
+        var context = Context(servers, variables, wide);
+        var (compiled, compileError) = ComposeCompiler.Compile(plan!, context);
         if (compileError is not null)
         {
             return;
@@ -565,20 +613,23 @@ public sealed class ComposeParameterCoverageTests
 
         corpus.Add(new Statement(
             $"{measureKey} {plan!.Mode} ({(servers is null ? "fleet" : "scoped")})"
+            + (wide is null ? "" : $" wide:{wide.Value.Start:HH:mm}")
             + (filterOp is null ? "" : $" filter:{filterOp}"),
             compiled!,
-            PredictedParameterCount(plan, servers is not null),
+            PredictedParameterCount(plan, servers is not null, context),
             plan.Mode,
             servers is not null,
             measureKey,
             Annotation: null,
             filterOp,
-            variables is not null));
+            variables is not null,
+            PredictsWideStartBind(plan, context)));
     }
 
     private static ComposeRunContext Context(
         IReadOnlyList<string>? servers,
-        IReadOnlyDictionary<string, string?>? variables) =>
+        IReadOnlyDictionary<string, string?>? variables,
+        (bool Eligible, DateTime? Start)? wide = null) =>
         new(
             servers,
             WindowStart,
@@ -586,7 +637,9 @@ public sealed class ComposeParameterCoverageTests
             variables ?? ComposeRunContext.NoVariables,
             RollupAvailability.All,
             WindowEnd,
-            RollupCoverage.Unknown);
+            RollupCoverage.Unknown,
+            QueryStoreWideEligible: wide?.Eligible ?? false,
+            QueryStoreWideStart: wide?.Start);
 
     /// <summary>The repository root, from this file's own compile-time path — the same anchor
     /// <c>StartupCommandTimeoutTests</c> and <c>ServerLocalReadFrameDisciplineTests</c> use, so the source
