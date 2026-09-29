@@ -1556,7 +1556,7 @@ ORDER BY c.bucket";
     /// daily kept), which a refresh from that source would shrink — never done here.
     /// </summary>
     public static bool PartialDayNeedsRefresh(long? sourceSamples, long? dailySamples) =>
-        sourceSamples is { } source && dailySamples is { } daily && daily < source;
+        sourceSamples.HasValue && dailySamples.HasValue && dailySamples.Value < sourceSamples.Value;
 
     /// <summary>
     /// #4716: the two totals one day is judged on, in ONE statement, read off the MATERIALIZATION hypertables
