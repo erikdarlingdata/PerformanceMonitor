@@ -8,9 +8,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
 
@@ -44,7 +46,9 @@ public sealed class ViewerJobHistoryRow
     public int RunStatus { get; init; }
     public string? RunStatusDesc { get; init; }
 
-    /// <summary>run_datetime de-skewed to naive-UTC in SQL (server-local minus utc_offset_minutes).</summary>
+    /// <summary>run_datetime as naive UTC: the stored server-local time converted with the server's
+    /// <see cref="ServerClock"/> (its time zone where known, else its offset), so a run on either side of a
+    /// daylight-saving change lands at its real UTC time (#4766).</summary>
     public DateTime? RunDateTimeUtc { get; init; }
 
     public long RunDurationSeconds { get; init; }
@@ -92,10 +96,14 @@ public sealed partial class ViewerDataService
     /// windowing on the run time so "last N hours/days" means jobs that RAN in that window (a first-run
     /// backfill of a year of history does not flood a short window the way a collection_time filter would).
     /// <para>
-    /// run_datetime is the monitored server's LOCAL wall clock, so it is DE-SKEWED to naive-UTC in SQL —
-    /// subtracting the collected <c>server_properties.utc_offset_minutes</c> (per-server latest, 0 when none
-    /// yet) — and windowed against the naive-UTC bounds ($1), so the returned timestamps share the viewer's
-    /// UTC frame and render/sort consistently on the tab (the same de-skew the Default Trace reader uses).
+    /// run_datetime is the monitored server's LOCAL wall clock, so it is converted to naive-UTC in C# with
+    /// the server's <see cref="ServerClock"/> (its time zone id where SQL Server reports one, else the
+    /// collected <c>server_properties.utc_offset_minutes</c>, else UTC) and windowed against the naive-UTC
+    /// bound ($1), so the returned timestamps share the viewer's UTC frame and render/sort consistently on
+    /// the tab. The SQL cannot do that conversion (PostgreSQL <c>AT TIME ZONE</c> does not resolve Windows
+    /// zone ids, and one subtracted offset is an hour off on the far side of a daylight-saving change), so it
+    /// pre-filters with the latest offset, widened by an hour, and <see cref="ApplyJobHistoryWindow"/> filters
+    /// exactly after the conversion (#4766).
     /// Long-runtime is computed reader-side via a per-job window function (a step_id 0 outcome exceeding 2x
     /// its job's average successful-outcome duration, floored at 60s), and each row carries its job's last
     /// successful outcome run. With no <paramref name="serverId"/> it aggregates ALL servers (the tab
@@ -108,6 +116,7 @@ public sealed partial class ViewerDataService
         DateTime sinceUtc, int? serverId = null, int limit = 2000, CancellationToken cancellationToken = default)
     {
         var sql = BuildJobHistorySql(serverId.HasValue);
+        var clocks = await GetServerClocksAsync(serverId, cancellationToken);
 
         var rows = new List<ViewerJobHistoryRow>();
 
@@ -124,10 +133,98 @@ public sealed partial class ViewerDataService
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            rows.Add(ReadJobHistoryRow(reader));
+            rows.Add(ReadJobHistoryRow(reader, clocks));
         }
 
-        return rows;
+        return ApplyJobHistoryWindow(rows, sinceUtc, limit);
+    }
+
+    /// <summary>
+    /// The exact window, after the server-local to UTC conversion: keeps the runs at or after
+    /// <paramref name="sinceUtc"/> (the SQL pre-filter is widened by an hour, so a run just before the
+    /// window can still be in the set), orders them newest first by their real UTC time (the SQL orders by
+    /// the latest offset, which is an hour off across a daylight-saving change), and keeps the newest
+    /// <paramref name="limit"/> (#4766).
+    /// </summary>
+    internal static List<ViewerJobHistoryRow> ApplyJobHistoryWindow(List<ViewerJobHistoryRow> rows, DateTime sinceUtc, int limit)
+    {
+        var since = DateTime.SpecifyKind(sinceUtc, DateTimeKind.Unspecified);
+        var kept = new List<ViewerJobHistoryRow>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (row.RunDateTimeUtc is { } runUtc && runUtc >= since)
+            {
+                kept.Add(row);
+            }
+        }
+
+        kept.Sort(static (a, b) =>
+        {
+            var byTime = Nullable.Compare(b.RunDateTimeUtc, a.RunDateTimeUtc);
+            return byTime != 0 ? byTime : b.InstanceId.CompareTo(a.InstanceId);
+        });
+
+        if (limit >= 0 && kept.Count > limit)
+        {
+            kept.RemoveRange(limit, kept.Count - limit);
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// Each server's clock from its newest <c>server_properties</c> row that has an offset (the time zone id
+    /// alongside it where the store has the V134 column, else the offset alone), keyed by server id. A server
+    /// with no row is absent, and its stored times are read as UTC — what the old SQL's <c>COALESCE(..., 0)</c>
+    /// did. With <paramref name="serverId"/> it reads that one server (#4766).
+    /// </summary>
+    internal async Task<Dictionary<int, ServerClock>> GetServerClocksAsync(int? serverId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ReadServerClocksAsync(BuildServerClocksSql(serverId.HasValue, withZone: true), serverId, withZone: true, cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            /* A store below V134 has no time_zone_id: read the offset alone, as this read did before. */
+            return await ReadServerClocksAsync(BuildServerClocksSql(serverId.HasValue, withZone: false), serverId, withZone: false, cancellationToken);
+        }
+    }
+
+    internal static string BuildServerClocksSql(bool scopedToServer, bool withZone)
+    {
+        var zone = withZone ? ",\n    time_zone_id" : "";
+        var scope = scopedToServer ? "AND   server_id = $1\n" : "";
+        return $@"
+SELECT DISTINCT ON (server_id)
+    server_id,
+    utc_offset_minutes{zone}
+FROM server_properties
+WHERE utc_offset_minutes IS NOT NULL
+{scope}ORDER BY server_id, collection_time DESC";
+    }
+
+    private async Task<Dictionary<int, ServerClock>> ReadServerClocksAsync(
+        string sql, int? serverId, bool withZone, CancellationToken cancellationToken)
+    {
+        var clocks = new Dictionary<int, ServerClock>();
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+        if (serverId.HasValue)
+        {
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId.Value });
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            clocks[reader.GetInt32(0)] = ServerClock.Resolve(
+                withZone && !reader.IsDBNull(2) ? reader.GetString(2) : null,
+                reader.IsDBNull(1) ? null : reader.GetInt32(1));
+        }
+
+        return clocks;
     }
 
     /// <summary>
@@ -221,7 +318,8 @@ top_by_server AS (
         top.step_name,
         top.run_status,
         top.run_status_desc,
-        top.run_datetime - make_interval(mins => so.offset_minutes) AS run_datetime_utc,
+        top.run_datetime AS run_datetime_local,
+        top.run_datetime - make_interval(mins => so.offset_minutes) AS approx_run_utc,
         top.run_duration_seconds,
         top.retries_attempted,
         top.message
@@ -245,7 +343,7 @@ top_by_server AS (
         FROM job_history AS jh
         WHERE jh.server_id = so.server_id
         AND   jh.collection_time >= {floorParam}
-        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes)
+        AND   jh.run_datetime >= $1 + make_interval(mins => so.offset_minutes) - interval '1 hour'
         ORDER BY jh.run_datetime DESC, jh.instance_id DESC
         LIMIT {limitParam}
     ) AS top
@@ -253,7 +351,7 @@ top_by_server AS (
 base AS (
     SELECT *
     FROM top_by_server
-    ORDER BY run_datetime_utc DESC, instance_id DESC
+    ORDER BY approx_run_utc DESC, instance_id DESC
     LIMIT {limitParam}
 ),
 job_stats AS (
@@ -261,14 +359,14 @@ job_stats AS (
         so.server_id,
         js.job_id,
         js.avg_success_duration,
-        js.last_success_run_utc
+        js.last_success_run_local
     FROM (SELECT DISTINCT server_id FROM base) AS b
     JOIN server_offsets AS so ON so.server_id = b.server_id
     CROSS JOIN LATERAL (
         SELECT
             jh.job_id,
             AVG(jh.run_duration_seconds) AS avg_success_duration,
-            MAX(jh.run_datetime - make_interval(mins => so.offset_minutes)) AS last_success_run_utc
+            MAX(jh.run_datetime) AS last_success_run_local
         FROM job_history AS jh
         WHERE jh.server_id = so.server_id
         AND   jh.step_id = 0
@@ -291,11 +389,11 @@ SELECT
     base.step_name,
     base.run_status,
     base.run_status_desc,
-    base.run_datetime_utc,
+    base.run_datetime_local,
     base.run_duration_seconds,
     base.retries_attempted,
     base.message,
-    job_stats.last_success_run_utc,
+    job_stats.last_success_run_local,
     CASE
         WHEN base.step_id = 0
         AND  job_stats.avg_success_duration IS NOT NULL
@@ -309,14 +407,20 @@ FROM base
 LEFT JOIN job_stats
     ON  job_stats.server_id = base.server_id
     AND job_stats.job_id = base.job_id
-ORDER BY base.run_datetime_utc DESC, base.instance_id DESC";
+ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     }
 
-    /// <summary>Maps one row of <see cref="BuildJobHistorySql"/>'s result set.</summary>
-    private static ViewerJobHistoryRow ReadJobHistoryRow(NpgsqlDataReader reader) =>
-        new()
+    /// <summary>Maps one row of <see cref="BuildJobHistorySql"/>'s result set. The run time and the last
+    /// successful run arrive as the server's own wall clock; they leave as naive UTC, converted with that
+    /// server's clock from <paramref name="clocks"/> (UTC when it has none).</summary>
+    internal static ViewerJobHistoryRow ReadJobHistoryRow(DbDataReader reader, IReadOnlyDictionary<int, ServerClock> clocks)
+    {
+        var serverId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
+        var clock = clocks.TryGetValue(serverId, out var known) ? known : ServerClock.Utc;
+
+        return new()
         {
-            ServerId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+            ServerId = serverId,
             ServerName = reader.IsDBNull(1) ? "" : reader.GetString(1),
             InstanceId = reader.IsDBNull(2) ? 0 : reader.GetInt64(2),
             JobId = reader.IsDBNull(3) ? "" : reader.GetString(3),
@@ -327,13 +431,14 @@ ORDER BY base.run_datetime_utc DESC, base.instance_id DESC";
             StepName = reader.IsDBNull(8) ? null : reader.GetString(8),
             RunStatus = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
             RunStatusDesc = reader.IsDBNull(10) ? null : reader.GetString(10),
-            RunDateTimeUtc = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+            RunDateTimeUtc = reader.IsDBNull(11) ? null : clock.ToUtc(reader.GetDateTime(11)),
             RunDurationSeconds = reader.IsDBNull(12) ? 0 : reader.GetInt64(12),
             RetriesAttempted = reader.IsDBNull(13) ? 0 : reader.GetInt32(13),
             Message = reader.IsDBNull(14) ? null : reader.GetString(14),
-            LastSuccessfulRunUtc = reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+            LastSuccessfulRunUtc = reader.IsDBNull(15) ? null : clock.ToUtc(reader.GetDateTime(15)),
             IsLongRunning = !reader.IsDBNull(16) && reader.GetBoolean(16),
         };
+    }
 
     /// <summary>
     /// The latest SQL Agent status snapshot per server (issue #1433 Phase 2) — Running/Stopped, startup
