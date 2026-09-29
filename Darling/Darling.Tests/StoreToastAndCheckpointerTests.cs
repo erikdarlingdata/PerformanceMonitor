@@ -1097,6 +1097,158 @@ public sealed class StoreToastAndCheckpointerTests
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, recovered.MetricName);
     }
 
+    /* ---- #4823: one long sync inside an hour whose average is under the bar --------------------------------- */
+
+    private static readonly DateTime LongSyncMinute = new(2026, 9, 20, 12, 41, 0, DateTimeKind.Utc);
+
+    /// <summary>
+    /// The field case behind #4823. Four checkpoints in the hour, one of them synced for 23,542 ms and the other
+    /// three next to nothing: the hour's average is 5.9 s, under the 10 s bar, so the average arm judged it clean
+    /// while collection stalled on every server. The once-a-minute sample saw the 23,542 ms sync in one minute; the
+    /// alert must fire on it and name how long it took and in which minute (UTC).
+    /// </summary>
+    [Fact]
+    public async Task CheckpointerPressure_OneLongSyncAmongFourCheckpoints_FiresAndNamesTheSyncAndItsMinute()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        var hour = Interval(syncMs: 23_542, requested: 0, timed: 4);
+        Assert.Equal(4, hour.CheckpointCount);
+        Assert.True(hour.AverageSyncMsPerCheckpoint < DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
+        Assert.False(hour.IsPressure);
+
+        await e.ApplyCheckpointerPressureAsync(hour, Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
+        Assert.Null(fired.Severity);
+        Assert.Equal("checkpointer", fired.ServerKey);
+        Assert.Equal(23_542, fired.NumericCurrentValue);
+        Assert.Equal(10_000, fired.NumericThresholdValue);
+
+        foreach (var text in new[] { fired.CurrentValue, fired.ShortMessage!, fired.DetailText! })
+        {
+            Assert.Contains("23.5s", text, StringComparison.Ordinal);
+            Assert.Contains("12:41 UTC", text, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("over 4 checkpoint(s) in 60.0 min", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.DoesNotContain("requested", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("single checkpoint sync > 10s", fired.ThresholdValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_ALongestSyncOf800Ms_WithTheSameAverage_StaysQuiet()
+    {
+        var hour = Interval(syncMs: 23_542, requested: 0, timed: 4);
+
+        /* The same hour, but the longest single sync the minute samples saw was 800 ms: nothing to say. */
+        var small = new Harness();
+        await small.Build().ApplyCheckpointerPressureAsync(hour, Ct, new CheckpointSyncMax(LongSyncMinute, 800));
+        Assert.Empty(small.Deliverer.Outcomes);
+        Assert.Empty(small.History.Records);
+
+        /* No sample at all (the sampler was just started, or every read of the window failed): the average and
+           requested arms decide alone, exactly as before. */
+        var unsampled = new Harness();
+        await unsampled.Build().ApplyCheckpointerPressureAsync(hour, Ct, longestSync: null);
+        Assert.Empty(unsampled.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_TheLongestSyncBar_IsPastTheBar_NotAtIt()
+    {
+        var hour = Interval(syncMs: 23_542, requested: 0, timed: 4);
+
+        /* Exactly the bar is quiet (over it, like the average arm); a millisecond past it fires. */
+        var atBar = new Harness();
+        await atBar.Build().ApplyCheckpointerPressureAsync(hour, Ct, new CheckpointSyncMax(LongSyncMinute, 10_000));
+        Assert.Empty(atBar.Deliverer.Outcomes);
+
+        var pastBar = new Harness();
+        await pastBar.Build().ApplyCheckpointerPressureAsync(hour, Ct, new CheckpointSyncMax(LongSyncMinute, 10_001));
+        Assert.Single(pastBar.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_ALongSyncHour_ResolvesOnTheNextQuietHour()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 23_542, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+        Assert.Single(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        /* The next hour: average under the bar, nothing requested, longest sync 800 ms. One Recovered row, which
+           carries the hour's longest sync beside the average. */
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 1_200, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute.AddHours(1), 800));
+        var recovered = Assert.Single(h.History.Records);
+        Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, recovered.MetricName);
+        Assert.Contains("0.8s", recovered.DetailText!, StringComparison.Ordinal);
+
+        /* A second quiet hour resolves nothing twice. */
+        await e.ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 1_200, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute.AddHours(2), 800));
+        Assert.Single(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_ALongSyncHour_KeepsAStandingAlertStanding_WhileTheAverageReadsClean()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        await e.ApplyCheckpointerPressureAsync(Interval(syncMs: 25_200, requested: 0, timed: 1), Ct);
+        Assert.Single(h.Deliverer.Outcomes);
+
+        /* The next hour's average is clean, but a 23.5 s sync is still in it: not a clean hour, so no Recovered row. */
+        h.Clock = h.Clock.AddHours(1);
+        await e.ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 23_542, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+        Assert.Empty(h.History.Records);
+        Assert.Equal(2, h.Deliverer.Outcomes.Count);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_WhenEveryArmBreaches_TheTextNamesEachOfThem()
+    {
+        var h = new Harness();
+
+        /* 3 timed + 1 requested checkpoint, 60 s of sync: a 15.0 s average, one requested, and a 23.5 s longest. */
+        await h.Build().ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 60_000, requested: 1, timed: 3), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+
+        var fired = Assert.Single(h.Deliverer.Outcomes);
+        Assert.Contains("average sync 15.0s per checkpoint", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("23.5s", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("12:41 UTC", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Contains("1 requested checkpoint(s)", fired.CurrentValue, StringComparison.Ordinal);
+        Assert.Equal(23_542, fired.NumericCurrentValue);
+    }
+
+    [Fact]
+    public async Task CheckpointerPressure_ALongSyncInAnIntervalThatIsNotMeasured_NeitherFiresNorResolves()
+    {
+        /* A restart-spanning interval carries the shutdown checkpoint's sync in the very counters the minute
+           samples difference (#3955), so the long sync is not judged there either. */
+        var h = new Harness();
+        await h.Build().ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 800, requested: 2, restarted: true), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+
+        var off = new Harness();
+        off.Settings.AlertsEnabled = false;
+        await off.Build().ApplyCheckpointerPressureAsync(
+            Interval(syncMs: 23_542, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+        Assert.Empty(off.Deliverer.Outcomes);
+    }
+
     [Fact]
     public void TheWorker_EvaluatesBothOnTheStoreSelfMetricsTick_AfterTheSweep()
     {
@@ -1106,7 +1258,7 @@ public sealed class StoreToastAndCheckpointerTests
         var tick = worker.IndexOf("if (DateTime.UtcNow >= _nextStoreMetricsUtc)", StringComparison.Ordinal);
         var sweep = worker.IndexOf("await SweepStoreSelfMetricsAsync(stoppingToken);", tick, StringComparison.Ordinal);
         var toast = worker.IndexOf("await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);", sweep, StringComparison.Ordinal);
-        var checkpointer = worker.IndexOf("await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);", toast, StringComparison.Ordinal);
+        var checkpointer = worker.IndexOf("await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken, _checkpointSyncSampler.TakeWindowMax());", toast, StringComparison.Ordinal);
         var nextTick = worker.IndexOf("await Task.Delay(s_sweepInterval, stoppingToken);", tick, StringComparison.Ordinal);
 
         Assert.True(tick >= 0 && sweep > tick && toast > sweep && checkpointer > toast && checkpointer < nextTick,

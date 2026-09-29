@@ -6032,7 +6032,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// checkpointer row, and differences it against the one before through the SAME reader
     /// <c>get_store_metrics</c> publishes from. Same failure isolation and master gate.
     /// </summary>
-    public async Task EvaluateCheckpointerPressureAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    public async Task EvaluateCheckpointerPressureAsync(
+        NpgsqlDataSource postgres, CancellationToken cancellationToken, CheckpointSyncMax? longestSync = null)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -6052,7 +6053,7 @@ internal sealed class DarlingSelfAlertEvaluator
             return;
         }
 
-        await ApplyCheckpointerPressureAsync(reading, cancellationToken);
+        await ApplyCheckpointerPressureAsync(reading, cancellationToken, longestSync);
     }
 
     /// <summary>
@@ -6089,7 +6090,8 @@ internal sealed class DarlingSelfAlertEvaluator
     /// restart; the next interval is judged normally.</para>
     /// </summary>
     internal async Task ApplyCheckpointerPressureAsync(
-        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken)
+        Mcp.DarlingStoreMetricsReader.CheckpointerReading reading, CancellationToken cancellationToken,
+        CheckpointSyncMax? longestSync = null)
     {
         if (reading is null)
         {
