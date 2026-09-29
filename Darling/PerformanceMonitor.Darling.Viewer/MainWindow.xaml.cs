@@ -1744,8 +1744,13 @@ public partial class MainWindow : Window
                 windowEmpty: analysisState?.WindowEmpty == true,
                 windowEmptyMessage: analysisState?.Message));
 
+        /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
+           the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display
+           mode, so it was wrong in Server and UTC modes; and its time went through the process-wide clock the
+           last server tab set, which may be another server's. */
         RecommendationsStatusText.Text = rows.Count > 0
-            ? $"Last analyzed {rows[0].AnalysisTimeLocal:yyyy-MM-dd HH:mm:ss} (local)"
+            ? RecommendationsViewModel.FormatLastAnalyzed(
+                rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode, serverClock)
             : string.Empty;
         StatusText.Text = $"{server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}";
     }

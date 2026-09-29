@@ -7,11 +7,13 @@
  */
 
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Viewer;
+using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -27,6 +29,9 @@ namespace Darling.Tests;
 /// and the fall change is 1 November (02:00 EDT becomes 01:00 EST at 06:00 UTC). These are the same cases as
 /// Lite's <c>LiteRecommendationServerClockTests</c>.</para>
 /// </summary>
+/* Serialized with the other classes that read or set the process-wide ViewerTimeHelper statics: the status-line
+   tests below set ActiveServerClock and CurrentDisplayMode to prove the line ignores them. */
+[Collection("viewer-time-statics")]
 public sealed class ViewerRecommendationServerClockTests
 {
     /* The dash between the two ends of the window in the prompt text. */
@@ -195,5 +200,94 @@ public sealed class ViewerRecommendationServerClockTests
             new Regex(@"ViewerDataService\s*\.\s*ClockFor\(\s*await\s+_dataService\s*\.\s*GetServerClocksAsync\(\s*server\s*\.\s*ServerId\s*,[^;]*,\s*server\s*\.\s*ServerId\s*\)"),
             body);
         Assert.Matches(new Regex(@"FromFindings\(\s*rows\s*,\s*server\s*\.\s*DisplayName\s*,\s*serverClock\s*,"), body);
+    }
+
+    // ── the status line names the display mode its time is in ────────────────────
+
+    /// <summary>
+    /// The line under the Recommendations tab, "Last analyzed ...", showed a time that follows the display mode
+    /// (Server, Local or UTC) and always ended in "(local)". It now ends in the zone the time is in, taken from
+    /// the same mode and clock that produced the time.
+    /// </summary>
+    [Theory]
+    [InlineData(TimeDisplayMode.ServerTime)]
+    [InlineData(TimeDisplayMode.UTC)]
+    [InlineData(TimeDisplayMode.LocalTime)]
+    public void LastAnalyzed_NamesTheDisplayModeItsTimeIsIn(TimeDisplayMode mode)
+    {
+        var analyzed = Utc(2026, 7, 15, 14, 0);
+        var machine = TimeZoneInfo.Local;
+
+        var (time, zone) = mode switch
+        {
+            /* 14:00 UTC is 10:00 on a US Eastern server in July, which is on daylight time. */
+            TimeDisplayMode.ServerTime => ("2026-07-15 10:00:00", "UTC-4:00"),
+            TimeDisplayMode.UTC => ("2026-07-15 14:00:00", "UTC"),
+            _ => (
+                TimeZoneInfo.ConvertTimeFromUtc(analyzed, machine).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+                machine.IsDaylightSavingTime(analyzed) ? machine.DaylightName : machine.StandardName),
+        };
+
+        var text = WithAnotherServersClockActive(() => RecommendationsViewModel.FormatLastAnalyzed(analyzed, mode, Eastern));
+
+        Assert.Equal($"Last analyzed {time} ({zone})", text);
+    }
+
+    [Fact]
+    public void LastAnalyzed_InServerMode_ShowsTheSelectedServersOwnTimeAndOffset_WhateverClockTheLastServerTabSet()
+    {
+        var (winter, summer) = WithAnotherServersClockActive(() => (
+            RecommendationsViewModel.FormatLastAnalyzed(Utc(2026, 1, 15, 14, 0), TimeDisplayMode.ServerTime, Eastern),
+            RecommendationsViewModel.FormatLastAnalyzed(Utc(2026, 7, 15, 14, 0), TimeDisplayMode.ServerTime, Eastern)));
+
+        Assert.Equal("Last analyzed 2026-01-15 09:00:00 (UTC-5:00)", winter);
+        Assert.Equal("Last analyzed 2026-07-15 10:00:00 (UTC-4:00)", summer);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="read"/> while the process-wide clock is another server's (India, +05:30, no daylight
+    /// saving) and the process-wide mode is UTC: what a viewer holds after a different server's tab rendered last.
+    /// The status line must not read either, so a formatter that went back through
+    /// <c>ViewerTimeHelper.ForDisplay</c> would show India's time here. Both statics are restored.
+    /// </summary>
+    private static T WithAnotherServersClockActive<T>(Func<T> read)
+    {
+        var savedClock = ViewerTimeHelper.ActiveServerClock;
+        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
+        try
+        {
+            ViewerTimeHelper.ActiveServerClock = ServerClock.FixedOffset(330);
+            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+            return read();
+        }
+        finally
+        {
+            ViewerTimeHelper.ActiveServerClock = savedClock;
+            ViewerTimeHelper.CurrentDisplayMode = savedMode;
+        }
+    }
+
+    /// <summary>
+    /// The tab is a WPF window this suite does not instantiate, so this is a source pin on the loader: the status
+    /// line goes through <c>FormatLastAnalyzed</c> with the display mode in force and the selected server's clock,
+    /// and the loader holds no "Last analyzed" text of its own that could end in a fixed zone name.
+    /// </summary>
+    [Fact]
+    public void TheRecommendationsLoader_BuildsTheStatusLineFromTheDisplayModeAndTheSelectedServersClock()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Viewer", "MainWindow.xaml.cs");
+        var source = CSharpSourceWalker.StripCommentsAndStrings(raw);
+
+        var signature = source.IndexOf("Task LoadRecommendationsAsync()", StringComparison.Ordinal);
+        Assert.True(signature >= 0, "LoadRecommendationsAsync is gone, so this pin would read nothing.");
+        var open = source.IndexOf('{', signature);
+        var body = CSharpSourceWalker.BraceBalanced(source, open);
+
+        Assert.Matches(
+            new Regex(@"RecommendationsStatusText\s*\.\s*Text\s*=\s*rows\s*\.\s*Count\s*>\s*0\s*\?\s*RecommendationsViewModel\s*\.\s*FormatLastAnalyzed\(\s*rows\[0\]\s*\.\s*Finding\s*\.\s*AnalysisTime\s*,\s*ViewerTimeHelper\s*\.\s*CurrentDisplayMode\s*,\s*serverClock\s*\)"),
+            body);
+
+        var literals = CSharpSourceWalker.StringLiteralBodies(raw.Substring(open, body.Length)).Select(l => l.Text);
+        Assert.DoesNotContain(literals, l => l.Contains("Last analyzed", StringComparison.Ordinal));
     }
 }

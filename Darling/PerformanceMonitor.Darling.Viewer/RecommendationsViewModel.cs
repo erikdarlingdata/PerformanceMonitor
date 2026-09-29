@@ -13,6 +13,7 @@ using System.Linq;
 using System.Text;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Ui;
 
 namespace PerformanceMonitor.Darling.Viewer;
 
@@ -698,7 +699,7 @@ public sealed class RecommendationsViewModel
     /// <summary>
     /// Builds the MCP investigation prompt "Ask AI" copies to the clipboard for a finding. Pure (no
     /// WPF / clock) so the interpolation is unit-testable. The window times are formatted in whatever
-    /// timezone the caller passed (the card passes viewer-local). Ported verbatim from Lite's prompt
+    /// timezone the caller passed (the card passes server-local). Ported verbatim from Lite's prompt
     /// (RecommendationsTab AskAi_Click -> LiteRecommendationsViewModel.BuildAskAiPrompt).
     /// </summary>
     public static string BuildAskAiPrompt(string serverName, string title, DateTime from, DateTime to)
@@ -710,6 +711,22 @@ public sealed class RecommendationsViewModel
             "get_analysis_findings and the relevant wait/blocking/memory tools, then tell me the " +
             "likely cause and what to do.",
             serverName, title, from, to);
+    }
+
+    /// <summary>
+    /// The Recommendations tab's status line: when the newest analysis batch ran, in the display mode the user
+    /// picked and followed by that mode's zone, so "10:00:00 (UTC-4:00)", "14:00:00 (UTC)" and a local time
+    /// with the machine's zone name cannot be read as one another (#4766). It used to end in a fixed "(local)",
+    /// which was wrong in Server and UTC modes. The time is converted on <paramref name="serverClock"/>, the
+    /// selected server's own clock, not the process-wide clock the last server tab set (another server's, when
+    /// the tab was for another server), and the label is taken from the same clock at the same instant, so it
+    /// always names the zone the time beside it is in. Pure (no WPF, no statics) so the text is unit-testable.
+    /// </summary>
+    internal static string FormatLastAnalyzed(DateTime analysisTimeUtc, TimeDisplayMode mode, ServerClock serverClock)
+    {
+        var shown = ViewerTimeHelper.ConvertToDisplay(analysisTimeUtc, mode, serverClock);
+        var zone = ViewerTimeHelper.GetTimezoneLabel(mode, serverClock, analysisTimeUtc);
+        return $"Last analyzed {shown:yyyy-MM-dd HH:mm:ss} ({zone})";
     }
 
     /// <summary>
