@@ -441,7 +441,7 @@ WHERE digest = ANY($1)";
         var digests = new List<byte[]>();
         foreach (var (inlineText, digest) in keptRows)
         {
-            if (inlineText is null && digest is not null && seen.Add(Convert.ToHexString(digest)))
+            if (inlineText is null && digest is not null && seen.Add(DigestKey(digest)))
                 digests.Add(digest);
         }
 
@@ -534,18 +534,24 @@ WHERE digest = ANY($1)";
             worker_ratio = p.WorkerRatio,
             grant_ratio = p.GrantRatio,
             spills_on_some_inputs = p.SpillsOnSomeInputs,
-            query_text = SettledQueryText(p, dimensionText)
+            query_text = SettledQueryText(p.InlineText, p.TextDigest, dimensionText)
         }).ToList();
     }
 
     /// <summary>
-    /// The text the drill-down prints for <paramref name="plan"/>: the view's own <c>COALESCE</c>. Inline text wins
-    /// when it is not NULL, even when empty; otherwise the dimension's text for the plan's digest; a digest with no
-    /// dimension row yet, or no digest at all, reads as empty text rather than dropping the offender.
+    /// The text the drill-down prints for a kept plan: the view's own <c>COALESCE</c>. Inline text wins when it is
+    /// not NULL, even when empty; otherwise the dimension's text for the plan's digest; a digest with no dimension
+    /// row yet, or no digest at all, reads as empty text rather than dropping the offender.
     /// </summary>
-    private static string SettledQueryText(ParameterSensitivePlan plan, Dictionary<string, string> dimensionText) =>
-        plan.InlineText
-        ?? (plan.TextDigest is not null && dimensionText.TryGetValue(Convert.ToHexString(plan.TextDigest), out var text) ? text : "");
+    internal static string SettledQueryText(string? inlineText, byte[]? digest, IReadOnlyDictionary<string, string> dimensionText) =>
+        inlineText
+        ?? (digest is not null && dimensionText.TryGetValue(DigestKey(digest), out var text) ? text : "");
+
+    /// <summary>
+    /// A digest's key in the text <see cref="ReadParameterSensitiveTextAsync"/> returns: its content, since the reader
+    /// hands over a new array for every row.
+    /// </summary>
+    internal static string DigestKey(byte[] digest) => Convert.ToHexString(digest);
 
     /// <summary>
     /// Runs <see cref="ParameterSensitiveTextSql"/> once for <paramref name="digests"/>, on the connection the plans
@@ -568,7 +574,7 @@ WHERE digest = ANY($1)";
         while (await reader.ReadAsync(cancellationToken))
         {
             if (!reader.IsDBNull(1))
-                text[Convert.ToHexString(reader.GetFieldValue<byte[]>(0))] = reader.GetString(1);
+                text[DigestKey(reader.GetFieldValue<byte[]>(0))] = reader.GetString(1);
         }
 
         return text;

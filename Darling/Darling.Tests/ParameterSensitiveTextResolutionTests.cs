@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System.Collections.Generic;
 using PerformanceMonitor.Darling.Analysis;
 using Xunit;
 
@@ -15,7 +16,8 @@ namespace Darling.Tests;
 /// #4821: the parameter-sensitivity drill-down reads its rows before the cap, so it resolves statement text in a
 /// second read, by digest, for the rows the reader keeps (#3902's rule: text for the plans that print, never for the
 /// window's rows). Which digests that read is asked for is decided by <see cref="PgDrillDownCollector.DigestsToResolve"/>,
-/// pure so it is pinned here without a database. The live half, which runs both statements against a real
+/// and the text each kept plan then prints by <see cref="PgDrillDownCollector.SettledQueryText"/>; both are pure, so
+/// they are pinned here without a database. The live half, which runs both statements against a real
 /// store, is <see cref="ParameterSensitiveDrillDownTextLiveTests"/>.
 /// </summary>
 public sealed class ParameterSensitiveTextResolutionTests
@@ -89,5 +91,30 @@ public sealed class ParameterSensitiveTextResolutionTests
 
         Assert.Single(resolved);
         Assert.Equal(Digest(5), resolved[0]);
+    }
+
+    [Fact]
+    public void SettledQueryText_TakesInlineTextFirst_EvenWhenItIsEmpty()
+    {
+        var digest = Digest(1);
+        var dimension = new Dictionary<string, string> { [PgDrillDownCollector.DigestKey(digest)] = "dimension text" };
+
+        Assert.Equal("inline text", PgDrillDownCollector.SettledQueryText("inline text", digest, dimension));
+
+        /* The view's COALESCE let inline text win whenever it was not NULL, empty or not. */
+        Assert.Equal("", PgDrillDownCollector.SettledQueryText("", digest, dimension));
+    }
+
+    [Fact]
+    public void SettledQueryText_FallsBackToTheDimension_ThenToEmptyText()
+    {
+        var dimension = new Dictionary<string, string> { [PgDrillDownCollector.DigestKey(Digest(1))] = "dimension text" };
+
+        /* A new array with the same content finds the row: the reader hands over one per row. */
+        Assert.Equal("dimension text", PgDrillDownCollector.SettledQueryText(null, Digest(1), dimension));
+
+        /* A digest whose dimension row is not there yet still reports its offender, with empty text. */
+        Assert.Equal("", PgDrillDownCollector.SettledQueryText(null, Digest(2), dimension));
+        Assert.Equal("", PgDrillDownCollector.SettledQueryText(null, null, dimension));
     }
 }

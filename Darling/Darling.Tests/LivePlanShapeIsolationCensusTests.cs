@@ -33,7 +33,7 @@ public sealed class LivePlanShapeIsolationCensusTests
         {
             ["DarlingDeltaSeederTests.cs"] = "names the planted rows' own chunks by tableoid and asserts only on those two; leftover chunks can't flip it",
             ["DarlingPgIndexBloatCoverageLivePostgresTests.cs"] = "EXPLAIN appears only in prose; its asserts are census verdict counts, not a plan",
-            ["ParameterSensitiveDrillDownTextLiveTests.cs"] = "counts rows the executed plan resolves against query_text_dim; empty chunks return no rows",
+            ["ParameterSensitiveDrillDownTextLiveTests.cs"] = "counts rows the executed plans resolve against or fetch from query_text_dim; empty chunks return no rows",
             ["PgTargetSeqScanTests.cs"] = "Seq Scan is a node inside plan JSON the test seeds and parses; no store plan is asserted",
             ["PlanRegressionDrillDownReuseLiveTests.cs"] = "sums actual rows from EXPLAIN ANALYZE leaf nodes; empty chunks add 0",
             ["StoreMetricsLatestSkipScanLiveTests.cs"] = "asserts an index on the plain table collect.store_metrics; no hypertable in the plan",
