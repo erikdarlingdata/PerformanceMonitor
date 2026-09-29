@@ -545,7 +545,7 @@ public sealed class DarlingStoreUpgradeTests
             await Assert.ThrowsAsync<IOException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
                 DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
                 () => throw new IOException("postgresql.auto.conf could not be written"),
-                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
                 NullLogger.Instance));
 
             Assert.False(Directory.Exists(store.Retained));
@@ -568,7 +568,7 @@ public sealed class DarlingStoreUpgradeTests
             await Assert.ThrowsAsync<IOException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
                 DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, steps.Add,
                 () => Task.CompletedTask,
-                () => throw new IOException("postgresql.conf could not be written"),
+                _ => throw new IOException("postgresql.conf could not be written"),
                 NullLogger.Instance));
 
             Assert.True(File.Exists(Path.Combine(store.Retained, "PG_VERSION")));
@@ -591,7 +591,7 @@ public sealed class DarlingStoreUpgradeTests
             await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
                 DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
                 () => Task.CompletedTask,
-                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
                 NullLogger.Instance);
 
             Assert.False(Directory.Exists(store.Retained));
@@ -618,7 +618,7 @@ public sealed class DarlingStoreUpgradeTests
             await Assert.ThrowsAsync<TimeoutException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
                 DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
                 () => throw new TimeoutException("postgres -C did not answer"),
-                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
                 NullLogger.Instance));
 
             Assert.False(Directory.Exists(store.Retained));
@@ -647,7 +647,7 @@ public sealed class DarlingStoreUpgradeTests
             await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
                 DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
                 () => Task.CompletedTask,
-                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
                 log);
 
             Assert.Equal(OperatorConf, await File.ReadAllTextAsync(Path.Combine(store.Retained, "postgresql.conf")));
@@ -676,7 +676,7 @@ public sealed class DarlingStoreUpgradeTests
             await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
                 DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, steps.Add,
                 () => Task.CompletedTask,
-                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
                 NullLogger.Instance);
 
             Assert.True(File.Exists(store.SavedConf), $"expected the saved postgresql.conf at {store.SavedConf}");
@@ -701,7 +701,7 @@ public sealed class DarlingStoreUpgradeTests
             await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
                 DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, _ => { },
                 () => Task.CompletedTask,
-                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
                 NullLogger.Instance);
 
             Assert.False(Directory.Exists(store.Retained));
@@ -726,7 +726,7 @@ public sealed class DarlingStoreUpgradeTests
             await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
                 DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, _ => { },
                 () => Task.CompletedTask,
-                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
                 NullLogger.Instance);
 
             Assert.True(File.Exists(store.SavedConf), $"expected the saved postgresql.conf at {store.SavedConf}");
@@ -771,7 +771,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var log = new CapturingLogger();
             var result = await new DarlingStoreUpgrade(log).CarryOperatorConfLinesAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir",
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", savedCopyExists ? savedCopy : null,
                 (exePath, arguments, timeout, token) => Task.FromResult((1, "unrecognized configuration parameter")),
                 CancellationToken.None);
 
@@ -785,6 +785,73 @@ public sealed class DarlingStoreUpgradeTests
         finally
         {
             TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A second or later major upgrade: the postgresql.conf.pre-upgrade the EARLIER upgrade saved is
+    /// still beside the new data directory, and this upgrade's copy cannot replace it (the earlier copy is
+    /// read-only, so File.Copy with overwrite throws). This upgrade's lines then exist only in the retained
+    /// directory, which hard-link mode keeps, and the operator-lines carry's warning has to name that file,
+    /// not the earlier copy that is still there and holds the earlier upgrade's lines. Driven through
+    /// CarryConfAfterSwapAsync, so the path the warning names is the one the save step reported.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_EarlierCopyCannotBeReplaced_OperatorLinesWarningNamesTheRetainedConf()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "A read-only file blocks File.Copy(overwrite: true) on Windows only.");
+
+        const string EarlierCopyText = "include 'darling-managed.conf'\nwork_mem = '1MB'\n";
+        var store = PlantStore(
+            "include 'darling-managed.conf'\n" +
+            "darling_4725_unknown_setting = 'on'\n");
+        File.WriteAllText(Path.Combine(store.NewDataDirectory, "postgresql.conf"), "include 'darling-managed.conf'\n");
+        File.WriteAllText(store.SavedConf, EarlierCopyText);
+        File.SetAttributes(store.SavedConf, FileAttributes.ReadOnly);
+
+        var retainedConf = Path.Combine(store.Retained, "postgresql.conf");
+        var log = new CapturingLogger();
+        var upgrade = new DarlingStoreUpgrade(log);
+        var rejected = -1;
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, _ => { },
+                () => Task.CompletedTask,
+                async linesPath =>
+                {
+                    var result = await upgrade.CarryOperatorConfLinesAsync(
+                        store.Retained, store.NewDataDirectory, "unused-bin-dir", linesPath,
+                        (exePath, arguments, timeout, token) => Task.FromResult((1, "unrecognized configuration parameter")),
+                        CancellationToken.None);
+                    rejected = result.RejectedCount;
+                },
+                log);
+
+            Assert.Equal(1, rejected);
+            Assert.Equal(EarlierCopyText, await File.ReadAllTextAsync(store.SavedConf));
+
+            /* The save step's own warning names the earlier copy (the copy failed against it), so the
+               assertions read the operator-lines warning's own line, not the whole log. */
+            var logText = log.ToString();
+            Assert.Contains("Could not save the pre-upgrade postgresql.conf", logText, StringComparison.Ordinal);
+            var notCarried = Assert.Single(
+                logText.Split('\n'),
+                line => line.Contains("NOT carried: darling_4725_unknown_setting", StringComparison.Ordinal));
+            Assert.Contains($"The original line is kept in {retainedConf}.", notCarried, StringComparison.Ordinal);
+            Assert.DoesNotContain(store.SavedConf, notCarried, StringComparison.Ordinal);
+
+            Assert.True(Directory.Exists(store.Retained), "the retained directory holds the only copy of the lines, so it is kept");
+            Assert.True(File.Exists(retainedConf));
+            Assert.Contains("Kept the pre-upgrade data directory", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Removed the pre-upgrade data directory", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(store.SavedConf))
+            {
+                File.SetAttributes(store.SavedConf, FileAttributes.Normal);
+            }
+
+            TryDeleteTree(store.Root);
         }
     }
 
@@ -2056,7 +2123,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
             var result = await upgrade.CarryOperatorConfLinesAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir",
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", null,
                 (exePath, arguments, timeout, token) => Task.FromResult((0, string.Empty)),
                 CancellationToken.None);
 
@@ -2117,7 +2184,7 @@ public sealed class DarlingStoreUpgradeTests
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log);
             var result = await upgrade.CarryOperatorConfLinesAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None);
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", null, Probe, CancellationToken.None);
 
             Assert.Equal(2, result.CarriedCount);
             Assert.Equal(1, result.RejectedCount);
