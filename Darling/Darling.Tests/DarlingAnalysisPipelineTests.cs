@@ -174,9 +174,13 @@ public sealed class DarlingAnalysisPipelineTests
            queries-at-peak = 2). The reconstructed-chain method's DMV-snapshot fallback runs
            through the shared PgBlockingPairRowQuery.DmvSnapshotSql, already pinned in the
            fact-collector suite. Plus the regressed-queries read's #3953 table twin, which Lite has no
-           store for: its DuckDB keeps no latest-snapshot interval table. */
-        Assert.Equal(LiteDrillDownMethodSurface.Length + 2, PgDrillDownCollector.AllSql.Count);
+           store for: its DuckDB keeps no latest-snapshot interval table. And the parameter-sensitivity
+           drill-down's text read (#4821): its main read runs before the cap, so resolving text there would
+           resolve it for every plan its rough filter passes; Lite carries that text inline and has no such
+           second statement. */
+        Assert.Equal(LiteDrillDownMethodSurface.Length + 3, PgDrillDownCollector.AllSql.Count);
         Assert.Contains(PgDrillDownCollector.RegressedQueriesTableSql, PgDrillDownCollector.AllSql);
+        Assert.Contains(PgDrillDownCollector.ParameterSensitiveTextSql, PgDrillDownCollector.AllSql);
     }
 
     [Fact]
