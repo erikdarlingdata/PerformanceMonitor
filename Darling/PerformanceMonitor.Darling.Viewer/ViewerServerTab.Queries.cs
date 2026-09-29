@@ -210,10 +210,10 @@ public partial class ViewerServerTab
            applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
            the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
            ordinary read (M1) — null tells the gate this end is open. */
-        var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
+        var (rows, widePlan) = await _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc);
+        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan);
         await LoadQueryStoreSlicerAsync(startUtc, endUtc);
         await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
     }
@@ -226,8 +226,36 @@ public partial class ViewerServerTab
     /// form, in <see cref="ViewerTimeHelper.ForDisplay"/>'s own <c>yyyy-MM-dd HH:mm</c>, the format every trend
     /// chart title already uses for a head timestamp.
     /// </summary>
-    internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null)
+    internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
+        QueryStoreIntervalWide.WideReadPlan? widePlan = null)
     {
+        /* #4689: when the interval table served, the rows start at the plan's EffectiveStart, not at raw's
+           floor. The banner names that start and the bound that set it; the slicer still reads raw, so a
+           truncated raw floor is named beside it. The raw route's banner below is unchanged. */
+        if (widePlan?.EffectiveStart is DateTime wideStart)
+        {
+            var wideTruncated = RawWindowFloor.IsTruncated(wideStart, requestedStartUtc);
+            if (wideTruncated || !string.IsNullOrEmpty(tierSuffix))
+            {
+                var text = wideTruncated
+                    ? $"Showing since {ViewerTimeHelper.ForDisplay(wideStart):yyyy-MM-dd HH:mm}{WideStartReason(widePlan.Value.StartBound)}"
+                    : $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}";
+                if (wideTruncated && RawWindowFloor.IsTruncated(floor, requestedStartUtc))
+                {
+                    text += $" · slicer since {ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc)):yyyy-MM-dd HH:mm}";
+                }
+
+                banner.Text = text + tierSuffix;
+                banner.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                banner.Visibility = Visibility.Collapsed;
+            }
+
+            return;
+        }
+
         var truncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
         /* #4231 stage 3: the raw-floor truncation and the hourly-tier suffix are independent facts (a window
            can be BOTH aged past raw's floor and routed to the hourly rollup) — so the banner shows whenever
@@ -243,6 +271,15 @@ public partial class ViewerServerTab
             : $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}{tierSuffix}";
         banner.Visibility = Visibility.Visible;
     }
+
+    /// <summary>The parenthesised reason a table-served grid names for where its rows start, or nothing when the
+    /// window's own start or raw's floor set it.</summary>
+    private static string WideStartReason(QueryStoreIntervalWide.WideStartBound bound) => bound switch
+    {
+        QueryStoreIntervalWide.WideStartBound.FilledSince => " (interval table complete from then)",
+        QueryStoreIntervalWide.WideStartBound.TablePurgeEdge => " (interval table keeps 9 days)",
+        _ => "",
+    };
 
     /// <summary>
     /// Loads the Query Store Regressions grid — the Dashboard's regressions view (baseline-vs-recent Query
