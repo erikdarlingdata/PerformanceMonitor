@@ -152,7 +152,8 @@ public sealed class ChartCsvExportDisplayZoneTests
 
     /// <summary>
     /// The "Last refresh" line prints the refresh instant read in the tab's display zone, the zone its label
-    /// names, and no longer the machine's clock (<c>DateTime.Now</c>) under a label for another zone.
+    /// names, and no longer the machine's clock (<c>DateTime.Now</c>) under a label for another zone. The instant is
+    /// <c>DateTime.UtcNow</c> read once, straight or through a local the label shares.
     /// </summary>
     [Fact]
     public void TheLastRefreshLine_ShowsTheRefreshInstantInTheDisplayZone_NotTheMachinesClock()
@@ -167,9 +168,16 @@ public sealed class ChartCsvExportDisplayZoneTests
         var shown = Regex.Match(line, @"\{(\w+):HH:mm:ss\}");
         Assert.True(shown.Success, $"the line should print its time as a named value: {line}");
         var name = Regex.Escape(shown.Groups[1].Value);
-        Assert.Matches(
-            new Regex(@"\bvar\s+" + name + @"\s*=\s*(?:PerformanceMonitor\.Ui\.)?DisplayZone\.ToDisplay\(\s*DateTime\.UtcNow\s*,\s*GetPickerZone\(\)\s*\)\s*;"),
-            code);
+        var shownFrom = Regex.Match(
+            code,
+            @"\bvar\s+" + name + @"\s*=\s*(?:PerformanceMonitor\.Ui\.)?DisplayZone\.ToDisplay\(\s*(\w+(?:\.\w+)*)\s*,\s*GetPickerZone\(\)\s*\)\s*;");
+        Assert.True(shownFrom.Success, $"the time should be DisplayZone.ToDisplay(<the refresh instant>, GetPickerZone()): {line}");
+
+        var instant = shownFrom.Groups[1].Value;
+        if (instant != "DateTime.UtcNow")
+        {
+            Assert.Matches(new Regex(@"\bvar\s+" + Regex.Escape(instant) + @"\s*=\s*DateTime\.UtcNow\s*;"), code);
+        }
     }
 
     /// <summary>The text of the call whose opening parenthesis is at <paramref name="open"/>, arguments included.</summary>

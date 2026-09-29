@@ -251,6 +251,52 @@ public sealed class DisplayZoneTextFrameTests : IDisposable
             drill);
     }
 
+    /// <summary>
+    /// The shared time hook is gone from Lite: no source file assigns <c>UiTimeContext.ConvertForDisplay</c> or
+    /// draws the old axis (<c>DateTimeTicksBottomDateChange</c>), whose labels went through it, and every
+    /// <c>ChartHoverHelper</c> is built with a display zone, so a hover words the plotted instant in the zone the
+    /// ticks use and not through the process-wide mode.
+    /// </summary>
+    [Fact]
+    public void NoLiteSourceFile_AssignsTheSharedTimeHook_DrawsTheOldAxis_OrBuildsAHoverWithoutAZone()
+    {
+        var lite = Path.GetFullPath(Path.Combine(ControlsFolder(), ".."));
+        var offenders = new List<string>();
+        var hovers = 0;
+        foreach (var file in Directory.EnumerateFiles(lite, "*.cs", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(lite, file);
+            var top = relative.Split(Path.DirectorySeparatorChar)[0];
+            if (top is "obj" or "bin")
+            {
+                continue;
+            }
+
+            var code = CodeOnly(File.ReadAllText(file));
+            if (Regex.IsMatch(code, @"\bUiTimeContext\s*\.\s*ConvertForDisplay\s*="))
+            {
+                offenders.Add($"{relative}: assigns UiTimeContext.ConvertForDisplay");
+            }
+
+            if (Regex.IsMatch(code, @"\bDateTimeTicksBottomDateChange\s*\("))
+            {
+                offenders.Add($"{relative}: DateTimeTicksBottomDateChange(");
+            }
+
+            foreach (Match m in Regex.Matches(code, @"new\s+ChartHoverHelper\s*\(([^;]*?)\)\s*;"))
+            {
+                hovers++;
+                if (!Regex.IsMatch(m.Groups[1].Value, @"\bdisplayZone\b"))
+                {
+                    offenders.Add($"{relative} (code line {Line(code, m.Index)}): ChartHoverHelper without displayZone");
+                }
+            }
+        }
+
+        Assert.True(hovers >= 40, $"expected the tab's hover helpers, found {hovers}.");
+        Assert.True(offenders.Count == 0, "still on the old time frame: " + string.Join(", ", offenders));
+    }
+
     private static IEnumerable<(string Name, string Code)> ServerTabCode()
     {
         var files = Directory.GetFiles(ControlsFolder(), "ServerTab*.cs");
