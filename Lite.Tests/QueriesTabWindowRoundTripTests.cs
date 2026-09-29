@@ -30,6 +30,11 @@ namespace PerformanceMonitorLite.Tests;
 /// bound in any season). US Eastern, 2026: the spring-forward is 8 March (07:00 UTC) and the fall-back is
 /// 1 November (06:00 UTC).</para>
 /// </summary>
+/* Reads none of ServerTimeHelper's shared settings: every call passes its clock and its display mode. It carries the
+   collection anyway because ServerTimeHelperCollectionTests matches on the member names, which cannot tell these
+   explicit overloads from the ones that read the process-wide clock, and a later edit here that used one would
+   otherwise race the classes that write it. */
+[Collection("server-time-helper")]
 public sealed class QueriesTabWindowRoundTripTests
 {
     private const string EasternZone = "Eastern Standard Time";
