@@ -1861,9 +1861,10 @@ public class QueryStatsHistoryRow
     /// in any grid.
     /// </summary>
     public Func<TimeZoneInfo>? Zone { get; set; }
-    /* CreationTimeLocal and LastExecutionTimeLocal (or CachedTimeLocal) below are the SQL server's own wall clock, not
-       an instant: they stay on FormatServerClock, which shows them as they stand in Server mode. Putting them through
-       Zone would read a wall clock as UTC and shift it by the server's offset. */
+    /* CreationTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not an instant, so they
+       stay on FormatServerClock: it shows them as they stand in Server mode. Sent through Zone they would be read as
+       UTC and moved by the server's offset. In UTC and Local modes FormatServerClock reaches that mode on the selected
+       tab's clock, because this row does not know which server it came from. */
     public string CollectionTimeLocal => Worded(Zone, CollectionTime);
     public string CreationTimeLocal => ServerTimeHelper.FormatServerClock(CreationTime);
     public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
@@ -1933,9 +1934,10 @@ public class ProcedureStatsHistoryRow
     /// in any grid.
     /// </summary>
     public Func<TimeZoneInfo>? Zone { get; set; }
-    /* CachedTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not
-       an instant: they stay on FormatServerClock, which shows them as they stand in Server mode. Putting them through
-       Zone would read a wall clock as UTC and shift it by the server's offset. */
+    /* CachedTimeLocal and LastExecutionTimeLocal below are the SQL server's own wall clock, not an instant, so they
+       stay on FormatServerClock: it shows them as they stand in Server mode. Sent through Zone they would be read as
+       UTC and moved by the server's offset. In UTC and Local modes FormatServerClock reaches that mode on the selected
+       tab's clock, because this row does not know which server it came from. */
     public string CollectionTimeLocal => Worded(Zone, CollectionTime);
     public string CachedTimeLocal => ServerTimeHelper.FormatServerClock(CachedTime);
     public string LastExecutionTimeLocal => ServerTimeHelper.FormatServerClock(LastExecutionTime);
