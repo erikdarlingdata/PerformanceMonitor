@@ -69,18 +69,6 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 public static class DarlingWebEndpoints
 {
-    /// <summary>#4442 scope 2: the process-lifetime read-latency accumulator, set once from <see cref="MapAll"/>'s
-    /// DI singleton. Static because <see cref="RunComposedPanelAsync"/> is shared, unchanged, with the MCP
-    /// run_custom_view_panel tool -- a static field is the seam that lets this recording land without adding a
-    /// parameter to that shared, static method's signature (and touching its MCP call site, which is a later,
-    /// separate change). Null in any context that never calls <see cref="MapAll"/> (a unit test exercising
-    /// RunComposedPanelAsync directly), so recording is always optional, never required.</summary>
-    private static ReadLatencyAccumulator? s_readLatency;
-
-    /// <summary>The logger recording failures are reported through, at Debug -- never at a level an operator
-    /// would see, since a recording failure is never a request failure.</summary>
-    private static ILogger? s_readLatencyLogger;
-
     /// <summary>#4442, test-only: one extra <c>/api/read/*</c> dispatch entry a test can register so a
     /// real <see cref="PostgresException"/> with SqlState 57014 travels through the SAME dispatch loop
     /// every other route uses, rather than a hand-called <c>Record</c> standing in for the wiring. <c>internal</c>
@@ -304,15 +292,15 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// </summary>
     public static void MapAll(WebApplication app, NpgsqlDataSource postgres, CollectorRuntimeState collector, ILogger logger, BaselineCache? baselineCache = null, PostgresConfig? postgresConfig = null, ReadLatencyAccumulator? readLatency = null, PerformanceMonitor.PlanAnalysis.AnalyzerConfig? analyzerConfig = null)
     {
-        /* #4442 scope 2: RunComposedPanelAsync is a static method shared with the MCP run_custom_view_panel
-           tool (Mcp/DarlingMcpCustomViewTools.cs) and carries no instance state, so it cannot take the
-           accumulator as an ordinary parameter without touching that MCP call site too -- out of scope for
-           this change (MCP recording is a later step). A process-lifetime static set once here, from the
-           one DI singleton, is the seam: every MapAll call (there is exactly one, at host startup) sets it
-           before any route can be hit. Null-safe throughout, so a caller that never sets it up (a test that
-           builds MapAll's routes directly) simply records nothing. */
-        s_readLatency = readLatency;
-        s_readLatencyLogger = logger;
+        /* #4442 scope 2, #4782: the read-latency seat THIS call's routes record into -- the accumulator and
+           logger this call was given, held in a per-call object that the two record sites close over: the
+           /api/read/* loop below, and the /api/compose/run route, which hands it to the shared
+           RunComposedPanelAsync (the MCP run_custom_view_panel tool hands that runner its own host's seat).
+           They used to be process-wide statics that every MapAll call overwrote, so a second server set up in
+           the same process (six test classes call MapAll, and xUnit runs classes in parallel) took the samples
+           of a server built before it. Production calls MapAll once, so nothing changes there. A caller with
+           no accumulator (a test that maps the routes directly) records nothing. */
+        var readLatencyRecorder = new ReadLatencyRecorder(readLatency, logger);
 
         /* Liveness AND collection state (#2953). The one health surface that does not read the store, which
            makes it the only one that can answer when the store IS the problem — so it reports the collector's
@@ -393,7 +381,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                        routing this through FormatError first would make ToHttpResult's classifier re-derive
                        from text what this catch already knows structurally, and log it a second time. */
                     DarlingWebFailureLog.Report(logger, "/api/read/" + name, stopwatch.ElapsedMilliseconds, ex);
-                    RecordWebReadLatency(name, ReadOutcomeClassifier.Classify(ex, context.RequestAborted), stopwatch.ElapsedMilliseconds);
+                    RecordWebReadLatency(readLatencyRecorder, name, ReadOutcomeClassifier.Classify(ex, context.RequestAborted), stopwatch.ElapsedMilliseconds);
                     return Results.Json(DarlingWebFailureLog.Body(ex), statusCode: DarlingWebFailureLog.StatusCode(ex));
                 }
 
@@ -405,13 +393,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 var webOutcome = ClassifyToolResponse(result) == ToolResponseKind.ServerError
                     ? ReadOutcomeClassifier.ClassifySentence(McpHelpers.ErrorMessageOf(result), context.RequestAborted)
                     : ReadOutcome.Ok;
-                RecordWebReadLatency(name, webOutcome, stopwatch.ElapsedMilliseconds);
+                RecordWebReadLatency(readLatencyRecorder, name, webOutcome, stopwatch.ElapsedMilliseconds);
 
                 return ToHttpResult(result, "/api/read/" + name, logger, stopwatch.ElapsedMilliseconds);
             });
         }
 
-        MapCustomViews(app, postgres, logger);
+        MapCustomViews(app, postgres, logger, readLatencyRecorder);
         MapCustomAlerts(app, postgres, logger);
         MapMuteRules(app, postgres, logger);
 
@@ -444,7 +432,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <see cref="ValidateDefinition"/> (the authority) before any write; the store adds optimistic concurrency +
     /// duplicate-name conflict detection. Error bodies are always <c>{"error": "..."}</c>, matching the read surface.
     /// </summary>
-    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger)
+    private static void MapCustomViews(WebApplication app, NpgsqlDataSource postgres, ILogger logger, ReadLatencyRecorder readLatencyRecorder)
     {
         var store = new CustomViewStore(postgres);
 
@@ -603,7 +591,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                sees. Only THIS web mapping (see ComposeRunFailureResult) stops putting a STORE fault's text on
                the wire (M1's outcome.Fault, checked before outcome.Error is ever read for the 400/500 split). */
             var stopwatch = Stopwatch.StartNew();
-            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted);
+            var outcome = await RunComposedPanelAsync(postgres, body, context.RequestAborted, readLatencyRecorder);
             if (outcome.Payload is not null)
             {
                 return JsonNodeResult(outcome.Payload);
@@ -1095,9 +1083,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// value bound — and the query runs under the pool's role <c>statement_timeout</c> backstop. A cancellation
     /// (<see cref="OperationCanceledException"/>) is deliberately NOT caught: it propagates to the caller as a
     /// client-abort, exactly as the endpoint has always done.
+    ///
+    /// <para><paramref name="readLatency"/> (#4782) is the read-latency seat this run is recorded into: the web
+    /// route passes the one its own <see cref="MapAll"/> call built, the MCP tool the one its host registered.
+    /// Null records nothing (a test calling the runner directly).</para>
     /// </summary>
     internal static async Task<ComposeRunOutcome> RunComposedPanelAsync(
-        NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken)
+        NpgsqlDataSource postgres, JsonObject body, System.Threading.CancellationToken cancellationToken,
+        ReadLatencyRecorder? readLatency = null)
     {
         /* #4442 scope 2: recorded ONCE per call, here, so the web /api/compose/run route and the MCP
            run_custom_view_panel tool -- both of which call this ONE runner -- contribute exactly one
@@ -1108,7 +1101,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            Debug, exactly like the web loop's own recording. */
         var stopwatch = Stopwatch.StartNew();
         var outcome = await RunComposedPanelCoreAsync(postgres, body, cancellationToken);
-        RecordComposeLatency(body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
+        RecordComposeLatency(readLatency, body, outcome, stopwatch.ElapsedMilliseconds, cancellationToken);
         return outcome;
     }
 
@@ -1121,19 +1114,19 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// name="name"/> is already a bounded-cardinality route label (the dispatch table's own tool name, never
     /// caller-supplied text). Never throws into the request: swallowed and logged at Debug, exactly like the
     /// compose path's own recording.</summary>
-    private static void RecordWebReadLatency(string name, ReadOutcome outcome, long elapsedMs)
+    private static void RecordWebReadLatency(ReadLatencyRecorder recorder, string name, ReadOutcome outcome, long elapsedMs)
     {
         try
         {
-            s_readLatency?.Record(ReadSurface.Web, name, outcome, elapsedMs);
+            recorder.Accumulator?.Record(ReadSurface.Web, name, outcome, elapsedMs);
         }
         catch (Exception ex)
         {
-            s_readLatencyLogger?.LogDebug(ex, "Read-latency recording failed for /api/read/{Route}.", name);
+            recorder.Logger?.LogDebug(ex, "Read-latency recording failed for /api/read/{Route}.", name);
         }
     }
 
-    private static void RecordComposeLatency(JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken)
+    private static void RecordComposeLatency(ReadLatencyRecorder? recorder, JsonObject body, ComposeRunOutcome outcome, long elapsedMs, System.Threading.CancellationToken cancellationToken)
     {
         try
         {
@@ -1163,11 +1156,11 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                                 ? ReadOutcome.Cancelled
                                 : ReadOutcome.Error;
 
-            s_readLatency?.Record(ReadSurface.Compose, measureKey, readOutcome, elapsedMs);
+            recorder?.Accumulator?.Record(ReadSurface.Compose, measureKey, readOutcome, elapsedMs);
         }
         catch (Exception ex)
         {
-            s_readLatencyLogger?.LogDebug(ex, "Read-latency recording failed for a composed-panel run.");
+            recorder?.Logger?.LogDebug(ex, "Read-latency recording failed for a composed-panel run.");
         }
     }
 
