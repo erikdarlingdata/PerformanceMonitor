@@ -17,6 +17,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Notifications;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Models;
@@ -38,6 +39,9 @@ public partial class AlertsHistoryTab : UserControl
     private DateTime? _lastRefreshed;
     private readonly DispatcherTimer _staleDataTimer;
 
+    /* #4766: the clock of the open server tab for a server id, or null when that server has no tab open. */
+    private Func<int, ServerClock?>? _openTabClock;
+
     public MuteRuleService? MuteRuleService { get; set; }
 
     /// <summary>
@@ -57,9 +61,13 @@ public partial class AlertsHistoryTab : UserControl
     /// <summary>
     /// Initializes the control with required dependencies.
     /// </summary>
-    public void Initialize(LocalDataService dataService)
+    /// <param name="openTabClock">#4766: the clock of the open server tab for a server id, or null when that server
+    /// has no tab open. The second place a row's clock comes from, after the server's own collected one
+    /// (<see cref="StampClocks"/>). Optional, so a caller with no tabs keeps compiling.</param>
+    public void Initialize(LocalDataService dataService, Func<int, ServerClock?>? openTabClock = null)
     {
         _dataService = dataService;
+        _openTabClock = openTabClock;
         _filterManager = new DataGridFilterManager<AlertHistoryRow>(AlertsDataGrid);
         _staleDataTimer.Start();
     }
@@ -86,8 +94,18 @@ public partial class AlertsHistoryTab : UserControl
             var hoursBack = GetSelectedHoursBack();
             int? serverId = GetSelectedServerId();
 
-            var alerts = await System.Threading.Tasks.Task.Run(() => _dataService.GetAlertHistoryAsync(hoursBack, 500, serverId));
+            /* #4766: the rows and each server's collected clock come back from ONE hop off the UI thread, and the
+               clocks are read once per distinct server id, not once per row. */
+            var dataService = _dataService;
+            var (alerts, collectedClocks) = await System.Threading.Tasks.Task.Run(async () =>
+            {
+                var rows = await dataService.GetAlertHistoryAsync(hoursBack, 500, serverId);
+                return (rows, await ReadCollectedClocksAsync(dataService, rows));
+            });
             if (_loads.Superseded(nameof(LoadAlertsAsync), gen)) return;
+
+            /* Back on the UI thread, where the open tabs can be asked for their clocks. */
+            StampClocks(alerts, collectedClocks, _openTabClock);
 
             if (_filterManager != null)
                 _filterManager.UpdateData(alerts);
@@ -107,6 +125,59 @@ public partial class AlertsHistoryTab : UserControl
         catch (Exception ex)
         {
             AppLogger.Error("AlertsHistory", $"Failed to load alert history: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Each distinct server in <paramref name="rows"/> with its collected clock (#4766), or null where it has none
+    /// yet: one <c>GetServerClockAsync</c> per server id, however many rows that server has. A read that fails leaves
+    /// that server on the next clock in the chain (its open tab's, then the machine's) rather than failing the whole
+    /// list, since the rows are already read and only the Server-mode text depends on the clock.
+    /// </summary>
+    internal static async System.Threading.Tasks.Task<Dictionary<int, ServerClock?>> ReadCollectedClocksAsync(
+        LocalDataService dataService, IEnumerable<AlertHistoryRow> rows)
+    {
+        var clocks = new Dictionary<int, ServerClock?>();
+        foreach (var serverId in rows.Select(r => r.ServerId).Distinct())
+        {
+            try
+            {
+                clocks[serverId] = await dataService.GetServerClockAsync(serverId);
+            }
+            catch (Exception ex)
+            {
+                clocks[serverId] = null;
+                AppLogger.Debug("AlertsHistory", $"Server clock read failed for server {serverId}, its rows take the open tab's or the machine's clock: {ex.Message}");
+            }
+        }
+
+        return clocks;
+    }
+
+    /// <summary>
+    /// Stamps each row with the clock of its own server (#4766), one chain per distinct server id:
+    /// <see cref="ServerTimeHelper.ClockForServer(ServerClock?, ServerClock?)"/> of the server's collected clock
+    /// (<paramref name="collected"/>) and its open tab's (<paramref name="openTabClock"/>). Two servers with
+    /// different clocks in one list therefore each convert on their own, in Server mode. Pure of the control, so a
+    /// test drives it directly; the lookup is called here, on the caller's thread, because the open tabs are UI
+    /// objects.
+    /// </summary>
+    internal static void StampClocks(
+        IEnumerable<AlertHistoryRow> rows,
+        IReadOnlyDictionary<int, ServerClock?> collected,
+        Func<int, ServerClock?>? openTabClock)
+    {
+        var chosen = new Dictionary<int, ServerClock>();
+        foreach (var row in rows)
+        {
+            if (!chosen.TryGetValue(row.ServerId, out var clock))
+            {
+                collected.TryGetValue(row.ServerId, out var own);
+                clock = ServerTimeHelper.ClockForServer(own, openTabClock?.Invoke(row.ServerId));
+                chosen[row.ServerId] = clock;
+            }
+
+            row.Clock = clock;
         }
     }
 

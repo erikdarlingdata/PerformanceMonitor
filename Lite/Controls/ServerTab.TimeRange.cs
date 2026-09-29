@@ -104,12 +104,8 @@ public partial class ServerTab : UserControl
     /// server clock (<paramref name="tabClock"/>, not the selected tab's, so a tab that is not the selected one keeps
     /// its own server's zone; a server with no collected clock keeps the fixed offset the connect probe read).
     /// </summary>
-    internal static TimeZoneInfo PickerZone(TimeDisplayMode mode, ServerClock tabClock) => mode switch
-    {
-        TimeDisplayMode.UTC => TimeZoneInfo.Utc,
-        TimeDisplayMode.LocalTime => TimeZoneInfo.Local,
-        _ => tabClock.AsTimeZone()
-    };
+    internal static TimeZoneInfo PickerZone(TimeDisplayMode mode, ServerClock tabClock) =>
+        ServerTimeHelper.DisplayZoneFor(mode, tabClock);
 
     /// <summary>
     /// The window a refresh reads, as (hoursBack, fromUtc, toUtc): the held custom range when a custom range is

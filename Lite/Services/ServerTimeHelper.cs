@@ -26,8 +26,16 @@ namespace PerformanceMonitorLite.Services;
 /// </summary>
 public static class ServerTimeHelper
 {
-    private static volatile ServerClock _serverClock =
-        ServerClock.FixedOffset((int)TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes);
+    private static volatile ServerClock _serverClock = MachineClock(TimeZoneInfo.Local, DateTime.UtcNow);
+
+    /// <summary>
+    /// The clock of <paramref name="machine"/> at <paramref name="utcNow"/>: a fixed offset, the machine's UTC
+    /// offset at that instant. What the active clock starts as, and what a server with no clock of its own is shown
+    /// in (<see cref="ClockForServer(ServerClock?, ServerClock?)"/>). The zone and the instant come in as arguments
+    /// so a test names them instead of depending on the zone of the machine it runs on.
+    /// </summary>
+    private static ServerClock MachineClock(TimeZoneInfo machine, DateTime utcNow) =>
+        ServerClock.FixedOffset((int)machine.GetUtcOffset(DateTime.SpecifyKind(utcNow, DateTimeKind.Utc)).TotalMinutes);
 
     /// <summary>The connected (selected) server's clock. Setting <c>null</c> installs UTC.</summary>
     public static ServerClock ActiveServerClock
@@ -86,29 +94,92 @@ public static class ServerTimeHelper
     };
 
     /// <summary>
-    /// Returns a short timezone label for the current display mode.
+    /// The zone a time is shown in for <paramref name="mode"/> (#4766): UTC, this machine's zone, or the server's own
+    /// clock (<paramref name="clock"/>: its time zone where one was collected, else its fixed offset). Pure, so a
+    /// caller that holds its own server's clock (a server tab that is not the selected one, an alert row) names it
+    /// instead of reading the active one. <c>DisplayZone.ToDisplay</c> turns a naive-UTC instant into the wall
+    /// clock of the zone this returns.
     /// </summary>
-    public static string GetTimezoneLabel(TimeDisplayMode mode) => mode switch
+    internal static TimeZoneInfo DisplayZoneFor(TimeDisplayMode mode, ServerClock clock) => mode switch
+    {
+        TimeDisplayMode.UTC => TimeZoneInfo.Utc,
+        TimeDisplayMode.LocalTime => TimeZoneInfo.Local,
+        _ => clock.AsTimeZone()
+    };
+
+    /// <summary>
+    /// The clock one server's rows are shown on (#4766), in the order the sources are trusted: the server's own
+    /// collected clock (<paramref name="collected"/>, from <c>server_properties</c>), else the clock of the server's
+    /// open tab (<paramref name="openTabClock"/>; a tab keeps the fixed offset its connect probe read until the first
+    /// collected row arrives, so that is what the server's own tab shows for it), else this machine's own offset
+    /// right now, which is what the active clock starts as before any server has been selected. The machine comes
+    /// last, never UTC: a list that put a server with no clock of its own in UTC would disagree with every other
+    /// list beside it in Server mode. The MCP tools keep their own stated UTC fallback
+    /// (<c>McpServerLocalWindow.ClockForAsync</c>); this is the desktop's and is separate on purpose. Never the ACTIVE
+    /// tab's clock in place of the row's own server's: another server's zone would put the row's time an hour or
+    /// more off its own server's clock.
+    /// </summary>
+    internal static ServerClock ClockForServer(ServerClock? collected, ServerClock? openTabClock) =>
+        ClockForServer(collected, openTabClock, TimeZoneInfo.Local, DateTime.UtcNow);
+
+    /// <inheritdoc cref="ClockForServer(ServerClock?, ServerClock?)"/>
+    /// <param name="machine">This machine's zone; a test names one instead of depending on the zone it runs in.</param>
+    /// <param name="utcNow">The instant the machine's offset is read at.</param>
+    internal static ServerClock ClockForServer(
+        ServerClock? collected, ServerClock? openTabClock, TimeZoneInfo machine, DateTime utcNow) =>
+        collected ?? openTabClock ?? MachineClock(machine, utcNow);
+
+    /// <summary>
+    /// Returns a short timezone label for the current display mode, on the active server's clock.
+    /// </summary>
+    public static string GetTimezoneLabel(TimeDisplayMode mode) => GetTimezoneLabel(mode, _serverClock);
+
+    /// <summary>
+    /// A short label for the zone <paramref name="mode"/> shows times in (#4766): "UTC", this machine's zone name,
+    /// or the server's. The server's is its zone's name (for example "Eastern Standard Time") when the clock has a
+    /// zone whose offset changes through the year, else its fixed offset (for example "UTC-5:00"). The offset in
+    /// force NOW would name the wrong one for a time on the far side of a daylight-saving change, which is what
+    /// the zone's name does not do; where the offset never changes (a fixed-offset clock, UTC, a zone with no
+    /// daylight saving) it is exact and shorter than the name, which is what the header's "Last refresh" line needs.
+    /// </summary>
+    public static string GetTimezoneLabel(TimeDisplayMode mode, ServerClock clock) => mode switch
     {
         TimeDisplayMode.LocalTime => TimeZoneInfo.Local.StandardName,
         TimeDisplayMode.UTC => "UTC",
-        _ => OffsetLabel(UtcOffsetMinutes)
+        _ => ServerZoneLabel(clock)
     };
 
-    private static string OffsetLabel(int utcOffsetMinutes) =>
-        $"UTC{(utcOffsetMinutes >= 0 ? "+" : "")}{utcOffsetMinutes / 60}:{Math.Abs(utcOffsetMinutes % 60):D2}";
+    private static string ServerZoneLabel(ServerClock clock)
+    {
+        var zone = clock.AsTimeZone();
+        return zone.SupportsDaylightSavingTime
+            ? zone.StandardName
+            : OffsetLabel(clock.OffsetMinutesAt(DateTime.UtcNow));
+    }
+
+    private static string OffsetLabel(int utcOffsetMinutes)
+    {
+        var magnitude = Math.Abs(utcOffsetMinutes);
+        return $"UTC{(utcOffsetMinutes < 0 ? "-" : "+")}{magnitude / 60}:{magnitude % 60:D2}";
+    }
 
     /// <summary>
-    /// Formats a NAIVE-UTC timestamp for display. The offset add converts UTC to the server's own clock,
-    /// which is <see cref="ConvertForDisplay"/>'s input; use <see cref="FormatServerClock"/> instead for a
-    /// value that is already the server's clock.
+    /// Formats a NAIVE-UTC timestamp for display (#4766): the instant, in the zone of the selected display mode on
+    /// the active server's clock (<see cref="DisplayZoneFor"/>). One conversion from the instant to that zone's wall
+    /// clock, so UTC mode shows the stored instant itself and a time in the hour that repeats after a fall-back reads
+    /// the wall time of its own offset in every mode. The path used to go to the server's wall clock first and back
+    /// out of it, and a wall clock cannot say which occurrence of the repeated hour it was: 06:30Z on 2026-11-01 on a
+    /// US Eastern server read 05:30 in UTC mode. Use <see cref="FormatServerClock"/> instead for a value that is
+    /// already the server's clock.
     /// </summary>
     public static string FormatServerTime(DateTime utcTime, string format = "yyyy-MM-dd HH:mm:ss")
-        => ConvertForDisplay(ToServerTime(utcTime), CurrentDisplayMode).ToString(format);
+        => DisplayZone.ToDisplay(utcTime, DisplayZoneFor(CurrentDisplayMode, _serverClock)).ToString(format);
 
     /// <inheritdoc cref="FormatServerTime(DateTime, string)"/>
     public static string FormatServerTime(DateTime? utcTime, string format = "yyyy-MM-dd HH:mm:ss")
-        => utcTime.HasValue ? ConvertForDisplay(ToServerTime(utcTime.Value), CurrentDisplayMode).ToString(format) : "";
+        => utcTime.HasValue
+            ? DisplayZone.ToDisplay(utcTime.Value, DisplayZoneFor(CurrentDisplayMode, _serverClock)).ToString(format)
+            : "";
 
     /// <summary>
     /// Formats a timestamp that is ALREADY the monitored server's own wall clock: the
@@ -125,17 +196,19 @@ public static class ServerTimeHelper
     /// renderer.</para>
     ///
     /// <para><see cref="ConvertForDisplay"/> already takes the server's clock and honours the selected
-    /// display mode, so this is <see cref="FormatServerTime"/> with the offset add removed rather than a
-    /// second conversion. That add is the whole defect it exists to prevent: it is correct for naive UTC
-    /// and, applied to a value already in the server's frame, skews it by the collected offset a second
-    /// time — the fleet's -240 renders four hours early, in every display mode.</para>
+    /// display mode, so this is that conversion of the value as it stands, not a second one on top of the
+    /// naive-UTC renderer's. <see cref="FormatServerTime"/> reads its input as an instant and shifts it into the
+    /// display zone; that shift is correct for naive UTC and, applied to a value already in the server's frame,
+    /// skews it by the collected offset a second time — the fleet's -240 renders four hours early, in every
+    /// display mode. That is the defect this renderer exists to prevent.</para>
     ///
     /// <para>Darling's <c>ViewerDataService.FormatServerClock</c> is the mirror of this, under the same
     /// name and with the same input contract, reached the other way round: its
     /// <c>ViewerTimeHelper.ConvertToDisplay</c> takes naive UTC, so the server-clock conversion there
     /// goes to UTC through the server's clock first (<c>ServerClock.ToUtc</c>), where this one starts from the
-    /// server's clock and the naive-UTC renderer converts into it. Either way there is exactly one conversion
-    /// through the server's clock between the two frames, and both renderers honour the display preference.</para>
+    /// server's clock and the naive-UTC renderer converts the instant into the display zone. Either way there is
+    /// exactly one conversion through the server's clock between the two frames, and both renderers honour the
+    /// display preference.</para>
     /// </summary>
     public static string FormatServerClock(DateTime serverLocal, string format = "yyyy-MM-dd HH:mm:ss")
         => ConvertForDisplay(serverLocal, CurrentDisplayMode).ToString(format);
