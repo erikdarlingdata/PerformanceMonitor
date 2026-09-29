@@ -522,8 +522,9 @@ public static class ServiceCommandDeadlines
     /// <para><b>It NARROWS the lease overrun rather than closing it</b>, following #2888's lock wait
     /// and #2901's own command plane. <c>DarlingCommandExecutor.StaleCommandTimeout</c> is five
     /// minutes with no heartbeat, and what a command spends is dominated by work this deadline does not
-    /// bound — a full collector sweep for <c>snapshot_now</c>, a fleet-wide retention purge for
-    /// <c>purge_now</c>, 120 s of re-execution for <c>execute_actual_plan</c>. So the lease is not the
+    /// bound — a full collector sweep for <c>snapshot_now</c>, 120 s of re-execution for
+    /// <c>execute_actual_plan</c> (<c>purge_now</c> used to be here too; since #4825 it starts the purge in the
+    /// background and answers at once). So the lease is not the
     /// instrument this constant moves; it is the instrument that MISREPORTS when the report write
     /// fails, and the report failing fast is strictly better than it failing slow.</para>
     /// </summary>
