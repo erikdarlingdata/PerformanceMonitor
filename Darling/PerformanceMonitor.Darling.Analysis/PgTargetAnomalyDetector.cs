@@ -239,6 +239,9 @@ ORDER BY " + WindowTiles.LocalHourSql;
     /// The window's percent-of-configured-capacity (Aurora): peak / average / count of <c>acu_utilization_percent</c>
     /// (#3281 — the bandable quantity; rows without a capacity sample are not samples), the time of the peak, and
     /// beside it the peak RAW <c>cpu_percent</c> for the advice to state as "was a core pinned", never to grade.
+    /// The peak-time subquery's ORDER BY ends <c>DESC NULLS LAST, collection_time DESC</c> like the tile twin's
+    /// (#4731); its <c>IS NOT NULL</c> filter already keeps a NULL out, so the clause changes no result here and
+    /// keeps the one shape.
     /// </summary>
     public const string CpuWindowSql = @"
 SELECT MAX(acu_utilization_percent) AS peak_capacity_pct,
@@ -247,7 +250,7 @@ SELECT MAX(acu_utilization_percent) AS peak_capacity_pct,
        (SELECT collection_time FROM pg_cpu_utilization
         WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
         AND   acu_utilization_percent IS NOT NULL
-        ORDER BY acu_utilization_percent DESC, collection_time DESC LIMIT 1) AS peak_time,
+        ORDER BY acu_utilization_percent DESC NULLS LAST, collection_time DESC LIMIT 1) AS peak_time,
        MAX(cpu_percent) AS peak_cpu_percent,
        COUNT(*) AS rows_in_window
 FROM pg_cpu_utilization
