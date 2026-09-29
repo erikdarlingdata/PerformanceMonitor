@@ -1607,7 +1607,7 @@ LIMIT $1";
     /// <param name="Timed">(V140, #4037) The cumulative COUNT of TIMED checkpoints as the server reported it,
     /// null on a row written before the rung. <see cref="CheckpointerReading.From"/> reads a null on either
     /// sample as no evidence for the average-per-checkpoint arm, never as zero.</param>
-    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null);
+    public sealed record CheckpointerSample(DateTime MetricTime, long WriteMs, long SyncMs, long Requested, DateTime? PostmasterStartTime = null, long? Timed = null, long? LongestSyncMs = null, DateTime? LongestSyncAt = null);
 
     /// <summary>
     /// Whether the pair yielded an interval (#3783). Five states rather than a nullable delta, for the reason
@@ -1690,7 +1690,9 @@ LIMIT $1";
         bool PostmasterRestarted = false,
         DateTime? PostmasterStartTime = null,
         long? Timed = null,
-        long? CumulativeTimed = null)
+        long? CumulativeTimed = null,
+        long? LongestSyncMs = null,
+        DateTime? LongestSyncAtUtc = null)
     {
         /// <summary>The reading when the series holds no checkpointer row — every field null.</summary>
         public static CheckpointerReading Absent { get; } =

@@ -656,7 +656,7 @@ public sealed class StoreToastAndCheckpointerTests
 
         /* The checkpointer block, and its keys. */
         Assert.Contains("var checkpointer = await DarlingStoreMetricsReader.GetCheckpointerAsync(postgres, cancellationToken);", source, StringComparison.Ordinal);
-        foreach (var key in new[] { "status = checkpointer.Status.ToString()", "observed_at = ", "previous_at = ", "interval_seconds = checkpointer.IntervalSeconds", "write_ms = checkpointer.WriteMs", "sync_ms = checkpointer.SyncMs", "requested = checkpointer.Requested", "cumulative_write_ms = ", "cumulative_sync_ms = ", "cumulative_requested = ", "pressure = checkpointer.IsPressure", "sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs", "note = CheckpointerNote(checkpointer)" })
+        foreach (var key in new[] { "status = checkpointer.Status.ToString()", "observed_at = ", "previous_at = ", "interval_seconds = checkpointer.IntervalSeconds", "write_ms = checkpointer.WriteMs", "sync_ms = checkpointer.SyncMs", "requested = checkpointer.Requested", "cumulative_write_ms = ", "cumulative_sync_ms = ", "cumulative_requested = ", "longest_sync_ms = checkpointer.LongestSyncMs", "longest_sync_at = checkpointer.LongestSyncAtUtc?.ToString(\"o\", CultureInfo.InvariantCulture)", "pressure = checkpointer.IsPressure", "sync_bar_ms = DarlingSelfAlertEvaluator.CheckpointSyncBarMs", "note = CheckpointerNote(checkpointer)" })
         {
             Assert.Contains(key, source, StringComparison.Ordinal);
         }
@@ -1101,11 +1101,19 @@ public sealed class StoreToastAndCheckpointerTests
 
     private static readonly DateTime LongSyncMinute = new(2026, 9, 20, 12, 41, 0, DateTimeKind.Utc);
 
+    /// <summary>The field case's hour - four checkpoints, 23,542 ms of sync in all, none requested - with the given
+    /// longest single sync stored on the newer row (#4834), or none stored when <paramref name="longestSyncMs"/> is
+    /// null. Built through the real differencer.</summary>
+    private static DarlingStoreMetricsReader.CheckpointerReading LongSyncHour(long? longestSyncMs, DateTime? at = null) =>
+        Interval(syncMs: 23_542, requested: 0, timed: 4, longestSyncMs: longestSyncMs,
+            longestSyncAt: longestSyncMs is null ? null : at ?? LongSyncMinute);
+
     /// <summary>
-    /// The field case behind #4823. Four checkpoints in the hour, one of them synced for 23,542 ms and the other
-    /// three next to nothing: the hour's average is 5.9 s, under the 10 s bar, so the average arm judged it clean
-    /// while collection stalled on every server. The once-a-minute sample saw the 23,542 ms sync in one minute; the
-    /// alert must fire on it and name how long it took and in which minute (UTC).
+    /// The field case behind #4823, judged from the stored row (#4834). Four checkpoints in the hour, one of them
+    /// synced for 23,542 ms and the other three next to nothing: the hour's average is 5.9 s, under the 10 s bar, so
+    /// the average arm judged it clean while collection stalled on every server. The once-a-minute sample saw the
+    /// 23,542 ms sync in one minute and the sweep stored it on the hour's checkpointer row; the alert must fire on the
+    /// reading and name how long it took and in which minute (UTC).
     /// </summary>
     [Fact]
     public async Task CheckpointerPressure_OneLongSyncAmongFourCheckpoints_FiresAndNamesTheSyncAndItsMinute()
@@ -1113,12 +1121,16 @@ public sealed class StoreToastAndCheckpointerTests
         var h = new Harness();
         var e = h.Build();
 
-        var hour = Interval(syncMs: 23_542, requested: 0, timed: 4);
-        Assert.Equal(4, hour.CheckpointCount);
-        Assert.True(hour.AverageSyncMsPerCheckpoint < DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
-        Assert.False(hour.IsPressure);
+        /* Without the stored longest sync this hour reads clean: today's rule, unchanged. */
+        var withoutLongest = LongSyncHour(null);
+        Assert.Equal(4, withoutLongest.CheckpointCount);
+        Assert.True(withoutLongest.AverageSyncMsPerCheckpoint < DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
+        Assert.False(withoutLongest.IsPressure);
 
-        await e.ApplyCheckpointerPressureAsync(hour, Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+        var hour = LongSyncHour(23_542);
+        Assert.True(hour.IsPressure);
+
+        await e.ApplyCheckpointerPressureAsync(hour, Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureMetric, fired.MetricName);
@@ -1141,33 +1153,29 @@ public sealed class StoreToastAndCheckpointerTests
     [Fact]
     public async Task CheckpointerPressure_ALongestSyncOf800Ms_WithTheSameAverage_StaysQuiet()
     {
-        var hour = Interval(syncMs: 23_542, requested: 0, timed: 4);
-
         /* The same hour, but the longest single sync the minute samples saw was 800 ms: nothing to say. */
         var small = new Harness();
-        await small.Build().ApplyCheckpointerPressureAsync(hour, Ct, new CheckpointSyncMax(LongSyncMinute, 800));
+        await small.Build().ApplyCheckpointerPressureAsync(LongSyncHour(800), Ct);
         Assert.Empty(small.Deliverer.Outcomes);
         Assert.Empty(small.History.Records);
 
-        /* No sample at all (the sampler was just started, or every read of the window failed): the average and
-           requested arms decide alone, exactly as before. */
+        /* No stored longest sync at all (a row from before the rung, or an hour the sampler took no difference in):
+           the average and requested arms decide alone, exactly as before. */
         var unsampled = new Harness();
-        await unsampled.Build().ApplyCheckpointerPressureAsync(hour, Ct, longestSync: null);
+        await unsampled.Build().ApplyCheckpointerPressureAsync(LongSyncHour(null), Ct);
         Assert.Empty(unsampled.Deliverer.Outcomes);
     }
 
     [Fact]
     public async Task CheckpointerPressure_TheLongestSyncBar_IsPastTheBar_NotAtIt()
     {
-        var hour = Interval(syncMs: 23_542, requested: 0, timed: 4);
-
         /* Exactly the bar is quiet (over it, like the average arm); a millisecond past it fires. */
         var atBar = new Harness();
-        await atBar.Build().ApplyCheckpointerPressureAsync(hour, Ct, new CheckpointSyncMax(LongSyncMinute, 10_000));
+        await atBar.Build().ApplyCheckpointerPressureAsync(LongSyncHour(10_000), Ct);
         Assert.Empty(atBar.Deliverer.Outcomes);
 
         var pastBar = new Harness();
-        await pastBar.Build().ApplyCheckpointerPressureAsync(hour, Ct, new CheckpointSyncMax(LongSyncMinute, 10_001));
+        await pastBar.Build().ApplyCheckpointerPressureAsync(LongSyncHour(10_001), Ct);
         Assert.Single(pastBar.Deliverer.Outcomes);
     }
 
@@ -1177,8 +1185,7 @@ public sealed class StoreToastAndCheckpointerTests
         var h = new Harness();
         var e = h.Build();
 
-        await e.ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 23_542, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct);
         Assert.Single(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
 
@@ -1186,14 +1193,14 @@ public sealed class StoreToastAndCheckpointerTests
            carries the hour's longest sync beside the average. */
         h.Clock = h.Clock.AddHours(1);
         await e.ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 1_200, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute.AddHours(1), 800));
+            Interval(syncMs: 1_200, requested: 0, timed: 4, longestSyncMs: 800, longestSyncAt: LongSyncMinute.AddHours(1)), Ct);
         var recovered = Assert.Single(h.History.Records);
         Assert.Equal(DarlingSelfAlertEvaluator.CheckpointerPressureRecoveredMetric, recovered.MetricName);
         Assert.Contains("0.8s", recovered.DetailText!, StringComparison.Ordinal);
 
         /* A second quiet hour resolves nothing twice. */
         await e.ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 1_200, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute.AddHours(2), 800));
+            Interval(syncMs: 1_200, requested: 0, timed: 4, longestSyncMs: 800, longestSyncAt: LongSyncMinute.AddHours(2)), Ct);
         Assert.Single(h.History.Records);
     }
 
@@ -1208,8 +1215,7 @@ public sealed class StoreToastAndCheckpointerTests
 
         /* The next hour's average is clean, but a 23.5 s sync is still in it: not a clean hour, so no Recovered row. */
         h.Clock = h.Clock.AddHours(1);
-        await e.ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 23_542, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+        await e.ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct);
         Assert.Empty(h.History.Records);
         Assert.Equal(2, h.Deliverer.Outcomes.Count);
     }
@@ -1221,7 +1227,7 @@ public sealed class StoreToastAndCheckpointerTests
 
         /* 3 timed + 1 requested checkpoint, 60 s of sync: a 15.0 s average, one requested, and a 23.5 s longest. */
         await h.Build().ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 60_000, requested: 1, timed: 3), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+            Interval(syncMs: 60_000, requested: 1, timed: 3, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute), Ct);
 
         var fired = Assert.Single(h.Deliverer.Outcomes);
         Assert.Contains("average sync 15.0s per checkpoint", fired.CurrentValue, StringComparison.Ordinal);
@@ -1238,15 +1244,168 @@ public sealed class StoreToastAndCheckpointerTests
            samples difference (#3955), so the long sync is not judged there either. */
         var h = new Harness();
         await h.Build().ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 800, requested: 2, restarted: true), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+            Interval(syncMs: 800, requested: 2, restarted: true, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute), Ct);
         Assert.Empty(h.Deliverer.Outcomes);
         Assert.Empty(h.History.Records);
 
         var off = new Harness();
         off.Settings.AlertsEnabled = false;
-        await off.Build().ApplyCheckpointerPressureAsync(
-            Interval(syncMs: 23_542, requested: 0, timed: 4), Ct, new CheckpointSyncMax(LongSyncMinute, 23_542));
+        await off.Build().ApplyCheckpointerPressureAsync(LongSyncHour(23_542), Ct);
         Assert.Empty(off.Deliverer.Outcomes);
+    }
+
+    /* ---- #4834: the stored row carries the hour's longest sync, and the tool and the alert judge the same value ---- */
+
+    [Fact]
+    public void TheReading_TakesTheLongestSyncFromTheNewerRow_AndJudgesItPressure()
+    {
+        var reading = LongSyncHour(23_542);
+
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
+        Assert.Equal(23_542L, reading.LongestSyncMs);
+        Assert.Equal(LongSyncMinute, reading.LongestSyncAtUtc);
+        Assert.Equal(DateTimeKind.Utc, reading.LongestSyncAtUtc!.Value.Kind);
+        Assert.True(reading.AverageSyncMsPerCheckpoint < DarlingSelfAlertEvaluator.CheckpointSyncBarMs);
+        Assert.Equal(0L, reading.Requested);
+        Assert.True(reading.IsPressure);
+    }
+
+    [Fact]
+    public void TheReading_WithNoStoredLongestSync_KeepsTodaysResult_ExactlyAsBefore()
+    {
+        /* NULL on the newer row (a row from before the rung, or an hour the sampler took no difference in) is no
+           evidence: never zero, and never a reason to change any of today's three outcomes. */
+        var none = LongSyncHour(null);
+        Assert.Null(none.LongestSyncMs);
+        Assert.Null(none.LongestSyncAtUtc);
+        Assert.False(none.IsPressure);
+        Assert.True(Interval(syncMs: 60_000, requested: 0, timed: 2).IsPressure);
+        Assert.True(Interval(syncMs: 800, requested: 1, timed: 1).IsPressure);
+        Assert.False(Interval(syncMs: 800, requested: 0, timed: 1).IsPressure);
+    }
+
+    [Fact]
+    public void TheReading_ALongestSyncOf800Ms_StaysQuiet_AndTheBarIsPastNotAt()
+    {
+        Assert.False(LongSyncHour(800).IsPressure);
+        Assert.False(LongSyncHour(10_000).IsPressure);
+        Assert.True(LongSyncHour(10_001).IsPressure);
+    }
+
+    [Fact]
+    public void TheReading_ReadsOnlyTheNewerRowsLongestSync()
+    {
+        var t0 = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Unspecified);
+        var reading = DarlingStoreMetricsReader.CheckpointerReading.From(
+            new(t0.AddHours(1), 12_500, 500_800, 40, Timed: 104, LongestSyncMs: 800, LongestSyncAt: t0.AddMinutes(90)),
+            new(t0, 10_000, 500_000, 40, Timed: 100, LongestSyncMs: 23_542, LongestSyncAt: t0.AddMinutes(20)));
+
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
+        Assert.Equal(800L, reading.LongestSyncMs);
+        Assert.False(reading.IsPressure);
+    }
+
+    [Fact]
+    public void TheReading_AnIntervalThatIsNotMeasured_StatesNoLongestSync_AndJudgesNoPressure()
+    {
+        var restarted = Interval(syncMs: 800, requested: 2, restarted: true, longestSyncMs: 23_542, longestSyncAt: LongSyncMinute);
+
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted, restarted.Status);
+        Assert.Null(restarted.LongestSyncMs);
+        Assert.Null(restarted.LongestSyncAtUtc);
+        Assert.False(restarted.IsPressure);
+    }
+
+    [Fact]
+    public void TheCheckpointerNote_NamesTheLongestSync_WhenItBreached_AsTheAlertDoes()
+    {
+        var breached = DarlingMcpStoreMetricsTools.CheckpointerNote(LongSyncHour(23_542));
+        Assert.Contains("CHECKPOINTER PRESSURE", breached, StringComparison.Ordinal);
+        Assert.Contains("longest single sync 23.5s in the minute ending 12:41 UTC", breached, StringComparison.Ordinal);
+
+        /* Under the bar: a measured fact the note may state, but not pressure and not the breach sentence. */
+        var quiet = DarlingMcpStoreMetricsTools.CheckpointerNote(LongSyncHour(800));
+        Assert.DoesNotContain("CHECKPOINTER PRESSURE", quiet, StringComparison.Ordinal);
+        Assert.DoesNotContain("longest single sync 0.8s", quiet, StringComparison.Ordinal);
+        Assert.Contains("0.8s", quiet, StringComparison.Ordinal);
+
+        /* No stored longest sync: the note is the one it was before the column existed. */
+        var none = DarlingMcpStoreMetricsTools.CheckpointerNote(LongSyncHour(null));
+        Assert.DoesNotContain("longest single", none, StringComparison.Ordinal);
+        Assert.Contains("Both under the lines the self-alert judges", none, StringComparison.Ordinal);
+    }
+
+    /// <summary>The #4834 live proof, against a real server: a sweep given the hour's longest sync stores it and its
+    /// minute on the checkpointer row and on no other kind's row, a sweep given none stores NULLs, and the real pair
+    /// read gives both back and judges the long sync as pressure although the interval has no average to judge.
+    /// Own store through <c>ScratchPostgres</c>, like the tests around it.</summary>
+    [Fact]
+    public async Task TheSweep_StoresTheHoursLongestSync_AndTheRealPairReadJudgesIt_AgainstDevPostgres()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4834 longest-sync test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var sweptAt = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow));
+        var earlierAt = sweptAt.AddHours(-1);
+        var minute = sweptAt.AddMinutes(-20);
+
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, earlierAt, null, null, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, sweptAt, null, 23_542, minute, ct);
+
+        await using (var columns = new NpgsqlCommand(
+            "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns " +
+            "WHERE table_schema = 'collect' AND table_name = 'store_metrics' AND column_name IN ('checkpoint_longest_sync_ms', 'checkpoint_longest_sync_at') ORDER BY column_name",
+            connection) { CommandTimeout = 30 })
+        {
+            await using var reader = await columns.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("checkpoint_longest_sync_at", reader.GetString(0));
+            Assert.Equal("timestamp without time zone", reader.GetString(1));
+            Assert.Equal("YES", reader.GetString(2));
+            Assert.True(reader.IsDBNull(3));
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal("checkpoint_longest_sync_ms", reader.GetString(0));
+            Assert.Equal("bigint", reader.GetString(1));
+            Assert.Equal("YES", reader.GetString(2));
+            Assert.True(reader.IsDBNull(3));
+            Assert.False(await reader.ReadAsync(ct));
+        }
+
+        await using (var stored = new NpgsqlCommand(
+            $"SELECT metric_time, checkpoint_longest_sync_ms, checkpoint_longest_sync_at FROM collect.store_metrics WHERE object_kind = '{StoreSelfMetrics.CheckpointerObjectKind}' ORDER BY metric_time",
+            connection) { CommandTimeout = 30 })
+        {
+            await using var reader = await stored.ExecuteReaderAsync(ct);
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal(earlierAt, reader.GetDateTime(0));
+            Assert.True(reader.IsDBNull(1) && reader.IsDBNull(2), "a sweep given no longest sync must store NULLs, never a zero");
+            Assert.True(await reader.ReadAsync(ct));
+            Assert.Equal(sweptAt, reader.GetDateTime(0));
+            Assert.Equal(23_542L, reader.GetInt64(1));
+            Assert.Equal(minute, reader.GetDateTime(2));
+            Assert.False(await reader.ReadAsync(ct));
+        }
+
+        await using (var others = new NpgsqlCommand(
+            $"SELECT count(*) FROM collect.store_metrics WHERE object_kind <> '{StoreSelfMetrics.CheckpointerObjectKind}' AND (checkpoint_longest_sync_ms IS NOT NULL OR checkpoint_longest_sync_at IS NOT NULL)",
+            connection) { CommandTimeout = 30 })
+        {
+            Assert.Equal(0L, Convert.ToInt64(await others.ExecuteScalarAsync(ct), System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+        var reading = await DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
+        Assert.Equal(DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, reading.Status);
+        Assert.Equal(23_542L, reading.LongestSyncMs);
+        Assert.Equal(DateTime.SpecifyKind(minute, DateTimeKind.Utc), reading.LongestSyncAtUtc);
+        Assert.True(reading.IsPressure, "a 23.5 s single sync must be pressure whatever the interval's average");
     }
 
     [Fact]
@@ -1256,13 +1415,20 @@ public sealed class StoreToastAndCheckpointerTests
             .Replace("\r\n", "\n", StringComparison.Ordinal);
 
         var tick = worker.IndexOf("if (DateTime.UtcNow >= _nextStoreMetricsUtc)", StringComparison.Ordinal);
-        var sweep = worker.IndexOf("await SweepStoreSelfMetricsAsync(stoppingToken);", tick, StringComparison.Ordinal);
+        var window = worker.IndexOf("var checkpointWindow = _checkpointSyncSampler.TakeWindowMax();", tick, StringComparison.Ordinal);
+        var sweep = worker.IndexOf("await SweepStoreSelfMetricsAsync(checkpointWindow, stoppingToken);", tick, StringComparison.Ordinal);
         var toast = worker.IndexOf("await _selfAlerts.EvaluateToastSlackAsync(_postgres!, stoppingToken);", sweep, StringComparison.Ordinal);
-        var checkpointer = worker.IndexOf("await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken, _checkpointSyncSampler.TakeWindowMax());", toast, StringComparison.Ordinal);
+        var checkpointer = worker.IndexOf("await _selfAlerts.EvaluateCheckpointerPressureAsync(_postgres!, stoppingToken);", toast, StringComparison.Ordinal);
         var nextTick = worker.IndexOf("await Task.Delay(s_sweepInterval, stoppingToken);", tick, StringComparison.Ordinal);
 
         Assert.True(tick >= 0 && sweep > tick && toast > sweep && checkpointer > toast && checkpointer < nextTick,
             "the two #3783 conditions must be evaluated on the store self-metrics tick, after the sweep that writes their evidence");
+
+        /* #4834: the window is taken ONCE, at the top of the tick and ahead of the sweep, and handed to the sweep
+           that stores it. The evaluator reads it back from the stored row, so it is never handed a window. */
+        Assert.True(window > tick && window < sweep, "the tick must take the sampler's window before the sweep that stores it");
+        Assert.Single(Regex.Matches(worker, @"TakeWindowMax\("));
+        Assert.Contains("checkpointLongestSync?.SyncMs, checkpointLongestSync?.SampledUtc", worker, StringComparison.Ordinal);
 
         /* Exactly one call site each — the census in DarlingSelfAlertTests asserts they exist; this asserts where. */
         Assert.Single(Regex.Matches(worker, @"EvaluateToastSlackAsync\("));
@@ -1301,7 +1467,8 @@ public sealed class StoreToastAndCheckpointerTests
     /// stamps both with one postmaster; both of those are Observed. True stamps them with two, the newer started
     /// half an hour into the interval, which is Restarted.
     /// </summary>
-    private static DarlingStoreMetricsReader.CheckpointerReading Interval(long syncMs, long requested, bool? restarted = null, long timed = 1)
+    private static DarlingStoreMetricsReader.CheckpointerReading Interval(
+        long syncMs, long requested, bool? restarted = null, long timed = 1, long? longestSyncMs = null, DateTime? longestSyncAt = null)
     {
         var t0 = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Unspecified);
         var longAgo = t0.AddDays(-20);
@@ -1314,7 +1481,8 @@ public sealed class StoreToastAndCheckpointerTests
         };
 
         var reading = DarlingStoreMetricsReader.CheckpointerReading.From(
-            new(t0.AddHours(1), 10_000 + 2_500, 500_000 + syncMs, 40 + requested, newestStart, Timed: 100 + timed), new(t0, 10_000, 500_000, 40, previousStart, Timed: 100));
+            new(t0.AddHours(1), 10_000 + 2_500, 500_000 + syncMs, 40 + requested, newestStart, Timed: 100 + timed,
+                LongestSyncMs: longestSyncMs, LongestSyncAt: longestSyncAt), new(t0, 10_000, 500_000, 40, previousStart, Timed: 100));
         Assert.Equal(
             restarted is true ? DarlingStoreMetricsReader.CheckpointerDeltaStatus.Restarted : DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed,
             reading.Status);
@@ -1477,7 +1645,7 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
             "SELECT sha256(g::text::bytea), repeat(md5(g::text), 300)::bytea, '2026-01-01' FROM generate_series(1, 2000) AS g", ct);
 
         var t0 = DateTime.SpecifyKind(DateTime.UtcNow.AddYears(-40), DateTimeKind.Unspecified);
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, t0, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, t0, null, null, null, ct);
 
         var full = await ReadDimAsync(connection, t0, ct);
         Assert.True(full.Toast > 15_000_000, $"2,000 x 9.6 KB values must TOAST into a file of ~20 MB, not {full.Toast} bytes");
@@ -1535,7 +1703,7 @@ public sealed class StoreToastAndCheckpointerLivePostgresTests
         }
 
         var t1 = t0.AddHours(1);
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, t1, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, t1, null, null, null, ct);
 
         var half = await ReadDimAsync(connection, t1, ct);
         Assert.Equal(full.Toast, half.Toast);
@@ -1625,7 +1793,7 @@ SELECT concat_ws('; ',
         await Exec(connection, "CHECKPOINT", ct);
 
         var sweptAt = DarlingMcpTestData.Naive(DarlingMcpTestData.TruncateToSeconds(DateTime.UtcNow));
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, sweptAt, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: false, sweptAt, null, null, null, ct);
 
         DateTime serverStart;
         await using (var live = new NpgsqlCommand("SELECT pg_postmaster_start_time() AT TIME ZONE 'UTC'", connection) { CommandTimeout = 30 })

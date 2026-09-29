@@ -1173,6 +1173,8 @@ WHERE metric_time < $1";
         bool timescaleAvailable,
         DateTime utcNow,
         ILogger? logger,
+        long? checkpointLongestSyncMs,
+        DateTime? checkpointLongestSyncAt,
         CancellationToken cancellationToken = default)
     {
         if (connection is null)
