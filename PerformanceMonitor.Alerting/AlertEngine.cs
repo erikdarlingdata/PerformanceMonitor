@@ -2654,11 +2654,9 @@ public sealed class AlertEngine
 
                     var muteCtx = new AlertMuteContext { ServerName = serverName, MetricName = "Failed Agent Job", JobName = mostRecent.JobName }; /* :675 */
                     bool isMuted = _isAlertMuted(muteCtx);                          /* :676 */
-                    DateTime? priorWatermark = hasWatermark ? lastFailure : null;   /* #4752: what a fire nobody received puts back */
+                    DateTime? priorWatermark = hasWatermark ? lastFailure : null;   /* #4752: what a fire nobody received puts back in memory */
                     _lastFailedJobAlert[key] = now;                                 /* :677 */
                     _lastAlertedFailedJobTime[key] = newestFailure;                 /* :678 */
-                    /* :679-682 — persist the SERVER-LOCAL watermark on-change only (#1145 parity). */
-                    await _stateStore.SaveFailedJobWatermarkAsync(key, newestFailure);
 
                     var failedJobContext = AlertContextBuilders.BuildFailedJobContext(
                         serverName, failedJobs, failedJobOccurrences.Decorate,
@@ -2677,23 +2675,32 @@ public sealed class AlertEngine
                         ShortMessage: $"{failedJobs.Count} job failure(s) — {jobNames}"), ct);
                     AfterFire("Failed Agent Job", _lastFailedJobAlert, key, now, alertCooldown, delivery);
 
-                    /* #4752: the watermark moved to the newest failure, and was saved, BEFORE delivery. A fire
-                       nobody received puts back the one the operator was last told about, so the retry sweep
-                       still sees a failure above it. With a prior value the saved row goes back too. With none
-                       the in-memory entry is removed, but the store has no delete, so the saved row keeps the
-                       new value: the retry still happens in this process, and only a restart inside the retry
-                       delay would read the failure as already announced. */
+                    /* #4752: the in-memory watermark moved to the newest failure BEFORE the fire; the saved one
+                       moves only AFTER it, and only when a channel delivered. A fire nobody received puts the
+                       in-memory entry back to the value the operator was last told about, or removes it when
+                       there was none, so the retry sweep still sees a failure above it. The saved row never
+                       received the new value, so there is nothing to put back there: it still holds the prior
+                       value, or none, and a restart inside the retry delay reads the failure as not yet
+                       announced instead of losing it. The gate is the failed delivery alone, not the mute: a
+                       muted fire attempts no channel, is not "every channel failed", and saves as it always did.
+                       The trade is that this family is at-least-once: a crash after a send and before this save
+                       can send the same failure again after the restart, where saving first lost a failure no
+                       channel had received. */
                     if (EveryChannelFailed(delivery))
                     {
                         if (priorWatermark is { } prior)
                         {
                             _lastAlertedFailedJobTime[key] = prior;
-                            await _stateStore.SaveFailedJobWatermarkAsync(key, prior);
                         }
                         else
                         {
                             _lastAlertedFailedJobTime.TryRemove(key, out _);
                         }
+                    }
+                    else
+                    {
+                        /* :679-682 — persist the SERVER-LOCAL watermark on-change only (#1145 parity). */
+                        await _stateStore.SaveFailedJobWatermarkAsync(key, newestFailure);
                     }
                 }
             }
