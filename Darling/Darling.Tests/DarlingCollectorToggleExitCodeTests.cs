@@ -29,8 +29,23 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class DarlingCollectorToggleExitCodeTests
 {
-    private const int UsageOrConfig = 1;
-    private const int StoreUnavailable = 2;
+    private const int UsageOrConfig = DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig;
+    private const int StoreUnavailable = DarlingCliCommands.CollectorToggleExitCode.StoreUnavailable;
+
+    /// <summary>Scripts compare against the numbers, so the numbers are pinned, and the README lists the same
+    /// three next to <c>--check-settings</c>'s.</summary>
+    [Fact]
+    public void TheExitCodes_AreTheDocumentedNumbers()
+    {
+        Assert.Equal(0, DarlingCliCommands.CollectorToggleExitCode.Success);
+        Assert.Equal(1, DarlingCliCommands.CollectorToggleExitCode.UsageOrConfig);
+        Assert.Equal(2, DarlingCliCommands.CollectorToggleExitCode.StoreUnavailable);
+
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        Assert.Contains("`--enable-collector` and `--disable-collector` (described under", readme, StringComparison.Ordinal);
+        Assert.Contains("`0` the row was written and read back, `1` a usage or configuration problem", readme, StringComparison.Ordinal);
+        Assert.Contains("`2` the store could not be reached or refused the change", readme, StringComparison.Ordinal);
+    }
 
     /// <summary>A TCP port nothing is listening on, proven closed by bind-then-release, so a connection attempt
     /// fails fast (refused) rather than timing out against an address that merely never answers.</summary>

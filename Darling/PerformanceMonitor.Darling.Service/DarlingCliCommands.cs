@@ -5503,6 +5503,23 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     private static string DescribeFrequency(int minutes) =>
         minutes == 0 ? "on load only" : string.Format(CultureInfo.InvariantCulture, "every {0} min", minutes);
 
+    /// <summary>Exit codes <see cref="ToggleCollectorAsync"/> returns for <c>--enable-collector</c> and
+    /// <c>--disable-collector</c> (#4744): one code for a usage or configuration problem and another for a store that
+    /// cannot be reached or refuses the change, so a script can tell them apart instead of reading every failure as a
+    /// bare 1. The same idea as <see cref="CheckSettingsExitCode"/>, with the two failure kinds these verbs have.</summary>
+    public static class CollectorToggleExitCode
+    {
+        /// <summary>The row was written and read back.</summary>
+        public const int Success = 0;
+
+        /// <summary>Bad arguments, a config that is missing or invalid, a managed store's credential that is not
+        /// stored, an unknown collector, or a <c>--server</c> that names no server or more than one.</summary>
+        public const int UsageOrConfig = 1;
+
+        /// <summary>The store cannot be reached, or it refuses the write (or the read-back after it).</summary>
+        public const int StoreUnavailable = 2;
+    }
+
     /// <summary>
     /// <c>--enable-collector</c> / <c>--disable-collector</c> (#3752): flips one collector's <c>enabled</c> flag
     /// in <c>config.config_collector_schedules</c> — fleet-wide, or for one server with <c>--server</c> — and
@@ -5534,8 +5551,10 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     ///
     /// <para><b>Platform.</b> The <c>--add-server</c> posture: no Windows guard on the verb, because Windows is
     /// needed only for a MANAGED store's DPAPI credential, which is checked here; a Linux host on bring-your-own
-    /// Postgres can toggle a collector. Exit 0 when the row was written and read back; 1 on an argument, config,
-    /// credential, resolution or store error — the same policy as the sibling verbs, so a script can gate on it.</para>
+    /// Postgres can toggle a collector. Exit codes are <see cref="CollectorToggleExitCode"/>'s (#4744): 0 when the row was written
+    /// and read back; 1 on an argument, config, credential or server-resolution problem; 2 when the store cannot be
+    /// reached or refuses the change (a failure reading the row back after the write included), so a script can tell
+    /// its own mistake from a store that is down.</para>
     /// </summary>
     /// <param name="rest">The arguments AFTER the verb itself.</param>
     public static async Task<int> ToggleCollectorAsync(
@@ -5547,7 +5566,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         {
             error.WriteLine(argError);
             output.WriteLine(CollectorToggleUsageText());
-            return 1;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
         /* Validate the name BEFORE touching config or the store, through the executor itself: a fleet-scoped plan
@@ -5559,7 +5578,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         {
             error.WriteLine(preflight.FailReason ?? $"{verb}: the executor refused the request.");
             output.WriteLine(CollectorToggleUsageText());
-            return 1;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
         DarlingConfig config;
@@ -5570,14 +5589,14 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         catch (Exception ex)
         {
             error.WriteLine($"Could not load configuration: {ex.Message}");
-            return 1;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
         var postgres = config.Postgres;
         if (postgres is null)
         {
             error.WriteLine("postgres section is required.");
-            return 1;
+            return CollectorToggleExitCode.UsageOrConfig;
         }
 
         string? connectionString;
@@ -5590,7 +5609,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             {
                 error.WriteLine($"A managed Postgres store keeps its credential in DPAPI, so {verb} needs Windows. "
                     + "A bring-your-own store (postgres.connectionString) works on any platform.");
-                return 1;
+                return CollectorToggleExitCode.UsageOrConfig;
             }
 
             connectionString = DarlingManagedPostgres.TryBuildConnectionStringFromStoredCredential(postgres);
@@ -5599,7 +5618,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                 /* Inside the branch the guard above proved is Windows, for the reason --add-server documents: a
                    bool is not something the platform analyzer can correlate with an earlier OS guard. */
                 error.WriteLine(DarlingStoreBootstrapEvidence.MissingStoreCredentialMessage(postgres));
-                return 1;
+                return CollectorToggleExitCode.UsageOrConfig;
             }
         }
         else
@@ -5608,7 +5627,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             if (string.IsNullOrWhiteSpace(connectionString))
             {
                 error.WriteLine("postgres.connectionString is empty, so there is no store to write a schedule to.");
-                return 1;
+                return CollectorToggleExitCode.UsageOrConfig;
             }
 
             /* The worker's own normalization: a bring-your-own string usually omits the collect/config search
@@ -5636,7 +5655,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 error.WriteLine($"Could not read the servers registry from the store: {ex.Message}");
-                return 1;
+                return CollectorToggleExitCode.StoreUnavailable;
             }
 
             var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, serverName);
@@ -5648,7 +5667,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                 var (_, missMessage) = DarlingServerResolver.ResolveOrError(servers, serverName);
                 error.WriteLine(missMessage is null ? $"Could not resolve server '{serverName}'." : McpHelpers.ErrorMessageOf(missMessage));
                 error.WriteLine("Nothing was changed.");
-                return 1;
+                return CollectorToggleExitCode.UsageOrConfig;
             }
 
             if (target.Candidates.Count > 1)
@@ -5664,7 +5683,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
                         : $"  {candidate.DisplayName} ({candidate.ServerName})");
                 }
 
-                return 1;
+                return CollectorToggleExitCode.UsageOrConfig;
             }
 
             var resolved = target.Candidates[0];
@@ -5684,7 +5703,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             error.WriteLine($"Could not update the control-plane store: {ex.Message}");
-            return 1;
+            return CollectorToggleExitCode.StoreUnavailable;
         }
 
         output.WriteLine($"  [{(enable ? "ENABLED" : "DISABLED")}] {collectorName} — {scopeLabel} ({plan.SuccessStatus}).");
@@ -5701,7 +5720,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             error.WriteLine($"The schedule write succeeded, but reading the rows back failed: {ex.Message}");
-            return 1;
+            return CollectorToggleExitCode.StoreUnavailable;
         }
 
         foreach (var line in FormatCollectorScheduleRows(collectorName, rows))
@@ -5713,7 +5732,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         /* The schedule write bumps config_version through trg_bump_collector_schedules, which the worker polls
            every sweep — so say the restart is unnecessary rather than leaving them to wonder (the --add-server line). */
         output.WriteLine("The running service re-resolves its schedules on its next config poll; no restart is needed.");
-        return 0;
+        return CollectorToggleExitCode.Success;
     }
 
     /// <summary>
