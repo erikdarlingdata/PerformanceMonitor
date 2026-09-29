@@ -38,14 +38,16 @@ public enum PlanEdgeColourKey
 }
 
 /// <summary>
-/// Pure helper computing plan-edge color by the estimate-vs-actual row-count ratio of the CHILD
-/// operator feeding that edge, on the same per-execution basis <see cref="PlanRowAccuracy"/> gives the
-/// node label (colors only actual plans; estimated plans keep the neutral default). Started as a match
-/// for erikdarlingdata/PerformanceStudio's <c>GetLinkColorBrush</c>; #4627 found PS compares the CHILD's
-/// un-normalized total actual rows against its per-execution estimate, so this now diverges from PS on
-/// purpose until erikdarlingdata/PerformanceStudio#594 fixes the same bug there. Kept here (no WPF
-/// dependency) so a unit test can pin every tier boundary without needing <c>PerformanceMonitor.Ui</c>,
-/// which is net10.0-windows-only.
+/// Pure logic computing plan-edge color by the actual-vs-expected row-count ratio of the CHILD
+/// operator feeding that edge (colors only actual plans; estimated plans keep the neutral default).
+/// "Expected" is <see cref="RowEstimateHelper.GetExpectedRows"/>, the same basis the analyzer's
+/// row-estimate rules use: the per-execution estimate times ActualExecutions on the inner side of a
+/// Nested Loops join, where ActualExecutions is a real loop count, and the plain per-execution
+/// estimate everywhere else, where a parallel zone's ActualExecutions only counts threads (#4627).
+/// This matches erikdarlingdata/PerformanceStudio's <c>GetLinkColorBrush</c> as fixed in
+/// PerformanceStudio#594 / #597: it compares the child's total actual rows against that expected
+/// figure, and the tier limits are PS's. Kept here (no WPF dependency) so a unit test can pin every
+/// tier boundary without needing <c>PerformanceMonitor.Ui</c>, which is net10.0-windows-only.
 /// </summary>
 public static class PlanEdgeColour
 {
@@ -56,22 +58,34 @@ public static class PlanEdgeColour
     public const double DefaultDivergenceLimit = 10.0;
 
     /// <summary>
-    /// Returns the color key for the edge feeding <paramref name="child"/>. <paramref name="divergenceLimit"/>
-    /// is the raw setting value; this clamps it to <see cref="MinDivergenceLimit"/> itself, so callers
-    /// may pass the setting unclamped. <paramref name="actualRows"/> is the total across every execution
-    /// (showplan XML's own basis); this normalizes it by <paramref name="actualExecutions"/> before
-    /// comparing against the per-execution <paramref name="estimateRows"/>, via <see cref="PlanRowAccuracy"/>
-    /// — the same normalization the node label applies, so the two can't disagree (#4627).
+    /// Returns the color key for the edge feeding <paramref name="child"/>: the node's own actual-stats
+    /// flag, its total <c>ActualRows</c>, and the expected rows <see cref="RowEstimateHelper.GetExpectedRows"/>
+    /// derives from its position in the tree. This is the overload every caller in the viewer uses, so
+    /// no caller can hand the tiers the wrong "expected" (#4627). <paramref name="divergenceLimit"/> is
+    /// the raw setting value; it is clamped to <see cref="MinDivergenceLimit"/> like the numeric overload's.
     /// </summary>
-    public static PlanEdgeColourKey ForChild(bool hasActualStats, double actualRows, long actualExecutions, double estimateRows, double divergenceLimit)
+    public static PlanEdgeColourKey ForChild(PlanNode child, double divergenceLimit)
+        => ForChild(child.HasActualStats, child.ActualRows, RowEstimateHelper.GetExpectedRows(child), divergenceLimit);
+
+    /// <summary>
+    /// The tier logic on plain numbers, so a unit test can pin every boundary without building a tree.
+    /// <paramref name="divergenceLimit"/> is the raw setting value; this clamps it to
+    /// <see cref="MinDivergenceLimit"/> itself, so callers may pass the setting unclamped.
+    /// <paramref name="actualRows"/> is the operator's total across every execution (showplan XML's own
+    /// basis) and <paramref name="expectedRows"/> is what that total should be on the same basis, from
+    /// <see cref="RowEstimateHelper.GetExpectedRows"/>. Passing a bare per-execution estimate as
+    /// <paramref name="expectedRows"/> for a node that ran more than once compares a total against a
+    /// single execution, which is the original #4627 bug, so viewer code calls
+    /// <see cref="ForChild(PlanNode, double)"/> instead.
+    /// </summary>
+    public static PlanEdgeColourKey ForChild(bool hasActualStats, double actualRows, double expectedRows, double divergenceLimit)
     {
         if (!hasActualStats)
             return PlanEdgeColourKey.Neutral;
 
         divergenceLimit = System.Math.Max(MinDivergenceLimit, divergenceLimit);
 
-        var actualRowsPerExecution = PlanRowAccuracy.ActualRowsPerExecution(actualRows, actualExecutions);
-        var accuracyRatio = PlanRowAccuracy.Ratio(actualRowsPerExecution, estimateRows);
+        var accuracyRatio = RowEstimateHelper.GetRowAccuracyRatio(actualRows, expectedRows);
 
         // Within the neutral band — keep the default color.
         if (accuracyRatio >= 1.0 / divergenceLimit && accuracyRatio <= divergenceLimit)

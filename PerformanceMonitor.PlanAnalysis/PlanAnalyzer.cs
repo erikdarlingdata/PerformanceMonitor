@@ -873,10 +873,13 @@ public static partial class PlanAnalyzer
             }
             else
             {
-                // Compare per-execution actuals to estimates (SQL Server estimates are per-execution)
-                var executions = node.ActualExecutions;
-                var actualPerExec = (double)node.ActualRows / executions;
-                var ratio = actualPerExec / node.EstimateRows;
+                // #594 (PerformanceStudio): compare like with like. EstimateRows is per execution;
+                // ActualExecutions is a real per-execution count only on the inner side of a Nested Loops
+                // join — everywhere else (including a non-inner node in a parallel zone, where it is
+                // thread-summed) RowEstimateHelper leaves the estimate at one execution instead of
+                // inflating it by DOP (#4627).
+                var isInnerSide = RowEstimateHelper.IsInnerSideOfNestedLoops(node);
+                var ratio = RowEstimateHelper.GetRowAccuracyRatio(node);
                 if (ratio >= 10.0 || ratio <= 0.1)
                 {
                     var harm = AssessEstimateHarm(node, ratio);
@@ -884,8 +887,8 @@ public static partial class PlanAnalyzer
                     {
                         var direction = ratio >= 10.0 ? "underestimated" : "overestimated";
                         var factor = ratio >= 10.0 ? ratio : 1.0 / ratio;
-                        var actualDisplay = executions > 1
-                            ? $"Actual {node.ActualRows:N0} ({actualPerExec:N0} rows x {executions:N0} executions)"
+                        var actualDisplay = isInnerSide && node.ActualExecutions > 1
+                            ? $"Actual {node.ActualRows:N0} ({(double)node.ActualRows / node.ActualExecutions:N0} rows x {node.ActualExecutions:N0} executions)"
                             : $"Actual {node.ActualRows:N0}";
                         node.Warnings.Add(new PlanWarning
                         {
@@ -1345,15 +1348,21 @@ public static partial class PlanAnalyzer
                 // Core fact
                 details.Add($"Nested Loops inner side executed {innerChild.ActualExecutions:N0} times (DOP {dop}).");
 
-                // Outer side estimate mismatch — explains WHY the optimizer chose NL
+                // Outer side estimate mismatch — explains WHY the optimizer chose NL.
+                // #594 (PerformanceStudio): outerChild is this join's OUTER input, but if this Nested Loops is
+                // itself nested inside an ancestor join's inner side, outerChild inherits that — walk the whole
+                // ancestor chain (RowEstimateHelper) rather than assuming one execution. In a parallel zone its
+                // ActualExecutions is a thread count, so dividing the actual by it understated the actual by DOP (#4627).
                 if (outerChild.HasActualStats && outerChild.EstimateRows > 0)
                 {
-                    var outerExecs = outerChild.ActualExecutions > 0 ? outerChild.ActualExecutions : 1;
-                    var outerActualPerExec = (double)outerChild.ActualRows / outerExecs;
-                    var outerRatio = outerActualPerExec / outerChild.EstimateRows;
+                    var outerIsInnerSide = RowEstimateHelper.IsInnerSideOfNestedLoops(outerChild);
+                    var outerRatio = RowEstimateHelper.GetRowAccuracyRatio(outerChild);
                     if (outerRatio >= 10.0)
                     {
-                        details.Add($"Outer side: estimated {outerChild.EstimateRows:N0} rows, actual {outerActualPerExec:N0} ({outerRatio:F0}x underestimate). The optimizer chose Nested Loops expecting far fewer iterations.");
+                        var outerActualDisplay = outerIsInnerSide && outerChild.ActualExecutions > 0
+                            ? (double)outerChild.ActualRows / outerChild.ActualExecutions
+                            : outerChild.ActualRows;
+                        details.Add($"Outer side: estimated {outerChild.EstimateRows:N0} rows, actual {outerActualDisplay:N0} ({outerRatio:F0}x underestimate). The optimizer chose Nested Loops expecting far fewer iterations.");
                     }
                 }
 
@@ -1507,9 +1516,11 @@ public static partial class PlanAnalyzer
                 var rowGoalWorked = false;
                 if (node.HasActualStats)
                 {
-                    var executions = node.ActualExecutions > 0 ? node.ActualExecutions : 1;
-                    var actualPerExec = (double)node.ActualRows / executions;
-                    rowGoalWorked = actualPerExec <= node.EstimateRows;
+                    // #594 (PerformanceStudio): compare like with like — see RowEstimateHelper. A scan or seek is
+                    // routinely the inner side of a Nested Loops join (a key lookup, for one), where
+                    // ActualExecutions is a real per-execution count; everywhere else, in a parallel zone, it is a
+                    // thread count and dividing by it swallowed a row goal that did not hold (#4627).
+                    rowGoalWorked = RowEstimateHelper.GetRowAccuracyRatio(node) <= 1.0;
                 }
 
                 if (!rowGoalWorked)
