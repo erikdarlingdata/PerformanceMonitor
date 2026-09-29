@@ -58,6 +58,13 @@ public sealed class RdsDeadlockIngestor
     /// </summary>
     private readonly RdsDeadlockCarryBook _reportCarry = new();
 
+    /// <summary>
+    /// Where the parsed rows go: null is the real COPY into the store (<see cref="WriteAsync"/>). A test that has no
+    /// store sets it, so a report that is stored can be counted, and the marker save that follows it observed, without
+    /// one (#4735). Nothing in the service sets it.
+    /// </summary>
+    internal Func<IReadOnlyList<PgDeadlocksCollector.Row>, CancellationToken, Task<int>>? RowWriter { get; init; }
+
     public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -199,8 +206,15 @@ public sealed class RdsDeadlockIngestor
 
         /* #4708: the position is saved AFTER the chunk's rows are stored and the in-process position has moved, never
            before, so a crash between the two re-reads a window (rows dedupe on their identity hash) rather than
-           resuming past one. */
-        if (_resume is not null)
+           resuming past one.
+
+           NOT while a report is held (#4735). The held head lives in memory only, so a position saved past this chunk
+           would start a restarted process in the middle of the report: no header left for Extract to find, and the
+           deadlock never stored. The saved position stays where the last finished chunk left it, and a restart reads
+           this chunk again; the rows before the report dedupe on their identity hash, as for any replay. The csvlog
+           carry's held record is left as it was (RdsLogEventIngestor): its holds happen on most chunks, a held report
+           is rare. */
+        if (_resume is not null && nextReport.Length == 0)
         {
             await _resume.SaveAsync(serverId, kind, chunk.Value.Resume, cancellationToken);
         }
@@ -327,7 +341,9 @@ public sealed class RdsDeadlockIngestor
         }
 
         return (
-            await WriteAsync(serverId, storageName, rows, cancellationToken),
+            RowWriter is { } writeRows
+                ? await writeRows(rows, cancellationToken)
+                : await WriteAsync(serverId, storageName, rows, cancellationToken),
             foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry, nextReport);
     }
 
