@@ -161,8 +161,13 @@ public sealed class ViewerWave3SqlTests
    below sets the mode it asserts under (#4766), and a mutator racing another collection's reader is the flake the
    viewer-time-statics collection exists to prevent. */
 [Collection("viewer-time-statics")]
-public sealed class ViewerWave3DisplayTests
+public sealed class ViewerWave3DisplayTests : IDisposable
 {
+    /* The display mode this class found; the time test below sets its own and Dispose puts it back after every test. */
+    private readonly TimeDisplayMode _savedDisplayMode = ViewerTimeHelper.CurrentDisplayMode;
+
+    public void Dispose() => ViewerTimeHelper.CurrentDisplayMode = _savedDisplayMode;
+
     private static ViewerAlertRow AlertRow(
         string metric = "High CPU",
         double current = 95.5,
@@ -358,24 +363,17 @@ public sealed class ViewerWave3DisplayTests
            INSTANT, so it holds on any machine and any date. */
         var stored = new DateTime(2026, 7, 1, 3, 30, 0, DateTimeKind.Utc);
         var row = AlertRow(clock: ServerClock.FixedOffset(330));
-        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
-        try
-        {
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
-            Assert.Equal("2026-07-01 09:00:00", row.TimeLocal);
 
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
-            Assert.Equal("2026-07-01 03:30:00", row.TimeLocal);
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
+        Assert.Equal("2026-07-01 09:00:00", row.TimeLocal);
 
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
-            Assert.Equal(
-                TimeZoneInfo.ConvertTimeFromUtc(stored, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss"),
-                row.TimeLocal);
-        }
-        finally
-        {
-            ViewerTimeHelper.CurrentDisplayMode = savedMode;
-        }
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.UTC;
+        Assert.Equal("2026-07-01 03:30:00", row.TimeLocal);
+
+        ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
+        Assert.Equal(
+            TimeZoneInfo.ConvertTimeFromUtc(stored, TimeZoneInfo.Local).ToString("yyyy-MM-dd HH:mm:ss"),
+            row.TimeLocal);
     }
 
     [Fact]
