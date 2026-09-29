@@ -43,6 +43,11 @@ public sealed class ArchiveCompactionSwapLockTests : IDisposable
     /* 5 hot rows, plus 10 per archive file across four files. */
     private const long TotalRows = 45;
 
+    /* How long a helper thread is given to return. The longest wait any probe makes is 5 seconds, so a thread
+       that has not returned by then is stuck, and a bound the write-lock hold census (WriteLockBudgetTests)
+       can read is what lets this file take the lock with no timeout. */
+    private static readonly TimeSpan ProbeJoinLimit = TimeSpan.FromSeconds(10);
+
     private readonly string _tempDir;
     private readonly string _dbPath;
     private readonly string _archiveDir;
@@ -192,7 +197,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
                 gotIn = readLock is not null;
             });
             probe.Start();
-            probe.Join();
+            Assert.True(probe.Join(ProbeJoinLimit), "the probe thread did not return");
             return gotIn;
         }
 
@@ -251,7 +256,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
             }
         });
         probe.Start();
-        probe.Join();
+        Assert.True(probe.Join(ProbeJoinLimit), "the probe thread did not return");
         return refused;
     }
 
@@ -347,11 +352,11 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         using (initializer.AcquireWriteLock())
         {
             compaction.Start();
-            finished = compaction.Join(TimeSpan.FromSeconds(5));
+            finished = compaction.Join(ProbeJoinLimit);
         }
 
         /* Released above; a compaction that was parked on the lock finishes now instead of hanging the run. */
-        compaction.Join();
+        compaction.Join(ProbeJoinLimit);
 
         Assert.True(finished, "the replay waited for the write lock although there was no journal to replay");
         Assert.Equal(0, replays);
