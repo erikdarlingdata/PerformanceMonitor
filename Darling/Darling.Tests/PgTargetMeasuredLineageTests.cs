@@ -29,6 +29,9 @@ namespace Darling.Tests;
 /// shape, (b) cites <c>2026-09-19</c>, and (c) names the population (<c>Aurora PostgreSQL clusters</c>). Moving
 /// a bar then means re-reading the fleet or rewriting the comment as unmeasured, and either is honest.</para>
 ///
+/// <para><b>Round 4 (#4404).</b> The host-memory reclaimable bars, the sustain length and the overcommit band are measured
+/// as the empty interval (2026-09-29, 7 days, Aurora clusters); the growth bars and every boost stay unmeasured.</para>
+///
 /// <para><b>What stays unmeasured, on purpose.</b> The sampling floor and the sampled profile's bar (population 0
 /// on the fleet as of 2026-09-20 — no cluster runs <c>pg_wait_sampling</c>), the session-count floors (read as a
 /// fraction of the ceiling, not as counts), and every co-fire boost. Those are pinned to still say so, because the
@@ -47,6 +50,8 @@ public sealed class PgTargetMeasuredLineageTests
     private const string CalibrationDate = "2026-09-19";
     /// <summary>The second read (batch C): hour-of-week ratios, per-event wait fractions, reads per 15-minute bucket.</summary>
     private const string SecondCalibrationDate = "2026-09-20";
+    /// <summary>The fourth read (#4404, batch D re-fire): host-memory reclaimable share and the configured overcommit ratio, 7 d.</summary>
+    private const string FourthCalibrationDate = "2026-09-29";
     private const string Population = "Aurora PostgreSQL clusters";
 
     private static readonly Regex s_constDeclaration = new(
@@ -73,6 +78,8 @@ public sealed class PgTargetMeasuredLineageTests
         ("Baselines/AnomalyThresholds.cs", CalibrationDate, new[] { "PgTpsFloor", "PgTpsFallback", "PgCpuFloorPct", "PgCpuFallbackPct", "PgWaitProfileFallbackMsPerSec", "PgDeadlockRateFloorPerHour" }),
         /* Round 2 (§C2): the ratio multiple, read per family — the verdict differs by family and the comment says each. */
         ("Baselines/AnomalyThresholds.cs", SecondCalibrationDate, new[] { "PgRatioAnomalyThreshold" }),
+        /* Round 4 (#4404, D1/D2 re-fire): the memory bars, measured as the empty interval. */
+        ("PgTargetScorer.Memory.cs", FourthCalibrationDate, new[] { "OvercommitCriticalRatio", "HostMemoryReclaimableWarningShare", "HostMemoryReclaimableCriticalShare", "HostMemoryPressureSustainSamples" }),
     };
 
     /// <summary>The bars the calibrations did NOT measure, which must still say so.</summary>
@@ -92,9 +99,8 @@ public sealed class PgTargetMeasuredLineageTests
             /* lane 30 — the Seq-Scan advisory: no plan-node, predicate-selectivity or relation-size distribution was read. */
             "SeqScanSelectiveFraction", "SeqScanLargeRelationBytes", "SeqScanMinCapturesPerHour", "SeqScanAdvisoryBase" }),
         ("Baselines/AnomalyThresholds.cs", new[] { "PgStatementMeanMsFloor", "PgStatementMeanMsFallback" }),
-        /* Lane 32 (#3691 v3): the memory family — the 2026-09-19 calibration ran before V136 landed the memory columns, so it
-           read no reclaimable share and no overcommit ratio; the 1.0 line is engine-defined and is not listed here. */
-        ("PgTargetScorer.Memory.cs", new[] { "OvercommitCriticalRatio", "HostMemoryReclaimableWarningShare", "HostMemoryReclaimableCriticalShare", "HostMemoryPressureSustainSamples", "OvercommitCriticalBandBoost", "HostMemoryCauseBoost" }),
+        /* #3691: the memory family's boosts — severity lifts, not bars; round 4 (2026-09-29) measured the bars, not these. */
+        ("PgTargetScorer.Memory.cs", new[] { "OvercommitCriticalBandBoost", "HostMemoryCauseBoost" }),
         /* Lane 38 (#3691): the object-growth family — pg_database_size_stats (V136) is one day old at the family's birth; the
            2026-09-19 calibration ran before it existed, so every bar is chosen and the family stamps threshold_lineage = 0. */
         ("PgTargetScorer.Growth.cs", new[] { "GrowthLookbackDays", "GrowthConcerningBytes", "GrowthConcerningFraction", "GrowthCriticalBytes", "GrowthCriticalFraction", "GrowthMinimumSamples", "GrowthBloatCoFireBoost", "GrowthAnomalyCoFireBoost" }),
@@ -172,7 +178,7 @@ public sealed class PgTargetMeasuredLineageTests
     [Fact]
     public void TheMetadataFlag_AgreesWithTheCommentsFileByFile()
     {
-        foreach (var file in new[] { "PgTargetScorer.Temp.cs", "PgTargetScorer.Vacuum.cs", "PgTargetScorer.Database.cs", "PgTargetScorer.Cpu.cs", "PgTargetScorer.Sessions.cs" })
+        foreach (var file in new[] { "PgTargetScorer.Temp.cs", "PgTargetScorer.Vacuum.cs", "PgTargetScorer.Database.cs", "PgTargetScorer.Cpu.cs", "PgTargetScorer.Sessions.cs", "PgTargetScorer.Memory.cs" })
         {
             var source = string.Join("\n", Source(file));
             Assert.Contains("[\"threshold_lineage\"] = 1;", source, StringComparison.Ordinal);
