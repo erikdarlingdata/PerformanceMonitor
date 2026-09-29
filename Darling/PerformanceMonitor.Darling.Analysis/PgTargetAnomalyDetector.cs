@@ -139,7 +139,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(tps)                                                             AS peak_tps,
        AVG(tps)                                                             AS avg_tps,
        COUNT(*)                                                             AS tps_samples,
-       (array_agg(collection_time ORDER BY tps DESC, collection_time DESC))[1]                    AS peak_time
+       (array_agg(collection_time ORDER BY tps DESC NULLS LAST, collection_time DESC))[1]                    AS peak_time
 FROM rated
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
@@ -230,7 +230,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_sessions)                                  AS peak_sessions,
        AVG(total_sessions)                                  AS avg_sessions,
        COUNT(*)                                              AS sample_count,
-       (array_agg(collection_time ORDER BY total_sessions DESC, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY total_sessions DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM per_collection
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
@@ -256,7 +256,9 @@ WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3";
     /// <summary>
     /// #3653 A8 option B (lane L3a): <see cref="CpuWindowSql"/>'s tile twin, one row per target-local hour. The
     /// peak-time subquery becomes the per-tile <c>array_agg ORDER BY … DESC)[1]</c> the recipe names (replacing the
-    /// <c>ORDER BY … LIMIT 1</c> shape, which cannot be windowed per tile). Also carries the raw <c>cpu_percent</c>
+    /// <c>ORDER BY … LIMIT 1</c> shape, which cannot be windowed per tile). The ORDER BY ends <c>DESC NULLS LAST,
+    /// collection_time DESC</c>, so a NULL <c>acu_utilization_percent</c> (which <c>MAX</c> ignores) is never the
+    /// peak time and a tie reports the later sample (#4731). Also carries the raw <c>cpu_percent</c>
     /// peak PER TILE (design's "extra window scalars" rule) — the detector reports the worst tile's. Binds
     /// <c>$4..$6</c> from the analysis window's clock.
     /// </summary>
@@ -265,7 +267,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(acu_utilization_percent)                                          AS peak_capacity_pct,
        AVG(acu_utilization_percent)                                          AS avg_capacity_pct,
        COUNT(acu_utilization_percent)                                        AS sample_count,
-       (array_agg(collection_time ORDER BY acu_utilization_percent DESC, collection_time DESC))[1] AS peak_time,
+       (array_agg(collection_time ORDER BY acu_utilization_percent DESC NULLS LAST, collection_time DESC))[1] AS peak_time,
        MAX(cpu_percent)                                                      AS peak_cpu_percent
 FROM pg_cpu_utilization
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3

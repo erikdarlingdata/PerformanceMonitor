@@ -194,13 +194,17 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
        (WindowTiles.LocalHourSql, $4..$6 bound from the ANALYSIS window's clock, never the cached
        baseline clock — see the recipe doc). The peak-time subquery is dropped for a per-tile
        array_agg ORDER BY, which the correlated LIMIT-1 subquery cannot express per group. Column
-       order (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the reader's ordinal contract. */
+       order (0 local_hour, 1 peak, 2 avg, 3 count, 4 peak_time) is the reader's ordinal contract.
+       #4731: every peak-time array_agg in the anomaly detectors orders `<value> DESC NULLS LAST,
+       collection_time DESC`. PostgreSQL sorts NULLs first under DESC, and the MAX beside it ignores
+       them, so without NULLS LAST a sample with no value could be reported as the peak time; the
+       collection_time key makes two samples tied on the peak report the later one. */
     public const string CpuTileWindowSql = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(sqlserver_cpu_utilization) AS peak_cpu,
        AVG(sqlserver_cpu_utilization) AS avg_cpu,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY sqlserver_cpu_utilization DESC, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY sqlserver_cpu_utilization DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2 AND collection_time < $3
@@ -315,7 +319,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS peak_batch,
        AVG(delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0)) AS avg_batch,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) DESC, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY delta_cntr_value * 1.0 / NULLIF(sample_interval_seconds, 0) DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_perfmon_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 AND   counter_name = 'Batch Requests/sec'
@@ -340,7 +344,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_connections) AS peak_connections,
        AVG(total_connections) AS avg_connections,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY total_connections DESC, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY total_connections DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -363,7 +367,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_elapsed) AS peak_elapsed,
        AVG(total_elapsed) AS avg_elapsed,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY total_elapsed DESC, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY total_elapsed DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM per_collection
 GROUP BY local_hour
 ORDER BY local_hour";
@@ -376,7 +380,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS peak_pressure,
        AVG(total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) * 100) AS avg_pressure,
        COUNT(*) AS sample_count,
-       (array_agg(collection_time ORDER BY total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) DESC, collection_time DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY total_server_memory_mb::DOUBLE PRECISION / NULLIF(target_server_memory_mb::DOUBLE PRECISION, 0) DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM v_memory_stats
 WHERE server_id = $1 AND collection_time >= $2 AND collection_time <= $3
 AND   target_server_memory_mb > 0

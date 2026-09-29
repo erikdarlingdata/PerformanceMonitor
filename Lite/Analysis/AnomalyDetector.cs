@@ -332,8 +332,9 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
                bind BaselineLocalClock's window clock (map.WindowClock), never the cached baseline clock.
 
                #4731: the peak time orders by value, then collection_time DESC - Darling's
-               array_agg(collection_time ORDER BY value DESC, collection_time DESC)[1], so two rows tied on the
-               peak report the later time on every run. The key is a STRUCT; DuckDB compares STRUCTs
+               array_agg(collection_time ORDER BY value DESC NULLS LAST, collection_time DESC)[1], so two rows
+               tied on the peak report the later time on every run, and a row with no value is never the peak
+               time. The key is a STRUCT; DuckDB compares STRUCTs
                field by field, and treats a NULL field as LARGER than any value. The FILTER keeps a row with a NULL
                value out of the aggregate, as arg_max(arg, val) itself always ignored it. */
             cmd.CommandText = @"
