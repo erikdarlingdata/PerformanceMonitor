@@ -368,13 +368,18 @@ public sealed class DarlingAnomalyBaselineTests
         {
             "MAX(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS peak_read_lat",
             "AVG(delta_stall_read_ms * 1.0 / NULLIF(delta_reads, 0)) AS avg_read_lat",
+            /* #4731: each side counts its OWN samples. One shared COUNT(*) over the (reads OR writes) rows made a
+               write-only row a read sample (peak and mean NULL, read as 0), so the read gate admitted tiles and
+               window_samples differed from Lite's. */
+            "COUNT(*) FILTER (WHERE delta_reads > 0) AS read_sample_count",
             "MAX(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS peak_write_lat",
             "AVG(delta_stall_write_ms * 1.0 / NULLIF(delta_writes, 0)) AS avg_write_lat",
+            "COUNT(*) FILTER (WHERE delta_writes > 0) AS write_sample_count",
         };
         foreach (var column in expectedColumns)
             Assert.Contains(column, sql, StringComparison.Ordinal);
 
-        /* The column ORDER is the reader's ordinal contract (0 peak read, 1 avg read, 2 peak write, 3 avg write). */
+        /* The column ORDER is the reader's ordinal contract (0 local hour, 1 peak read, 2 avg read, 3 read samples, 4 peak write, 5 avg write, 6 write samples). */
         var positions = expectedColumns.Select(c => sql.IndexOf(c, StringComparison.Ordinal)).ToArray();
         Assert.True(positions.SequenceEqual(positions.OrderBy(p => p)), "peak/avg column order is the reader's ordinal contract");
 
@@ -382,11 +387,22 @@ public sealed class DarlingAnomalyBaselineTests
         Assert.Contains("FROM v_file_io_stats", sql, StringComparison.Ordinal);
         Assert.Contains("(delta_reads > 0 OR delta_writes > 0)", sql, StringComparison.Ordinal);
 
-        /* Lite's inline twin carries the same four columns, in the same order. */
+        /* Lite's inline twin carries the same six columns, in the same order. */
         var lite = RepoFile.ReadRepoFile("Lite", "Analysis", "AnomalyDetector.cs");
         var litePositions = expectedColumns.Select(c => lite.IndexOf(c, StringComparison.Ordinal)).ToArray();
         Assert.All(litePositions, p => Assert.True(p > 0, "Lite's I/O window read has drifted from the PG twin"));
         Assert.True(litePositions.SequenceEqual(litePositions.OrderBy(p => p)));
+
+        /* #4731: the reader ordinals are part of the same contract. Both products hand the read gate ordinals
+           1/2 with the read count at 3, and the write gate 4/5 with the write count at 6 - a shared count read
+           from one ordinal for both sides is the drift this pin exists to stop. */
+        var pgIoCode = CSharpSourceWalker.StripCommentsAndStrings(RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgAnomalyDetector.cs"));
+        var liteIoCode = CSharpSourceWalker.StripCommentsAndStrings(lite);
+        foreach (var code in new[] { pgIoCode, liteIoCode })
+        {
+            Assert.Matches(@"readTiles\.Add\(WindowTiles\.ReadTile\(\w+, 0, 1, 2, 3\)\)", code);
+            Assert.Matches(@"writeTiles\.Add\(WindowTiles\.ReadTile\(\w+, 0, 4, 5, 6\)\)", code);
+        }
 
         /* And every z-score family in BOTH detectors hands the gate the PAIR — no peak-only call survives
            in the SQL Server detector bodies (the PostgreSQL-target detector's peak-only calls are the
@@ -412,6 +428,68 @@ public sealed class DarlingAnomalyBaselineTests
             }
             Assert.DoesNotMatch(@"AnomalyGate\.EvaluateZScore\(\s*\w*[Bb]aseline,\s*\w+,\s*(ioThreshold|GetDeviationThreshold)", code);
         }
+    }
+
+    /// <summary>
+    /// #4731: a window where reads and writes have DIFFERENT sample counts. Hour A has 12 read samples and 4
+    /// write samples; hour B is write-only (5 write samples, no read sample, its read peak and mean NULL). Each
+    /// side's tile carries its own count, so the whole-window read count is 12 - not 17 - and the write count
+    /// is 9; and a window with no read rows at all reads 0 read samples, so the read gate never sees it (the
+    /// shared count it replaced handed that gate the write rows' count). Fed to the detector's own row reader
+    /// through a hand-built table in the <see cref="PgAnomalyDetector.IoTileWindowSql"/> column order.
+    /// </summary>
+    [Fact]
+    public void IoTileReader_GivesEachSideItsOwnSampleCount_AWriteOnlyTileIsNotAReadSample()
+    {
+        static System.Data.DataTable IoTable()
+        {
+            var table = new System.Data.DataTable();
+            table.Columns.Add("local_hour", typeof(DateTime));
+            table.Columns.Add("peak_read_lat", typeof(double));
+            table.Columns.Add("avg_read_lat", typeof(double));
+            table.Columns.Add("read_sample_count", typeof(long));
+            table.Columns.Add("peak_write_lat", typeof(double));
+            table.Columns.Add("avg_write_lat", typeof(double));
+            table.Columns.Add("write_sample_count", typeof(long));
+            return table;
+        }
+
+        var hourA = new DateTime(2026, 9, 24, 5, 0, 0, DateTimeKind.Unspecified);
+        var hourB = hourA.AddHours(1);
+        var table = IoTable();
+        table.Rows.Add(hourA, 30.0, 12.5, 12L, 8.0, 3.0, 4L);
+        table.Rows.Add(hourB, DBNull.Value, DBNull.Value, 0L, 9.0, 4.0, 5L);
+
+        var readTiles = new List<WindowTile>();
+        var writeTiles = new List<WindowTile>();
+        using (var reader = table.CreateDataReader())
+        {
+            while (reader.Read())
+                PgAnomalyDetector.ReadIoTiles(reader, readTiles, writeTiles);
+        }
+
+        Assert.Equal(new long[] { 12, 0 }, readTiles.Select(t => t.Samples).ToArray());
+        Assert.Equal(new long[] { 4, 5 }, writeTiles.Select(t => t.Samples).ToArray());
+        Assert.Equal(30.0, readTiles[0].Peak);
+        Assert.Equal(12.5, readTiles[0].Mean);
+        Assert.Equal(8.0, writeTiles[0].Peak);
+        Assert.Equal(3.0, writeTiles[0].Mean);
+        Assert.Equal(12L, WindowTiles.WholeWindow(readTiles).Samples);
+        Assert.Equal(9L, WindowTiles.WholeWindow(writeTiles).Samples);
+
+        // A window whose every row is write-only: the read side reads 0 samples, so the detector's
+        // wholeRead.Samples > 0 guard skips the read gate - the tile Darling used to admit and Lite rejects.
+        var writeOnly = IoTable();
+        writeOnly.Rows.Add(hourA, DBNull.Value, DBNull.Value, 0L, 9.0, 4.0, 6L);
+        var onlyReadTiles = new List<WindowTile>();
+        var onlyWriteTiles = new List<WindowTile>();
+        using (var reader = writeOnly.CreateDataReader())
+        {
+            while (reader.Read())
+                PgAnomalyDetector.ReadIoTiles(reader, onlyReadTiles, onlyWriteTiles);
+        }
+        Assert.Equal(0L, WindowTiles.WholeWindow(onlyReadTiles).Samples);
+        Assert.Equal(6L, WindowTiles.WholeWindow(onlyWriteTiles).Samples);
     }
 
     /// <summary>
