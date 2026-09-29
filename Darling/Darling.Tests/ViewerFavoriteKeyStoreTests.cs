@@ -54,11 +54,18 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     private static List<string> Starred(ViewerServerStore store) =>
         store.GetAllServers().Where(s => s.IsFavorite).Select(s => s.ServerName).ToList();
 
+    /// <summary>
+    /// Files a bare favorite under a name, the way an earlier version did when it starred a server by its host or
+    /// its collected name. The store no longer has a way to write one, so the test writes the entry itself.
+    /// </summary>
+    private static void FileAnEarlierStar(ViewerServerStore store, string name) =>
+        store.AddServer(new ViewerServerEntry { ServerName = name, DisplayName = name, IsFavorite = true }, null, null);
+
     [Fact]
     public void AHostEdit_LeavesTheFlagOnTheServersKey_AndNothingUnderEitherHost()
     {
         var store = NewStore();
-        store.SetFavorite("host-a", true);                          // what the host-keyed dialog saved
+        FileAnEarlierStar(store, "host-a");                          // what the host-keyed dialog saved
 
         Assert.True(store.IsFavorite(ServerId, "host-a"));           // the edit dialog's prefill read
         store.SetFavorite(ServerId, true, "host-a", "host-b");       // the save: host-a -> host-b, box still checked
@@ -87,7 +94,7 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     public void UncheckingInTheSameEdit_LeavesNoEntrySetToTrue(bool prefillReadCarriedTheOldEntryOver)
     {
         var store = NewStore();
-        store.SetFavorite("host-a", true);
+        FileAnEarlierStar(store, "host-a");
         if (prefillReadCarriedTheOldEntryOver)
         {
             Assert.True(store.IsFavorite(ServerId, "host-a"));
@@ -104,7 +111,7 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     public void AnEntrySavedUnderAHostByAnEarlierVersion_StillShowsAsAFavoriteUnderTheNewKey()
     {
         var store = NewStore();
-        store.SetFavorite("host-a", true);
+        FileAnEarlierStar(store, "host-a");
 
         Assert.True(store.IsFavorite(ServerId, "host-a"));
 
@@ -119,7 +126,7 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     public void AnEntrySavedUnderTheSidebarNameByAnEarlierVersion_IsCarriedOverToo()
     {
         var store = NewStore();
-        Assert.True(store.ToggleFavorite("sidebar-name"));           // the old sidebar's star
+        FileAnEarlierStar(store, "sidebar-name");                    // the old sidebar's star
 
         Assert.True(store.IsFavorite(ServerId, "sidebar-name", "host-a"));
 
@@ -131,7 +138,7 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     public void AnOldEntryThatAlsoHoldsADatabaseFilter_IsUnstarredNotDeleted()
     {
         var store = NewStore();
-        store.SetFavorite("sidebar-name", true);
+        FileAnEarlierStar(store, "sidebar-name");
         store.SetViewFilterDatabases("sidebar-name", new List<string> { "Sales" });
 
         Assert.True(store.IsFavorite(ServerId, "sidebar-name"));
@@ -305,7 +312,7 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     public void ACarriedOverFlagIsCarriedOnce_SoUnpinningItSticks()
     {
         var store = NewStore();
-        store.SetFavorite("host-a", true);
+        FileAnEarlierStar(store, "host-a");
         Assert.True(store.IsFavorite(ServerId, "host-a"));
 
         store.SetFavorite(ServerId, false, "host-a");
@@ -318,8 +325,8 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     public void ALeftoverOldStar_DoesNotUndoAnUnpinMadeUnderTheNewKey()
     {
         var store = NewStore();
-        store.SetFavorite("sidebar-name", true);
-        store.SetFavorite("host-a", true);
+        FileAnEarlierStar(store, "sidebar-name");
+        FileAnEarlierStar(store, "host-a");
 
         Assert.True(store.IsFavorite(ServerId, "sidebar-name"));     // the sidebar reads first
         store.SetFavorite(ServerId, false, "sidebar-name");          // and the operator unpins there
@@ -333,7 +340,7 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     public void AServerAddedLaterAtTheOldAddress_IsNotStarred()
     {
         var store = NewStore();
-        store.SetFavorite("host-a", true);
+        FileAnEarlierStar(store, "host-a");
         Assert.True(store.IsFavorite(ServerId, "host-a"));
 
         store.SetFavorite(ServerId, true, "host-a", "host-b");       // the server moves from host-a to host-b
@@ -347,7 +354,7 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     public void ToggleFavorite_StartsFromTheCarriedOverFlag_ThenFlipsThatOneEntry()
     {
         var store = NewStore();
-        store.SetFavorite("sidebar-name", true);
+        FileAnEarlierStar(store, "sidebar-name");
 
         Assert.False(store.ToggleFavorite(ServerId, "sidebar-name"));   // it was starred, so the toggle unpins it
         Assert.False(store.IsFavorite(ServerId, "sidebar-name"));
@@ -361,7 +368,7 @@ public sealed class ViewerFavoriteKeyStoreTests : IDisposable
     {
         var store = NewStore();
         store.SetFavorite(ServerId, true);
-        store.SetFavorite("sidebar-name", true);                     // a leftover from an earlier version
+        FileAnEarlierStar(store, "sidebar-name");                     // a leftover from an earlier version
 
         store.SetFavorite(ServerId, false, "sidebar-name");          // what removing the server does
 

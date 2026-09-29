@@ -215,6 +215,10 @@ public sealed class ViewerServerStore
     /// existing name is skipped (Lite's "skipped duplicate" behavior). Each imported entry gets a fresh id
     /// because secrets never cross machines (they live in the source machine's Credential Manager). Returns
     /// the imported and skipped counts.
+    ///
+    /// <para>A <see cref="FavoriteKey"/> entry is a server's star, not a server definition (#4768), so it is in
+    /// neither count. It still rides along, which keeps the star: it is added when this registry holds no entry
+    /// under that key, and an entry that is already here is left as it is, so an unpin made here is not undone.</para>
     /// </summary>
     public (int Imported, int Skipped) ImportServersFromFile(string path)
     {
@@ -225,9 +229,28 @@ public sealed class ViewerServerStore
 
         var imported = 0;
         var skipped = 0;
+        var carriedStars = 0;
         foreach (var entry in incoming)
         {
-            if (string.IsNullOrWhiteSpace(entry.ServerName) || GetByServerName(entry.ServerName) is not null)
+            if (string.IsNullOrWhiteSpace(entry.ServerName))
+            {
+                skipped++;
+                continue;
+            }
+
+            if (IsFavoriteKey(entry.ServerName))
+            {
+                if (GetByServerName(entry.ServerName) is null)
+                {
+                    entry.Id = Guid.NewGuid().ToString();
+                    _servers.Add(entry);
+                    carriedStars++;
+                }
+
+                continue;
+            }
+
+            if (GetByServerName(entry.ServerName) is not null)
             {
                 skipped++;
                 continue;
@@ -238,7 +261,7 @@ public sealed class ViewerServerStore
             imported++;
         }
 
-        if (imported > 0)
+        if (imported > 0 || carriedStars > 0)
         {
             Save();
         }
@@ -247,57 +270,12 @@ public sealed class ViewerServerStore
     }
 
     /// <summary>
-    /// Flips the favorite flag for the server with this name and persists, returning the new state. When no
-    /// registry entry exists yet (the sidebar server came straight from the Postgres store), a minimal entry
-    /// is created and marked favorite — "adopting" the collected server into the registry so the one favorites
-    /// source of truth stays in the registry, exactly like Lite pins on <c>ServerConnection.IsFavorite</c>.
-    /// </summary>
-    public bool ToggleFavorite(string serverName)
-    {
-        var entry = GetByServerName(serverName);
-        if (entry is null)
-        {
-            entry = new ViewerServerEntry
-            {
-                ServerName = serverName,
-                DisplayName = serverName,
-                IsFavorite = true
-            };
-            _servers.Add(entry);
-        }
-        else
-        {
-            entry.IsFavorite = !entry.IsFavorite;
-        }
-
-        Save();
-        return entry.IsFavorite;
-    }
-
-    /// <summary>
-    /// Sets (not toggles) the favorite flag for a server by name, creating a minimal viewer-local entry when
-    /// none exists, and persists. Favorites are the one thing this store keeps after Stage 3 moved server
-    /// DEFINITIONS to <c>config.config_monitored_servers</c> — they are viewer-local (the service never reads
-    /// them), so they legitimately stay in viewer-servers.json. Returns the resulting state.
-    /// </summary>
-    public bool SetFavorite(string serverName, bool isFavorite)
-    {
-        if (string.IsNullOrWhiteSpace(serverName))
-        {
-            return false;
-        }
-
-        if (ApplyFavorite(serverName, isFavorite))
-        {
-            Save();
-        }
-
-        return isFavorite;
-    }
-
-    /// <summary>
     /// Sets the flag on the entry filed under <paramref name="serverName"/> in memory, creating a minimal entry
     /// when a favorite has none yet. Returns whether anything changed, for the caller to save.
+    ///
+    /// <para>Favorites are the one thing this store keeps after Stage 3 moved server DEFINITIONS to
+    /// <c>config.config_monitored_servers</c> — they are viewer-local (the service never reads them), so they
+    /// legitimately stay in viewer-servers.json.</para>
     /// </summary>
     private bool ApplyFavorite(string serverName, bool isFavorite)
     {
@@ -521,7 +499,7 @@ public sealed class ViewerServerStore
 
     /// <summary>
     /// #1319: persists the per-server display database filter, adopting a minimal viewer-local registry
-    /// entry when the server has none yet (same adopt-on-write rule as <see cref="SetFavorite(string, bool)"/>). An empty
+    /// entry when the server has none yet (same adopt-on-write rule as <see cref="SetFavorite(int, bool, string[])"/>). An empty
     /// list clears the filter (and writes no new entry for a server that had none).
     /// </summary>
     public void SetViewFilterDatabases(string serverName, List<string> databases)

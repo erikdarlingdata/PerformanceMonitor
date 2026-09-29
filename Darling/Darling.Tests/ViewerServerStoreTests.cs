@@ -113,25 +113,29 @@ public sealed class ViewerServerStoreTests : IDisposable
     {
         var store = NewStore();
 
-        Assert.True(store.ToggleFavorite("SQL2019"));      // adopt + pin
-        Assert.True(store.IsFavorite("SQL2019"));
+        Assert.True(store.ToggleFavorite(2019));      // adopt + pin
+        Assert.True(store.IsFavorite(2019));
         Assert.Single(store.GetAllServers());
 
-        Assert.False(store.ToggleFavorite("SQL2019"));     // unpin the same entry (not a second one)
-        Assert.False(store.IsFavorite("SQL2019"));
+        Assert.False(store.ToggleFavorite(2019));     // unpin the same entry (not a second one)
+        Assert.False(store.IsFavorite(2019));
         Assert.Single(store.GetAllServers());
     }
 
     [Fact]
-    public void ToggleFavorite_IsCaseInsensitiveOnServerName()
+    public void ToggleFavorite_FindsAnEarlierVersionsEntry_WhateverTheCaseOfItsName()
     {
         var store = NewStore();
-        store.AddServer(new ViewerServerEntry { ServerName = "SQL2022", DisplayName = "Prod" }, null, null);
+        store.AddServer(
+            new ViewerServerEntry { ServerName = "SQL2022", DisplayName = "Prod", IsFavorite = true }, null, null);
 
-        Assert.True(store.ToggleFavorite("sql2022"));
+        Assert.False(store.ToggleFavorite(2022, "sql2022"));   // it was starred, so the toggle unpins
 
-        Assert.True(store.IsFavorite("SQL2022"));
-        Assert.Single(store.GetAllServers());   // flipped the existing entry, didn't add a duplicate
+        Assert.False(store.IsFavorite(2022, "sql2022"));
+        Assert.False(store.IsFavorite("SQL2022"));
+        Assert.Equal(2, store.GetAllServers().Count);          // the definition stays, plus the server's own entry
+        Assert.NotNull(store.GetByServerName("SQL2022"));
+        Assert.NotNull(store.GetByServerName(ViewerServerStore.FavoriteKey(2022)));
     }
 
     [Fact]
