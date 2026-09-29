@@ -352,7 +352,7 @@ public static class FactAdvice
             if (advice is null)
                 continue;
             advice = WithNamedHops(advice, story, byKey);
-            advice = WithSideLeaves(advice, story);
+            advice = WithSideLeaves(advice, story, byKey);
             story.StoryText = SerializeForStoryText(advice);
         }
     }
@@ -384,24 +384,32 @@ public static class FactAdvice
     }
 
     /// <summary>
-    /// #3691 (lane 42): appends the ONE sentence naming the config lever(s) hanging off this story
-    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's INVESTIGATION, after the named-hop sentences and by
-    /// the same rule — the levers are where to look next, and the lever's own card (the payload's
-    /// <c>side_leaves</c>) carries its value and its remediation. Before this, the lever rooted a card of its own
-    /// beside the incident; now the walk consumes it, so the root's card is the only place that can point at it and
-    /// this sentence is that pointer. Remediation is untouched: the lever's fix is the lever's, in its own family's
-    /// words. A story with no side leaves returns the block untouched — the byte-identity arm for every chain this
-    /// does not concern, which is nearly all of them.
+    /// #3691, #4730: appends the config lever(s) hanging off this story
+    /// (<see cref="AnalysisStory.SideLeafKeys"/>) to the root's advice, after the named-hop sentences. Each lever
+    /// gets one INVESTIGATION sentence carrying its own composed headline, and its composed remediation joins the
+    /// root's REMEDIATION under its key ("For `CONFIG_PG_MAINT_WORK_MEM`: …"). Before this, the lever rooted a card
+    /// of its own beside the incident; the walk now consumes it, and only <c>analyze_server</c> renders the
+    /// lever's card (the payload's <c>side_leaves</c>). <c>get_analysis_findings</c>, the viewer and the e-mail
+    /// render this frozen StoryText alone, so the advice has to be in it: the sentence used to say "see its card",
+    /// a pointer to a card those surfaces never show, and the lever's fix stayed on that card. Each lever is
+    /// composed from the FULL fact set here, the one place both are in scope, the same way
+    /// <see cref="WithNamedHops"/> reads its hops. A story with no side leaves returns the block untouched — the
+    /// byte-identity arm for every chain this does not concern, which is nearly all of them.
     /// </summary>
-    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story)
+    private static AdviceBlock WithSideLeaves(AdviceBlock advice, AnalysisStory story, IReadOnlyDictionary<string, Fact> byKey)
     {
-        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys);
+        var sentence = StorySideLeaves.Sentence(story.SideLeafKeys, byKey);
         if (sentence is null)
             return advice;
         var investigation = advice.Investigation ?? string.Empty;
+        var remediation = advice.Remediation ?? string.Empty;
+        var remediationClauses = StorySideLeaves.RemediationSentence(story.SideLeafKeys, byKey);
+        if (remediationClauses is not null)
+            remediation = remediation.Length == 0 ? remediationClauses.TrimStart() : remediation + remediationClauses;
         return advice with
         {
-            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence
+            Investigation = investigation.Length == 0 ? sentence.TrimStart() : investigation + sentence,
+            Remediation = remediation
         };
     }
 
