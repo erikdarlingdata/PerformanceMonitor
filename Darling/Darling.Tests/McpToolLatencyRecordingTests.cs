@@ -71,9 +71,11 @@ public sealed class McpToolLatencyRecordingTests
 
         var postgres = NpgsqlDataSource.Create("Host=localhost;Database=postgres;Username=darling");
         builder.Services.AddSingleton(postgres);
-        builder.Services.AddSingleton(new DarlingAnalysisService(
+        /* #4726: per call, like the production host - one analysis service per tools/call, one shared BaselineCache. */
+        var sharedBaselines = new BaselineCache();
+        builder.Services.AddTransient<DarlingAnalysisService>(_ => new DarlingAnalysisService(
             postgres, planFetcher: null, logger: Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance,
-            baselineCache: new BaselineCache()));
+            baselineCache: sharedBaselines));
         builder.Services.AddSingleton<Microsoft.Extensions.Logging.ILogger>(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
 
         DarlingMcpHostService.ConfigureMcpServices(
