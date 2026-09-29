@@ -465,6 +465,14 @@ public sealed class DarlingCollectorRunner
        first-contact behaviour, not a regression. */
     private readonly ConcurrentDictionary<int, bool> _lastPgLogUsesCsvlogVerdict = new();
 
+    /* #4735: the (target, log-tail collector) pairs whose last cycle used every read start and was refused at each.
+       A start inside a character is cured by one of the later starts. A byte that is invalid in the database
+       encoding, anywhere in the 4 MB window, is refused at all four and would be again on every cycle, so while a
+       pair is here its cycle makes one read at shift 0 and no retries. Only a read that succeeds removes it. Keyed
+       as the binary-file grant is (ReadBinaryFileCacheKey), plus the collector. In memory on purpose, like the
+       caches around it: a restart pays one four-read cycle and sets it again, the safe direction. */
+    private readonly ConcurrentDictionary<(string Target, string Collector), byte> _pgLogRefusedAtEveryShift = new();
+
     /// <summary>The #2111 yield-to-live read side: null when the server has never failed a live
     /// query_store item this process lifetime.</summary>
     public DateTime? LastQueryStoreItemFailureUtc(int serverId)
@@ -1538,7 +1546,7 @@ public sealed class DarlingCollectorRunner
     {
         try
         {
-            return await RunCoreAsync(definition, server, cancellationToken);
+            return await RunWithSplitCharacterRetryAsync(definition, server, cancellationToken);
         }
         catch
         {
@@ -1748,7 +1756,9 @@ public sealed class DarlingCollectorRunner
 
     /// <summary>
     /// The per-database Query Store watermark: the cache when it can prove the bounded store read's answer,
-    /// otherwise that read (reseeding the cache when the read succeeded).
+    /// otherwise that read (reseeding the cache when the read succeeded). The read also returns the witness
+    /// row's <c>collection_time</c> (#4749), so a database whose newest row is recent but which has had no
+    /// batch since the seed keeps hitting the cache until that row leaves the floor.
     /// </summary>
     internal async Task<DateTime?> ResolveQueryStoreDatabaseWatermarkAsync(
         ServerRuntime server, string table, string column, string dbColumn, string database,
@@ -1760,11 +1770,11 @@ public sealed class DarlingCollectorRunner
         }
 
         var token = _databaseWatermarkCache.TokenFor(server.ServerId, database);
-        var (value, ok) = await ReadLastCollectedTimeForDatabaseAsync(
-            server.ServerId, table, column, dbColumn, database, ct, readFloor);
+        var (value, witness, ok) = await ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+            server.ServerId, table, column, dbColumn, database, readFloor, ct);
         if (ok)
         {
-            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, token);
+            _databaseWatermarkCache.Seed(server.ServerId, database, value, readFloor, collectionTime, token, witness);
         }
 
         return value;
@@ -1818,9 +1828,99 @@ public sealed class DarlingCollectorRunner
         _databaseWatermarkCache.Advance(server.ServerId, database, staged.BatchMax, staged.CollectionTime);
     }
 
+    /// <summary>
+    /// #4735 item 1: a text read of the log tail that starts inside a multi-byte character is refused by PostgreSQL
+    /// (22021) before this process sees a byte, and it says the same about a real bad byte. The read is repeated in
+    /// the same cycle with its start moved forward by 1, then 2, then 3 bytes, which reaches a character boundary
+    /// when the start was the cause. The attempts write no ERROR row: only the last refusal leaves this method,
+    /// and the general handler records that one as it always did. Recognised by SQLSTATE, on the text route of
+    /// the three log-tail collectors, and never for a proven write to the store.
+    ///
+    /// <para><b>Once per cycle while an invalid byte stays in the window.</b> The retries cure a start inside a
+    /// character. A byte that is invalid in the database encoding, anywhere in the 4 MB window, is refused at all
+    /// four starts, on every cycle, so a cycle that used every start and was refused at each is remembered
+    /// (<c>_pgLogRefusedAtEveryShift</c>). Until a read succeeds, that server's collector makes one read at shift 0 and
+    /// no retries, the cost it had before the retries existed. A read that starts inside a character still gets
+    /// its retries the first time it happens, because nothing is remembered until every start has been refused.</para>
+    /// </summary>
+    private Task<CollectorRunResult> RunWithSplitCharacterRetryAsync<TRow>(
+        ICollectorDefinition<TRow> definition,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+        => RunWithSplitCharacterRetryAsync(
+            definition.Name,
+            server,
+            (shift, token) => RunCoreAsync(definition, server, shift, token),
+            cancellationToken);
+
+    /// <summary>
+    /// The retry loop itself, over a read that takes its start shift, so a test can drive it with a read that
+    /// counts its calls instead of one that needs a target (#4735).
+    /// </summary>
+    internal async Task<CollectorRunResult> RunWithSplitCharacterRetryAsync(
+        string collectorName,
+        ServerRuntime server,
+        Func<int, CancellationToken, Task<CollectorRunResult>> runCore,
+        CancellationToken cancellationToken)
+    {
+        var readsLogTail = ReadsPgServerLogTail(collectorName);
+        var refusedKey = (ReadBinaryFileCacheKey(server), collectorName);
+
+        /* Read once, before the first attempt: this cycle's own refusals set the memory for the NEXT cycle. */
+        var refusedAtEveryShiftLastCycle = readsLogTail && _pgLogRefusedAtEveryShift.ContainsKey(refusedKey);
+
+        for (var shift = 0; ; shift++)
+        {
+            try
+            {
+                var result = await runCore(shift, cancellationToken);
+
+                if (readsLogTail)
+                {
+                    _pgLogRefusedAtEveryShift.TryRemove(refusedKey, out _);
+                }
+
+                return result;
+            }
+            catch (PostgresException pg) when (readsLogTail
+                && !refusedAtEveryShiftLastCycle
+                && !CollectorFaultCopyPhase.IsProvenStoreWrite(pg)
+                && PgServerLogTail.ShouldRetryFromLaterStart(pg.SqlState, shift, PgReadBinaryFileGranted(server)))
+            {
+                _logger?.LogDebug(
+                    "{Collector} on '{Server}': PostgreSQL refused the log slice as not valid in the database encoding; "
+                    + "retrying with the read start moved forward {Shift} byte(s) (#4735)",
+                    collectorName, server.Config.DisplayName, shift + 1);
+            }
+            catch (PostgresException pg) when (readsLogTail
+                && !CollectorFaultCopyPhase.IsProvenStoreWrite(pg)
+                && PgServerLogTail.IsEncodingRefusal(pg.SqlState, PgReadBinaryFileGranted(server)))
+            {
+                /* Refused and not retried above: either every start was just refused, or the last cycle's memory
+                   held this cycle to its one read. An invalid byte is in the window, and the refusal goes on to the
+                   general handler as it always did. */
+                if (_pgLogRefusedAtEveryShift.TryAdd(refusedKey, 0))
+                {
+                    _logger?.LogDebug(
+                        "{Collector} on '{Server}': PostgreSQL refused the log slice at every read start, so a byte that is "
+                        + "not valid in the database encoding is in the window; later cycles make one read until a read "
+                        + "succeeds (#4735)",
+                        collectorName, server.Config.DisplayName);
+                }
+
+                throw;
+            }
+        }
+    }
+
+    /// <summary>Whether the cached verdict says the binary route (pg_read_binary_file) is granted, which reads bytea and carries no encoding check.</summary>
+    private static bool PgReadBinaryFileGranted(ServerRuntime server) =>
+        PgReadBinaryFileCapability.TryGetCachedVerdict(ReadBinaryFileCacheKey(server), out var granted) && granted;
+
     private async Task<CollectorRunResult> RunCoreAsync<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,
+        int pgLogReadShiftBytes,
         CancellationToken cancellationToken)
     {
         /* #3936: nudged forward (by, in practice, a handful of ticks) rather than a bare DateTime.UtcNow
@@ -2018,6 +2118,8 @@ public sealed class DarlingCollectorRunner
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
                operator asked for by name and which stores nothing, so it always renders. */
             CapturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId),
+            /* #4735 item 1: 0 on the first attempt; RunWithSplitCharacterRetryAsync raises it after a 22021. */
+            PgLogReadShiftBytes = pgLogReadShiftBytes,
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
                per query_id into collect.query_store_text (FetchAndStoreQueryTextAsync, below) and resolved
                back by the readers, all six of which now prefer that table and fall back to the fact row's
@@ -4222,6 +4324,21 @@ public sealed class DarlingCollectorRunner
             : $"SELECT MAX({columnName}) FROM {tableName} WHERE server_id = $1 AND {databaseColumnName} = $2";
 
     /// <summary>
+    /// The per-database watermark SQL for the Query Store cache's seed read (#4749): the bounded value, plus its
+    /// witness, which is the newest <c>collection_time</c> among the rows AT that value inside the bound. Same
+    /// predicates as <see cref="BuildServerWatermarkForDatabaseSql"/> (bounded, <c>collection_time</c> last as
+    /// $3), repeated in the inner query in the shape <see cref="BuildServerWatermarkInstanceIdSql"/> already
+    /// uses to pick the newest batch. The unaliased <c>MAX(</c>column<c>)</c> stays in the text: the tests that
+    /// count watermark reads match on it. Exposed for the same reason as its siblings, so a pin asserts the
+    /// SHIPPED string.
+    /// </summary>
+    internal static string BuildServerWatermarkWithWitnessForDatabaseSql(string tableName, string columnName, string databaseColumnName) =>
+        $"SELECT MAX({columnName}), MAX(collection_time) FROM {tableName} "
+        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3 "
+        + $"AND {columnName} = (SELECT MAX({columnName}) FROM {tableName} "
+        + $"WHERE server_id = $1 AND {databaseColumnName} = $2 AND collection_time > $3)";
+
+    /// <summary>
     /// The numeric (bigint identity) watermark SQL behind <see cref="GetLastCollectedInstanceIdAsync"/>
     /// (job_history's <c>instance_id</c>), exposed for the same reason as the timestamp builders above. Bounds
     /// on <c>collection_time</c> — job_history's partitioning column — never on <paramref name="columnName"/>
@@ -5954,7 +6071,8 @@ RETURNING s.state_key";
 
     /// <summary>
     /// The read behind <see cref="GetLastCollectedTimeForDatabaseAsync"/>, plus whether it succeeded: a null
-    /// from a failed read must never be cached as "no rows".
+    /// from a failed read must never be cached as "no rows". The Query Store cache's seed uses its twin,
+    /// <see cref="ReadLastCollectedTimeAndWitnessForDatabaseAsync"/>, which also returns the witness.
     /// </summary>
     internal async Task<(DateTime? Value, bool Succeeded)> ReadLastCollectedTimeForDatabaseAsync(
         int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
@@ -6017,6 +6135,48 @@ RETURNING s.state_key";
                 serverId, databaseName, tableName, columnName, ex.Message);
         }
         return (null, !failed);
+    }
+
+    /// <summary>
+    /// The seed read for the per-database Query Store watermark cache (#4749): the bounded read behind
+    /// <see cref="ReadLastCollectedTimeForDatabaseAsync"/> (same bound, same failure handling), plus the
+    /// witness, the newest <c>collection_time</c> among the rows at the returned value inside the bound. It is
+    /// the row's own stamp and never this read's time, which is an upper bound and would keep serving the
+    /// value after its row left the floor. A null value has a null witness, and a failed read reports
+    /// <c>Succeeded</c> false so a null from it is never cached as "no rows".
+    /// </summary>
+    internal async Task<(DateTime? Value, DateTime? Witness, bool Succeeded)> ReadLastCollectedTimeAndWitnessForDatabaseAsync(
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName,
+        DateTime collectedSince, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var connection = await _postgres.OpenConnectionAsync(cancellationToken);
+            using var command = new NpgsqlCommand(
+                BuildServerWatermarkWithWitnessForDatabaseSql(tableName, columnName, databaseColumnName), connection);
+            command.CommandTimeout = CommandTimeoutSeconds;
+            command.Parameters.AddWithValue(serverId);
+            command.Parameters.AddWithValue(databaseName);
+            /* Naive like every other timestamp bound in this store (#1969). */
+            command.Parameters.AddWithValue(DateTime.SpecifyKind(collectedSince, DateTimeKind.Unspecified));
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken) && reader.GetValue(0) is DateTime value)
+            {
+                return (value, reader.GetValue(1) as DateTime?, true);
+            }
+
+            return (null, null, true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.LogWarning(
+                "Per-database watermark read failed for server {ServerId} database {Database} on "
+                + "{Table}.{Column} — falling back to the collector's default window, which re-collects "
+                + "data already stored: {Message}",
+                serverId, databaseName, tableName, columnName, ex.Message);
+            return (null, null, false);
+        }
     }
 
     /// <summary>

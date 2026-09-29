@@ -1061,6 +1061,14 @@ public sealed class DarlingWorker : BackgroundService
        site for why an unconditional per-sweep read would be a real cost, not just noise. */
     private readonly ConcurrentDictionary<string, bool> _postgresAlertHistorySeeded = new(StringComparer.Ordinal);
 
+    /* #4795: the failure streaks behind "a PostgreSQL alert whose every channel failed is tried again sooner
+       than its cooldown", the twin of AlertEngine's own _failedSends (#4752) for the SQL Server families. The
+       six PostgreSQL families stamp their cooldown BEFORE they deliver, so a send that reached nobody (an HTTP
+       429 or 5xx, a timeout, an unreachable mail server) used to leave the alert silent for the whole
+       cooldown. Keyed (metric name, the family's own cooldown key). In memory only: a restart starts every
+       streak over, which is the safe direction, because the first retry after a restart is only ever earlier. */
+    private readonly FailedSendBackoff _pgFailedSends = new();
+
     /// <summary>
     /// Held for the same reason <see cref="_alertDeliverer"/> is: the Postgres Deadlocks/Blocking alerts
     /// (#2711) need to write a resolution history row on the active→inactive transition, exactly like
@@ -5307,6 +5315,79 @@ public sealed class DarlingWorker : BackgroundService
     }
 
     /// <summary>
+    /// Runs after a PostgreSQL family's fire (#4795), the twin of <c>AlertEngine.AfterFire</c> (#4752) for the
+    /// six families that fire from this file. They stamp their cooldown BEFORE delivery, so an alert whose
+    /// every channel failed (<see cref="FailedSendBackoff.EveryChannelFailed"/>) used to be silent for the
+    /// whole cooldown. When it did, this counts the failure in <c>_pgFailedSends</c> and back-dates the stamp
+    /// so the cooldown opens again after the streak's delay (a minute, doubling, never more than the
+    /// cooldown): every family's check is <c>now - last &gt;= cooldown</c>, so
+    /// <c>last = now - cooldown + delay</c> opens exactly <c>delay</c> after this fire, and the next sweep
+    /// that still sees the condition fires it again. Any other result (delivered, partly delivered, muted,
+    /// throttled, folded, unreported) ends the streak and leaves the stamp alone.
+    /// <para>Returns true when every channel failed. The families with a second "already reported" marker
+    /// (the deadlock and blocking count watermarks, the poison wait collection time) put it back at their own
+    /// call site on true; this method only knows the cooldown.</para>
+    /// </summary>
+    private bool AfterPgFire(
+        string family, ConcurrentDictionary<string, DateTime> stamps, string key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery) =>
+        AfterPgFireCore(_pgFailedSends, _logger, family, stamps, key, now, cooldown, delivery);
+
+    /// <summary>
+    /// The body of <see cref="AfterPgFire"/> as an internal static method, so <c>Darling.Tests</c> can drive it
+    /// without a whole <see cref="DarlingWorker"/> (the arms that call it are private and read a live store).
+    /// The instance method is a one-line forward that threads <c>_pgFailedSends</c> and <c>_logger</c> through.
+    /// </summary>
+    internal static bool AfterPgFireCore(
+        FailedSendBackoff failedSends, ILogger logger, string family,
+        ConcurrentDictionary<string, DateTime> stamps, string key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery)
+    {
+        if (!FailedSendBackoff.EveryChannelFailed(delivery))
+        {
+            failedSends.RecordDelivered(family, key);
+            return false;
+        }
+
+        var delay = failedSends.RecordFailure(family, key, now, cooldown, out var failures);
+        stamps[key] = now - cooldown + delay;
+        logger.LogInformation(
+            "Every channel failed for {Family} on {Key} (failure {Failures}); trying again in {Delay}",
+            family, key, failures, delay);
+        return true;
+    }
+
+    /// <summary>
+    /// The count watermark a Deadlocks or Blocking fire whose every channel failed leaves behind (#4795): the
+    /// value from BEFORE the fire, decayed the way <see cref="RollingCountAlertGate"/> decays it (a watermark
+    /// above the current count drops to the count). The gate advances the watermark to the fired count, and the
+    /// caller saves it, before delivery; left there, the retry sweep would see no new events and the alert
+    /// would stay lost until the count rose. At the pre-fire value the retry sees the count above the
+    /// watermark and fires again at the same count. The SQL Server twins do the same (#4752).
+    /// </summary>
+    internal static int PgUnannouncedWatermark(int preFireWatermark, int count) =>
+        Math.Min(preFireWatermark, count);
+
+    /// <summary>
+    /// Puts a poison wait subject's last-fired-on collection time back to what it was before a fire (#4795):
+    /// the prior time when there was one, no entry when the failed fire was the first. The time was recorded
+    /// before delivery, and the retry sweep would otherwise read the same collection as already reported and
+    /// never fire on it. Mirrors <c>AlertEngine.RestoreAlertedLevel</c>'s prior-or-remove shape.
+    /// </summary>
+    internal static void RestorePgPoisonCollectionTime(
+        ConcurrentDictionary<string, DateTime> collectionTimes, string key, DateTime? prior)
+    {
+        if (prior is { } time)
+        {
+            collectionTimes[key] = time;
+        }
+        else
+        {
+            collectionTimes.TryRemove(key, out _);
+        }
+    }
+
+    /// <summary>
     /// Evaluates the three PostgreSQL Tier 0 outage predictors and delivers whatever fired.
     /// <para>Failure-isolated from the shared sweep on purpose: these are additive signals, and a broken
     /// PostgreSQL read must not cost a server its CPU or blocking alerts. Recording and mute handling stay
@@ -5418,7 +5499,7 @@ public sealed class DarlingWorker : BackgroundService
                     DatabaseName = finding.Subject,
                 }) ?? false;
 
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         snapshot.ServerKey,
                         snapshot.ServerName,
@@ -5447,6 +5528,12 @@ public sealed class DarlingWorker : BackgroundService
                         finding.ShortMessage),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: the cooldown was stamped above, before the send, so a send that reached no channel
+                   would hold this subject for the whole cooldown. Back-date the stamp instead: the subject is
+                   tried again after a minute, doubling, never later than the cooldown. This family moves no
+                   other marker, so the stamp is all there is to put right. */
+                AfterPgFire(finding.MetricName, _lastPostgresAlert, cooldownKey, now, cooldown, delivery);
             }
         }
         catch (OperationCanceledException)
@@ -5782,7 +5869,7 @@ public sealed class DarlingWorker : BackgroundService
                    rides — so the history grids and get_alert_history read the tier this fire wore. */
                 var grade = GradePgCpuFire(reading.CpuPercent, reading.AcuUtilizationPercent);
 
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
@@ -5810,6 +5897,12 @@ public sealed class DarlingWorker : BackgroundService
                             + $"(threshold: {alertSettings.CpuThresholdPercent}%)"),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: only the cooldown stamp moved before the send. The gate's record (Firing, the
+                   streak, the observed-sample watermark) was saved above from the samples, not from the
+                   delivery, and it stays Firing, so the retry sweep reaches this same arm as a standing
+                   condition and fires once the back-dated stamp opens. Nothing else to put back. */
+                AfterPgFire(metricName, _lastPgCpuAlert, key, now, cooldown, delivery);
             }
             else if (outcome == PersistenceOutcome.Resolve)
             {
@@ -5969,7 +6062,7 @@ public sealed class DarlingWorker : BackgroundService
                    the persisted context (#2090) before the row is written, which is what #3635's grids and
                    get_alert_history read. The SQL engine sets both because it serves two SKUs' deliverers;
                    this host serves one. */
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
@@ -5988,6 +6081,23 @@ public sealed class DarlingWorker : BackgroundService
                         ShortMessage: $"{count} deadlock(s) in the last hour"),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: the cooldown stamp above and the count watermark (moved to this count by the gate,
+                   and saved, before the send) were both written ahead of delivery. A send that reached no
+                   channel gets the stamp back-dated, and the watermark goes back to the value it had before
+                   this fire, in memory and in the saved row: the retry sweep then sees the count above the
+                   watermark and fires again at the same count, instead of waiting for the count to rise.
+                   The SQL Server twin does the same (#4752). */
+                if (AfterPgFire(metricName, _lastPgDeadlockAlert, key, now, cooldown, delivery))
+                {
+                    var unannouncedWatermark = PgUnannouncedWatermark(watermark, count);
+                    _lastAlertedPgDeadlockCount[key] = unannouncedWatermark;
+                    if (unannouncedWatermark != decision.Watermark)
+                    {
+                        await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, unannouncedWatermark);
+                        readClock.Restart();
+                    }
+                }
             }
             else if (!decision.Active && wasActive)
             {
@@ -6127,7 +6237,7 @@ public sealed class DarlingWorker : BackgroundService
                    explains) rather than leaving #3635's by-name replay arm to imply it. Warning, and only
                    Warning — PgBlockingFireSeverity's doc says which bars were considered and why none
                    qualifies as a Critical tier tonight. */
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
@@ -6146,6 +6256,20 @@ public sealed class DarlingWorker : BackgroundService
                         ShortMessage: $"{count} blocking session(s)"),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: the deadlock arm explains it — the stamp is back-dated and the count watermark put
+                   back to its pre-fire value (in memory and saved) when no channel delivered, so the retry
+                   sweep fires again at the same count. */
+                if (AfterPgFire(metricName, _lastPgBlockingAlert, key, now, cooldown, delivery))
+                {
+                    var unannouncedWatermark = PgUnannouncedWatermark(watermark, count);
+                    _lastAlertedPgBlockingCount[key] = unannouncedWatermark;
+                    if (unannouncedWatermark != decision.Watermark)
+                    {
+                        await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, unannouncedWatermark);
+                        readClock.Restart();
+                    }
+                }
             }
             else if (!decision.Active && wasActive)
             {
@@ -6336,7 +6460,7 @@ public sealed class DarlingWorker : BackgroundService
                 /* #3653 (A8e, the PostgreSQL host): an explicit tier in place of Severity: null, for the
                    reason the blocking arm above gives. Warning, and only Warning —
                    PgLongRunningQueryFireSeverity's doc says why. */
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
@@ -6363,6 +6487,11 @@ public sealed class DarlingWorker : BackgroundService
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: a live-state check with no count watermark and no collection-time marker, so the
+                   cooldown stamp is the only thing the fire moved. A send that reached no channel gets it
+                   back-dated, and the next sweep that still sees a long-running query fires again. */
+                AfterPgFire(metricName, _lastPgLongRunningQueryAlert, key, now, cooldown, delivery);
             }
             else if (wasActive)
             {
@@ -6551,8 +6680,10 @@ public sealed class DarlingWorker : BackgroundService
                 var newestCollection = newestCollectionBySubject.TryGetValue(finding.Subject, out var nc)
                     ? nc
                     : DateTime.MinValue;
-                var hasFreshCollection = !_lastPgPoisonWaitCollectionTime.TryGetValue(cooldownKey, out var lastCollection)
-                    || newestCollection > lastCollection;
+                /* Whether a time was recorded, and which, is kept for #4795: a fire that reaches no channel
+                   puts it back. */
+                var hadPriorCollection = _lastPgPoisonWaitCollectionTime.TryGetValue(cooldownKey, out var lastCollection);
+                var hasFreshCollection = !hadPriorCollection || newestCollection > lastCollection;
                 if (!hasFreshCollection)
                 {
                     continue;
@@ -6578,7 +6709,7 @@ public sealed class DarlingWorker : BackgroundService
                     WaitType = finding.Subject,
                 }) ?? false;
 
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         serverKey,
                         snapshot.ServerName,
@@ -6606,6 +6737,16 @@ public sealed class DarlingWorker : BackgroundService
                         finding.ShortMessage),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: two markers were written before the send, the cooldown stamp and the collection time
+                   this fire counted. A send that reached no channel gets the stamp back-dated, and the
+                   collection time goes back to what it was (or to no entry, when this was the first fire for
+                   the subject): otherwise the retry sweep reads the same collection as already reported and
+                   never fires on it, which is the #2704 guard doing its job on a fire nobody received. */
+                if (AfterPgFire(finding.MetricName, _lastPgPoisonWaitAlert, cooldownKey, now, cooldown, delivery))
+                {
+                    RestorePgPoisonCollectionTime(_lastPgPoisonWaitCollectionTime, cooldownKey, hadPriorCollection ? lastCollection : null);
+                }
             }
 
             /* The Cleared edge, per subject: previously active, no longer over the bar, ON AN OBSERVED WINDOW
@@ -10749,12 +10890,25 @@ LIMIT 1";
             return null;
         }
 
+        /* #4735 item 1: every 22021 that reaches this handler has already been retried with the read start moved forward
+           by 1, 2 and 3 bytes (DarlingCollectorRunner.RunWithSplitCharacterRetryAsync), either in this cycle or in the
+           cycle that first met it, after which each cycle makes one read until a read succeeds. The sentence says what
+           the attempts were and does not blame a planted byte alone. A 22P05 is a conversion fault, not a start offset. */
+        var splitCharacter = pg.SqlState == PgServerLogTail.EncodingRefusalSqlState
+            ? "A read with no saved position starts 4 MB before the end of the log, and that start can fall inside a "
+              + "multi-byte character, which PostgreSQL refuses the same way. The collector retried the read from 1, 2 and 3 "
+              + "bytes later and every attempt was refused. Until a read succeeds it reads once per cycle and does not retry. "
+              + "Once a read succeeds, every later read resumes from the start of a full line, so a split character clears "
+              + "by itself. "
+            : string.Empty;
+
         const string Planted = " A client can plant such a byte with nothing more than a failed login. The role or "
             + "database name that the client sends lands unescaped in the FATAL message (#4046).";
 
         if (pg.SqlState == "22P05" || PgReadBinaryFileCapability.IsCachedAsUnsupportedEncoding(runtime.StorageName))
         {
-            return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte "
+            return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). " + splitCharacter
+                + "The log tail that this cycle read contains a byte "
                 + "that this database's encoding cannot pass to this collector, so PostgreSQL refused the whole read."
                 + Planted
                 + " Granting pg_read_binary_file does not help on this database. The binary route decodes the log in "
@@ -10763,7 +10917,8 @@ LIMIT 1";
                 + "The read fails until the line with the byte leaves the 4 MB tail window.";
         }
 
-        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). The log tail that this cycle read contains a byte that "
+        return $"{pg.MessageText} (SQLSTATE {pg.SqlState}). " + splitCharacter
+            + "The log tail that this cycle read contains a byte that "
             + "is not valid UTF-8, so PostgreSQL refused the whole read. pg_read_file() returns text, and PostgreSQL "
             + "checks text before this collector sees a row, even when only one byte in the 4 MB window is bad."
             + Planted

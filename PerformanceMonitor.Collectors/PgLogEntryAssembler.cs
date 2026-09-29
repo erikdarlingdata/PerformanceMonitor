@@ -247,6 +247,26 @@ public static class PgLogEntryAssembler
         @"(?<![\w@.-])(?<user>[A-Za-z_][\w$.-]*)@(?<db>[A-Za-z_][\w$.-]*)(?![\w@])",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
+    /* #4735 item 2: the pgBadger prefix ('%t [%p]: user=%u,db=%d,app=%a,client=%h ') spells the two fields as user= and
+       db=, anywhere in the prefix, each running to the next comma or whitespace. Read only when no user@db was found,
+       and each on its own, so a half-filled pair keeps the half that is there. An empty value does not match (the
+       value needs a character), so a background process, which renders nothing for %u and %d, stays null; so does the
+       [unknown] a client backend renders before it has authenticated. The lookbehind keeps `superuser=` and `mydb=`
+       from being read as the field. */
+    private static readonly Regex s_userField = new(
+        @"(?<![\w.-])user=(?<value>[^,\s]+)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex s_databaseField = new(
+        @"(?<![\w.-])db=(?<value>[^,\s]+)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static string? FieldValue(Regex field, string prefixRest)
+    {
+        var match = field.Match(prefixRest);
+        return match.Success && match.Groups["value"].Value != "[unknown]" ? match.Groups["value"].Value : null;
+    }
+
     /* %e: five characters, digits and capitals, at least one digit (every SQLSTATE class or subclass
        carries one), not glued to an identifier character. The digit requirement is what keeps a
        five-letter upper-case host name in %r from reading as an error code. Nor is it %r's port: %r renders
@@ -648,8 +668,8 @@ public static class PgLogEntryAssembler
                 Hint: _hint?.ToString(),
                 Statement: _statement?.ToString(),
                 Context: _context?.ToString(),
-                UserName: userMatch.Success ? userMatch.Groups["user"].Value : null,
-                DatabaseName: userMatch.Success ? userMatch.Groups["db"].Value : null,
+                UserName: userMatch.Success ? userMatch.Groups["user"].Value : FieldValue(s_userField, _prefixRest),
+                DatabaseName: userMatch.Success ? userMatch.Groups["db"].Value : FieldValue(s_databaseField, _prefixRest),
                 SqlState: stateMatch.Success ? stateMatch.Groups["state"].Value : null,
                 RawText: _raw.ToString(),
                 DetailComplete: _detailFollowed && !_detailInterrupted);

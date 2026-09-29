@@ -16,7 +16,9 @@ namespace PerformanceMonitor.Darling.Service;
 /// One cached per-database Query Store watermark. <see cref="Value"/> is the newest
 /// <c>last_execution_time</c> over every row with <c>collection_time</c> above <see cref="SeedFloor"/>.
 /// <see cref="Witness"/> is a LOWER bound on the <c>collection_time</c> of a row whose value equals
-/// <see cref="Value"/>; null when that is not known. <see cref="SeededAt"/> is the run clock at the store read
+/// <see cref="Value"/>; null when that is not known. The store read that seeds the entry supplies it (the newest
+/// <c>collection_time</c> among the rows at the value inside the read, #4749), and a batch that advances the
+/// entry sets it to its own collection time. <see cref="SeededAt"/> is the run clock at the store read
 /// that seeded the entry; <c>Advance</c> never moves it.
 /// </summary>
 internal readonly record struct DatabaseWatermarkEntry(DateTime? Value, DateTime? Witness, DateTime SeedFloor, DateTime SeededAt);
@@ -131,7 +133,16 @@ internal sealed class DatabaseWatermarkCache
         }
     }
 
-    public void Seed(int serverId, string database, DateTime? value, DateTime floor, DateTime now, SeedToken token)
+    /// <summary>
+    /// Lands a store read's answer. <paramref name="witness"/> is the newest <c>collection_time</c> among the
+    /// rows at <paramref name="value"/> inside the read (#4749), which is what lets the entry keep answering a
+    /// database whose newest row is recent but which has had no batch since. It is the row's own stamp, never
+    /// the read's time: the read's time is an upper bound, and would keep serving the value after the row left
+    /// the floor. It is kept only for a non-null value, and a seed without one misses at the next floor.
+    /// </summary>
+    public void Seed(
+        int serverId, string database, DateTime? value, DateTime floor, DateTime now, SeedToken token,
+        DateTime? witness = null)
     {
         lock (_gate)
         {
@@ -141,7 +152,9 @@ internal sealed class DatabaseWatermarkCache
             }
 
             _entries[(serverId, database)] = new DatabaseWatermarkEntry(
-                value is DateTime v ? Micro(v) : null, null, Micro(floor), now);
+                value is DateTime v ? Micro(v) : null,
+                value is not null && witness is DateTime w ? Micro(w) : null,
+                Micro(floor), now);
         }
     }
 
