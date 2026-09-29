@@ -271,11 +271,18 @@ public class ArchiveService
             }
         }
 
-        /* Compact per-cycle files into monthly parquet before refreshing views */
-        CompactParquetFiles();
-
-        /* Refresh archive views outside write lock — view creation is fast and safe */
-        await _duckDb.CreateArchiveViewsAsync();
+        /* Compact per-cycle files into monthly parquet before refreshing views. The refresh runs even when
+           compaction throws (#4720): a compaction that got part way may already have swapped some months, and
+           a view whose glob matches nothing fails every read of that table until the next hourly run. */
+        try
+        {
+            CompactParquetFiles();
+        }
+        finally
+        {
+            /* Refresh archive views outside write lock — view creation is fast and safe */
+            await _duckDb.CreateArchiveViewsAsync();
+        }
         }
         finally
         {
@@ -1381,8 +1388,15 @@ COPY (
             _logger?.LogInformation("Compacting parquet files into monthly archives");
             try
             {
-                CompactParquetFiles();
-                await _duckDb.CreateArchiveViewsAsync();
+                try
+                {
+                    CompactParquetFiles();
+                }
+                finally
+                {
+                    /* Also when compaction throws (#4720): months it already swapped must be readable. */
+                    await _duckDb.CreateArchiveViewsAsync();
+                }
             }
             catch (Exception compactEx)
             {

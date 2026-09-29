@@ -263,6 +263,21 @@ SELECT TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 1, 'S1', 'Blocking
         Assert.Equal(["202609_t.parquet.tmp"], TempFiles());
     }
 
+    [Fact]
+    public async Task CompactionThatThrows_StillRebuildsTheArchiveViews()
+    {
+        var initializer = await SeedAsync();
+
+        /* Compaction creates its spill folder before it merges anything; a file of that name makes it throw. */
+        File.WriteAllText(Path.Combine(_archiveDir, "duckdb_tmp"), "not a folder");
+
+        await Assert.ThrowsAnyAsync<IOException>(() => new ArchiveService(initializer, _archiveDir).ArchiveOldDataAsync(hotDataDays: 7));
+
+        /* The rows are only in the archive now, so a view that was not rebuilt does not see them. */
+        Assert.Equal(0, await ScalarAsync("SELECT COUNT(*) FROM collection_log"));
+        Assert.Equal(50, await ScalarAsync("SELECT COUNT(*) FROM v_collection_log"));
+    }
+
     private sealed class CapturingLogger : ILogger<ArchiveService>
     {
         public List<(LogLevel Level, string Message)> Entries { get; } = new();
