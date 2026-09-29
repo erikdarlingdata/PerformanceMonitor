@@ -33,7 +33,14 @@ namespace PerformanceMonitorLite.Tests;
 /// Own <see cref="DuckDbInitializer"/> per test (not <c>SharedDuckDbFixture</c>) because the archive
 /// tests need control of the database's archive directory, to COPY hot rows out to parquet exactly like
 /// <c>ArchiveViewDedupTests</c> does.
+///
+/// <para>One test formats the same time twice with <c>ServerTimeHelper.FormatServerTime</c> (once inside
+/// <c>ServerTab.SetWindowTruncatedBanner</c>, once in its assertion), and that reads two settings shared by the
+/// whole test process, <c>UtcOffsetMinutes</c> and <c>CurrentDisplayMode</c>. This class joins the
+/// <c>server-time-helper</c> collection so a class that changes either setting cannot run between the two
+/// calls (#4776).</para>
 /// </summary>
+[Collection("server-time-helper")]
 public sealed class QueryWindowTruncationTests : IDisposable
 {
     private readonly int ServerId;
