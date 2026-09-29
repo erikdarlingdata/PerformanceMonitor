@@ -632,14 +632,15 @@ SELECT EXISTS
 
     /// <summary>#4689: the note a table-served Query Store read carries when the interval table started it later than
     /// the window. The MCP top-queries table route (one server) and Compose's panel (the servers in scope) both
-    /// take their text from here.</summary>
-    public static string HistoryNote(DateTime effectiveStart, WideStartBound bound, bool manyServers)
+    /// take their text from here. <paramref name="settingServer"/> names the server whose history set the common
+    /// start of a many-server read; when null the reason says "these servers".</summary>
+    public static string HistoryNote(DateTime effectiveStart, WideStartBound bound, bool manyServers, string? settingServer = null)
     {
         var scope = manyServers ? "the servers in scope" : "this server";
         var reason = bound switch
         {
             WideStartBound.FilledSince =>
-                $"The interval table began keeping complete history for {(manyServers ? "these servers" : "this server")} at {effectiveStart:o}.",
+                $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart:o}.",
             WideStartBound.TablePurgeEdge =>
                 "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
             _ =>

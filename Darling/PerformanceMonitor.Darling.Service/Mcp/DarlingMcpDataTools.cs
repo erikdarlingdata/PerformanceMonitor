@@ -917,23 +917,21 @@ public sealed class DarlingMcpDataTools
                that was served rather than echo the one that was asked for. */
             /* When the interval table served, its own plan says how far back the answer reaches, and the raw
                floor probe is not asked: raw's floor describes a tier that did not answer. */
-            DateTime? effectiveStartOrNull;
+            DateTime effectiveStart;
             bool truncated;
             if (tablePlan is { } plan)
             {
-                effectiveStartOrNull = plan.EffectiveStart;
+                effectiveStart = plan.ReadStart;
                 /* The table's proven-complete history starts at its read bound. */
-                truncated = RawWindowFloor.IsTruncated(effectiveStartOrNull, requestedStart);
+                truncated = RawWindowFloor.IsTruncated(effectiveStart, requestedStart);
             }
             else
             {
                 var floor = await DarlingDataReader.GetQueryStoreWindowFloorAsync(postgres, resolved.ServerId, requestedStart, now, cancellationToken);
-                effectiveStartOrNull = floor ?? requestedStart;
+                effectiveStart = floor ?? requestedStart;
                 /* #4231: the shared helper's own boundary, not a bare 90-minute literal restated here. */
                 truncated = RawWindowFloor.IsTruncated(floor, requestedStart);
             }
-
-            var effectiveStart = effectiveStartOrNull ?? requestedStart;
 
             if (rows.Count == 0)
             {
@@ -951,8 +949,8 @@ public sealed class DarlingMcpDataTools
                            and the raw tier may not reach the whole of the one asked for. */
                         : McpHelpers.QueryStoreModuleEmpty(module_name, execution_type, hours_back, database_name, truncated, new
                         {
-                            effective_start = effectiveStartOrNull?.ToString("o"),
-                            effective_hours_back = effectiveStartOrNull is null ? (double?)null : Math.Round((now - effectiveStart).TotalHours, 1),
+                            effective_start = effectiveStart.ToString("o"),
+                            effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                             window_truncated = truncated
                         });
 
@@ -1006,8 +1004,8 @@ public sealed class DarlingMcpDataTools
                 hours_back,
                 /* #2364: what was served, beside what was asked for. hours_back alone was a request echoed
                    back as though it described the data. */
-                effective_start = effectiveStartOrNull?.ToString("o"),
-                effective_hours_back = effectiveStartOrNull is null ? (double?)null : Math.Round((now - effectiveStart).TotalHours, 1),
+                effective_start = effectiveStart.ToString("o"),
+                effective_hours_back = Math.Round((now - effectiveStart).TotalHours, 1),
                 /* Which tier answered. */
                 history_source = tablePlan is null ? "raw" : "interval_table",
                 /* #3653 item 17: the WINDOW floor under its own key. This tool has no page cut to disclose (top

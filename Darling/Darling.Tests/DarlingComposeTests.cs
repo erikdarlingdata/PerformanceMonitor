@@ -1751,6 +1751,23 @@ public sealed class DarlingComposeTests
     }
 
     [Fact]
+    public void QueryStoreHistoryNote_NamesTheSettingServer_AndTheRouteEmitsSetByOnlyWhenTruncated()
+    {
+        var start = new DateTime(2026, 8, 3, 12, 0, 0, DateTimeKind.Utc);
+        var named = DarlingWebEndpoints.QueryStoreHistoryNote(start, QueryStoreIntervalWide.WideStartBound.FilledSince, "alpha");
+        Assert.Contains("complete history for alpha at ", named, StringComparison.Ordinal);
+        Assert.DoesNotContain("these servers", named, StringComparison.Ordinal);
+
+        /* The field sits inside the same guard as the note: present when the table cut the window, absent otherwise. */
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWebEndpoints.cs");
+        var guard = source.IndexOf("wideResolution.WideStart is DateTime historyStart && historyStart > start", StringComparison.Ordinal);
+        Assert.True(guard >= 0);
+        var block = source[guard..source.IndexOf("return ComposeRunOutcome.Ok(payload);", guard, StringComparison.Ordinal)];
+        Assert.Contains("payload[\"query_store_history_note\"]", block, StringComparison.Ordinal);
+        Assert.Contains("payload[\"query_store_history_set_by\"] = wideResolution.SettingServer;", block, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Compile_QueryStoreWideEligible_ModuleNameFilterCompilesAgainstTheFactAlias()
     {
         /* module_name is a real column on query_store_stats AND on the wide table, so a LIKE filter on it

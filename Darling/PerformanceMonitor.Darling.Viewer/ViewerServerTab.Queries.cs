@@ -235,15 +235,20 @@ public partial class ViewerServerTab
         if (widePlan?.EffectiveStart is DateTime wideStart)
         {
             var wideTruncated = RawWindowFloor.IsTruncated(wideStart, requestedStartUtc);
-            if (wideTruncated || !string.IsNullOrEmpty(tierSuffix))
+            /* The slicer and comparison read raw whatever tier served the grid, so a truncated raw floor is
+               named whether or not the grid itself was cut. */
+            var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
+            if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))
             {
+                var slicerSince = slicerTruncated
+                    ? ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc)).ToString("yyyy-MM-dd HH:mm")
+                    : null;
                 var text = wideTruncated
                     ? $"Showing since {ViewerTimeHelper.ForDisplay(wideStart):yyyy-MM-dd HH:mm}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
-                    : $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}";
-                if (wideTruncated && RawWindowFloor.IsTruncated(floor, requestedStartUtc))
-                {
-                    text += $" · slicer since {ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc)):yyyy-MM-dd HH:mm}";
-                }
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}")
+                    : slicerSince is null
+                        ? $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}"
+                        : $"Slicer since {slicerSince} (the grid shows the full window)";
 
                 banner.Text = text + tierSuffix;
                 banner.Visibility = Visibility.Visible;

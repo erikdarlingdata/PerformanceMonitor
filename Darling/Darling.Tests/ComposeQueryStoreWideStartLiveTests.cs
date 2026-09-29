@@ -89,7 +89,9 @@ public sealed class ComposeQueryStoreWideStartLiveTests
         Assert.True(unbound.Min() < S.AddHours(12), "expected the unbound read to include the backdated table rows");
 
         Assert.Equal(S.AddHours(12), resolution.WideStart);
-        Assert.Contains("interval table began keeping complete history", DarlingWebEndpoints.QueryStoreHistoryNote(resolution.WideStart!.Value, resolution.Bound), StringComparison.Ordinal);
+        Assert.Equal(ServerName, resolution.SettingServer);
+        var note = DarlingWebEndpoints.QueryStoreHistoryNote(resolution.WideStart!.Value, resolution.Bound, resolution.SettingServer);
+        Assert.Contains("interval table began keeping complete history for " + ServerName, note, StringComparison.Ordinal);
     }
 
     private static async Task<List<DateTime>> RunBucketsAsync(NpgsqlConnection connection, PanelPlan plan, ComposeRunContext context, CancellationToken ct)

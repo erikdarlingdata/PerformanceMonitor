@@ -132,10 +132,31 @@ public sealed class RawWindowFloorViewerPortTests
             Assert.Contains("(interval table keeps 9 days)", banner.Text, StringComparison.Ordinal);
             Assert.DoesNotContain("slicer", banner.Text, StringComparison.Ordinal);
 
+            /* The grid shows the full window but raw (the slicer's tier) is cut: the shortfall is named. */
             var whole = plan with { ReadStart = RequestedStart, StartBound = QueryStoreIntervalWide.WideStartBound.Window };
             ViewerServerTab.UpdateTruncationBanner(banner, RequestedStart.AddDays(4), RequestedStart, widePlan: whole);
+            Assert.Equal(Visibility.Visible, banner.Visibility);
+            Assert.StartsWith("Slicer since ", banner.Text, StringComparison.Ordinal);
+            Assert.EndsWith(" (the grid shows the full window)", banner.Text, StringComparison.Ordinal);
+
+            ViewerServerTab.UpdateTruncationBanner(banner, RequestedStart, RequestedStart, widePlan: whole);
             Assert.Equal(Visibility.Collapsed, banner.Visibility);
         });
+    }
+
+    [Fact]
+    public void UpdateTruncationBanner_WideBranch_NamesTheSlicerFloor_WhetherOrNotTheGridWasCut()
+    {
+        var tab = ViewerFile("ViewerServerTab.Queries.cs");
+        var start = tab.IndexOf("if (widePlan?.EffectiveStart is DateTime wideStart)", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var branch = tab[start..tab.IndexOf("return;", start, StringComparison.Ordinal)];
+        Assert.Contains("var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);", branch, StringComparison.Ordinal);
+        Assert.Contains("if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))", branch, StringComparison.Ordinal);
+        Assert.Contains("Slicer since {slicerSince} (the grid shows the full window)", branch, StringComparison.Ordinal);
+        Assert.Contains(" · slicer since {slicerSince}", branch, StringComparison.Ordinal);
+        /* The slicer text is never gated on the grid's own truncation. */
+        Assert.DoesNotContain("wideTruncated && RawWindowFloor.IsTruncated(floor", branch, StringComparison.Ordinal);
     }
 
     [Fact]

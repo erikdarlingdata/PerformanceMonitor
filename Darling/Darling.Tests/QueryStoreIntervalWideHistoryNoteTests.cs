@@ -41,6 +41,20 @@ public sealed class QueryStoreIntervalWideHistoryNoteTests
     public void HistoryNote_IsExact_ForEveryBoundAndScope(QueryStoreIntervalWide.WideStartBound bound, bool manyServers, string expected) =>
         Assert.Equal(expected, QueryStoreIntervalWide.HistoryNote(Start, bound, manyServers));
 
+    [Fact]
+    public void HistoryNote_NamesTheSettingServer_OnlyForManyServers()
+    {
+        var expected = Lead1 + "the servers in scope" + Lead2 + "The interval table began keeping complete history for alpha at " + StartText + ".";
+        Assert.Equal(expected, QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: true, settingServer: "alpha"));
+        Assert.Equal(
+            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: false),
+            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.FilledSince, manyServers: false, settingServer: "alpha"));
+        /* The purge-edge and floor reasons name no server: the same text with or without one. */
+        Assert.Equal(
+            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true),
+            QueryStoreIntervalWide.HistoryNote(Start, QueryStoreIntervalWide.WideStartBound.TablePurgeEdge, manyServers: true, settingServer: "alpha"));
+    }
+
     [Theory]
     [InlineData(QueryStoreIntervalWide.WideStartBound.Window, null)]
     [InlineData(QueryStoreIntervalWide.WideStartBound.RawFloor, null)]
