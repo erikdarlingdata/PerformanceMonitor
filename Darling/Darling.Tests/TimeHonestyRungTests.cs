@@ -205,9 +205,23 @@ public sealed class TimeHonestyRungTests
         var declaration = System.Text.RegularExpressions.Regex.Match(lite, @"internal const int CurrentSchemaVersion = (\d+);");
         Assert.True(declaration.Success, "DuckDbInitializer no longer declares CurrentSchemaVersion in the pinned shape");
         Assert.True(int.Parse(declaration.Groups[1].Value, CultureInfo.InvariantCulture) >= 63, "Lite's schema version fell below the v63 twin");
-        var block = lite[lite.IndexOf("if (fromVersion < 63)", StringComparison.Ordinal)..];
-        Assert.Contains("(\"cpu_utilization_stats\", \"sample_time_utc\", \"TIMESTAMP\")", block, StringComparison.Ordinal);
-        Assert.Contains("(\"server_properties\", \"time_zone_id\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        /* #4727: Lite's added columns are entries of ONE versioned list, DuckDbInitializer.AddedColumns (version
+           first), and each migration step adds its own version's entries through the shared AddMissingColumnsAsync.
+           So the two v63 columns are pinned as entries of that list, and the v63 step, cut at the next
+           "if (fromVersion <" so a call in a later step cannot satisfy the pin, as the one that adds version 63's. */
+        var listStart = lite.IndexOf("internal static readonly (int Version, string Table, string Column, string Type)[] AddedColumns =", StringComparison.Ordinal);
+        Assert.True(listStart >= 0, "DuckDbInitializer no longer declares AddedColumns in the pinned shape");
+        var listEnd = lite.IndexOf("};", listStart, StringComparison.Ordinal);
+        Assert.True(listEnd > listStart, "DuckDbInitializer's AddedColumns list has no closing brace to end at");
+        var list = lite[listStart..listEnd];
+        Assert.Contains("(63, \"cpu_utilization_stats\", \"sample_time_utc\", \"TIMESTAMP\")", list, StringComparison.Ordinal);
+        Assert.Contains("(63, \"server_properties\", \"time_zone_id\", \"VARCHAR\")", list, StringComparison.Ordinal);
+        var start = lite.IndexOf("if (fromVersion < 63)", StringComparison.Ordinal);
+        Assert.True(start >= 0, "DuckDbInitializer has no v63 block");
+        var end = lite.IndexOf("if (fromVersion <", start + 1, StringComparison.Ordinal);
+        Assert.True(end > start, "DuckDbInitializer's v63 block has no later step to end at");
+        var block = lite[start..end];
+        Assert.Contains("AddMissingColumnsAsync(connection, AddedColumnsForVersion(63))", block, StringComparison.Ordinal);
         Assert.Contains("twinning Darling's V134", block, StringComparison.Ordinal);
     }
 

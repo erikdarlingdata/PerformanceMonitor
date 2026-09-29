@@ -216,8 +216,9 @@ public sealed class DarlingConfig
     public AlertsConfig Alerts { get; set; } = new();
 
     /// <summary>
-    /// SMTP delivery for fired alerts. Delivery is enabled when host + from + to are all set
-    /// (no separate flag — defaults over speculative config); the password uses the same DPAPI
+    /// SMTP delivery for fired alerts. Delivery is enabled when host + from are set (no separate
+    /// flag — defaults over speculative config); <c>to</c> is the default recipient list, which a
+    /// notification route can stand in for (#4751). The password uses the same DPAPI
     /// --encrypt-password pattern as SQL auth. Optional.
     /// </summary>
     [JsonPropertyName("smtp")]

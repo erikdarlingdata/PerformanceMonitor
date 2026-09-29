@@ -59,8 +59,11 @@ public sealed class TimeHonestyRungTests
         Assert.True(start >= 0, "DuckDbInitializer has no v63 block");
         var block = source[start..];
 
-        Assert.Contains("(\"cpu_utilization_stats\", \"sample_time_utc\", \"TIMESTAMP\")", block, StringComparison.Ordinal);
-        Assert.Contains("(\"server_properties\", \"time_zone_id\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        /* #4727: the entries live in DuckDbInitializer.AddedColumns; the step adds its own version's entries through
+           the shared AddMissingColumnsAsync. */
+        Assert.Contains("(63, \"cpu_utilization_stats\", \"sample_time_utc\", \"TIMESTAMP\")", block, StringComparison.Ordinal);
+        Assert.Contains("(63, \"server_properties\", \"time_zone_id\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        Assert.Contains("AddMissingColumnsAsync(connection, AddedColumnsForVersion(63))", block, StringComparison.Ordinal);
         Assert.Contains("ADD COLUMN IF NOT EXISTS {column} {type}", block, StringComparison.Ordinal);
         Assert.Contains("Running migration to v63", block, StringComparison.Ordinal);
         foreach (var phrase in new[]
