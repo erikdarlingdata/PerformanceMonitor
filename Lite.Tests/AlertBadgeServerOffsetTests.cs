@@ -112,22 +112,6 @@ public sealed class AlertBadgeServerOffsetTests : IClassFixture<SharedDuckDbFixt
         return candidate;
     }
 
-    /// <summary>
-    /// The value the toolbar pickers would hold for <paramref name="utc"/> in a given display mode and a
-    /// given server's offset — the inverse of what the production pair does to it. Kind is Unspecified,
-    /// which is what <c>GetDateTimeFromPickers</c> yields.
-    /// </summary>
-    private static DateTime PickerValueFor(DateTime utc, TimeDisplayMode mode, int utcOffsetMinutes) => mode switch
-    {
-        /* The picker reads UTC, so the pair must be a no-op overall. */
-        TimeDisplayMode.UTC => utc,
-        /* The picker reads the operator's own wall clock. */
-        TimeDisplayMode.LocalTime => ToLocalPicker(utc),
-        /* The default: the picker reads the MONITORED server's wall clock, so it is offset by that
-           server's own offset and only the read's conversion undoes it. */
-        _ => utc.AddMinutes(utcOffsetMinutes)
-    };
-
     private static DateTime ToLocalPicker(DateTime utc) =>
         DateTime.SpecifyKind(
             TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), TimeZoneInfo.Local),
@@ -216,83 +200,21 @@ public sealed class AlertBadgeServerOffsetTests : IClassFixture<SharedDuckDbFixt
     }
 
     /// <summary>
-    /// The pair, as arithmetic: converting the operator's picker value into a named server's local time
-    /// and then back out to UTC returns the instant the operator meant — for either server's offset, in
-    /// every display mode, with the desktop static set to something that is neither. This is the assertion
-    /// that fails if one side of the pair is moved onto a different server from the other.
-    /// </summary>
-    [Fact]
-    public void TheDisplayConversionAndTheReadConversionCancel_ForEitherServersOffset()
-    {
-        var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
-        try
-        {
-            /* Deliberately neither server's offset: nothing below may consult it. */
-            ServerTimeHelper.UtcOffsetMinutes = 720;
-
-            foreach (var mode in new[] { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime })
-            foreach (var offset in new[] { WestOffset, EastOffset })
-            {
-                var picker = PickerValueFor(WindowStartUtc, mode, offset);
-                var serverTime = ServerTimeHelper.DisplayTimeToServerTime(picker, mode, ServerClock.FixedOffset(offset));
-                var backToUtc = serverTime.AddMinutes(-offset);
-
-                Assert.True(
-                    backToUtc == WindowStartUtc,
-                    $"{mode} / offset {offset}: round trip landed on {backToUtc:O}, expected {WindowStartUtc:O}");
-            }
-        }
-        finally
-        {
-            ServerTimeHelper.UtcOffsetMinutes = savedOffset;
-        }
-    }
-
-    /// <summary>
-    /// The explicit-clock conversion given the static's own clock is the static-reading one, so the reads
-    /// that legitimately take the selected tab's clock are unchanged by the overload existing.
-    /// </summary>
-    [Fact]
-    public void TheExplicitClockConversionMatchesTheAmbientOne_WhenHandedTheAmbientClock()
-    {
-        var savedOffset = ServerTimeHelper.UtcOffsetMinutes;
-        try
-        {
-            ServerTimeHelper.UtcOffsetMinutes = EastOffset;
-            var picker = ToLocalPicker(WindowStartUtc);
-
-            foreach (var mode in new[] { TimeDisplayMode.ServerTime, TimeDisplayMode.UTC, TimeDisplayMode.LocalTime })
-            {
-                Assert.Equal(
-                    ServerTimeHelper.DisplayTimeToServerTime(picker, mode),
-                    ServerTimeHelper.DisplayTimeToServerTime(picker, mode, ServerTimeHelper.ActiveServerClock));
-            }
-        }
-        finally
-        {
-            ServerTimeHelper.UtcOffsetMinutes = savedOffset;
-        }
-    }
-
-    /// <summary>
-    /// Runs the production pair: the display conversion a <c>ServerTab</c> performs on its pickers with its
-    /// OWN offset, feeding the read with that same offset.
+    /// The badge read as the tab drives it (#4766): the tab holds the range as UTC instants, so the display mode and the
+    /// server's offset decide only what the pickers show, and the read is handed the same two instants whatever they are.
     /// </summary>
     private async Task<(int Blocking, int Deadlocks)> ReadBadgeAsync(int serverId, int utcOffsetMinutes, TimeDisplayMode mode)
     {
-        var serverClock = ServerClock.FixedOffset(utcOffsetMinutes);
-        var fromDate = ServerTimeHelper.DisplayTimeToServerTime(PickerValueFor(WindowStartUtc, mode, utcOffsetMinutes), mode, serverClock);
-        var toDate = ServerTimeHelper.DisplayTimeToServerTime(PickerValueFor(WindowEndUtc, mode, utcOffsetMinutes), mode, serverClock);
-
+        _ = (utcOffsetMinutes, mode);
         var (blocking, deadlocks, _) = await new LocalDataService(_duckDb)
-            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: fromDate, toDate: toDate, serverClock: serverClock);
+            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: WindowStartUtc, toDate: WindowEndUtc);
         return (blocking, deadlocks);
     }
 
     private async Task<(int Blocking, int Deadlocks)> ReadPresetBadgeAsync(int serverId, int utcOffsetMinutes)
     {
         var (blocking, deadlocks, _) = await new LocalDataService(_duckDb)
-            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: null, toDate: null, serverClock: ServerClock.FixedOffset(utcOffsetMinutes));
+            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: null, toDate: null);
         return (blocking, deadlocks);
     }
 

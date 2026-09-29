@@ -118,12 +118,6 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         var skipped = Utc(2026, 3, 8, 2, 30);
         Assert.Equal(Utc(2026, 3, 8, 7, 30), clock.ToUtc(skipped));
 
-        /* Server mode: the picker value is already the server's wall clock, so the display-to-server step is the
-           identity and the read's server-local-to-UTC step (below) is the one that must not throw. */
-        Assert.Equal(skipped, ServerTimeHelper.DisplayTimeToServerTime(skipped, TimeDisplayMode.ServerTime, clock));
-        ServerTimeHelper.ActiveServerClock = clock;
-        Assert.Equal(Utc(2026, 3, 8, 7, 30), ServerTimeHelper.ServerTimeToUtc(skipped));
-
         /* UTC and Local displays of that same server time do not throw either. */
         Assert.Equal(Utc(2026, 3, 8, 7, 30), ServerTimeHelper.ConvertForDisplay(skipped, TimeDisplayMode.UTC, clock));
         _ = ServerTimeHelper.ConvertForDisplay(skipped, TimeDisplayMode.LocalTime, clock);
@@ -137,7 +131,6 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         /* 01:30 on 1 November happens twice, at 05:30 UTC (EDT) and 06:30 UTC (EST): the first one wins. */
         var repeated = Utc(2026, 11, 1, 1, 30);
         Assert.Equal(Utc(2026, 11, 1, 5, 30), clock.ToUtc(repeated));
-        Assert.Equal(repeated, ServerTimeHelper.DisplayTimeToServerTime(repeated, TimeDisplayMode.ServerTime, clock));
         Assert.Equal(Utc(2026, 11, 1, 5, 30), ServerTimeHelper.ConvertForDisplay(repeated, TimeDisplayMode.UTC, clock));
     }
 
@@ -152,7 +145,6 @@ public sealed class ServerTimeHelperClockTests : IDisposable
         {
             var serverLocal = ServerTimeHelper.ToServerTime(utc, clock);
             Assert.Equal(utc, ServerTimeHelper.ConvertForDisplay(serverLocal, TimeDisplayMode.UTC, clock));
-            Assert.Equal(serverLocal, ServerTimeHelper.DisplayTimeToServerTime(utc, TimeDisplayMode.UTC, clock));
         }
 
         // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
