@@ -734,6 +734,9 @@ internal sealed class DarlingStoreUpgrade
     /// <summary>MAX_PATH: the least room <see cref="ResolveVolumeMountPoint"/> gives <c>GetVolumePathNameW</c> for its answer.</summary>
     private const int VolumePathBufferFloor = 260;
 
+    /// <summary>ERROR_ACCESS_DENIED: what <c>GetDiskFreeSpaceExW</c> answers for a folder the caller holds no right on.</summary>
+    private const int ErrorAccessDenied = 5;
+
     /// <summary>
     /// The bytes this process may still write on the volume that holds <paramref name="directory"/>, asked
     /// for the directory's own volume. <see cref="DriveInfo"/> answers for a drive letter, and a data
@@ -751,39 +754,47 @@ internal sealed class DarlingStoreUpgrade
 
     /// <summary>
     /// The free and total bytes of the volume that holds <paramref name="directory"/>, both from the one
-    /// <c>GetDiskFreeSpaceExW</c> call on that volume's mount point (<see cref="ResolveVolumeMountPoint"/>).
-    /// A report that shows a volume's size beside its free space reads both here so the two describe ONE
-    /// volume, and a directory on a volume mounted at a folder gets that volume's figures rather than the
-    /// ones behind its drive letter. Both are the caller's view, like <c>DriveInfo.AvailableFreeSpace</c> and
-    /// <c>DriveInfo.TotalSize</c>, so a quota on the service account counts.
+    /// <c>GetDiskFreeSpaceExW</c> call. A report that shows a volume's size beside its free space reads both
+    /// here so the two describe ONE volume, and a directory on a volume mounted at a folder gets that
+    /// volume's figures rather than the ones behind its drive letter. Both are the caller's view, like
+    /// <c>DriveInfo.AvailableFreeSpace</c> and <c>DriveInfo.TotalSize</c>, so a quota on the service account
+    /// counts.
     ///
-    /// <para>The space is asked of the mount point, not of the directory: <c>GetDiskFreeSpaceExW</c> opens
-    /// whatever it is given, so a caller with no access to the directory (a command prompt that is not
-    /// elevated, the viewer's own profile) is turned away with "access denied" for a volume it can read
-    /// perfectly well, and the size and free space of a volume do not depend on the caller's access to one
-    /// folder on it. Throws <see cref="IOException"/> when the volume cannot be read (a directory that is not
-    /// there, a volume that is not ready) and never answers for the drive letter. A Windows call: a caller
-    /// that also runs elsewhere keeps its own read for the other platforms.</para>
+    /// <para>The directory is asked first: <c>GetDiskFreeSpaceExW</c> opens whatever it is given, so a data
+    /// directory reached through a directory junction or a symbolic link is read on the volume the link
+    /// points at, where a lookup from the path alone names the volume that holds the link. Only when the
+    /// caller is turned away from the directory with "access denied" (a command prompt that is not elevated,
+    /// the viewer's own profile, asking about a data directory only the service account can open) is the
+    /// space asked of the volume's mount point (<see cref="ResolveVolumeMountPoint"/>) instead: the size and
+    /// free space of a volume do not depend on the caller's access to one folder on it. Any other failure
+    /// throws <see cref="IOException"/> (a directory that is not there, a volume that is not ready), and the
+    /// read never answers for the drive letter. A Windows call: a caller that also runs elsewhere keeps its
+    /// own read for the other platforms.</para>
     /// </summary>
     internal static (long AvailableFreeBytes, long TotalBytes) ReadVolumeSpace(string directory)
-        => ReadVolumeSpaceVia(directory, ResolveVolumeMountPoint, ReadMountPointSpace);
+        => ReadVolumeSpaceVia(directory, ReadDirectorySpace, ResolveVolumeMountPoint, ReadMountPointSpace);
 
     /// <summary>
-    /// <see cref="ReadVolumeSpace"/> with its two steps replaceable, so a test can say which mount point holds
-    /// a directory and what that mount point's volume holds. The order is the contract: the space is asked of
-    /// the mount point the first step found, never of the directory itself and never of its drive letter.
+    /// <see cref="ReadVolumeSpace"/> with its three steps replaceable, so a test can say what the directory
+    /// read answers, which mount point holds a directory and what that mount point's volume holds. The order
+    /// is the contract: the directory is asked first, and the numbers it gives are the answer, with no mount
+    /// point looked up. Only a directory read that answers <c>null</c> (the caller is turned away from the
+    /// directory) goes on to the mount point the second step finds, and any other failure of the first step
+    /// reaches the caller as it is. The space is never asked of the drive letter.
     /// </summary>
     internal static (long AvailableFreeBytes, long TotalBytes) ReadVolumeSpaceVia(
         string directory,
+        Func<string, (long AvailableFreeBytes, long TotalBytes)?> readDirectorySpace,
         Func<string, string> resolveMountPoint,
         Func<string, (long AvailableFreeBytes, long TotalBytes)> readMountPointSpace)
-        => readMountPointSpace(resolveMountPoint(directory));
+        => readDirectorySpace(directory) ?? readMountPointSpace(resolveMountPoint(directory));
 
     /// <summary>
     /// The root of the volume that holds <paramref name="directory"/>: <c>C:\</c> for a folder on a drive
     /// letter, the mount point's own folder (with its trailing separator) for a volume mounted at a folder,
     /// the share root for a UNC path. Found by <c>GetVolumePathNameW</c>, which works it out from the path
-    /// without opening the directory, so it answers for a directory the caller has no access to.
+    /// without opening the directory, so it answers for a directory the caller has no access to: the read
+    /// <see cref="ReadVolumeSpace"/> falls back to when the directory itself turns the caller away.
     ///
     /// <para>A directory that is not there is refused. <c>GetVolumePathNameW</c> answers for it anyway, with
     /// the volume of the nearest folder that does exist, and that is the wrong-volume answer this read exists
@@ -820,18 +831,61 @@ internal sealed class DarlingStoreUpgrade
         return length < 0 ? new string(buffer) : new string(buffer, 0, length);
     }
 
-    private static (long AvailableFreeBytes, long TotalBytes) ReadMountPointSpace(string mountPoint)
+    /// <summary>
+    /// The space of the volume behind <paramref name="directory"/>, asked of the directory itself, or
+    /// <c>null</c> when the caller is turned away from it with "access denied": that is the one answer
+    /// <see cref="ReadVolumeSpaceVia"/> goes on from, to the volume's mount point. Any other failure throws
+    /// <see cref="IOException"/>, so a directory that is not there is not answered with the volume above it.
+    /// </summary>
+    private static (long AvailableFreeBytes, long TotalBytes)? ReadDirectorySpace(string directory)
     {
-        /* A trailing separator is what the Win32 call wants for a UNC path and harmless for a local one. */
-        var path = Path.EndsInDirectorySeparator(mountPoint) ? mountPoint : mountPoint + Path.DirectorySeparatorChar;
+        var path = WithTrailingSeparator(Path.GetFullPath(directory));
 
-        if (!GetDiskFreeSpaceExW(path, out var availableToCaller, out var totalBytes, out _))
+        if (TryQueryVolumeSpace(path, out var space, out var win32Error))
         {
-            throw new IOException(
-                $"Could not read the free space of the volume mounted at {path} (Win32 error {Marshal.GetLastPInvokeError()}).");
+            return space;
         }
 
-        return (ClampToLong(availableToCaller), ClampToLong(totalBytes));
+        if (win32Error == ErrorAccessDenied)
+        {
+            return null;
+        }
+
+        throw new IOException(
+            $"Could not read the free space of the volume that holds {path} (Win32 error {win32Error}).");
+    }
+
+    private static (long AvailableFreeBytes, long TotalBytes) ReadMountPointSpace(string mountPoint)
+    {
+        var path = WithTrailingSeparator(mountPoint);
+
+        if (!TryQueryVolumeSpace(path, out var space, out var win32Error))
+        {
+            throw new IOException(
+                $"Could not read the free space of the volume mounted at {path} (Win32 error {win32Error}).");
+        }
+
+        return space;
+    }
+
+    /// <summary>A trailing separator is what the Win32 call wants for a UNC path and harmless for a local one.</summary>
+    private static string WithTrailingSeparator(string path)
+        => Path.EndsInDirectorySeparator(path) ? path : path + Path.DirectorySeparatorChar;
+
+    /// <summary>The one <c>GetDiskFreeSpaceExW</c> call, with the Win32 error read straight after it.</summary>
+    private static bool TryQueryVolumeSpace(
+        string path, out (long AvailableFreeBytes, long TotalBytes) space, out int win32Error)
+    {
+        if (GetDiskFreeSpaceExW(path, out var availableToCaller, out var totalBytes, out _))
+        {
+            space = (ClampToLong(availableToCaller), ClampToLong(totalBytes));
+            win32Error = 0;
+            return true;
+        }
+
+        space = default;
+        win32Error = Marshal.GetLastPInvokeError();
+        return false;
     }
 
     private static long ClampToLong(ulong value) => value > long.MaxValue ? long.MaxValue : (long)value;

@@ -354,33 +354,101 @@ public sealed class DarlingStoreUpgradeTests
         Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadVolumeSpace(missing));
     }
 
-    /// <summary>The space is asked of the mount point the first step found, never of the directory itself and
-    /// never of its drive letter: a volume mounted at a folder is read at its own mount point, and the
-    /// caller's access to the directory does not come into it.</summary>
+    /// <summary>The directory is asked first, and the numbers it gives are the answer: the mount point is not
+    /// even looked up. A data directory reached through a directory junction or a symbolic link is read on
+    /// the volume the link points at, which is what the directory read follows and a lookup of the mount
+    /// point from the path alone does not.</summary>
     [Fact]
-    public void ReadVolumeSpaceVia_AsksTheMountPointItResolved_NotTheDirectory()
+    public void ReadVolumeSpaceVia_DirectoryReadSucceeds_ItsNumbersComeBack_MountPointNeverResolved()
     {
         const long oneGb = 1024L * 1024 * 1024;
-        var resolved = new List<string>();
-        var asked = new List<string>();
+        var calls = new List<string>();
 
         var (free, total) = DarlingStoreUpgrade.ReadVolumeSpaceVia(
             @"C:\Mnt\Data\pgdata",
             directory =>
             {
-                resolved.Add(directory);
+                calls.Add("directory " + directory);
+                return (48 * oneGb, 100 * oneGb);
+            },
+            directory =>
+            {
+                calls.Add("resolve " + directory);
                 return @"C:\Mnt\Data\";
             },
             mountPoint =>
             {
-                asked.Add(mountPoint);
+                calls.Add("mount point " + mountPoint);
+                return (64 * oneGb, 120 * oneGb);
+            });
+
+        Assert.Equal(48 * oneGb, free);
+        Assert.Equal(100 * oneGb, total);
+        Assert.Equal(new[] { @"directory C:\Mnt\Data\pgdata" }, calls);
+    }
+
+    /// <summary>A directory that turns the caller away is not the end of the read: the space is then asked of
+    /// the mount point the second step found, and the caller's access to the directory does not come into
+    /// it. Three steps in this order, and never the drive letter.</summary>
+    [Fact]
+    public void ReadVolumeSpaceVia_DirectoryReadDenied_ReadsTheMountPointItResolved()
+    {
+        const long oneGb = 1024L * 1024 * 1024;
+        var calls = new List<string>();
+
+        var (free, total) = DarlingStoreUpgrade.ReadVolumeSpaceVia(
+            @"C:\Mnt\Data\pgdata",
+            directory =>
+            {
+                calls.Add("directory " + directory);
+                return null;
+            },
+            directory =>
+            {
+                calls.Add("resolve " + directory);
+                return @"C:\Mnt\Data\";
+            },
+            mountPoint =>
+            {
+                calls.Add("mount point " + mountPoint);
                 return (64 * oneGb, 120 * oneGb);
             });
 
         Assert.Equal(64 * oneGb, free);
         Assert.Equal(120 * oneGb, total);
-        Assert.Equal(new[] { @"C:\Mnt\Data\pgdata" }, resolved);
-        Assert.Equal(new[] { @"C:\Mnt\Data\" }, asked);
+        Assert.Equal(
+            new[] { @"directory C:\Mnt\Data\pgdata", @"resolve C:\Mnt\Data\pgdata", @"mount point C:\Mnt\Data\" },
+            calls);
+    }
+
+    /// <summary>Only "access denied" goes on to the mount point. A directory read that fails another way (a
+    /// directory that is not there, a volume that is not ready) throws as it is, and the mount point is not
+    /// looked up: it would answer with the volume above a directory that is not there.</summary>
+    [Fact]
+    public void ReadVolumeSpaceVia_DirectoryReadFailsAnotherWay_Throws_MountPointNeverResolved()
+    {
+        var calls = new List<string>();
+
+        var thrown = Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadVolumeSpaceVia(
+            @"C:\Mnt\Data\pgdata",
+            directory =>
+            {
+                calls.Add("directory " + directory);
+                throw new IOException("The volume is not ready.");
+            },
+            directory =>
+            {
+                calls.Add("resolve " + directory);
+                return @"C:\Mnt\Data\";
+            },
+            mountPoint =>
+            {
+                calls.Add("mount point " + mountPoint);
+                return (0L, 0L);
+            }));
+
+        Assert.Equal("The volume is not ready.", thrown.Message);
+        Assert.Equal(new[] { @"directory C:\Mnt\Data\pgdata" }, calls);
     }
 
     /// <summary>A folder on the system drive is on that drive's own volume, so its mount point is the drive
