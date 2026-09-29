@@ -202,7 +202,7 @@ public sealed class ReadLatencyWebRecordingTests
     /// time in another flow builds its own <c>BuildReadDispatch</c> without it. Disposing still clears it, so
     /// a later step in this fact's own flow never sees a leftover.
     /// </summary>
-    private sealed class ExtraDispatchEntryScope : IDisposable
+    internal sealed class ExtraDispatchEntryScope : IDisposable
     {
         public ExtraDispatchEntryScope((string Name, DarlingWebEndpoints.ReadToolHandler Handler) entry)
         {
