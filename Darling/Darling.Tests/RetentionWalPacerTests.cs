@@ -386,7 +386,7 @@ public sealed class RetentionWalPacerTests
     /* ---------------- the run's summary says what it paced ---------------- */
 
     [Fact]
-    public void BuildRunRecordSummary_APacedRun_SaysTheWalWrittenAndTheSecondsPaced()
+    public void BuildRunRecordSummary_APacedRun_SaysTheStoresWalDuringTheBatchesAndTheSecondsPaced()
     {
         var (status, message) = DarlingRetention.BuildRunRecordSummary(
             tablesPurged: 33, totalRowsDeleted: 1200, totalChunksDropped: 42, tablesFailed: 0,
@@ -394,8 +394,24 @@ public sealed class RetentionWalPacerTests
 
         Assert.Equal("SUCCESS", status);
         Assert.Contains("1200 row(s) deleted", message, StringComparison.Ordinal);
-        Assert.Contains("WAL written 6571 MB", message, StringComparison.Ordinal);
+        Assert.Contains("store WAL during the purge's batches: 6571 MB", message, StringComparison.Ordinal);
         Assert.Contains("paced 412 s", message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The WAL figure is the WHOLE store's WAL across the purge's batches, collection included
+    /// (<c>RetentionWalPacer.WalWrittenSinceAsync</c>), so neither the service log line nor the run record may call
+    /// it what the purge wrote. The run record's words are pinned above; the log line has no other pin, so this reads
+    /// the source and holds both to the same words.
+    /// </summary>
+    [Fact]
+    public void ThePurgeLogLine_AndTheRunRecord_NameTheWalTheStoresNotThePurges()
+    {
+        var source = ReadServiceFile("DarlingRetention.cs");
+
+        Assert.DoesNotContain("WAL written", source, StringComparison.Ordinal);
+        Assert.Contains("ms; store WAL during the purge's batches: {WalMb:F0} MB, paced", source, StringComparison.Ordinal);
+        Assert.Contains("; store WAL during the purge's batches: {(walBytes / 1_048_576.0)", source, StringComparison.Ordinal);
     }
 
     [Fact]

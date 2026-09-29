@@ -1013,7 +1013,7 @@ public static class DarlingRetention
             else
             {
                 logger?.LogInformation(
-                    "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms; WAL written {WalMb:F0} MB, paced {PacedSeconds:F0}s at {RateMb:F1} MB/s",
+                    "Retention purge: {Tables} table(s) purged, {Rows} row(s) deleted, {Chunks} chunk(s) dropped, {Failed} failed, {ElapsedMs}ms; store WAL during the purge's batches: {WalMb:F0} MB, paced {PacedSeconds:F0}s at {RateMb:F1} MB/s",
                     tablesPurged, totalRowsDeleted, totalChunksDropped, tablesFailed, sw.ElapsedMilliseconds,
                     walPacer.TotalWalBytes / 1_048_576.0, walPacer.TotalWaitSeconds, walPacer.RateBytesPerSecond / 1_048_576.0);
             }
@@ -1070,11 +1070,12 @@ public static class DarlingRetention
             ? $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped"
             : $"Purged {tablesPurged.ToString(CultureInfo.InvariantCulture)} table(s), {tablesFailed.ToString(CultureInfo.InvariantCulture)} failed (see prior warnings): {totalRowsDeleted.ToString(CultureInfo.InvariantCulture)} row(s) deleted, {totalChunksDropped.ToString(CultureInfo.InvariantCulture)} chunk(s) dropped";
 
-        /* #4823: a paced run says what it wrote and how long it waited, so a long purge reads as pacing
-           rather than as a stall. */
+        /* #4823: a paced run says how much WAL the store wrote during its batches and how long it waited, so a
+           long purge reads as pacing rather than as a stall. The figure is the WHOLE store's WAL across those
+           batches, collection included (RetentionWalPacer.WalWrittenSinceAsync), not the purge's own. */
         if (paced)
         {
-            message += $"; WAL written {(walBytes / 1_048_576.0).ToString("F0", CultureInfo.InvariantCulture)} MB, paced {pacedSeconds.ToString("F0", CultureInfo.InvariantCulture)} s";
+            message += $"; store WAL during the purge's batches: {(walBytes / 1_048_576.0).ToString("F0", CultureInfo.InvariantCulture)} MB, paced {pacedSeconds.ToString("F0", CultureInfo.InvariantCulture)} s";
         }
 
         if (!string.IsNullOrEmpty(runLabel))

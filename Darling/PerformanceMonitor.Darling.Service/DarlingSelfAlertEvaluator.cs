@@ -6040,8 +6040,7 @@ internal sealed class DarlingSelfAlertEvaluator
     /// finds it, the sweep stores it on the hour's checkpointer row (#4834), and the reader returns it with the
     /// interval, so this check and <c>get_store_metrics</c> judge one stored value.</para>
     /// </summary>
-    public async Task EvaluateCheckpointerPressureAsync(
-        NpgsqlDataSource postgres, CancellationToken cancellationToken)
+    public async Task EvaluateCheckpointerPressureAsync(NpgsqlDataSource postgres, CancellationToken cancellationToken)
     {
         if (!_settings.AlertsEnabled)
         {
@@ -6142,7 +6141,9 @@ internal sealed class DarlingSelfAlertEvaluator
             : null;
         var longestOverBar = longestSync is CheckpointSyncMax overBar && overBar.SyncMs > CheckpointSyncBarMs;
 
-        if (reading.IsPressure || longestOverBar)
+        /* IsPressure already carries the longest-sync arm (Observed only, which the gate above guarantees), so
+           longestOverBar is not repeated here; it only names that arm in the text below. */
+        if (reading.IsPressure)
         {
             _activeCheckpointerPressure[CheckpointerKey] = true;
             if (CooldownElapsed(_lastCheckpointerPressureAlert, CheckpointerKey, now))

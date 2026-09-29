@@ -33,7 +33,7 @@ public sealed class PurgeNowTotalsWatchTests
     private static readonly DateTime Started = new(2026, 9, 29, 11, 59, 59, 500, DateTimeKind.Unspecified);
 
     private const string TotalsMessage =
-        "Manual purge (purge_now): Purged 33 table(s): 1200 row(s) deleted, 42 chunk(s) dropped; WAL written 50 MB, paced 12 s";
+        "Manual purge (purge_now): Purged 33 table(s): 1200 row(s) deleted, 42 chunk(s) dropped; store WAL during the purge's batches: 50 MB, paced 12 s";
 
     private static DateTime At(int seconds) => Started.AddSeconds(seconds);
 
@@ -247,7 +247,7 @@ public sealed class PurgeNowTotalsWatchTests
 
         var text = Assert.Single(rig.Shown, t => t.StartsWith("Purge finished, ", StringComparison.Ordinal));
         Assert.StartsWith("Purge finished, SUCCESS: ", text, StringComparison.Ordinal);
-        Assert.Contains("Purged 33 table(s): 1200 row(s) deleted, 42 chunk(s) dropped; WAL written 50 MB, paced 12 s", text, StringComparison.Ordinal);
+        Assert.Contains("Purged 33 table(s): 1200 row(s) deleted, 42 chunk(s) dropped; store WAL during the purge's batches: 50 MB, paced 12 s", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Manual purge", text, StringComparison.Ordinal);
         Assert.Equal(1, rig.Reloads);
     }

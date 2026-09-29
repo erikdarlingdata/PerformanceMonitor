@@ -570,7 +570,7 @@ public sealed class PurgeNowBackgroundTests
 
         Assert.Equal("SUCCESS", status);
         Assert.StartsWith("Manual purge (purge_now, custom retention 14 day(s)): Purged 33 table(s)", message, StringComparison.Ordinal);
-        Assert.Contains("WAL written 50 MB", message, StringComparison.Ordinal);
+        Assert.Contains("store WAL during the purge's batches: 50 MB", message, StringComparison.Ordinal);
     }
 
     [Fact]
