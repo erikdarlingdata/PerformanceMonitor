@@ -4761,6 +4761,57 @@ public sealed class DarlingSelfAlertTests
         }
     }
 
+    /// <summary>
+    /// #4795: the failed-connect handler returns for a removed server before it counts the failure, schedules the
+    /// backoff or logs "retrying in Ns", and not only before the Offline alert. A removed server is never retried,
+    /// so a "Connect failed, retrying" line for it, or a failure count and a <c>NextConnectAttempt</c> on state
+    /// nothing reads again, would say something that will not happen. <c>server.Runtime = null;</c> stays first,
+    /// so the removed server does not keep a half-built runtime. The source walker blanks literal text, so the
+    /// log lines are located in the raw source (which the walker leaves the same length, so offsets line up).
+    /// </summary>
+    [Fact]
+    public void TheConnectBody_OnAFailedConnect_ReturnsForARemovedServerBeforeCountingBackingOffOrLoggingARetry()
+    {
+        var raw = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingWorker.cs");
+        var source = CSharpSourceWalker.StripCommentsAndStrings(raw);
+        Assert.Equal(raw.Length, source.Length);
+        var start = source.IndexOf("private async Task TryConnectAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the worker has no TryConnectAsync");
+        var end = source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        Assert.True(end > start, "TryConnectAsync has no closing brace");
+
+        var handler = Regex.Match(source[start..end], @"catch \(Exception ex\) when \(ex is not OperationCanceledException\)\s*\{");
+        Assert.True(handler.Success, "TryConnectAsync has no failed-connect handler");
+        var handlerCode = source[(start + handler.Index)..end];
+        var handlerRaw = raw[(start + handler.Index)..end];
+
+        var cleared = handlerCode.IndexOf("server.Runtime = null;", StringComparison.Ordinal);
+        Assert.True(cleared >= 0, "the failed-connect handler no longer clears server.Runtime");
+        var check = Regex.Match(handlerCode, @"if \(server\.Retired\)\s*\{[^{}]*\breturn;\s*\}");
+        Assert.True(check.Success, "the failed-connect handler has no server.Retired re-check that returns");
+        Assert.True(check.Index > cleared,
+            "the server.Retired return comes before server.Runtime = null, so a removed server keeps a half-built runtime");
+        var checkEnd = check.Index + check.Length;
+
+        var firstLog = Regex.Match(handlerCode, @"_logger\.Log\w+\(");
+        var after = new (string What, int At)[]
+        {
+            ("the failure count", handlerCode.IndexOf("ConsecutiveConnectFailures++", StringComparison.Ordinal)),
+            ("the backoff", handlerCode.IndexOf("NextConnectAttempt =", StringComparison.Ordinal)),
+            ("the first log call", firstLog.Success ? firstLog.Index : -1),
+            ("the 'Connect failed, retrying' log line", handlerRaw.IndexOf("Connect failed, retrying in", StringComparison.Ordinal)),
+            ("the 'Connect still failing, retrying' log line", handlerRaw.IndexOf("Connect still failing, retrying in", StringComparison.Ordinal)),
+            ("the Offline alert", handlerCode.IndexOf("ApplyConnectionOutcomeAsync(", StringComparison.Ordinal)),
+        };
+
+        foreach (var (what, at) in after)
+        {
+            Assert.True(at >= 0, what + " is missing from the failed-connect handler, so this pin no longer sees it");
+            Assert.True(at >= checkEnd,
+                what + " comes before the server.Retired return, so a server removed during a failing connect is counted, backed off or logged as retrying");
+        }
+    }
+
     [Fact]
     public async Task AgAlerts_FireUnderTheRealServerKey_SoPerServerDeliveryAndHistoryStillCorrelate()
     {

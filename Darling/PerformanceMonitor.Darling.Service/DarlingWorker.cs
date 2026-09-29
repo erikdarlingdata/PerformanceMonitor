@@ -10014,6 +10014,19 @@ AND   j.hypertable_name = '{relation}'", connection))
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             server.Runtime = null;
+
+            /* Retired containment (#4795), mirroring the CONNECT-path re-check on the online path above: a removal
+               (Retired, then Forget) that lands during a failed connect must leave no alert state and send nothing.
+               Applying the offline outcome below would write Offline under the removed server's key AFTER Forget
+               cleared it, and a re-added server (same storage name, same server_id) would inherit that Offline.
+               The check sits ahead of the failure count, the backoff and the retry log for the same reason: a
+               removed server is never retried, so counting the failure, scheduling a retry or logging "retrying
+               in Ns" for it would be false. server.Runtime = null above still runs first. */
+            if (server.Retired)
+            {
+                return;
+            }
+
             /* #4710: back off while the server stays down (60 s doubling to a 240 s cap, jittered), rather
                than a fixed 60 s. A definition edit or a successful connect resets the count. */
             server.ConsecutiveConnectFailures++;
@@ -10043,15 +10056,6 @@ AND   j.hypertable_name = '{relation}'", connection))
             {
                 _logger.LogWarning("[{Server}] Connect still failing, retrying in {Delay}s (same cause as logged above)",
                     server.Config.DisplayName, retrySeconds);
-            }
-
-            /* Retired containment (#4795), mirroring the CONNECT-path re-check on the online path above: a removal
-               (Retired, then Forget) that lands during a failed connect must leave no alert state and send nothing.
-               Applying the offline outcome now would write Offline under the removed server's key AFTER Forget
-               cleared it, and a re-added server (same storage name, same server_id) would inherit that Offline. */
-            if (server.Retired)
-            {
-                return;
             }
 
             /* Stage 4: the online->offline connection edge (Server Unreachable) — fires once when a
