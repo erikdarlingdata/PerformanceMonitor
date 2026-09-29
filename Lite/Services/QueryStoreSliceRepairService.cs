@@ -522,11 +522,27 @@ FROM (SELECT COUNT(*) AS c FROM {Table} GROUP BY {string.Join(", ", hotKey)} HAV
         return new Survey(groups, rows, archive, unreadable);
     }
 
-    /// <summary>The archived Query Store parquet files, oldest name first.</summary>
+    /// <summary>
+    /// The archived Query Store parquet files, oldest name first: the whole-month files and the part files
+    /// (<c>YYYYMM_query_store_stats_ptNNN.parquet</c>) compaction splits a month into when its input is too big
+    /// for one merge (#4721). The archive views read both shapes, so the repair must too. Each part is a file in
+    /// its own right, surveyed and rewritten on its own with the same checks as a whole-month file.
+    /// </summary>
     private IEnumerable<string> ArchiveFiles()
-        => Directory.Exists(_archivePath)
-            ? Directory.GetFiles(_archivePath, $"*_{Table}.parquet").OrderBy(f => f, StringComparer.Ordinal)
-            : [];
+    {
+        if (!Directory.Exists(_archivePath))
+        {
+            return [];
+        }
+
+        /* MatchType.Simple: '?' is exactly one character, as it is in the archive views' own part glob, so the
+           two shapes are the ones compaction writes and no other name. */
+        var exact = new EnumerationOptions { MatchType = MatchType.Simple, MatchCasing = MatchCasing.CaseInsensitive, AttributesToSkip = 0 };
+        return new[] { $"*_{Table}.parquet", $"*_{Table}_pt???.parquet" }
+            .SelectMany(pattern => Directory.EnumerateFiles(_archivePath, pattern, exact))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(f => f, StringComparer.Ordinal);
+    }
 
     private static async Task<ArchiveFileSurvey> SurveyArchiveFileAsync(
         DuckDBConnection connection, string file, CancellationToken cancellationToken)

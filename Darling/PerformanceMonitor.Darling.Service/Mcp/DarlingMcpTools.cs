@@ -1293,7 +1293,7 @@ public sealed class DarlingMcpTools
         }
     }
 
-    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded); \"error\" when the row could not be written (nothing is muted). story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
+    [McpServerTool(Name = "mute_analysis_finding"), Description("Write: stores a per-pattern, not per-occurrence, mute row in the monitoring store for story_path_hash, scoped to server_name (all servers when omitted), so it is skipped in later analysis runs. registered: a NEW row was stored this call. already_muted: the scope already held the hash; nothing was written. matched_now: retained findings in scope carrying the hash now. status: muted (registered, matched_now at least 1), muted_unmatched (registered, matched_now 0; maybe a mistyped hash), already_muted (nothing changed), error (the write failed; nothing is muted). <<GUIDE>> Mutes a finding pattern so it won't appear in future analysis runs. Use the story_path_hash from analyze_server or get_analysis_findings output. Muting is per-pattern, not per-occurrence — the same diagnostic chain won't be reported again until unmuted. The response reports what the write DID: registered says whether a NEW mute row was stored by this call, already_muted says the registry already held this hash in this scope (per server, or across all servers when server_name is omitted) so nothing was written, and matched_now is how many stored findings in the mute's scope carry that hash at this moment. status is \"muted\" when the mute is newly registered AND matched_now is at least 1; \"muted_unmatched\" when it is newly registered but matched_now is 0 — the pattern is not in the retained findings, which is what a mistyped hash looks like (the mute is kept, because the registry is by pattern and the pattern may return after retention purged its history, but check the hash against analyze_server output before relying on it); \"already_muted\" when the same scope already muted this hash (the mute is in force, this call changed nothing, and a different reason is not recorded); \"error\" when the row could not be written (nothing is muted). server_name resolves the way remove_server resolves it, not first-match like the reads: an exact match on the server or display name, else a partial one. A name that matches more than one server answers \"ambiguous\" with the candidates, and one that matches none answers \"not_found\"; either way nothing is muted, and a successful call echoes the resolved server name. story_path is the diagnostic chain the registry row names, resolved from the retained findings that carry the hash; it is null when none does, and the row then holds the hash as a placeholder.")]
     public static async Task<string> MuteAnalysisFinding(
         DarlingAnalysisService analysisService,
         NpgsqlDataSource postgres,
@@ -1308,13 +1308,28 @@ public sealed class DarlingMcpTools
                 return McpHelpers.Refusal("story_path_hash", "story_path_hash is required.");
             }
 
-            int? serverId = null;
+            /* #4734: the scope is resolved with the REMOVAL rule (exact, else partial, and a tie refuses), not the
+               read resolver's first-match rule. A read that lands on the wrong sibling shows its name in the
+               payload and the caller re-asks; this write persists a mute row against whichever server the name
+               resolved to, so a name two servers answer to used to mute the pattern on whichever sorted first and
+               say so only afterwards. The read rule itself is untouched (it is pinned as Lite parity). */
+            var scope = MuteScope.All;
+            string? kind = null;
             if (server_name != null)
             {
-                var (resolved, error) = await DarlingServerResolver.ResolveOrErrorAsync(postgres, server_name);
-                if (error != null) return error;
-                serverId = resolved.ServerId;
+                var (registry, fault) = await DarlingServerResolver.LoadEnabledOrFaultAsync(postgres);
+                if (fault != null) return fault;
+
+                scope = ResolveMuteScope(registry, server_name, story_path_hash);
+                if (scope.Answer != null) return scope.Answer;
+
+                /* Which of the machine's registrations the name picked (plain, read-only, per-database), so a wrong
+                   pick shows in the answer. The registry rows the resolver reads carry no database or read-only
+                   intent, so the two facts come from the definition row of the resolved server_id. */
+                kind = await ReadRegistrationKindAsync(postgres, scope.ServerId!.Value);
             }
+
+            var serverId = scope.ServerId;
 
             /* StoryPath is left EMPTY on purpose (#3653 A15/A16): this entry point holds only the hash, and the
                pre-#3653 code wrote that hash into the registry's story_path column — a row claiming to name a
@@ -1345,7 +1360,7 @@ public sealed class DarlingMcpTools
                     status = "error",
                     message = "The mute could not be written to the monitoring store (see the service log); nothing is muted.",
                     story_path_hash,
-                    server = server_name ?? "(all servers)",
+                    server = scope.Label,
                     registered = false,
                     already_muted = false,
                 }, McpHelpers.JsonOptions);
@@ -1359,7 +1374,8 @@ public sealed class DarlingMcpTools
                 status = !registered ? "already_muted" : matchedNow > 0 ? "muted" : "muted_unmatched",
                 story_path_hash,
                 story_path = write.StoryPath,
-                server = server_name ?? "(all servers)",
+                server = scope.Label,
+                kind,
                 reason,
                 registered,
                 already_muted = !registered,
@@ -1375,6 +1391,105 @@ public sealed class DarlingMcpTools
         {
             return McpHelpers.FormatError("mute_analysis_finding", ex);
         }
+    }
+
+    /// <summary>
+    /// The definition row's database name and read-only intent for one server (#4734): the two facts
+    /// <see cref="PerformanceMonitor.Common.ServerIdHelper.BuildStorageName"/> suffixes the storage name for, read from
+    /// the table <c>remove_server</c> deletes from. Exposed const so Darling.Tests can pin the dialect ungated.
+    /// </summary>
+    public const string RegistrationKindSql = @"
+SELECT d.database, d.read_only_intent
+FROM config_monitored_servers d
+WHERE d.server_id = $1";
+
+    /// <summary>
+    /// Which kind of registration <paramref name="serverId"/> is (<see cref="PerformanceMonitor.Common.ServerIdHelper.DescribeKind"/>:
+    /// plain, read-only, per-database, or per-database read-only), read from its definition row. A server with no
+    /// definition row — one defined in darling.json rather than the store — reports <c>unknown</c>: the registry row the
+    /// name resolved against records neither fact, and guessing plain would name a wrong pick as a right one.
+    /// </summary>
+    internal static async Task<string> ReadRegistrationKindAsync(NpgsqlDataSource postgres, int serverId)
+    {
+        await using var command = postgres.CreateCommand(RegistrationKindSql);
+        command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
+        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+        await using var reader = await command.ExecuteReaderAsync();
+        if (!await reader.ReadAsync())
+        {
+            return "unknown";
+        }
+
+        var database = reader.IsDBNull(0) ? null : reader.GetString(0);
+        var readOnlyIntent = !reader.IsDBNull(1) && reader.GetBoolean(1);
+        return PerformanceMonitor.Common.ServerIdHelper.DescribeKind(database, readOnlyIntent);
+    }
+
+    /// <summary>
+    /// Where a <c>mute_analysis_finding</c> call writes: either the fleet-wide scope (<see cref="All"/>), a single
+    /// registered server (<see cref="ServerId"/> and the storage name to echo as <see cref="Label"/>), or a ready-to-return
+    /// <see cref="Answer"/> that refuses the write because the name matched no server or more than one.
+    /// </summary>
+    internal sealed record MuteScope(int? ServerId, string Label, string? Answer)
+    {
+        /// <summary>The scope of a call that names no server: the mute row is written with a NULL server id.</summary>
+        internal static readonly MuteScope All = new(null, "(all servers)", null);
+    }
+
+    /// <summary>
+    /// Resolves <c>mute_analysis_finding</c>'s <c>server_name</c> with the REMOVAL rule
+    /// (<see cref="DarlingMcpServerAdminTools.ResolveForRemoval"/>, the one <c>remove_server</c> applies): the one
+    /// registration whose storage name matches exactly (case-sensitive) if there is one, else every exact match on the
+    /// storage name or display name if there is one, otherwise every partial match, and anything other than exactly
+    /// one match is refused with the candidates named. #4734: the tool used the read resolver, whose first-match
+    /// rule picks whichever registration sorts first, so a partial name (or a display name that per-database and
+    /// <c>:RO</c> registrations of one host share) muted the pattern on an arbitrary sibling and echoed the caller's
+    /// spelling, not the server it had picked. The read resolver's rule is Lite parity and stays; only this write leaves it.
+    ///
+    /// <para><b>Pure.</b> It takes the registry rows and returns the decision, so the rule unit-tests without a store. The
+    /// tool writes only when <see cref="MuteScope.Answer"/> is null, and echoes <see cref="MuteScope.Label"/> — the
+    /// RESOLVED storage name — in every answer that follows.</para>
+    ///
+    /// <para><b>A name that matches nothing is <c>not_found</c></b>, with the resolver's own listing of the servers that
+    /// exist. A blank name matches nothing here too: omit <c>server_name</c> to mute across all servers.</para>
+    /// </summary>
+    internal static MuteScope ResolveMuteScope(
+        IReadOnlyList<DarlingServerResolver.RegisteredServer> registry,
+        string serverName,
+        string storyPathHash)
+    {
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(registry, serverName);
+
+        if (target.Candidates.Count == 1)
+        {
+            var resolved = target.Candidates[0];
+            return new MuteScope(resolved.ServerId, resolved.ServerName, null);
+        }
+
+        if (target.Candidates.Count == 0)
+        {
+            return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
+            {
+                status = "not_found",
+                message = DarlingServerResolver.MissSentence(registry, serverName, DarlingPeerDirectory.Current),
+                story_path_hash = storyPathHash,
+                registered = false,
+                already_muted = false,
+            }, McpHelpers.JsonOptions));
+        }
+
+        return new MuteScope(null, string.Empty, JsonSerializer.Serialize(new
+        {
+            status = "ambiguous",
+            message = $"'{serverName}' matches {target.Candidates.Count} registered servers " +
+                      $"({(target.MatchedBy == "exact" ? "the same name on more than one registration" : "as a partial name")}); " +
+                      "nothing was muted. Re-issue mute_analysis_finding with ONE candidate's full server name.",
+            matched_by = target.MatchedBy,
+            story_path_hash = storyPathHash,
+            registered = false,
+            already_muted = false,
+            candidates = target.Candidates.Select(c => new { server = c.ServerName, display_name = c.DisplayName }),
+        }, McpHelpers.JsonOptions));
     }
 }
 

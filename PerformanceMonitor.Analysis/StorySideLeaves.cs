@@ -8,7 +8,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -58,7 +58,9 @@ public static class StorySideLeaves
     /// (<see cref="FactAdvice.GetForFactKey"/> — which routes the <c>CONFIG_PG_*</c> vocabulary to
     /// <c>PgTargetAdvice</c>, so both engines are served by this one call), and the VALUE-stated reading of the
     /// same knob stays where it always was: <c>get_analysis_facts</c>, which returns the fact with its metadata.
-    /// The root card's sentence (<see cref="Sentence"/>) is what points the reader at both.</para>
+    /// The root's frozen StoryText carries that value-stated reading too — <see cref="Sentence"/> and
+    /// <see cref="RemediationSentence"/> compose the lever where the facts live (#4730) — for the surfaces that
+    /// never render this array.</para>
     /// </summary>
     public static object? ToPayload(IReadOnlyList<string>? sideLeafKeys)
     {
@@ -104,18 +106,65 @@ public static class StorySideLeaves
     }
 
     /// <summary>
-    /// The ONE sentence a story's investigation gains when a lever hangs off it — "A configuration lever hangs off
-    /// this story: `CONFIG_PG_MAINT_WORK_MEM` — see its card." — with a leading space so it appends to the existing
-    /// prose the way the named-hop, recurrence and fold sentences do. One sentence however many levers there are:
-    /// the levers' own cards carry their values and their remediation, and this is the pointer to them, not a
-    /// second copy. Returns null when there is no lever, which is the byte-identity arm.
+    /// The sentences a story's investigation gains when a lever hangs off it, one per lever — "A configuration lever
+    /// hangs off this story: `CONFIG_PG_MAINT_WORK_MEM` — maintenance_work_mem is being tested by public.hot's 5,250
+    /// dead tuples." — with a leading space so they append to the existing prose the way the named-hop, recurrence and
+    /// fold sentences do. The text after the dash is the lever's own composed headline, read from the FULL fact set in
+    /// <paramref name="factsByKey"/> the way the root's values are (#4730). A lever that composes to no advice gets its
+    /// key named and nothing after it; the sentence never points at a card.
+    ///
+    /// <para><b>Why the advice travels here and not on a card.</b> The walk consumed the lever, so it has no card of
+    /// its own, and only <c>analyze_server</c> renders the <c>side_leaves</c> array (<see cref="ToPayload"/>).
+    /// <c>get_analysis_findings</c>, the viewer and the e-mail render the frozen StoryText alone, so the lever's
+    /// headline is here and its remediation is in <see cref="RemediationSentence"/>, both in the text that
+    /// persists. The lever's fix is the lever's, in its own family's words: it is appended to the root's
+    /// remediation under the lever's key rather than restated.</para>
+    ///
+    /// <para>Returns null when there is no lever, which is the byte-identity arm.</para>
     /// </summary>
-    public static string? Sentence(IReadOnlyList<string>? sideLeafKeys)
+    public static string? Sentence(IReadOnlyList<string>? sideLeafKeys, IReadOnlyDictionary<string, Fact> factsByKey)
     {
         if (sideLeafKeys is null || sideLeafKeys.Count == 0)
             return null;
-        var keys = string.Join(", ", sideLeafKeys.Select(k => $"`{k}`"));
-        var cards = sideLeafKeys.Count == 1 ? "see its card" : "see their cards";
-        return $" {SentenceMarker} {keys} — {cards}.";
+        var sentences = new StringBuilder();
+        foreach (var key in sideLeafKeys)
+        {
+            var headline = FactAdvice.Compose(key, factsByKey)?.Headline?.Trim();
+            var body = string.IsNullOrEmpty(headline) ? $"`{key}`" : $"`{key}` — {headline}";
+            sentences.Append(' ').Append(SentenceMarker).Append(' ').Append(body);
+            if (!EndsWithTerminator(body))
+                sentences.Append('.');
+        }
+        return sentences.ToString();
     }
+
+    /// <summary>
+    /// The clauses a story's remediation gains when a lever hangs off it, one per lever that composes to a
+    /// remediation — " For `CONFIG_PG_MAINT_WORK_MEM`: Raise autovacuum_work_mem (reload, not restart) …" — with a
+    /// leading space so they append to the root's remediation. The text after the colon is the lever's own composed
+    /// remediation, unchanged, introduced by its key so the reader can tell whose fix it is (#4730). Before this the
+    /// remediation stayed on the lever's card, which only <c>analyze_server</c> renders; it now travels in StoryText
+    /// with the headline in <see cref="Sentence"/>. Returns null when no lever composes to a remediation — no
+    /// lever, or levers with no advice — so the root's remediation keeps its bytes.
+    /// </summary>
+    public static string? RemediationSentence(IReadOnlyList<string>? sideLeafKeys, IReadOnlyDictionary<string, Fact> factsByKey)
+    {
+        if (sideLeafKeys is null || sideLeafKeys.Count == 0)
+            return null;
+        StringBuilder? clauses = null;
+        foreach (var key in sideLeafKeys)
+        {
+            var remediation = FactAdvice.Compose(key, factsByKey)?.Remediation?.Trim();
+            if (string.IsNullOrEmpty(remediation))
+                continue;
+            clauses ??= new StringBuilder();
+            clauses.Append(" For `").Append(key).Append("`: ").Append(remediation);
+            if (!EndsWithTerminator(remediation))
+                clauses.Append('.');
+        }
+        return clauses?.ToString();
+    }
+
+    private static bool EndsWithTerminator(string text) =>
+        text.Length > 0 && (text[^1] == '.' || text[^1] == '!' || text[^1] == '?');
 }

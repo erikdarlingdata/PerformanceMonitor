@@ -1782,8 +1782,9 @@ ALTER TABLE collect.pg_cpu_utilization
     /// been there. These columns are for a <c>checkpointer</c> row (<c>object_kind = 'checkpointer'</c>,
     /// <c>object_name = 'pg_stat_checkpointer'</c>) the store self-metrics inventory writes once per run,
     /// carrying DELTAS since its previous run: milliseconds the checkpointer spent in the write phase, in the
-    /// sync phase, and how many REQUESTED (WAL-forced, not timed) checkpoints ran — the count that says the
-    /// store outran <c>max_wal_size</c> rather than merely reaching <c>checkpoint_timeout</c>. The source is
+    /// sync phase, and how many REQUESTED (not timed) checkpoints ran: WAL volume reaching <c>max_wal_size</c>, a
+    /// base backup and a <c>CHECKPOINT</c> statement all request one, so the count alone does not say the store
+    /// outran <c>max_wal_size</c> rather than merely reaching <c>checkpoint_timeout</c>. The source is
     /// <c>pg_stat_checkpointer</c> on PostgreSQL 17+ (<c>write_time</c>, <c>sync_time</c>, <c>num_requested</c>) and
     /// <c>pg_stat_bgwriter</c> before it (<c>checkpoint_write_time</c>, <c>checkpoint_sync_time</c>,
     /// <c>checkpoints_req</c>); the bundled store is 18, and the WRITER guards the version, not this rung.

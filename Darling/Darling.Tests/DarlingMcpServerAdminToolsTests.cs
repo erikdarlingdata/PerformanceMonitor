@@ -409,6 +409,103 @@ public sealed class DarlingMcpServerAdminToolsSurfaceTests
         Assert.Equal(2, target.Candidates.Count);
     }
 
+    /// <summary>A registration's own storage name picks it: the plain registration's storage name is the machine name
+    /// its read-only and per-database siblings show as their display name, and a delete must not tie on it.</summary>
+    [Fact]
+    public void ResolveForRemoval_ThePlainRegistrationsExactStorageName_PicksIt_WhileSiblingsExist()
+    {
+        var servers = new[]
+        {
+            Row(1, "sql-01", "sql-01"),
+            Row(2, "sql-01:RO", "sql-01"),
+            Row(3, "sql-01:AppDb", "sql-01"),
+            Row(4, "sql-01:AppDb:RO", "sql-01"),
+        };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01");
+
+        Assert.Equal("exact", target.MatchedBy);
+        Assert.Equal(1, Assert.Single(target.Candidates).ServerId);
+
+        foreach (var row in servers)
+        {
+            var own = DarlingMcpServerAdminTools.ResolveForRemoval(servers, row.ServerName);
+            Assert.Equal(row.ServerId, Assert.Single(own.Candidates).ServerId);
+        }
+    }
+
+    /// <summary>The tie-break is narrow: a partial of the machine name, and the machine name in another case, still
+    /// name every sibling and stay ambiguous.</summary>
+    [Theory]
+    [InlineData("SQL-01", "exact")]
+    [InlineData("sql-0", "partial")]
+    public void ResolveForRemoval_TheMachineNameInAnotherCaseOrAsAPartial_StillTies(string name, string matchedBy)
+    {
+        var servers = new[]
+        {
+            Row(1, "sql-01", "sql-01"),
+            Row(2, "sql-01:RO", "sql-01"),
+            Row(3, "sql-01:AppDb", "sql-01"),
+        };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, name);
+
+        Assert.Equal(matchedBy, target.MatchedBy);
+        Assert.Equal(3, target.Candidates.Count);
+    }
+
+    /// <summary>A registration's kind is read from the database name and read-only intent its definition row holds, and
+    /// the success answer of <c>remove_server</c> carries it beside the storage name, so a wrong pick shows at once.</summary>
+    [Fact]
+    public void RemovedAnswer_NamesTheStorageNameAndTheKindOfEachRegistration()
+    {
+        var definitions = new[]
+        {
+            DarlingMcpServerAdminTools.ToDefinition(1, "sql-01", "sql-01", null, false, null, 0, true),
+            DarlingMcpServerAdminTools.ToDefinition(2, "sql-01", "sql-01", null, true, null, 0, true),
+            DarlingMcpServerAdminTools.ToDefinition(3, "sql-01", "sql-01", "AppDb", false, null, 0, false),
+            DarlingMcpServerAdminTools.ToDefinition(4, "sql-01", "sql-01", "AppDb", true, null, 0, false),
+            DarlingMcpServerAdminTools.ToDefinition(5, "sql-01", "sql-01", "RO", false, null, 0, false),
+        };
+        var expectedNames = new[] { "sql-01", "sql-01:RO", "sql-01:AppDb", "sql-01:AppDb:RO", "sql-01:RO" };
+        var expectedKinds = new[] { "plain", "read-only", "per-database", "per-database, read-only", "per-database" };
+        var servers = definitions.Select(d => d.Server).ToList();
+
+        for (var i = 0; i < definitions.Length; i++)
+        {
+            Assert.Equal(expectedNames[i], definitions[i].Server.ServerName);
+            Assert.Equal(expectedKinds[i], definitions[i].Kind);
+        }
+
+        /* The plain registration's own storage name picks it out of its siblings, and its answer says plain. */
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01");
+        var resolved = definitions.Single(d => d.Server.ServerId == Assert.Single(target.Candidates).ServerId);
+        using var doc = JsonDocument.Parse(DarlingMcpServerAdminTools.RemovedAnswer(resolved, target.MatchedBy));
+        var root = doc.RootElement;
+        Assert.Equal("removed", root.GetProperty("status").GetString());
+        Assert.Equal("sql-01", root.GetProperty("server").GetString());
+        Assert.Equal("plain", root.GetProperty("kind").GetString());
+        Assert.Equal("exact", root.GetProperty("matched_by").GetString());
+        Assert.True(root.GetProperty("ever_connected").GetBoolean());
+
+        using var perDatabase = JsonDocument.Parse(DarlingMcpServerAdminTools.RemovedAnswer(definitions[3], "exact"));
+        Assert.Equal("sql-01:AppDb:RO", perDatabase.RootElement.GetProperty("server").GetString());
+        Assert.Equal("per-database, read-only", perDatabase.RootElement.GetProperty("kind").GetString());
+        Assert.False(perDatabase.RootElement.GetProperty("ever_connected").GetBoolean());
+    }
+
+    /// <summary>A display name that happens to spell another registration's storage name does not tie with it.</summary>
+    [Fact]
+    public void ResolveForRemoval_ADisplayNameThatIsAnotherRegistrationsStorageName_DoesNotTieWithIt()
+    {
+        var servers = new[] { Row(1, "sql-01", "Payments"), Row(2, "sql-02", "sql-01") };
+
+        var target = DarlingMcpServerAdminTools.ResolveForRemoval(servers, "sql-01");
+
+        Assert.Equal("exact", target.MatchedBy);
+        Assert.Equal(1, Assert.Single(target.Candidates).ServerId);
+    }
+
     [Theory]
     [InlineData("nothing-like-it")]
     [InlineData("")]
