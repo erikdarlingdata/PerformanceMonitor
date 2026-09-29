@@ -148,6 +148,42 @@ public sealed class OverviewComparisonWindowOffsetTests
     }
 
     /// <summary>
+    /// #4766: the X-axis window the lanes are pinned to. A preset range on US Eastern across the spring change is
+    /// hoursBack REAL hours: at 09:00 UTC on 8 March (05:00 EDT) the 6-hour axis starts at 22:00 EST the evening
+    /// before, not the 23:00 that "local now minus 6 wall-clock hours" gives, which would cut the first real hour off
+    /// the axis while its samples are still plotted.
+    /// </summary>
+    [Fact]
+    public void GetXAxisWindow_PresetRange_AcrossSpringForward_StartsHoursBackRealHoursBeforeNow()
+    {
+        var clock = Eastern();
+        var utcNow = new DateTime(2026, 3, 8, 9, 0, 0, DateTimeKind.Utc);
+
+        var (start, end) = CorrelatedTimelineLanesControl.GetXAxisWindow(6, null, null, utcNow, clock);
+
+        Assert.Equal(Local(2026, 3, 8, 5, 0), end);
+        Assert.Equal(Local(2026, 3, 7, 22, 0), start);
+    }
+
+    /// <summary>
+    /// #4766: a custom range pins the axis to its own bounds, untouched (they are server-local already); with only
+    /// one bound supplied the axis falls back to the preset window, as SyncXAxes always did.
+    /// </summary>
+    [Fact]
+    public void GetXAxisWindow_CustomRange_UsesBothBoundsVerbatim_AndOneBoundFallsBackToThePreset()
+    {
+        var clock = Eastern();
+        var from = Local(2026, 3, 1, 9, 0);
+        var to = Local(2026, 3, 1, 17, 0);
+
+        Assert.Equal((from, to), CorrelatedTimelineLanesControl.GetXAxisWindow(6, from, to, FixedUtcNow, clock));
+
+        var preset = CorrelatedTimelineLanesControl.GetXAxisWindow(6, null, null, FixedUtcNow, clock);
+        Assert.Equal(preset, CorrelatedTimelineLanesControl.GetXAxisWindow(6, from, null, FixedUtcNow, clock));
+        Assert.Equal(preset, CorrelatedTimelineLanesControl.GetXAxisWindow(6, null, to, FixedUtcNow, clock));
+    }
+
+    /// <summary>
     /// #4296 ruling items 1/2: under a preset range, on a server east AND west of UTC, the reference
     /// window is the current SERVER-LOCAL window shifted back exactly 1 day (Yesterday) or 7 days (Last
     /// week / Same day last week), and CurrentFrom - From (the <c>timeShift</c> RefreshAsync applies) is

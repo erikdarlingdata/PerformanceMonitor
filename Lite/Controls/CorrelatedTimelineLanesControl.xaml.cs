@@ -232,7 +232,11 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var ioBaseline = ioBaselineTask.IsCompletedSuccessfully ? ioBaselineTask.Result : null;
             var blockingBaseline = blockingBaselineTask.IsCompletedSuccessfully ? blockingBaselineTask.Result : null;
 
-            var utcOffset = ServerTimeHelper.UtcOffsetMinutes;
+            /* #4766: every lane X below is the sample's UTC instant on the server's wall clock, converted through
+               ServerTimeHelper.ToServerTime -- the SAME clock the axis and the crosshair convert back through
+               (AxesExtensions -> UiTimeContext.ConvertForDisplay -> ServerTimeHelper.ConvertForDisplay), so a label
+               reads the instant that was plotted. One offset added to every sample was TODAY's offset, an hour out
+               for a sample from before a daylight saving change. */
 
             // minAnomalyValue: absolute floor below which dots/arrows are suppressed even if outside band.
             // Prevents "1% CPU above 0.5% baseline" false alarms on idle servers.
@@ -247,24 +251,24 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
             if (waitTask.IsCompletedSuccessfully)
                 UpdateLane(WaitStatsChart, "Wait ms/sec",
-                    waitTask.Result.Select(d => (d.CollectionTime.AddMinutes(utcOffset).ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
+                    waitTask.Result.Select(d => (ServerTimeHelper.ToServerTime(d.CollectionTime).ToOADate(), d.WaitTimeMsPerSecond)).ToList(),
                     "#FFB74D", baseline: waitBaseline, minAnomalyValue: 100);
             else
                 ShowEmpty(WaitStatsChart, "Wait ms/sec");
 
             {
                 var blockingData = blockingTask.IsCompletedSuccessfully
-                    ? blockingTask.Result.Select(d => (d.Time.AddMinutes(utcOffset).ToOADate(), (double)d.Count)).ToList()
+                    ? blockingTask.Result.Select(d => (ServerTimeHelper.ToServerTime(d.Time).ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
                 var deadlockData = deadlockTask.IsCompletedSuccessfully
-                    ? deadlockTask.Result.Select(d => (d.Time.AddMinutes(utcOffset).ToOADate(), (double)d.Count)).ToList()
+                    ? deadlockTask.Result.Select(d => (ServerTimeHelper.ToServerTime(d.Time).ToOADate(), (double)d.Count)).ToList()
                     : new List<(double, double)>();
                 UpdateBlockingLane(blockingData, deadlockData, blockingBaseline);
             }
 
             if (memoryTask.IsCompletedSuccessfully)
                 UpdateLane(MemoryChart, "Buffer Pool MB",
-                    memoryTask.Result.Select(d => (d.CollectionTime.AddMinutes(utcOffset).ToOADate(), d.BufferPoolMb)).ToList(),
+                    memoryTask.Result.Select(d => (ServerTimeHelper.ToServerTime(d.CollectionTime).ToOADate(), d.BufferPoolMb)).ToList(),
                     "#CE93D8");
             else
                 ShowEmpty(MemoryChart, "Memory MB");
@@ -274,7 +278,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
                 var ioGrouped = fileIoTask.Result
                     .GroupBy(d => d.CollectionTime)
                     .OrderBy(g => g.Key)
-                    .Select(g => (g.Key.AddMinutes(utcOffset).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                    .Select(g => (ServerTimeHelper.ToServerTime(g.Key).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
                     .ToList();
                 UpdateLane(FileIoChart, "I/O ms", ioGrouped, "#81C784", baseline: ioBaseline, minAnomalyValue: 2);
             }
@@ -311,26 +315,26 @@ public partial class CorrelatedTimelineLanesControl : UserControl
 
                 if (refWaitTask.IsCompletedSuccessfully && refWaitTask.Result != null)
                     AddGhostLine(WaitStatsChart, refWaitTask.Result
-                        .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.WaitTimeMsPerSecond)).ToList(), "#FFB74D");
+                        .Select(d => (ServerTimeHelper.ToServerTime(d.CollectionTime).Add(timeShift).ToOADate(), d.WaitTimeMsPerSecond)).ToList(), "#FFB74D");
 
                 if (refBlockingTask.IsCompletedSuccessfully && refBlockingTask.Result != null)
                 {
                     var refBlocking = refBlockingTask.Result
-                        .Select(d => (d.Time.AddMinutes(utcOffset).Add(timeShift).ToOADate(), (double)d.Count)).ToList();
+                        .Select(d => (ServerTimeHelper.ToServerTime(d.Time).Add(timeShift).ToOADate(), (double)d.Count)).ToList();
                     if (refBlocking.Count > 0)
                         AddGhostLine(BlockingChart, refBlocking, "#E57373");
                 }
 
                 if (refMemoryTask.IsCompletedSuccessfully && refMemoryTask.Result != null)
                     AddGhostLine(MemoryChart, refMemoryTask.Result
-                        .Select(d => (d.CollectionTime.AddMinutes(utcOffset).Add(timeShift).ToOADate(), d.BufferPoolMb)).ToList(), "#CE93D8");
+                        .Select(d => (ServerTimeHelper.ToServerTime(d.CollectionTime).Add(timeShift).ToOADate(), d.BufferPoolMb)).ToList(), "#CE93D8");
 
                 if (refIoTask.IsCompletedSuccessfully && refIoTask.Result != null)
                 {
                     var refIo = refIoTask.Result
                         .GroupBy(d => d.CollectionTime)
                         .OrderBy(g => g.Key)
-                        .Select(g => (g.Key.AddMinutes(utcOffset).Add(timeShift).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
+                        .Select(g => (ServerTimeHelper.ToServerTime(g.Key).Add(timeShift).ToOADate(), g.Average(x => x.AvgReadLatencyMs)))
                         .ToList();
                     AddGhostLine(FileIoChart, refIo, "#81C784");
                 }
@@ -342,7 +346,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             /* VLines must be re-attached before SyncXAxes so they're part of
                the render set when the chart refreshes. */
             _crosshairManager?.ReattachVLines();
-            SyncXAxes(hoursBack, fromDate, toDate, utcOffset);
+            SyncXAxes(hoursBack, fromDate, toDate);
         }
         finally
         {
@@ -632,21 +636,25 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
+    /// #4766: the X-axis window every lane is pinned to, on the server's wall clock -- the frame the lanes plot in. A
+    /// custom range's bounds are already server-local. A preset range is the window
+    /// <see cref="GetCurrentWindowServerLocal"/> gives (hoursBack REAL hours ending now), not "the server's local now
+    /// minus hoursBack of wall clock", which is an hour long or short when a clock change falls inside it and would cut
+    /// the first hour off the axis while its samples are still plotted. serverClock/utcNow are explicit parameters so a
+    /// test can drive this on either side of a change.
+    /// </summary>
+    internal static (DateTime Start, DateTime End) GetXAxisWindow(
+        int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, ServerClock serverClock) =>
+        fromDate.HasValue && toDate.HasValue
+            ? (fromDate.Value, toDate.Value)
+            : GetCurrentWindowServerLocal(hoursBack, null, null, utcNow, serverClock);
+
+    /// <summary>
     /// Sets identical X-axis limits across all lanes.
     /// </summary>
-    private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate, double utcOffset)
+    private void SyncXAxes(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
-        DateTime xStart, xEnd;
-        if (fromDate.HasValue && toDate.HasValue)
-        {
-            xStart = fromDate.Value;
-            xEnd = toDate.Value;
-        }
-        else
-        {
-            xEnd = DateTime.UtcNow.AddMinutes(utcOffset);
-            xStart = xEnd.AddHours(-hoursBack);
-        }
+        var (xStart, xEnd) = GetXAxisWindow(hoursBack, fromDate, toDate, DateTime.UtcNow, ServerTimeHelper.ActiveServerClock);
 
         double xMin = xStart.ToOADate();
         double xMax = xEnd.ToOADate();
