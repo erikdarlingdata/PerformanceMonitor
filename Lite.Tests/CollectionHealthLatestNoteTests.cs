@@ -193,6 +193,69 @@ public sealed class CollectionHealthLatestNoteTests : IClassFixture<SharedDuckDb
     }
 
     /// <summary>
+    /// #4748, Lite half: a SUCCESS run whose note says half or more of its databases failed bands WARNING,
+    /// read back through the real Collection Health query against a REAL DuckDB. The ladder itself is pinned
+    /// by <c>CollectorHealthClassifierTests</c> on hand-built counts; what only a live read can show is that
+    /// <c>latest_run_note</c> reaches <c>Classify</c> as the note of the NEWEST run - a wrong rank, a wrong
+    /// status gate or a note taken from another column is still valid SQL that returns one string.
+    /// </summary>
+    [Fact]
+    public async Task ASuccessRunThatLostNineOfTenDatabases_BandsWarning_AtAMicrosecondTimestamp()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        /* The run still records SUCCESS - tolerating one unreachable database must not cost the other nine -
+           so its counts read clean and the note is the only record of the loss. Non-zero microseconds on
+           purpose: every other case here truncates to the second so ticks compare equal after DuckDB stores
+           them, which would hide a rank or a cutoff that only misbehaves off a whole-second boundary. */
+        await SeedAsync("query_store", MinutesAgoWithMicroseconds(10), "SUCCESS", PartialNote(9, 10));
+
+        var row = await ReadAsync(service, "query_store");
+
+        Assert.Equal(CollectorHealthClassifier.Warning, row.HealthStatus);
+        Assert.Equal(PartialNote(9, 10), row.LatestRunNote);
+        Assert.Equal(0, row.ErrorCount);
+    }
+
+    [Fact]
+    public async Task ANewerCleanRunClearsThePartialDatabaseWarning()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        /* last_note (the newest run that CARRIED a note) still names the partial-failure cycle here, because
+           a clean run does not blank it. The band must not read that column: the loss it names is not the
+           collector's current state, and a WARNING that outlived the recovery would stay until the note
+           aged out of the window. */
+        await SeedAsync("query_store", MinutesAgoWithMicroseconds(30), "SUCCESS", PartialNote(9, 10));
+        await SeedAsync("query_store", MinutesAgo(10), "SUCCESS", null);
+
+        var row = await ReadAsync(service, "query_store");
+
+        Assert.Equal(CollectorHealthClassifier.Healthy, row.HealthStatus);
+        Assert.Null(row.LatestRunNote);
+        Assert.Equal(PartialNote(9, 10), row.LastNote);
+    }
+
+    [Fact]
+    public async Task ANewerRunWithADifferentNoteDoesNotInheritAnOlderPartialDatabaseWarning()
+    {
+        var service = new LocalDataService(_duckDb);
+
+        /* The older note is the LEXICOGRAPHICALLY greater string ("9 of 10 ..." against "3 item(s) ..."), so
+           a value-MAX over the window's notes would hand it to the band and stay WARNING, the same defect
+           #1855 fixed for last_note. The newest run carries a note that is not the partial-failure sentence,
+           and TryParse reads only that one. */
+        await SeedAsync("query_store", MinutesAgoWithMicroseconds(30), "SUCCESS", PartialNote(9, 10));
+        await SeedAsync("query_store", MinutesAgo(10), "SUCCESS", ProbeNote(3));
+
+        var row = await ReadAsync(service, "query_store");
+
+        Assert.Equal(CollectorHealthClassifier.Healthy, row.HealthStatus);
+        Assert.Equal(ProbeNote(3), row.LatestRunNote);
+        Assert.Equal(2, row.NoteCount);
+    }
+
+    /// <summary>
     /// #2460, Lite half: the two duration statistics, against a REAL DuckDB, on the population that
     /// motivated them. A source pin cannot tell PERCENTILE_DISC from AVG — both are valid SQL returning
     /// one number — and the whole finding is that one of those numbers describes no run that ever ran.
@@ -253,6 +316,17 @@ public sealed class CollectionHealthLatestNoteTests : IClassFixture<SharedDuckDb
         var t = DateTime.UtcNow.AddMinutes(-minutes);
         return new DateTime(t.Year, t.Month, t.Day, t.Hour, t.Minute, t.Second, DateTimeKind.Unspecified);
     }
+
+    /// <summary>
+    /// <see cref="MinutesAgo"/> plus 123,456 microseconds. DuckDB stores whole microseconds, and 10 ticks
+    /// make one, so a tick count that is a multiple of 10 survives the round trip exactly.
+    /// </summary>
+    private static DateTime MinutesAgoWithMicroseconds(int minutes) =>
+        MinutesAgo(minutes).AddTicks(123_456 * 10L);
+
+    /// <summary>The real partial-failure note for a count, from the shared writer's format - the text the band reads.</summary>
+    private static string PartialNote(int failed, int total) =>
+        string.Format(CultureInfo.InvariantCulture, PartialDatabaseFailureNote.Format, failed, total, "db_a, db_b", "login failed");
 
     private async Task<DuckDBConnection> SeedConnectionAsync()
     {
