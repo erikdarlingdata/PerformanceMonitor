@@ -165,12 +165,17 @@ public sealed class ComposeParameterCoverageTests
         && string.Equals(plan.Measure.SourceTable, "query_store_stats", StringComparison.Ordinal);
 
     /// <summary>
-    /// The same prediction for an annotation query, whose whole parameter set is the window plus the
-    /// optional server scope: the catalog supplies its table, time column and label column as compiler
-    /// constants, and the per-server offset join reuses the array the outer predicate already bound rather
-    /// than binding a second one.
+    /// The same prediction for an annotation query, whose parameter set is the window plus the optional
+    /// server scope: the catalog supplies its table, time column and label column as compiler constants. A
+    /// server-local source adds the four arrays of per-server offset stretches (#4821: server names, local
+    /// start, local end, offset), and never binds the server list a second time.
     /// </summary>
-    internal static int PredictedAnnotationParameterCount(bool serverScoped) => 2 + (serverScoped ? 1 : 0);
+    internal static int PredictedAnnotationParameterCount(bool serverScoped, bool serverLocal = false) =>
+        2 + (serverScoped ? 1 : 0) + (serverLocal ? 4 : 0);
+
+    /// <summary>The server clock read that comes before a server-local annotation query binds only the
+    /// optional server scope.</summary>
+    internal static int PredictedServerClockReadParameterCount(bool serverScoped) => serverScoped ? 1 : 0;
 
     /* ───────────────────────── the corpus sweep ───────────────────────── */
 
@@ -328,12 +333,13 @@ public sealed class ComposeParameterCoverageTests
     /// <summary>
     /// <see cref="PredictedParameterCount"/> restates a rule that lives in another file, so it can be
     /// outgrown. This counts the <c>ParamList</c> call sites in <c>ComposeCompiler.cs</c> and pins the
-    /// total: sixteen, which is the three window/scope binds and one <c>topN</c> per ranked arm in
+    /// total: twenty-one, which is the three window/scope binds and one <c>topN</c> per ranked arm in
     /// <c>Compile</c>, the Query Store wide-start bind in <c>Compile</c> when the run reads the interval table
-    /// from a later start, the seven <c>BuildFilterClause</c> operator arms, and the three window/scope binds in
-    /// <c>CompileAnnotation</c>.
+    /// from a later start, the seven <c>BuildFilterClause</c> operator arms, the three window/scope binds in
+    /// <c>CompileAnnotation</c>, the four offset-stretch arrays in <c>ServerLocalRangeJoin</c> and the server
+    /// scope in <c>CompileServerClockRead</c> (#4821; both predicted above).
     ///
-    /// <para>A seventeenth is the "next site someone adds" case, and it reds HERE — where the fix is to decide
+    /// <para>A twenty-second is the "next site someone adds" case, and it reds HERE — where the fix is to decide
     /// whether the prediction grows with it — rather than in the sweep, where it would read as a compiler
     /// bug. Comments and string literals are stripped first, because this file's reasoning names
     /// <c>p.AddTextArray</c> in prose.</para>
@@ -352,7 +358,7 @@ public sealed class ComposeParameterCoverageTests
         var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
         var sites = Regex.Matches(code, @"\bp\.Add[A-Za-z]+\s*\(").Count;
 
-        Assert.Equal(16, sites);
+        Assert.Equal(21, sites);
     }
 
     /// <summary>
@@ -564,12 +570,12 @@ public sealed class ComposeParameterCoverageTests
                 var (plan, error) = ComposeSpec.TryParsePanel((JsonObject)JsonNode.Parse(json)!, []);
                 Assert.True(error is null, error);
 
-                foreach (var (key, compiled) in ComposeCompiler.CompileAnnotations(plan!, Context(servers, null)))
+                foreach (var (key, compiled) in ComposeCompiler.CompileAnnotations(plan!, Context(servers, null), ComposeCompiler.NoServerClocks))
                 {
                     corpus.Add(new Statement(
                         $"annotation {key} ({(servers is null ? "fleet" : "scoped")})",
                         compiled,
-                        PredictedAnnotationParameterCount(servers is not null),
+                        PredictedAnnotationParameterCount(servers is not null, source.Frame == AnnotationClockFrame.ServerLocal),
                         PanelMode.TimeSeries,
                         servers is not null,
                         Measure: null,
@@ -578,6 +584,20 @@ public sealed class ComposeParameterCoverageTests
                         UsesVariable: false));
                 }
             }
+        }
+
+        foreach (var servers in new[] { (IReadOnlyList<string>?)null, TwoServers })
+        {
+            corpus.Add(new Statement(
+                $"server clock read ({(servers is null ? "fleet" : "scoped")})",
+                ComposeCompiler.CompileServerClockRead(Context(servers, null)),
+                PredictedServerClockReadParameterCount(servers is not null),
+                PanelMode.TimeSeries,
+                servers is not null,
+                Measure: null,
+                Annotation: null,
+                FilterOp: null,
+                UsesVariable: false));
         }
 
         return corpus;
