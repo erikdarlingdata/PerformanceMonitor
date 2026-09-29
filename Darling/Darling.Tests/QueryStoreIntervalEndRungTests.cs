@@ -218,8 +218,10 @@ public sealed class QueryStoreIntervalEndRungTests
 
             var freshStats = await ColumnOrderAsync(connection, "query_store_stats", ct);
             var freshWide = await ColumnOrderAsync(connection, "query_store_interval_wide", ct);
+            var freshView = await ColumnOrderAsync(connection, "v_query_store_stats", ct);
             Assert.Equal($"{Column}:timestamp without time zone", freshStats[^1]);
             Assert.Equal($"{Column}:timestamp without time zone", freshWide[^1]);
+            Assert.Equal($"{Column}:timestamp without time zone", freshView[^1]);
 
             /* Roll back to a V154 store. The passthrough view selects * from the stats table, so it depends on
                the column and goes first; it is put back over the narrower table, the state an existing store is in
@@ -236,8 +238,8 @@ public sealed class QueryStoreIntervalEndRungTests
             Assert.Equal(freshStats, await ColumnOrderAsync(connection, "query_store_stats", ct));
             Assert.Equal(freshWide, await ColumnOrderAsync(connection, "query_store_interval_wide", ct));
 
-            /* The refreshed passthrough exposes the new column too. */
-            Assert.Contains(Column, await ColumnOrderAsync(connection, "v_query_store_stats", ct));
+            /* The refreshed passthrough lists the same columns in the same order as the fresh store's, so the new column is there and last. */
+            Assert.Equal(freshView, await ColumnOrderAsync(connection, "v_query_store_stats", ct));
 
             bodySucceeded = true;
         }
