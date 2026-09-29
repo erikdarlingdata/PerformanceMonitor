@@ -600,6 +600,31 @@ public sealed class ForcePlanReplicaScopeTests
     }
 
     [Fact]
+    public void BestPlanLastSeenWithNoAge_SaysWhenItLastRanAt_NeverHowLongAgo()
+    {
+        /* #4736: a finding with no window end still knows when the best plan last ran (the drill-down row says
+           so) but cannot say how long before the window that was. The script then states the time alone
+           instead of a made-up age. The first script is the control: with a window end the same row reads
+           "9 days ago". */
+        var row = Row(queryId: 123, bestPlanId: 99, regressionFactor: 12.0, replicaRole: null);
+        row["best_plan_last_seen"] = new DateTime(2026, 6, 22, 9, 0, 0, DateTimeKind.Unspecified);
+
+        var withWindow = FactRemediation.GenerateForFinding(PlanRegressionFinding(row));
+        Assert.Contains("--   best plan last ran 9 days ago (2026-06-22T09:00:00Z)", withWindow!, StringComparison.Ordinal);
+
+        var noWindow = PlanRegressionFinding(row);
+        noWindow.TimeRangeEnd = null;
+        var target = Assert.Single(FactRemediation.ExtractPlanRegressionTargets(noWindow));
+        Assert.NotNull(target.BestPlanLastSeenUtc);
+        Assert.Null(target.BestPlanAgeDays);
+
+        var sql = FactRemediation.GenerateForFinding(noWindow);
+        Assert.Contains("--   best plan last ran at 2026-06-22T09:00:00Z", sql!, StringComparison.Ordinal);
+        Assert.DoesNotContain("days ago", sql!, StringComparison.Ordinal);
+        Assert.DoesNotContain("within the past day", sql!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PspCoFiredTarget_CautionAlsoRidesTheCopyPasteSurface()
     {
         /* The paste surface is the one that gets EXECUTED, so the warning must survive the trip through
