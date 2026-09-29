@@ -8,6 +8,7 @@
 
 using System;
 using System.IO;
+using System.Reflection;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitorLite.Database;
@@ -114,6 +115,37 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         var deleted = await new RetentionService(_archiveDir).CleanupOldArchivesAndRefreshViewsAsync(initializer);
 
         Assert.Equal(1, deleted);
+        Assert.Equal(10, await ScalarAsync("SELECT COUNT(*) FROM v_collection_log"));
+    }
+
+    /// <summary>
+    /// The two tests above drive <see cref="RetentionService"/> directly. This one drives the background
+    /// service's own retention step, the code that runs once a day in the app: a step that goes back to the
+    /// plain delete leaves the view holding a glob for the file it just removed, and every read of that view
+    /// fails until the next archival refresh (#4720). The service is built without a collector because the
+    /// retention step never touches one, and the step is due once its daily interval has passed.
+    /// </summary>
+    [Fact]
+    public async Task TheBackgroundServicesRetentionStep_RebuildsTheViewsAfterItDeletesAFile()
+    {
+        var initializer = new DuckDbInitializer(_dbPath);
+        await initializer.InitializeAsync();
+        var thisMonth = DateTime.UtcNow.ToString("yyyyMM");
+
+        await ArchiveRowsAsync("200001_collection_log_pt001.parquet", 0, 40);
+        await ArchiveRowsAsync($"{thisMonth}_collection_log.parquet", 40, 50);
+        await initializer.CreateArchiveViewsAsync();
+        Assert.Equal(50, await ScalarAsync("SELECT COUNT(*) FROM v_collection_log"));
+
+        var service = new CollectionBackgroundService(null!, initializer, retentionService: new RetentionService(_archiveDir));
+        const BindingFlags nonPublic = BindingFlags.NonPublic | BindingFlags.Instance;
+        typeof(CollectionBackgroundService).GetField("_lastRetentionTime", nonPublic)!
+            .SetValue(service, DateTime.UtcNow.AddDays(-2));
+        var step = typeof(CollectionBackgroundService).GetMethod("RunRetentionIfDueAsync", nonPublic)!;
+
+        await (Task)step.Invoke(service, null)!;
+
+        Assert.False(File.Exists(Path.Combine(_archiveDir, "200001_collection_log_pt001.parquet")));
         Assert.Equal(10, await ScalarAsync("SELECT COUNT(*) FROM v_collection_log"));
     }
 
