@@ -168,6 +168,10 @@ public class DuckDbInitializer : IDisposable
     /// </summary>
     private static readonly ReaderWriterLockSlim s_dbLock = new(LockRecursionPolicy.NoRecursion);
 
+    /* Test seam (#4720): whether the calling thread holds the write lock. It is per thread, so a test reads it
+       from inside the code under test (see OnArchiveViewRebuildForTests), not from a thread of its own. */
+    internal static bool IsWriteLockHeldForTests => s_dbLock.IsWriteLockHeld;
+
     /// <summary>
     /// Acquires a read lock on the database. Multiple readers can hold this concurrently.
     /// Dispose the returned object to release the lock.
@@ -2500,6 +2504,11 @@ public class DuckDbInitializer : IDisposable
         await CreateArchiveViewsCoreAsync();
     }
 
+    /* Test seam (#4720): invoked at the start of every archive-view rebuild, before the connection opens.
+       A test records IsWriteLockHeldForTests in it to see whether the rebuild holds the write lock, or throws
+       from it to stand in for a rebuild that fails. */
+    internal Action? OnArchiveViewRebuildForTests { get; set; }
+
     /// <summary>
     /// The lock-free body of <see cref="CreateArchiveViewsAsync"/> (#4262 round 1 finding 3), split out so
     /// a caller that already holds the write lock can call it directly rather than nesting a read lock —
@@ -2509,6 +2518,10 @@ public class DuckDbInitializer : IDisposable
     /// </summary>
     internal async Task CreateArchiveViewsCoreAsync()
     {
+        /* Runs before anything else, on the caller's thread: a test reads the lock state here, or throws to
+           stand in for a rebuild that fails (#4720). Production leaves it null. */
+        OnArchiveViewRebuildForTests?.Invoke();
+
         using var connection = CreateConnection();
         await connection.OpenAsync();
 
@@ -2734,12 +2747,27 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
     /// <summary>
     /// Deletes the database and WAL files, then reinitializes with fresh empty tables
     /// and archive views pointing at the parquet files.
-    /// Acquires its own write lock — caller must NOT already hold the lock.
+    /// Acquires its own write lock — caller must NOT already hold the lock. A caller that has to promote
+    /// archive files, clear the tables and restore the preserved config rows under one lock (#4824) holds the
+    /// write lock itself and calls <see cref="ResetDatabaseCoreAsync"/>.
     /// </summary>
     public async Task ResetDatabaseAsync()
     {
         using var writeLock = AcquireWriteLock();
+        await ResetDatabaseCoreAsync();
+    }
 
+    /// <summary>
+    /// The lock-free body of <see cref="ResetDatabaseAsync"/> (#4824), split out the way
+    /// <see cref="CreateArchiveViewsCoreAsync"/> is: <see cref="ArchiveService"/> promotes the archive files of a
+    /// reset, clears the tables and puts the preserved config rows back under one write lock. An archive view
+    /// reads a promoted file through its glob at once, so a reader between the promote and the clearing would
+    /// count every row in the table and in the file; and the tables are empty from the clearing until their
+    /// rows are back, so a reader in that gap would read no config. Takes no lock of its own — every caller must
+    /// already hold the write lock, and <see cref="s_dbLock"/> does not nest.
+    /// </summary>
+    internal async Task ResetDatabaseCoreAsync()
+    {
         /* Close the sentinel BEFORE deleting the file (#4262). Left open, DuckDB.NET would hand the
            reinitialized database's own connections — and every other caller's CreateConnection() after
            this returns — the SAME cached native handle this held, so the delete below would be invisible
@@ -2755,12 +2783,12 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY {dedupKey} ORDER BY collection_time DESC
 
         _logger?.LogInformation("Database files deleted, reinitializing");
 
-        /* InitializeCoreAsync, not InitializeAsync: this thread already holds the write lock above, and
+        /* InitializeCoreAsync, not InitializeAsync: this thread already holds the write lock (the caller's), and
            InitializeAsync would try to take it again and throw (NoRecursion). */
         await InitializeCoreAsync();
 
         /* Reopen only once the fresh tables exist and archive views/analysis schema are rebuilt, and
-           still under the write lock above — the same ordering InitializeAsync uses. */
+           still under the caller's write lock — the same ordering InitializeAsync uses. */
         ReopenSentinel();
     }
 

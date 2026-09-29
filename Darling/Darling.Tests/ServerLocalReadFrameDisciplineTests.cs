@@ -60,7 +60,8 @@ public sealed class ServerLocalReadFrameDisciplineTests
     private static readonly Regex ReadsTheTable =
         new(@"FROM\s+(?:collect\.)?(?:v_)?default_trace_events", RegexOptions.IgnoreCase);
 
-    /// <summary>The Postgres de-skew, spelled on the column exactly as both Darling constants carry it.</summary>
+    /// <summary>The Postgres de-skew, spelled on the column exactly as the Darling constants carry it (the two
+    /// window pre-filter bounds of the MCP and viewer reads, and all three sites of the analysis trace-anchor read).</summary>
     private static readonly Regex PgDeSkew =
         new(@"event_time\s*-\s*make_interval\s*\(\s*mins\s*=>\s*svr\.offset_minutes\s*\)");
 
@@ -93,8 +94,8 @@ public sealed class ServerLocalReadFrameDisciplineTests
     /// </summary>
     private static readonly (string RelativePath, int PgSites, bool LiteRowDeSkew, bool ClockRowDeSkew, string Why)[] KnownReaders =
     [
-        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs", 3, false, false,
-            "the get_default_trace_events MCP read: one projection + both window bounds"),
+        ("Darling/PerformanceMonitor.Darling.Service/Mcp/DarlingDefaultTraceReader.cs", 2, false, true,
+            "the get_default_trace_events MCP read: the raw event_time projection, converted per row in C# with the server's ServerClock, and both window bounds as an hour-wide pre-filter (#4793)"),
         ("Darling/PerformanceMonitor.Darling.Viewer/ViewerDataService.SystemEvents.cs", 2, false, true,
             "the viewer's System Events tab: the raw event_time projection, converted per row in C# with the server's ServerClock, and both window bounds as an hour-wide pre-filter"),
         ("Lite/Services/LocalDataService.SystemEvents.cs", 0, true, false,
