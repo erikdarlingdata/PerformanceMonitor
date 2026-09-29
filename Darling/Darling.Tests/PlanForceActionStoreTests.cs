@@ -254,6 +254,105 @@ public sealed class PlanForceActionStoreTests
         }
     }
 
+    [Fact]
+    public async Task TheNewestRowsStateUnavailableBlocker_ShortensTheHold_ByTheWholeReasonToken()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live journal round-trip.");
+        Assert.True(_fixture.Established, "The live-postgres fixture did not establish the store.");
+
+        await using var postgres = NpgsqlDataSource.Create(_fixture.ConnectionString!);
+        var store = new PgPlanForceActionStore(postgres);
+        var ct = TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+
+        await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded: true,
+            (cleanup, cleanupCt) => DeleteRowsAsync(cleanup, cleanupCt));
+
+        var bodySucceeded = false;
+        try
+        {
+            /* #4769: no row yet, so no flag. */
+            var none = await store.GetQueryHistoryAsync(TestServerId, "orders", 42, ForcePlanBotSettings.Default, now, ct);
+            Assert.False(none.LastJournalWasStateUnavailable);
+
+            async Task<bool> JournalAndReadAsync(int minutesAgo, string reasons)
+            {
+                await store.JournalAsync(Record(now.AddMinutes(-minutesAgo),
+                    action: PgPlanForceActionStore.ActionBlocked, decision: PgPlanForceActionStore.ActionBlocked,
+                    reasons: reasons, outcome: PgPlanForceActionStore.OutcomeLogged), ct);
+                var history = await store.GetQueryHistoryAsync(
+                    TestServerId, "orders", 42, ForcePlanBotSettings.Default, now, ct);
+                Assert.NotNull(history.LastJournaledForQueryUtc);
+                return history.LastJournalWasStateUnavailable;
+            }
+
+            Assert.True(await JournalAndReadAsync(50, "state_unavailable"));
+            /* The newest row rules: a later row with a different blocker restores the full cooldown. */
+            Assert.False(await JournalAndReadAsync(40, "apc_owns_it"));
+            /* The token is matched wherever it sits in the comma-joined names... */
+            Assert.True(await JournalAndReadAsync(30, "parameter_sensitivity_cofired,state_unavailable"));
+            /* ...and only as a whole token. */
+            Assert.False(await JournalAndReadAsync(20, "state_unavailable_elsewhere"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded,
+                (cleanup, cleanupCt) => DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
+    [Fact]
+    public async Task TheTargetStateRead_TakesEachDatabasesNewestEnablementRowInTheLookback_NotOnlyTheServersNewestCapture()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live target-state read.");
+        Assert.True(_fixture.Established, "The live-postgres fixture did not establish the store.");
+
+        await using var postgres = NpgsqlDataSource.Create(_fixture.ConnectionString!);
+        var store = new PgPlanForceActionStore(postgres);
+        var ct = TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+
+        await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded: true,
+            (cleanup, cleanupCt) => DeleteEnablementRowsAsync(cleanup, cleanupCt));
+
+        var bodySucceeded = false;
+        try
+        {
+            /* #4770: a capture lands one database at a time, so the server's newest capture can lack a database
+               that an earlier capture (3 hours ago) had. That database keeps its earlier state; one with no row
+               inside the 24-hour lookback comes back with no enablement at all (unknown). */
+            await PlantEnablementAsync(postgres, 1, now.AddHours(-3), "orders", "ON", ct);
+            await PlantEnablementAsync(postgres, 2, now.AddMinutes(-10), "other", "OFF", ct);
+            await PlantEnablementAsync(postgres, 3, now.AddHours(-30), "old", "ON", ct);
+
+            var (states, unavailableReason) = await store.TryGetTargetStatesAsync(
+                TestServerId,
+                new[] { new ForcePlanTarget("orders", 1, 1), new ForcePlanTarget("other", 2, 2), new ForcePlanTarget("old", 3, 3) },
+                now, ct);
+
+            Assert.Null(unavailableReason);
+            Assert.NotNull(states);
+            var earlier = states[new ForcePlanTargetKey("orders", 1, 1)];
+            Assert.Equal("ON", earlier.ForceLastGoodPlanActualState);
+            Assert.NotNull(earlier.EnablementObservedAtUtc);
+            Assert.Equal("OFF", states[new ForcePlanTargetKey("other", 2, 2)].ForceLastGoodPlanActualState);
+            var none = states[new ForcePlanTargetKey("old", 3, 3)];
+            Assert.Null(none.ForceLastGoodPlanActualState);
+            Assert.Null(none.EnablementObservedAtUtc);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded,
+                (cleanup, cleanupCt) => DeleteEnablementRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static PlanForceActionRecord Record(
         DateTime timeUtc,
         string action,
@@ -291,6 +390,35 @@ public sealed class PlanForceActionStoreTests
     {
         await using var command = new NpgsqlCommand(
             "DELETE FROM collect.plan_force_actions WHERE server_id = $1", connection);
+        command.Parameters.AddWithValue(TestServerId);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>One enablement-only <c>plan_correction</c> row (no recommendation), the shape the collector
+    /// writes for every database on every capture. <c>collection_time</c> is naive UTC.</summary>
+    private static async Task PlantEnablementAsync(
+        NpgsqlDataSource postgres, long collectionId, DateTime collectionTimeUtc, string database, string actualState,
+        System.Threading.CancellationToken ct)
+    {
+        await using var command = postgres.CreateCommand(
+            """
+            INSERT INTO plan_correction
+                (collection_id, collection_time, server_id, server_name, database_name, force_last_good_plan_actual_state)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            """);
+        command.Parameters.AddWithValue(collectionId);
+        command.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTimeUtc, DateTimeKind.Unspecified));
+        command.Parameters.AddWithValue(TestServerId);
+        command.Parameters.AddWithValue("plan-force-store-e2e");
+        command.Parameters.AddWithValue(database);
+        command.Parameters.AddWithValue(actualState);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task DeleteEnablementRowsAsync(NpgsqlConnection connection, System.Threading.CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            "DELETE FROM plan_correction WHERE server_id = $1", connection);
         command.Parameters.AddWithValue(TestServerId);
         await command.ExecuteNonQueryAsync(ct);
     }

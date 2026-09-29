@@ -16,6 +16,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -84,8 +85,20 @@ public static class DarlingWebEndpoints
     /// real <see cref="PostgresException"/> with SqlState 57014 travels through the SAME dispatch loop
     /// every other route uses, rather than a hand-called <c>Record</c> standing in for the wiring. <c>internal</c>
     /// and set ONLY from <c>Darling.Tests</c> (grep proves no production caller ever assigns it); null in every
-    /// production run, so <see cref="BuildReadDispatch"/> adds nothing extra unless a test opted in.</summary>
-    internal static (string Name, ReadToolHandler Handler)? s_testOnlyExtraDispatchEntry;
+    /// production run, so <see cref="BuildReadDispatch"/> adds nothing extra unless a test opted in.
+    /// #4782: held per async flow, not process-wide. Only the async flow that set the entry (and what that flow
+    /// starts or awaits) sees it, so a test class running at the same time in another flow builds its own
+    /// dispatch without the extra route. A plain static was seen by all of them, and a test that compares the
+    /// dispatch keys with the Custom Views catalog failed on the route it did not expect.</summary>
+    private static readonly AsyncLocal<(string Name, ReadToolHandler Handler)?> s_testOnlyExtraDispatchEntry = new();
+
+    /// <summary>The test-only extra dispatch entry (#4442, #4782). Reads and writes the current async flow's
+    /// value only; see the note on the backing field.</summary>
+    internal static (string Name, ReadToolHandler Handler)? TestOnlyExtraDispatchEntry
+    {
+        get => s_testOnlyExtraDispatchEntry.Value;
+        set => s_testOnlyExtraDispatchEntry.Value = value;
+    }
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
     /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
@@ -849,7 +862,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         var store = new PgMuteRuleStore(postgres);
 
-        /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry. The
+        /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry; 409 with
+           status already_exists (and the existing rule's id) when an enabled, unexpired rule already has the same
+           scope, patterns and expiry, so a client retry leaves one rule (#4734). The
            body is one JSON object of the get_mute_rules field shape; {} is legal and creates a rule that mutes
            EVERY alert (the same whole-fleet silence an argument-less create_mute_rule builds — scope fields
            narrow, they are not required). application/json required. */
@@ -944,8 +959,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>
     /// Maps a mute-rule verb's returned string onto the HTTP status the web surface answers with, leaving the
-    /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, any other envelope (created / updated /
-    /// unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception envelope
+    /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, <c>already_exists</c> → 409 (#4734: a create
+    /// that repeats a rule already in force is a conflict, the status the views and custom-rule routes give theirs;
+    /// the body is still the verb's envelope, carrying the existing rule's id), any other envelope (created /
+    /// updated / unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception envelope
     /// (<c>McpHelpers.FormatError</c>, <c>{"status":"error", ...}</c>) → 500 (classified by
     /// <see cref="ClassifyToolResponse"/>, like the read surface, and BEFORE the status switch below so the
     /// failure word is never read as a verb outcome); any other bare string is a shape the cores do not produce and maps to the client-correctable
@@ -976,6 +993,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 "invalid" => StatusCodes.Status400BadRequest,
                 "not_found" => StatusCodes.Status404NotFound,
+                "already_exists" => StatusCodes.Status409Conflict,
                 _ => successStatus,
             };
         }
@@ -3547,8 +3565,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         };
 
         /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production
-           run, since s_testOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. */
-        if (s_testOnlyExtraDispatchEntry is { } extra)
+           run, since TestOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. #4782: it is
+           per async flow, so only the flow that set it gets the extra key; a test running at the same time
+           in another flow builds its dispatch without it. */
+        if (TestOnlyExtraDispatchEntry is { } extra)
         {
             dispatch[extra.Name] = extra.Handler;
         }

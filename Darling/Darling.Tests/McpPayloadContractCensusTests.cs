@@ -364,9 +364,16 @@ public sealed class McpPayloadContractCensusTests
     /// <c>precondition</c>) computed above the read and passed through by the same idiom — not refusals, but
     /// shared builders, which is what the sweep is holding. CARRIED: the health-parser family's
     /// <c>CollectAsync</c>, whose <c>Collected.EarlyReturn</c> is a resolver or validator result carried through
-    /// the nine-tool helper that <see cref="CallsAValidatingHelper"/> already holds to the shared validators.</summary>
+    /// the nine-tool helper that <see cref="CallsAValidatingHelper"/> already holds to the shared validators.
+    /// WRITE OUTCOMES (#4734): <c>mute_analysis_finding</c> resolves <c>server_name</c> with the removal rule, whose
+    /// two refusals are the write's own <c>ambiguous</c> / <c>not_found</c> outcomes (the words <c>remove_server</c>
+    /// answers), built by the pure <c>DarlingMcpTools.ResolveMuteScope</c> (pinned in
+    /// <c>MuteAnalysisFindingScopeTests</c>), and it reads the registry through
+    /// <c>DarlingServerResolver.LoadEnabledOrFaultAsync</c>, the read the resolvers themselves pass their fault
+    /// sentence through. Both are passed through by the same idiom, from a producer the census can name.</summary>
     private static readonly Regex SharedPassThroughProducer = new(
-        @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync)\("
+        @"\b(?:DarlingServerResolver|ServerResolver)\.(?:ResolveOrError\w*|ResolveWithFingerprintNameAsync|LoadEnabledOrFaultAsync)\("
+        + @"|\bResolveMuteScope\("
         + @"|\bMcpHelpers\.(?:ValidateWindow|ValidateUncappedWindow|ValidateHoursBack|ValidateDaysBack|ValidateTop|ResolveAsOf|ParseSummaryDate|ValidateChoice|ValidateMinMs|Refusal)\("
         + @"|\bDarlingFleetSweepEndpoints\.ValidateWatchState\("
         + @"|\bTrendBuckets\.(?:Resolve|ValidateWidth|RequireWholeHours)\("
@@ -1374,7 +1381,9 @@ public sealed class McpPayloadContractCensusTests
     public static readonly string[] GeneralTimestampParsesWithUtcStyles =
     [
         "DarlingMcpAlertTools.cs BuildMuteRuleUpdate",
-        "DarlingMcpAlertTools.cs CreateMuteRule",
+        /* #4734: create_mute_rule's body moved into CreateMuteRuleOver (the tool hands it the Postgres-backed
+           store), so the expires_at parse, unchanged, is found under the new method name. */
+        "DarlingMcpAlertTools.cs CreateMuteRuleOver",
     ];
 
     private static readonly Regex GeneralTimestampParse = new(
@@ -2070,6 +2079,8 @@ public sealed class McpPayloadContractCensusTests
             "audit_config's edition-NAME fallback (Enterprise / Standard / … / Unknown) — a name, spelled as the canon by coincidence"),
         ("Unknown", "McpAnalysisTools.cs",
             "audit_config's edition-NAME fallback — the Lite twin of the above"),
+        ("unknown", "DarlingMcpTools.cs",
+            "mute_analysis_finding's kind (plain / read-only / per-database) for a resolved server that has no definition row in the store (one defined in darling.json) — a registration kind, not a band"),
         ("unknown", "DarlingMcpPgWaitSamplingTools.cs",
             "the wait-instrument token for an arm this build does not know (PgWaitInstrument's service_sampled / pg_wait_sampling / … vocabulary) — an instrument, not a band"),
         ("unknown", "DarlingPgLoggingAudit.cs",

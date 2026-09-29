@@ -1661,7 +1661,8 @@ LIMIT $1";
     /// <param name="WriteMs">Milliseconds the checkpointer spent in the write phase inside the interval.</param>
     /// <param name="SyncMs">Milliseconds it spent in the sync (fsync) phase inside the interval — the phase the
     /// production read kills sat inside.</param>
-    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED (WAL-forced) rather than timed.</param>
+    /// <param name="Requested">Checkpoints inside the interval that were REQUESTED rather than timed: started by WAL
+    /// volume reaching <c>max_wal_size</c>, a base backup, or a <c>CHECKPOINT</c> statement.</param>
     /// <param name="CumulativeWriteMs">The newest row's raw counter, for a reader who wants the lifetime figure. Null when Absent.</param>
     /// <param name="CumulativeSyncMs">Likewise.</param>
     /// <param name="CumulativeRequested">Likewise.</param>
@@ -1787,13 +1788,13 @@ LIMIT $1";
         /// The self-alert's condition (#3783, judged per-checkpoint average since #4037), on an Observed
         /// interval only: the AVERAGE sync milliseconds per checkpoint in the interval
         /// (<see cref="AverageSyncMsPerCheckpoint"/> = SyncMs / (timed + requested)) held more than
-        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, OR at least one checkpoint was WAL-forced.
+        /// <see cref="DarlingSelfAlertEvaluator.CheckpointSyncBarMs"/>, OR at least one checkpoint was requested.
         /// The old rule judged the interval's SUMMED sync milliseconds against the same bar, which is a
         /// PER-CHECKPOINT bar (the MCP read deadline) — an hourly interval covers about twelve timed checkpoints
         /// on the default five-minute checkpoint_timeout, so a healthy store whose checkpoints synced five to
         /// eight seconds each summed past the bar every interval and never recovered. A pre-V140 row leaves
         /// <see cref="Timed"/> null; the average arm then states no pressure from sync alone rather than falling
-        /// back to the old sum, and the requested arm still fires on any WAL-forced checkpoint. Zero checkpoints
+        /// back to the old sum, and the requested arm still fires on any requested checkpoint. Zero checkpoints
         /// in the interval judges neither arm. False on every other status — an unmeasured interval is not a
         /// finding, and that includes one that spans a postmaster restart (#3955).
         /// </summary>

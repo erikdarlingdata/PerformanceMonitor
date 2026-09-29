@@ -2059,6 +2059,421 @@ public sealed class CreateMuteRuleCoreTests
 }
 
 /// <summary>
+/// A store whose INSERT takes a while, so two creates that start together genuinely overlap: the check-then-insert
+/// window a slow store leaves open, which is the window a client's timeout-and-retry lands in.
+/// </summary>
+internal sealed class SlowInsertMuteRuleStore : IMuteRuleStore
+{
+    private readonly FakeMuteRuleStore _inner;
+
+    internal SlowInsertMuteRuleStore(FakeMuteRuleStore inner) => _inner = inner;
+
+    public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default) => _inner.LoadAllAsync(cancellationToken);
+
+    public async Task InsertAsync(MuteRule rule)
+    {
+        await Task.Delay(150);
+        await _inner.InsertAsync(rule);
+    }
+
+    public Task UpdateAsync(MuteRule rule) => _inner.UpdateAsync(rule);
+
+    public Task SetEnabledAsync(string ruleId, bool enabled) => _inner.SetEnabledAsync(ruleId, enabled);
+
+    public Task DeleteAsync(string ruleId) => _inner.DeleteAsync(ruleId);
+
+    public Task DeleteExpiredAsync(IReadOnlyList<string> expiredIds) => _inner.DeleteExpiredAsync(expiredIds);
+}
+
+/// <summary>
+/// #4734: create_mute_rule is safe to repeat, on BOTH create paths. A client retry used to leave two identical rules;
+/// the sibling write tools already answer a repeat (<c>conflict</c> for custom rules and views, <c>already_muted</c>
+/// for an analysis mute). The MCP tool (<c>CreateMuteRuleOver</c>, the body <c>CreateMuteRule</c> hands the
+/// Postgres-backed store) and the web route (<c>CreateMuteRuleCore</c>) share one insert, so a rule either path made
+/// is a repeat to the other. The identity is the six scope and pattern fields plus the expiry, against rules that are
+/// enabled and unexpired.
+/// </summary>
+public sealed class RepeatedCreateMuteRuleTests
+{
+    private static string Expiry(int daysFromNow) =>
+        DateTime.UtcNow.Date.AddDays(daysFromNow).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static Task<string> ViaMcp(
+        IMuteRuleStore store,
+        string? server = "pm-server-1",
+        string? metric = "High CPU",
+        string? database = "sales",
+        string? query = "UPDATE big",
+        string? wait = "LCK",
+        string? job = "nightly",
+        string? reason = "known load window",
+        string? expires = null) =>
+        DarlingMcpAlertTools.CreateMuteRuleOver(store, server, metric, database, query, wait, job, reason, expires);
+
+    private static Task<string> ViaWeb(
+        IMuteRuleStore store,
+        string? server = "pm-server-1",
+        string? metric = "High CPU",
+        string? database = "sales",
+        string? query = "UPDATE big",
+        string? wait = "LCK",
+        string? job = "nightly",
+        string? reason = "known load window",
+        string? expires = null)
+    {
+        var body = new JsonObject();
+        void Put(string key, string? value)
+        {
+            if (value != null)
+            {
+                body[key] = value;
+            }
+        }
+
+        Put("server_name", server);
+        Put("metric_name", metric);
+        Put("database_pattern", database);
+        Put("query_text_pattern", query);
+        Put("wait_type_pattern", wait);
+        Put("job_name_pattern", job);
+        Put("reason", reason);
+        Put("expires_at", expires);
+        return DarlingMcpAlertTools.CreateMuteRuleCore(store, body.ToJsonString());
+    }
+
+    private static string RuleId(string result) => (string)JsonNode.Parse(result)!["mute_rule"]!["id"]!;
+
+    [Fact]
+    public async Task TheSameMcpCallTwice_StoresOneRule_AndAnswersAlreadyExistsWithTheFirstId()
+    {
+        var store = new FakeMuteRuleStore();
+
+        var first = await ViaMcp(store, expires: Expiry(30));
+        var second = await ViaMcp(store, expires: Expiry(30));
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(first));
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(second));
+        Assert.Equal(RuleId(first), (string)JsonNode.Parse(second)!["rule_id"]!);
+        Assert.Equal(RuleId(first), RuleId(second));
+        Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
+    public async Task TheSameWebBodyTwice_StoresOneRule_AndAnswersAlreadyExistsWithTheFirstId()
+    {
+        var store = new FakeMuteRuleStore();
+
+        var first = await ViaWeb(store, expires: Expiry(30));
+        var second = await ViaWeb(store, expires: Expiry(30));
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(first));
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(second));
+        Assert.Equal(RuleId(first), (string)JsonNode.Parse(second)!["rule_id"]!);
+        Assert.Equal(RuleId(first), RuleId(second));
+        Assert.Equal(1, store.Count);
+
+        /* The answer carries the existing rule whole, so a caller can act on it without a second read. */
+        var rule = JsonNode.Parse(second)!["mute_rule"]!;
+        Assert.Equal("pm-server-1", (string)rule["server_name"]!);
+        Assert.True((bool)rule["enabled"]!);
+    }
+
+    [Fact]
+    public async Task ARepeatedWholeFleetRuleWithNoExpiry_IsARepeatToo()
+    {
+        /* The whole-fleet rule (no fields) and the permanent rule (no expiry) are the cases a null comparison
+           gets wrong: two nulls are equal here, not "unknown". */
+        var store = new FakeMuteRuleStore();
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{}")));
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{}")));
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(await ViaMcp(store, null, null, null, null, null, null, null, null)));
+        Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
+    public async Task ARuleTheOtherPathCreated_IsARepeat_OnBothPaths()
+    {
+        var store = new FakeMuteRuleStore();
+
+        var viaMcp = await ViaMcp(store, expires: Expiry(30));
+        var viaWeb = await ViaWeb(store, expires: Expiry(30));
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(viaWeb));
+        Assert.Equal(RuleId(viaMcp), RuleId(viaWeb));
+
+        var other = new FakeMuteRuleStore();
+        var webFirst = await ViaWeb(other, expires: Expiry(30));
+        var mcpSecond = await ViaMcp(other, expires: Expiry(30));
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(mcpSecond));
+        Assert.Equal(RuleId(webFirst), RuleId(mcpSecond));
+
+        Assert.Equal(1, store.Count);
+        Assert.Equal(1, other.Count);
+    }
+
+    [Theory]
+    [InlineData(30, 31)]   // a day apart
+    [InlineData(30, 0)]    // permanent versus expiring
+    public async Task ARuleThatDiffersOnlyInItsExpiry_IsANewRule(int firstDays, int secondDays)
+    {
+        foreach (var create in new Func<FakeMuteRuleStore, string?, Task<string>>[]
+                 {
+                     (s, e) => ViaMcp(s, expires: e),
+                     (s, e) => ViaWeb(s, expires: e),
+                 })
+        {
+            var store = new FakeMuteRuleStore();
+
+            var first = await create(store, Expiry(firstDays));
+            var second = await create(store, secondDays == 0 ? null : Expiry(secondDays));
+
+            Assert.Equal("created", DarlingMcpTestData.StatusOf(first));
+            Assert.Equal("created", DarlingMcpTestData.StatusOf(second));
+            Assert.NotEqual(RuleId(first), RuleId(second));
+            Assert.Equal(2, store.Count);
+        }
+    }
+
+    [Fact]
+    public async Task AnExpiryASecondApart_IsANewRule()
+    {
+        var store = new FakeMuteRuleStore();
+        var day = DateTime.UtcNow.Date.AddDays(30);
+
+        await ViaWeb(store, expires: day.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"));
+        var second = await ViaWeb(store, expires: day.AddSeconds(1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"));
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(second));
+        Assert.Equal(2, store.Count);
+    }
+
+    [Theory]
+    [InlineData("server_name", "pm-server-2")]
+    [InlineData("metric_name", "Blocking Detected")]
+    [InlineData("database_pattern", "hr")]
+    [InlineData("query_text_pattern", "DELETE big")]
+    [InlineData("wait_type_pattern", "PAGEIOLATCH")]
+    [InlineData("job_name_pattern", "weekly")]
+    public async Task EachOfTheSixScopeAndPatternFields_IsPartOfTheIdentity(string field, string different)
+    {
+        foreach (var create in new Func<FakeMuteRuleStore, string, Task<string>>[]
+                 {
+                     (s, f) => ViaMcp(s, expires: Expiry(30), server: f == "server_name" ? different : "pm-server-1",
+                         metric: f == "metric_name" ? different : "High CPU",
+                         database: f == "database_pattern" ? different : "sales",
+                         query: f == "query_text_pattern" ? different : "UPDATE big",
+                         wait: f == "wait_type_pattern" ? different : "LCK",
+                         job: f == "job_name_pattern" ? different : "nightly"),
+                     (s, f) => ViaWeb(s, expires: Expiry(30), server: f == "server_name" ? different : "pm-server-1",
+                         metric: f == "metric_name" ? different : "High CPU",
+                         database: f == "database_pattern" ? different : "sales",
+                         query: f == "query_text_pattern" ? different : "UPDATE big",
+                         wait: f == "wait_type_pattern" ? different : "LCK",
+                         job: f == "job_name_pattern" ? different : "nightly"),
+                 })
+        {
+            var store = new FakeMuteRuleStore();
+
+            Assert.Equal("created", DarlingMcpTestData.StatusOf(await ViaMcp(store, expires: Expiry(30))));
+            Assert.Equal("created", DarlingMcpTestData.StatusOf(await create(store, field)));
+            Assert.Equal(2, store.Count);
+        }
+    }
+
+    [Fact]
+    public async Task ACaseOnlyDifference_IsANewRule_TheSpellingIsWhatTheRuleKeepsAndShows()
+    {
+        var store = new FakeMuteRuleStore();
+
+        await ViaMcp(store, server: "PM-Server-1", expires: Expiry(30));
+        var second = await ViaMcp(store, server: "pm-server-1", expires: Expiry(30));
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(second));
+        Assert.Equal(2, store.Count);
+    }
+
+    [Fact]
+    public async Task ADifferentReasonAlone_IsStillARepeat_AndTheExistingReasonStands()
+    {
+        var store = new FakeMuteRuleStore();
+
+        var first = await ViaWeb(store, reason: "first reason", expires: Expiry(30));
+        var second = await ViaWeb(store, reason: "a different reason", expires: Expiry(30));
+
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(second));
+        Assert.Equal("first reason", store.Row(RuleId(first))!.Reason);
+        Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
+    public async Task ADisabledRule_IsNotInForce_SoTheSameCreateMakesANewOne()
+    {
+        var store = new FakeMuteRuleStore();
+
+        var first = await ViaMcp(store, expires: Expiry(30));
+        await store.SetEnabledAsync(RuleId(first), false);
+        var second = await ViaMcp(store, expires: Expiry(30));
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(second));
+        Assert.Equal(2, store.Count);
+    }
+
+    [Fact]
+    public async Task AnExpiredRule_IsNotInForce_SoTheSameCreateMakesANewOne()
+    {
+        var store = new FakeMuteRuleStore().Seed(new MuteRule
+        {
+            Id = "lapsed",
+            ServerName = "pm-server-1",
+            MetricName = "High CPU",
+            DatabasePattern = "sales",
+            QueryTextPattern = "UPDATE big",
+            WaitTypePattern = "LCK",
+            JobNamePattern = "nightly",
+            ExpiresAtUtc = DateTime.UtcNow.AddDays(-2),
+        });
+
+        var repeat = await ViaWeb(store, expires: Expiry(30));
+
+        Assert.Equal("created", DarlingMcpTestData.StatusOf(repeat));
+        Assert.Equal(2, store.Count);
+    }
+
+    [Fact]
+    public async Task AnExpiryTheStoreKeptToTheMicrosecond_StillMatchesTheSameCallRepeated()
+    {
+        /* Postgres keeps microseconds; a .NET tick is 100 ns. The caller sent seven fractional digits, the row
+           holds six, and the repeat must still find it or the guard never fires for a caller who sends them. */
+        var day = DateTime.UtcNow.Date.AddDays(30);
+        var store = new FakeMuteRuleStore().Seed(new MuteRule
+        {
+            Id = "kept-to-the-microsecond",
+            ServerName = "pm-server-1",
+            MetricName = "High CPU",
+            DatabasePattern = "sales",
+            QueryTextPattern = "UPDATE big",
+            WaitTypePattern = "LCK",
+            JobNamePattern = "nightly",
+            ExpiresAtUtc = day.AddTicks(1234560),
+        });
+        var sent = day.ToString("yyyy-MM-dd'T'HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + ".1234567Z";
+
+        var viaWeb = await ViaWeb(store, expires: sent);
+        var viaMcp = await ViaMcp(store, expires: sent);
+
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(viaWeb));
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(viaMcp));
+        Assert.Equal("kept-to-the-microsecond", (string)JsonNode.Parse(viaWeb)!["rule_id"]!);
+        Assert.Equal(1, store.Count);
+    }
+
+    [Fact]
+    public async Task WhenSeveralIdenticalRulesAlreadyExist_TheOldestIsTheOneNamed()
+    {
+        MuteRule Twin(string id, int ageDays) => new()
+        {
+            Id = id,
+            CreatedAtUtc = DateTime.UtcNow.AddDays(-ageDays),
+            ServerName = "pm-server-1",
+            MetricName = "High CPU",
+            DatabasePattern = "sales",
+            QueryTextPattern = "UPDATE big",
+            WaitTypePattern = "LCK",
+            JobNamePattern = "nightly",
+        };
+
+        var store = new FakeMuteRuleStore().Seed(Twin("newer", 1)).Seed(Twin("oldest", 9)).Seed(Twin("middle", 5));
+
+        var repeat = await ViaMcp(store);
+
+        Assert.Equal("already_exists", DarlingMcpTestData.StatusOf(repeat));
+        Assert.Equal("oldest", (string)JsonNode.Parse(repeat)!["rule_id"]!);
+        Assert.Equal(3, store.Count);
+    }
+
+    [Fact]
+    public async Task TwoIdenticalCreatesInFlightTogether_StoreOneRule()
+    {
+        /* A retry usually arrives because the first call was slow. On a store that takes its time to insert, both
+           calls used to read "no such rule" before either wrote. */
+        var inner = new FakeMuteRuleStore();
+        var store = new SlowInsertMuteRuleStore(inner);
+
+        var results = await Task.WhenAll(ViaWeb(store, expires: Expiry(30)), ViaMcp(store, expires: Expiry(30)));
+
+        Assert.Equal(1, inner.Count);
+        Assert.Equal(new[] { "already_exists", "created" }, results.Select(DarlingMcpTestData.StatusOf).OrderBy(s => s, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public async Task ARefusedBody_IsRefusedBeforeTheStoreIsRead()
+    {
+        var store = new FakeMuteRuleStore();
+
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await DarlingMcpAlertTools.CreateMuteRuleCore(store, "{\"reason\":\"\"}")));
+        Assert.Equal("invalid", DarlingMcpTestData.StatusOf(await ViaMcp(store, expires: "not-a-timestamp")));
+        Assert.Equal(0, store.LoadAllCalls);
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
+    public async Task AFaultReadingTheStore_IsReportedAsAnError_AndNothingIsInserted()
+    {
+        var store = new ThrowingLoadMuteRuleStore();
+
+        var result = await ViaMcp(store);
+
+        Assert.Equal("error", DarlingMcpTestData.StatusOf(result));
+        Assert.Equal(0, store.Inserts);
+    }
+
+    private sealed class ThrowingLoadMuteRuleStore : IMuteRuleStore
+    {
+        internal int Inserts { get; private set; }
+
+        public Task<IReadOnlyList<MuteRule>> LoadAllAsync(CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("connection reset");
+
+        public Task InsertAsync(MuteRule rule)
+        {
+            Inserts++;
+            return Task.CompletedTask;
+        }
+
+        public Task UpdateAsync(MuteRule rule) => Task.CompletedTask;
+
+        public Task SetEnabledAsync(string ruleId, bool enabled) => Task.CompletedTask;
+
+        public Task DeleteAsync(string ruleId) => Task.CompletedTask;
+
+        public Task DeleteExpiredAsync(IReadOnlyList<string> expiredIds) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public void TheToolGuide_SaysARepeatIsSafe_AndNamesTheAnswer()
+    {
+        var method = typeof(DarlingMcpAlertTools).GetMethods()
+            .Single(m => m.GetCustomAttribute<McpServerToolAttribute>()?.Name == "create_mute_rule");
+        var description = method.GetCustomAttribute<DescriptionAttribute>()!.Description;
+
+        Assert.Contains("already_exists", description, StringComparison.Ordinal);
+        Assert.Contains("Repeating a call is safe", description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheMcpTool_HandsTheStoreBackedBodyTheSameSharedInsert_AsTheWebCore()
+    {
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", "DarlingMcpAlertTools.cs");
+
+        Assert.Contains("CreateMuteRuleOver(new PgMuteRuleStore(postgres)", source, StringComparison.Ordinal);
+        /* Exactly two callers of the checked insert (the tool's body and the web core), and no unchecked
+           InsertAsync left on a create path. */
+        Assert.Equal(2, source.Split("await InsertUnlessDuplicateAsync(store, rule)").Length - 1);
+        Assert.DoesNotContain("new PgMuteRuleStore(postgres).InsertAsync(rule)", source, StringComparison.Ordinal);
+    }
+}
+
+/// <summary>
 /// delete_mute_rule's hoisted core (#3450), over the seam — what <c>DELETE /api/mute-rules/{id}</c> and the MCP
 /// tool both run. The decisions are small and all here: an honest 'deleted' vs 'not_found' off the same store
 /// read get_mute_rules uses, and a blank id refused before the store is touched.
@@ -2436,7 +2851,10 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             Assert.Equal(DBNull.Value, await ScalarAsync(connection, ct, "SELECT analysis_uncorroborated_route FROM config_alert_settings WHERE id = 1"));
 
             /* create_mute_rule → get_mute_rules → delete_mute_rule round-trip (own-scoped by the GUID reason tag). */
-            var created = await DarlingMcpAlertTools.CreateMuteRule(postgres, server_name: "e2e-write-server", metric_name: "High CPU", reason: muteTag);
+            /* The server name carries the run's tag (#4734): create_mute_rule answers already_exists for a rule that
+               repeats an enabled one, so a fixed scope would collide with a rule an earlier crashed run left behind on
+               a reused store. */
+            var created = await DarlingMcpAlertTools.CreateMuteRule(postgres, server_name: "e2e-write-server-" + muteTag, metric_name: "High CPU", reason: muteTag);
             Assert.Equal("created", DarlingMcpTestData.StatusOf(created));
             string ruleId;
             using (var doc = JsonDocument.Parse(created))
