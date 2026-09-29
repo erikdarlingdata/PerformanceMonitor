@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -9,6 +10,9 @@ using System.Windows.Shapes;
 using PerformanceMonitorLite.Models;
 using PerformanceMonitorLite.Services;
 using PerformanceMonitor.Common;
+using PerformanceMonitor.Ui;
+// The DisplayZone property below hides the type's simple name inside this class.
+using UiDisplayZone = PerformanceMonitor.Ui.DisplayZone;
 
 namespace PerformanceMonitorLite.Controls;
 
@@ -48,6 +52,14 @@ public partial class TimeRangeSlicerControl : UserControl
     /// StartUtc/EndUtc are in UTC (matching DuckDB collection_time).
     /// </summary>
     public event EventHandler<SlicerRangeEventArgs>? RangeChanged;
+
+    /// <summary>
+    /// The zone the time axis labels and the range caption are worded in (#4766), read each time they draw. The data
+    /// and the selection are naive-UTC instants and never move with it: the display mode reaches only the text.
+    /// ServerTab sets it to its display zone; left null, it is the zone the display mode names for the selected
+    /// server.
+    /// </summary>
+    public Func<TimeZoneInfo>? DisplayZone { get; set; }
 
     public TimeRangeSlicerControl()
     {
@@ -182,6 +194,40 @@ public partial class TimeRangeSlicerControl : UserControl
         return Math.Clamp((double)(utc.Ticks - DataStartUtc.Ticks) / span, 0, 1);
     }
 
+    // ── Display zone ──
+
+    /// <summary>
+    /// The zone the labels and the range caption are worded in: the one the tab set, else the zone the display mode
+    /// names for the selected server.
+    /// </summary>
+    private TimeZoneInfo CurrentZone() =>
+        DisplayZone?.Invoke()
+        ?? ServerTab.PickerZone(ServerTimeHelper.CurrentDisplayMode, ServerTimeHelper.ActiveServerClock);
+
+    /// <summary>
+    /// The labels along the time axis (#4766): one at every whole wall-clock multiple of a step in
+    /// <paramref name="zone"/> between the two instants (both ends inclusive), each as the instant it sits at and its
+    /// wall time as "MM/dd HH:mm". The step is the finest one the chart axes use that leaves at most
+    /// <paramref name="widthPx"/> / <paramref name="minSpacingPx"/> labels across the span (two at the least), so the
+    /// labels sit on whole hours of the zone rather than at even fractions of a span that starts wherever the data
+    /// does. A wall time that happens twice on the autumn change day gets a label at each occurrence, an hour apart in
+    /// real time and reading the same; one the spring change skips gets none. Pure: it reads no control state.
+    /// </summary>
+    internal static IReadOnlyList<(DateTime Utc, string Text)> SlicerLabels(
+        DateTime startUtc, DateTime endUtc, double widthPx, double minSpacingPx, TimeZoneInfo zone)
+    {
+        if (endUtc <= startUtc || widthPx <= 0 || minSpacingPx <= 0)
+            return Array.Empty<(DateTime Utc, string Text)>();
+
+        var target = Math.Max(2, (int)(widthPx / minSpacingPx));
+        var step = DisplayZoneTickGenerator.ChooseStep(endUtc - startUtc, target);
+        var ticks = UiDisplayZone.WallTicks(startUtc, endUtc, step, zone);
+        var labels = new List<(DateTime Utc, string Text)>(ticks.Count);
+        foreach (var (utc, wall) in ticks)
+            labels.Add((utc, wall.ToString("MM/dd HH:mm", CultureInfo.InvariantCulture)));
+        return labels;
+    }
+
     // ── Drawing ──
 
     public void Redraw()
@@ -232,20 +278,16 @@ public partial class TimeRangeSlicerControl : UserControl
         }
         SlicerCanvas.Children.Add(new Path { Data = lineGeo, Stroke = lineBrush, StrokeThickness = 1.5 });
 
-        // X-axis labels — evenly spaced by TIME, skip if too close
+        // X-axis labels — whole wall-clock hours of the display zone (#4766), skip if too close
         var labelBrush = FindBrush("SlicerLabelBrush", "#E4E6EB");
         const double minLabelSpacingPx = 90;
         double lastLabelX = -minLabelSpacingPx;
-        int targetLabels = Math.Max(2, (int)(w / minLabelSpacingPx));
-        var timeStep = (DataEndUtc - DataStartUtc).TotalHours / targetLabels;
-        for (int tick = 0; tick <= targetLabels; tick++)
+        foreach (var (tickUtc, text) in SlicerLabels(DataStartUtc, DataEndUtc, w, minLabelSpacingPx, CurrentZone()))
         {
-            var tickTime = DataStartUtc.AddHours(tick * timeStep);
-            var x = NormAtUtc(tickTime) * w;
+            var x = NormAtUtc(tickUtc) * w;
             if (x - lastLabelX < minLabelSpacingPx) continue;
             if (x < 10 || x > w - 40) continue;
-            var dt = ServerTimeHelper.FormatServerTime(tickTime, "MM/dd HH:mm");
-            var tb = new TextBlock { Text = dt, FontSize = 9, Foreground = labelBrush };
+            var tb = new TextBlock { Text = text, FontSize = 9, Foreground = labelBrush };
             Canvas.SetLeft(tb, x - 25);
             Canvas.SetTop(tb, chartBottom + 2);
             SlicerCanvas.Children.Add(tb);
@@ -357,8 +399,9 @@ public partial class TimeRangeSlicerControl : UserControl
     private void UpdateRangeLabel()
     {
         if (_data.Count == 0) { RangeLabel.Text = ""; return; }
-        var startDisplay = ServerTimeHelper.FormatServerTime(UtcAtNorm(_rangeStart), "yyyy-MM-dd HH:mm");
-        var endDisplay = ServerTimeHelper.FormatServerTime(UtcAtNorm(_rangeEnd), "yyyy-MM-dd HH:mm");
+        var zone = CurrentZone();
+        var startDisplay = UiDisplayZone.Format(UtcAtNorm(_rangeStart), zone, "yyyy-MM-dd HH:mm");
+        var endDisplay = UiDisplayZone.Format(UtcAtNorm(_rangeEnd), zone, "yyyy-MM-dd HH:mm");
         var spanHours = (UtcAtNorm(_rangeEnd) - UtcAtNorm(_rangeStart)).TotalHours;
         var spanLabel = spanHours >= 1 ? $"{spanHours:F0}h" : $"{spanHours * 60:F0}m";
         RangeLabel.Text = $"{startDisplay} \u2192 {endDisplay}  ({spanLabel})";
