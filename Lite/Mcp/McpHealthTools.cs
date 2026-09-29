@@ -693,7 +693,8 @@ public sealed class McpHealthTools
        the ~30-field full one. Every check here is a fact this window's aggregate already computed, not a new
        read, and each one guards against exactly the "erroring collector went quiet" failure #4198 warns about:
        HealthStatus alone is not enough, because Classify() bands WARNING only above a 20% error rate or a 0.5%
-       abandon rate, so a collector could carry a handful of errors, session-missing runs or abandoned cycles
+       abandon rate, or when the newest run's partial-database note says half or more of its databases failed
+       (#4748), so a collector could carry a handful of errors, session-missing runs or abandoned cycles
        and still read HEALTHY. RowsStored > 0 (or a known event collector reading zero at rest) rules out the
        "non-event collector came back empty and needs a look" reading FormatOutputFinding would otherwise carry
        — dropped here specifically because it is the one non-obvious way a HEALTHY-banded row can still be

@@ -26,9 +26,12 @@ namespace PerformanceMonitor.Common;
 /// </summary>
 public static class PartialDatabaseFailureNote
 {
-    /// <summary>The words that follow the counts. The reader searches for them, so they are the one part of
-    /// the sentence the writer and the reader must agree on.</summary>
-    private const string Marker = " database(s) failed and were skipped";
+    /// <summary>The words that follow the counts, without the space that separates them. The reader searches
+    /// for them, so they are the one part of the sentence the writer and the reader must agree on. Public so
+    /// the health reads that pick the note out of the collection log in SQL build their <c>LIKE</c> pattern
+    /// from this constant instead of copying the sentence: those reads are <c>const</c> strings that
+    /// interpolate it, so a reworded note changes the writer, the reader and the SQL together.</summary>
+    public const string Marker = "database(s) failed and were skipped";
 
     private const string OfSeparator = " of ";
 
@@ -37,7 +40,7 @@ public static class PartialDatabaseFailureNote
     /// attempted, <c>{2}</c> = up to a few of the failed names, <c>{3}</c> = the first error's message.
     /// </summary>
     public const string Format =
-        "{0} of {1}" + Marker + " ({2}) - any rows this cycle are from the "
+        "{0} of {1} " + Marker + " ({2}) - any rows this cycle are from the "
         + "survivors ONLY, so a low or zero row count here is not evidence the server is quiet; "
         + "first error: {3}";
 
@@ -60,7 +63,8 @@ public static class PartialDatabaseFailureNote
         var at = note.IndexOf(Marker, StringComparison.Ordinal);
         while (at >= 0)
         {
-            if (TryReadCountsBefore(note, at, out failed, out total))
+            /* The counts end at the single space in front of the words: "<failed> of <total> " + Marker. */
+            if (at > 0 && note[at - 1] == ' ' && TryReadCountsBefore(note, at - 1, out failed, out total))
             {
                 return true;
             }
@@ -73,8 +77,8 @@ public static class PartialDatabaseFailureNote
         return false;
     }
 
-    /// <summary>Reads "&lt;failed&gt; of &lt;total&gt;" ending at <paramref name="end"/> (the index where the
-    /// marker starts).</summary>
+    /// <summary>Reads "&lt;failed&gt; of &lt;total&gt;" ending at <paramref name="end"/> (the index of the space
+    /// in front of the marker).</summary>
     private static bool TryReadCountsBefore(string note, int end, out int failed, out int total)
     {
         failed = 0;

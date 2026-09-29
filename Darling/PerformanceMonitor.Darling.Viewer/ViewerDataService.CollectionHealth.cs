@@ -398,10 +398,10 @@ public sealed partial class ViewerDataService
             -- note only when that run IS the collector's newest run of any status, so a clean run after a
             -- partial-failure cycle yields NULL. The text is the same sentence PartialDatabaseFailureNote
             -- writes; its pin lives in the Darling suite.
-            CASE WHEN MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%database(s) failed and were skipped%'
+            CASE WHEN MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%{PartialDatabaseFailureNote.Marker}%'
                                THEN collection_time END) = MAX(collection_time)
                  THEN SUBSTRING(
-                          MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%database(s) failed and were skipped%'
+                          MAX(CASE WHEN status = 'SUCCESS' AND error_message LIKE '%{PartialDatabaseFailureNote.Marker}%'
                                    THEN TO_CHAR(collection_time, 'YYYYMMDDHH24MISSUS') || error_message END)
                           FROM 21)
             END AS latest_run_note
@@ -673,9 +673,9 @@ public sealed partial class ViewerDataService
 
     /// <summary>Maps one row of the shared 19-column health projection (per-server or fleet, ordinals 0-18) to a
     /// <see cref="CollectorHealthRow"/>. The count is load-bearing: both projections are read POSITIONALLY
-    /// through this one mapper, so it must match them exactly (18 since #3819 appended
-    /// last_non_skip_time and last_productive_time at ordinals 16-17; #3240's extension_missing_count sits
-    /// at 15 and #2804's abandoned_count at 14).</summary>
+    /// through this one mapper, so it must match them exactly (19 since #4748 appended latest_run_note at
+    /// ordinal 18; #3819's last_non_skip_time and last_productive_time sit at ordinals 16-17,
+    /// #3240's extension_missing_count at 15 and #2804's abandoned_count at 14).</summary>
     private static CollectorHealthRow MapHealthRow(NpgsqlDataReader reader) => new()
     {
         CollectorName = reader.GetString(0),
