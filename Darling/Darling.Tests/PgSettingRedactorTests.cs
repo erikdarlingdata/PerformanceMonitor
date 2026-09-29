@@ -15,7 +15,12 @@ namespace Darling.Tests;
 /// <c>PgServerConfigCollector</c> sees <c>GUC_SUPERUSER_ONLY</c> settings such as a standby's
 /// <c>primary_conninfo</c>, which can carry a replication password in plain text. These pin
 /// <see cref="PgSettingRedactor"/>'s rules directly, without a database, so the corpus runs on every build.
+///
+/// <para>The class runs in <c>[Collection("pg-setting-redactor-timing")]</c>, which no other class shares and
+/// which does not run in parallel with any other collection: its scaling check compares wall-clock times, and
+/// on a busy machine the rest of the suite could slow every repeat of the larger size past the bar (#4788).</para>
 /// </summary>
+[Collection("pg-setting-redactor-timing")]
 public sealed class PgSettingRedactorTests
 {
     /// <summary>
