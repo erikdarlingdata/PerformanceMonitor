@@ -22,10 +22,13 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// what the service collects; this carries a pre-Stage-3 viewer's registered servers across so they keep
 /// being collected without re-adding them.
 ///
-/// <para><b>No double-seed.</b> Each row is written with <c>INSERT … ON CONFLICT (server_id) DO NOTHING</c>
-/// (<see cref="ViewerDataService.InsertMonitoredServerIfAbsentAsync"/>), so a server the service already
-/// seeded from darling.json (same shared <c>server_id</c>) is left untouched — the migrate imports only the
-/// entries the store LACKS. <b>Runs once.</b> A marker file guards it so a later run cannot RESURRECT a
+/// <para><b>No double-seed.</b> Each row is written through <see cref="ViewerDataService.AddMonitoredServerAsync"/>,
+/// which is <c>INSERT … ON CONFLICT (server_id) DO NOTHING</c> plus a read of whoever holds a taken id, so a
+/// server the service already seeded from darling.json (same shared <c>server_id</c>) is left untouched — the
+/// migrate imports only the entries the store LACKS. A taken id is one of two things (#4789): the same server
+/// again, which is a silent skip, or a DIFFERENT server whose identity hashes to the same id, which is refused,
+/// counted apart and logged as a warning naming both, so it is never dropped without a word as if it were
+/// already there. <b>Runs once.</b> A marker file guards it so a later run cannot RESURRECT a
 /// server the user has since removed from the store (the marker is written only after a clean pass).
 /// Read-only seats and a disconnected viewer skip it (nothing to write).</para>
 ///
@@ -67,7 +70,8 @@ public sealed class ViewerServerMigration
     /// Imports every migratable <c>viewer-servers.json</c> entry the store lacks, then writes the once-marker.
     /// A no-op (returns 0) when the viewer is disconnected, connected read-only, or already migrated. A
     /// <see cref="ViewerReadOnlyException"/> mid-pass (grants changed under us) stops without marking done, so
-    /// a later run can retry. Returns the number of servers actually imported.
+    /// a later run can retry. Returns the number of servers actually imported; a server whose id a DIFFERENT
+    /// server already holds is not imported and is logged as a warning naming both (#4789).
     /// </summary>
     [SupportedOSPlatform("windows")]
     public async Task<int> MigrateAsync(ViewerDataService? dataService, CancellationToken cancellationToken = default)
@@ -77,7 +81,7 @@ public sealed class ViewerServerMigration
             return 0;
         }
 
-        var imported = 0;
+        var total = new ViewerServerImportResult(0, 0);
         try
         {
             foreach (var entry in _serverStore.GetAllServers())
@@ -88,10 +92,10 @@ public sealed class ViewerServerMigration
                     continue;
                 }
 
-                if (await dataService.InsertMonitoredServerIfAbsentAsync(row, cancellationToken))
-                {
-                    imported++;
-                }
+                /* The guarded add writes exactly the row the bare insert did for an absent id (#4789); a taken id
+                   is then told apart: the same server again is skipped, a different one is counted and logged. */
+                var result = await dataService.AddMonitoredServerAsync(row, cancellationToken);
+                total = Record(total, row, result);
             }
         }
         catch (ViewerReadOnlyException)
@@ -99,23 +103,24 @@ public sealed class ViewerServerMigration
             /* Lost the write race (grants tightened under us) — leave the marker unwritten so a later,
                writable run finishes the import. */
             ViewerLogger.Warn("ViewerServerMigration", "Store went read-only mid-migrate; will retry next run.");
-            return imported;
+            return total.Imported;
         }
 
         WriteMarker();
-        return imported;
+        return total.Imported;
     }
 
     /// <summary>
     /// Imports every migratable entry of an EXTERNAL registry (a folder chosen in Import Settings) into the
-    /// store — the same projection + <c>ON CONFLICT DO NOTHING</c> as <see cref="MigrateAsync"/>, but ungated
-    /// by the once-marker (an explicit user action) and against a caller-supplied source store. Returns the
-    /// number imported. Cross-machine secrets don't travel (they live in the source machine's Credential
-    /// Manager), so SQL servers with no locally-resolvable secret are skipped — matching Import's existing
-    /// "credentials are not importable" caveat; integrated servers import fully.
+    /// store — the same projection + guarded add as <see cref="MigrateAsync"/>, but ungated by the once-marker
+    /// (an explicit user action) and against a caller-supplied source store. Returns how many were imported and
+    /// how many were refused because a DIFFERENT server already holds their id (#4789), so the import message
+    /// can say so; the same server again is neither. Cross-machine secrets don't travel (they live in the
+    /// source machine's Credential Manager), so SQL servers with no locally-resolvable secret are skipped —
+    /// matching Import's existing "credentials are not importable" caveat; integrated servers import fully.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    public static async Task<int> ImportFromStoreAsync(
+    public static async Task<ViewerServerImportResult> ImportFromStoreAsync(
         ViewerServerStore sourceStore,
         ViewerProfileStore sourceProfiles,
         ViewerDataService dataService,
@@ -126,18 +131,55 @@ public sealed class ViewerServerMigration
         ArgumentNullException.ThrowIfNull(dataService);
 
         var projector = new ViewerServerMigration(sourceStore, sourceProfiles);
-        var imported = 0;
+        var total = new ViewerServerImportResult(0, 0);
         foreach (var entry in sourceStore.GetAllServers())
         {
             var (row, _) = projector.TryProjectEntry(entry);
-            if (row is not null && await dataService.InsertMonitoredServerIfAbsentAsync(row, cancellationToken))
+            if (row is null)
             {
-                imported++;
+                continue;
             }
+
+            var result = await dataService.AddMonitoredServerAsync(row, cancellationToken);
+            total = Record(total, row, result);
         }
 
-        return imported;
+        return total;
     }
+
+    /// <summary>
+    /// Folds what <see cref="ViewerDataService.AddMonitoredServerAsync"/> answered for <paramref name="row"/> into
+    /// the running <paramref name="total"/> (#4789); both imports go through here so they cannot drift.
+    /// <see cref="MonitoredServerAddOutcome.Added"/> is imported. <see cref="MonitoredServerAddOutcome.Collides"/>
+    /// (a DIFFERENT server holds the id) is counted apart and logged as a warning naming the row and the holder.
+    /// <see cref="MonitoredServerAddOutcome.Duplicate"/> (the same server, already there) and
+    /// <see cref="MonitoredServerAddOutcome.NotSaved"/> (the holder went away between the insert and the read, so
+    /// nothing was written) are silent skips, as an id that was already taken always was.
+    /// </summary>
+    internal static ViewerServerImportResult Record(
+        ViewerServerImportResult total, MonitoredServerRow row, MonitoredServerAddResult result)
+    {
+        switch (result.Outcome)
+        {
+            case MonitoredServerAddOutcome.Added:
+                return total with { Imported = total.Imported + 1 };
+            case MonitoredServerAddOutcome.Collides:
+                ViewerLogger.Warn("ViewerServerMigration", DescribeCollision(row, result.Occupant));
+                return total with { Collided = total.Collided + 1 };
+            default:
+                return total;
+        }
+    }
+
+    /// <summary>
+    /// The warning for a server left out because a DIFFERENT one holds its id (#4789). It says it the way the Add
+    /// dialog does (<c>AddServerDialog.DescribeRefusedAdd</c>): the id collides with a different server that is
+    /// already monitored. Both servers are named with their host, because the display names alone may not tell
+    /// the operator which registry entry was left out.
+    /// </summary>
+    internal static string DescribeCollision(MonitoredServerRow row, MonitoredServerRow? holder) =>
+        $"Not imported: server '{row.Name}' ({row.Host}): its id collides with '{holder?.Name}' ({holder?.Host}), "
+        + "a different server that is already monitored. Two servers cannot share one id, so it was left out and nothing was changed.";
 
     /// <summary>
     /// Projects a viewer registry entry to the store row the migrate writes, or returns a skip reason. Public
@@ -243,3 +285,9 @@ public sealed class ViewerServerMigration
         }
     }
 }
+
+/// <summary>
+/// What an import into the monitored store did (#4789): the servers it added, and the servers it refused because a
+/// DIFFERENT server already holds their id. The same server again (already in the store) is neither.
+/// </summary>
+public readonly record struct ViewerServerImportResult(int Imported, int Collided);

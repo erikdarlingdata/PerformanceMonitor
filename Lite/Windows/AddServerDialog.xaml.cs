@@ -680,6 +680,33 @@ public partial class AddServerDialog : Window
             }
         }
 
+        /* #4789: the id everything is collected under is a 32-bit hash of the name, database and read-only intent,
+           so a DIFFERENT server can already hold the one this save would derive, and both would collect into one
+           history. Checked before the connection test, so a save that will be refused does not wait on a login.
+
+           The check runs on a copy that carries the form's identity, not on AddedServer: an edit changes the live
+           server object in place further down, and a refusal after that would leave the running list already
+           renamed. An edit that keeps its id passes even when another server already shares it (a pair saved before
+           this check stays editable), and the same server again reads as already monitored. */
+        var isEdit = AddedServer != null && Title == "Edit SQL Server";
+        var candidate = new ServerConnection
+        {
+            ServerName = serverName,
+            DatabaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text) ? null : DatabaseNameBox.Text.Trim(),
+            ReadOnlyIntent = ReadOnlyIntentCheckBox.IsChecked == true
+        };
+        if (isEdit)
+            candidate.Id = AddedServer!.Id;
+
+        var idHolder = isEdit
+            ? _serverManager.FindServerIdHolderForEdit(AddedServer!, candidate)
+            : _serverManager.FindServerIdHolder(candidate);
+        if (idHolder != null)
+        {
+            StatusText.Text = ServerManager.DescribeIdHolder(candidate, idHolder, isEdit);
+            return;
+        }
+
         // Test connection when data collection is enabled
         if (EnabledCheckBox.IsChecked == true)
         {
