@@ -53,7 +53,7 @@ namespace Darling.Tests;
 /// steady for 30 days and spiking in the last four hours; through the REAL <c>analyze_server</c>: a TPS anomaly at
 /// the display cap, corroborated by the session and CPU anomalies and the measured CPU confirmer, storied above
 /// 1.5 (the lone-anomaly cap does not hold an extreme, corroborated one); the CPU anomaly folded onto the
-/// <c>PG_CPU_PERCENT</c> story's incident; the first-occurrence deadlock-rate anomaly folded onto
+/// <c>PG_CPU_PERCENT</c> story's incident; the measured-zero (#4731) deadlock-rate anomaly folded onto
 /// <c>PG_DEADLOCK_RATE</c>'s; and every anomaly fact carrying the gate's metadata with a <c>threshold_lineage</c>
 /// verdict — 1 on the TPS and CPU anomalies (floors and fallbacks fleet-measured, #3691 2026-09-19), 0 on the session
 /// (count floors unmeasured), deadlock-rate and wait-profile (chosen ratio multiple) anomalies.</para>
@@ -1122,7 +1122,8 @@ public sealed class PgTargetAnomalyTests
                of capacity — each far past its floor, and each ≥ 25 robust sigmas from a median whose MAD is under 1.
                Deadlocks: none for 30 days, then one every ten minutes over the last 230 minutes (24 increments,
                both ends inclusive) — INSIDE the window only, so the bucket mean is 0 and the anomaly takes the
-               first-occurrence path at 24 / 4 h = 6 per observed hour ≥ the measured 5 / h fallback. */
+               is_new path at 24 / 4 h = 6 per observed hour ≥ the measured 5 / h fallback, stamped a MEASURED zero
+               (#4731) because the 30 dense days of zeros clear the bucket's floors. */
             var end = TruncateToMinutes(DateTime.UtcNow).AddMinutes(-1);
             const int minutes = 31 * 24 * 60;
             var start = end.AddMinutes(-minutes);
@@ -1240,11 +1241,14 @@ FROM generate_series(0, $7, 5) AS n", start, spikeFrom, deadlocksFrom, minutes, 
                 Assert.Equal(cpuParent.GetProperty("incident_id").GetString(), cpuAnomaly.GetProperty("incident_id").GetString());
                 Assert.Contains("configured capacity ceiling", cpuParent.GetProperty("advice").GetProperty("headline").GetString(), StringComparison.Ordinal);
 
-                /* The first-occurrence deadlock anomaly folds onto PG_DEADLOCK_RATE (6 / h ≥ the 5 / h tier roots it). */
+                /* The measured-zero (#4731) deadlock anomaly folds onto PG_DEADLOCK_RATE (6 / h ≥ the 5 / h tier roots it). Its
+                   headline is worded as the zero the baseline measured for this hour, never as a first occurrence. */
                 var deadlockParent = Assert.Single(findings, f => RootKey(f) == PgTargetFactKeys.DeadlockRate);
                 var deadlockCard = Assert.Single(findings, f => RootKey(f) == PgTargetFactKeys.AnomalyDeadlockRate);
                 Assert.Equal(deadlockParent.GetProperty("incident_id").GetString(), deadlockCard.GetProperty("incident_id").GetString());
-                Assert.Contains("first occurrence, no baseline yet", deadlockCard.GetProperty("advice").GetProperty("headline").GetString(), StringComparison.Ordinal);
+                var deadlockHeadline = deadlockCard.GetProperty("advice").GetProperty("headline").GetString();
+                Assert.Contains($"24 deadlocks this window (6/hour) — against a {BaselineMath.BaselineWindowDays}-day baseline in which this hour saw none", deadlockHeadline, StringComparison.Ordinal);
+                Assert.DoesNotContain("first occurrence", deadlockHeadline, StringComparison.Ordinal);
                 Assert.True(deadlockCard.GetProperty("severity").GetDouble() < 1.49);
             }
 
