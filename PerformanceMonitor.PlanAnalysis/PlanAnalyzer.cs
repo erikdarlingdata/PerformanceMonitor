@@ -1563,7 +1563,12 @@ public static partial class PlanAnalyzer
         // one or two operators always take most of the time just because there's almost
         // nothing else to divide it among, so the share points at nothing. The benefit % is
         // just the self-time share.
+        // Exchanges (Parallelism) are skipped: their self-time is mostly time spent waiting on the
+        // operators that feed them and drain them, not work of their own. On a live plan an exchange
+        // feeding a spilling sort showed 21 s of elapsed time on 2.4 s of CPU per thread, and was
+        // named as the expensive operator while the sort beside it was the real problem (#4690).
         if (!cfg.IsRuleDisabled(35) && node.HasActualStats && node.Warnings.Count == 0
+            && !IsExchangeOperator(node)
             && stmt.QueryTimeStats != null && stmt.QueryTimeStats.ElapsedTimeMs >= 1000)
         {
             var selfMs = GetOperatorOwnElapsedMs(node);
@@ -1593,6 +1598,15 @@ public static partial class PlanAnalyzer
                 warning.OriginNodeIds.Add(node.NodeId);
         }
     }
+
+    /// <summary>
+    /// True for parallelism exchange operators (Gather/Distribute/Repartition Streams), whose
+    /// timings reflect time spent waiting on the operators around them rather than the operator's
+    /// own work.
+    /// </summary>
+    private static bool IsExchangeOperator(PlanNode node) =>
+        node.PhysicalOp == "Parallelism"
+        || node.LogicalOp is "Gather Streams" or "Distribute Streams" or "Repartition Streams";
 
     /// <summary>
     /// Detects the NOT IN with nullable column pattern: statement has NOT IN,
