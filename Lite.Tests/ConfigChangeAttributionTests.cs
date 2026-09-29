@@ -414,6 +414,172 @@ public sealed class ConfigChangeAttributionTests
         Assert.Contains("1 earlier configuration change also sat inside this pass's window and is not compared here", stackedAdvice.Investigation, StringComparison.Ordinal);
     }
 
+    /* ── a young after half: what is missing from a few minutes is not yet a finding (#4729) ── */
+
+    /// <summary>
+    /// A change first seen minutes before the pass has minutes of "after". A rate metric the four-hour before
+    /// half held that has not shown up in them is presence-only to the banding, which bands it a whole
+    /// "better" move — a verdict about a metric that has had minutes to appear. Below
+    /// <see cref="ConfigChangeAttribution.MinComparableAfterHours"/> that row is not a moved metric: no
+    /// per-key entry, no count in the tallies or the headline, no "resolved (better)" in the prose. The card
+    /// says the metric is not yet comparable and keeps the "still filling in" wording. The last row is the
+    /// second at which rounded minutes would read "60 minutes" under a "1 h" floor.
+    /// </summary>
+    [Theory]
+    [InlineData(600, "10 minutes")]
+    [InlineData(3540, "59 minutes")]
+    [InlineData(3580, "59 minutes")]
+    public void Compose_BelowTheFloor_DoesNotCallAMetricMissingFromTheAfterHalfResolved(int afterSeconds, string minutes)
+    {
+        var (before, after) = Scored([Cpu(50), Wait("WRITELOG", 0.30)], [Cpu(51)]);
+        var compare = ComparisonBanding.Compare(before, after, NoDispersion, coverageCaveat: false);
+
+        /* The premise: the banding itself calls the missing wait a whole "better" move, on presence alone. */
+        var missing = Assert.Single(compare.Rows, r => r.Key == "WRITELOG");
+        Assert.Equal(ComparisonBanding.StatusBetter, missing.Status);
+        Assert.Equal(ComparisonBanding.BandSourcePresence, missing.BandSource);
+
+        var afterSpan = TimeSpan.FromSeconds(afterSeconds);
+        var fact = ConfigChangeAttribution.BuildFact(1, MaxdopEvent(T0, T0.AddHours(-23)), 0,
+            ConfigChangeAttribution.WindowsFor(T0, T0 + afterSpan), compare, FullCoverage(), FullCoverage(afterSpan.TotalMilliseconds));
+
+        Assert.False(fact.Metadata.ContainsKey(ConfigChangeAttribution.StatusKey("WRITELOG")));
+        Assert.Empty(ConfigChangeAttribution.MovedKeys(fact));
+        Assert.Equal(1, fact.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
+        Assert.Equal(0, fact.Metadata[ConfigChangeAttribution.MetaBetter]);
+        Assert.Equal(0, fact.Metadata[ConfigChangeAttribution.MetaWorse]);
+        Assert.Equal(1, fact.Metadata[ConfigChangeAttribution.MetaStable]);
+        Assert.Equal(2, fact.Metadata[ConfigChangeAttribution.MetaComparedKeys]);
+        Assert.Equal(0, fact.Metadata[ConfigChangeAttribution.MetaMovedKeysOmitted]);
+        /* A fully observed short half reads 1.0, which is why the coverage fraction cannot stand in for the floor. */
+        Assert.Equal(1.0, fact.Metadata[ConfigChangeAttribution.MetaAfterCoverageFraction]);
+
+        var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
+        Assert.EndsWith("— effect not yet comparable", advice.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("moved beyond band", advice.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("resolved", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("(better)", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("Moved beyond its band", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("No metric in the compare moved beyond its dispersion band", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the after half is still filling in, and later passes complete it", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains($"1 metric appeared in or vanished from the compare, but the after half covers only {minutes}", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("under the 1 h the compare needs before a missing metric means anything", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("so it is not yet comparable and later passes compare it", advice.Investigation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same missing metric with an after half at the floor, and past it: unchanged. The floor is
+    /// inclusive, so exactly one hour of "after" still reads the row as the resolved metric it always did.
+    /// </summary>
+    [Theory]
+    [InlineData(3600)]
+    [InlineData(7200)]
+    public void Compose_AtOrPastTheFloor_StillCallsAMetricMissingFromTheAfterHalfResolved(int afterSeconds)
+    {
+        var (before, after) = Scored([Cpu(50), Wait("WRITELOG", 0.30)], [Cpu(51)]);
+        var compare = ComparisonBanding.Compare(before, after, NoDispersion, coverageCaveat: false);
+
+        var afterSpan = TimeSpan.FromSeconds(afterSeconds);
+        var fact = ConfigChangeAttribution.BuildFact(1, MaxdopEvent(T0, T0.AddHours(-23)), 0,
+            ConfigChangeAttribution.WindowsFor(T0, T0 + afterSpan), compare, FullCoverage(), FullCoverage(afterSpan.TotalMilliseconds));
+
+        Assert.Equal(-1, fact.Metadata[ConfigChangeAttribution.StatusKey("WRITELOG")]);
+        Assert.Equal(new[] { "WRITELOG" }, ConfigChangeAttribution.MovedKeys(fact));
+        Assert.Equal(1, fact.Metadata[ConfigChangeAttribution.MetaBetter]);
+
+        var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
+        Assert.Contains("1 metric moved beyond band after it", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("WRITELOG resolved (better)", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("not yet comparable", advice.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("not yet comparable", advice.Investigation, StringComparison.Ordinal);
+        Assert.Equal(0, fact.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
+    }
+
+    /// <summary>
+    /// Ten minutes of "after" with one real banded move (a sigma move on CPU) and one presence-only row: the
+    /// sigma row still shows and still counts in the headline, and the verdict adds one sentence counting what
+    /// is not yet comparable. The missing wait is counted, never named.
+    /// </summary>
+    [Fact]
+    public void Compose_BelowTheFloor_KeepsABandedMove_AndCountsWhatIsNotYetComparable()
+    {
+        var (before, after) = Scored([Cpu(70), Wait("WRITELOG", 0.30)], [Cpu(50)]);
+        var compare = ComparisonBanding.Compare(before, after,
+            new Dictionary<string, BaselineBucket> { [MetricNames.Cpu] = TrustworthyCpuBucket() }, coverageCaveat: false);
+        Assert.NotNull(Assert.Single(compare.Rows, r => r.Key == "CPU_SQL_PERCENT").DeltaSigma);
+        Assert.Equal(ComparisonBanding.BandSourcePresence, Assert.Single(compare.Rows, r => r.Key == "WRITELOG").BandSource);
+
+        var fact = ConfigChangeAttribution.BuildFact(1, MaxdopEvent(T0, T0.AddHours(-23)), 0,
+            ConfigChangeAttribution.WindowsFor(T0, T0.AddMinutes(10)), compare, FullCoverage(), FullCoverage(600_000));
+
+        Assert.Equal(new[] { "CPU_SQL_PERCENT" }, ConfigChangeAttribution.MovedKeys(fact));
+        Assert.Equal(-1, fact.Metadata[ConfigChangeAttribution.StatusKey("CPU_SQL_PERCENT")]);
+        Assert.False(fact.Metadata.ContainsKey(ConfigChangeAttribution.StatusKey("WRITELOG")));
+        Assert.Equal(1, fact.Metadata[ConfigChangeAttribution.MetaBetter]);
+        Assert.Equal(0, fact.Metadata[ConfigChangeAttribution.MetaWorse]);
+        Assert.Equal(1, fact.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
+
+        var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
+        Assert.Contains("1 metric moved beyond band after it", advice.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("not yet comparable", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("CPU_SQL_PERCENT", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("σ (better)", advice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("1 more metric appeared in or vanished from the compare and is not yet comparable: the after half covers only 10 minutes, under the 1 h the compare needs before a missing metric means anything.", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("WRITELOG", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("resolved", advice.Investigation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The cap on per-key metadata counts over the rows that remain: two presence-only rows sit among fifteen
+    /// real moves, and only the real ones can be omitted. The worse and better tallies drop the two as well.
+    /// </summary>
+    [Fact]
+    public void BuildFact_BelowTheFloor_CountsTheOmittedKeysOverTheRowsThatRemain()
+    {
+        var keys = new[] { "PAGEIOLATCH_SH", "PAGEIOLATCH_EX", "CXPACKET", "WRITELOG", "HADR_SYNC_COMMIT", "LATCH_EX", "LATCH_SH", "LCK", "LCK_M_S", "LCK_M_IS", "RESOURCE_SEMAPHORE", "RESOURCE_SEMAPHORE_QUERY_COMPILE", "SCH_M", "LCK_M_RS_S", "LCK_M_RX_X" };
+        var missing = new[] { "LCK_M_RS_U", "LCK_M_RIn_NL" };
+        var (before, after) = Scored(
+            keys.Concat(missing).Select(k => Wait(k, 0.30)).ToList(),
+            keys.Select(k => Wait(k, 0.60)).ToList());
+        var compare = ComparisonBanding.Compare(before, after, NoDispersion, coverageCaveat: false);
+        var presenceRows = compare.Rows.Count(r => r.Status != ComparisonBanding.StatusStable && r.BandSource == ComparisonBanding.BandSourcePresence);
+        var realRows = compare.Rows.Count(r => r.Status != ComparisonBanding.StatusStable && r.BandSource != ComparisonBanding.BandSourcePresence);
+        Assert.Equal(2, presenceRows);
+        Assert.True(realRows > ConfigChangeAttribution.MaxMovedKeysInMetadata, $"the planted set must exceed the cap to test it ({realRows} real moves)");
+
+        var fact = ConfigChangeAttribution.BuildFact(1, MaxdopEvent(T0, T0.AddHours(-1)), 0,
+            ConfigChangeAttribution.WindowsFor(T0, T0.AddMinutes(10)), compare, FullCoverage(), FullCoverage(600_000));
+
+        Assert.Equal(2, fact.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
+        Assert.Equal(ConfigChangeAttribution.MaxMovedKeysInMetadata, ConfigChangeAttribution.MovedKeys(fact).Count);
+        Assert.Equal(realRows - ConfigChangeAttribution.MaxMovedKeysInMetadata, fact.Metadata[ConfigChangeAttribution.MetaMovedKeysOmitted]);
+        Assert.Equal(compare.Worse + compare.Better - presenceRows, fact.Metadata[ConfigChangeAttribution.MetaWorse] + fact.Metadata[ConfigChangeAttribution.MetaBetter]);
+    }
+
+    /// <summary>
+    /// A non-dynamic setting still pending its restart keeps its own verdict and headline when the after half
+    /// is also young: nothing should have moved, so what is missing from the compare is not the news.
+    /// </summary>
+    [Fact]
+    public void Compose_ANonDynamicChangePendingRestart_KeepsItsVerdict_WhenTheAfterHalfIsYoungToo()
+    {
+        var snapshots = new List<ConfigChangeDiff.ServerConfigSnapshot>
+        {
+            new(T0.AddHours(-2), "max worker threads", 0, 0, false, true),
+            new(T0, "max worker threads", 2048, 0, false, true),
+        };
+        var evt = Assert.Single(Events(snapshots, T0.AddHours(-4), T0));
+        var (before, after) = Scored([Cpu(50), Wait("WRITELOG", 0.30)], [Cpu(51)]);
+        var fact = ConfigChangeAttribution.BuildFact(1, evt, 0, ConfigChangeAttribution.WindowsFor(T0, T0.AddMinutes(10)),
+            ComparisonBanding.Compare(before, after, NoDispersion, coverageCaveat: false), FullCoverage(), FullCoverage(600_000));
+        Assert.Equal(1, fact.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
+
+        var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
+        Assert.Contains("takes effect at the next restart", advice.Headline, StringComparison.Ordinal);
+        Assert.Contains("Nothing should have moved yet", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("not yet comparable", advice.Headline, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// A non-dynamic setting whose configured value moved while in-use did not: the engine is still running
     /// the old value, nothing should have moved, and the card says the change takes effect at restart
@@ -1220,5 +1386,5 @@ public sealed class ConfigChangeAttributionTests
         AbsStdDevFloor = BaselineMath.AbsStdDevFloorFor(MetricNames.Cpu)
     };
 
-    private static WindowCoverage FullCoverage() => new() { NominalMs = 14_400_000, ObservedMs = 14_400_000, SampleCount = 16, LargestGapMs = 0 };
+    private static WindowCoverage FullCoverage(double nominalMs = 14_400_000) => new() { NominalMs = nominalMs, ObservedMs = nominalMs, SampleCount = 16, LargestGapMs = 0 };
 }
