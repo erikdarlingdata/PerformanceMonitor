@@ -82,7 +82,10 @@ public partial class ServerTab : UserControl
             return;
         }
 
-        var times = data.Select(d => d.SampleTime.ToOADate()).ToArray();
+        /* #4766: the CPU read asks for the UTC frame (RefreshCpuAsync), so each point is plotted at its own instant:
+           the two readings of a repeated hour are two points, and the ticks and the hover word the instant in the
+           display zone. SampleTime is the server's wall clock and is not what a chart plots. */
+        var times = data.Select(d => d.SampleTimeUtc.ToOADate()).ToArray();
         var sqlCpu = data.Select(d => (double)d.SqlServerCpu).ToArray();
         var otherCpu = data.Select(d => (double)d.OtherProcessCpu).ToArray();
 
