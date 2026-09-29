@@ -151,8 +151,10 @@ public class LocalClockBucketKeyTests : IClassFixture<SharedDuckDbFixture>, IDis
                 Assert.Contains(parameter, sql, StringComparison.Ordinal);
         }
 
+        /* #4731: one DATE per source CTE (the collection log and the event rows) — the per-day divisor is now the
+           covered-day count taken from the slots those two CTEs produce, not a third and fourth DATE of its own. */
         foreach (var metric in ownExtract)
-            Assert.Equal(3, Regex.Matches(BaselineProvider.GetBaselineQuery(metric)!, Regex.Escape(BaselineProvider.LocalCollectionTime + "::DATE")).Count);
+            Assert.Equal(2, Regex.Matches(BaselineProvider.GetBaselineQuery(metric)!, Regex.Escape(BaselineProvider.LocalCollectionTime + "::DATE")).Count);
 
         Assert.Contains("FROM v_server_properties", BaselineProvider.ServerClockSql, StringComparison.Ordinal);
         Assert.Contains("utc_offset_minutes IS NOT NULL", BaselineProvider.ServerClockSql, StringComparison.Ordinal);

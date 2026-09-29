@@ -366,8 +366,9 @@ public sealed class LocalClockBucketKeyTests
         Assert.Contains("internal const string LocalCollectionTime = BaselineLocalClock.LocalCollectionTimeSql;", lite, StringComparison.Ordinal);
         Assert.DoesNotMatch(new Regex(@"EXTRACT\s*\(\s*(HOUR|DOW)\s+FROM\s+collection_time\s*\)", RegexOptions.IgnoreCase), lite);
         Assert.DoesNotMatch(new Regex(@"(?<![\w.])collection_time::DATE"), lite);
-        /* Two event arms × (hour, dow, three dates) = 10 hand references, plus the scaffold's 3, plus the alias's own line. */
-        Assert.True(Regex.Matches(lite, @"\+ LocalCollectionTime \+").Count >= 13, "Lite's event arms or scaffold lost a LocalCollectionTime reference");
+        /* #4731: the two event arms share ONE helper (EventBaselineSql) with two source CTEs, each extracting (hour, dow,
+           date) = 6 hand references, plus the scaffold's 3. */
+        Assert.True(Regex.Matches(lite, @"\+ LocalCollectionTime \+").Count >= 9, "Lite's event arms or scaffold lost a LocalCollectionTime reference");
 
         /* And both providers bind the three clock parameters after the window bounds, in the same order. */
         var darling = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Analysis", "PgBaselineProvider.cs");
