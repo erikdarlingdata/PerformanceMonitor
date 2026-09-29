@@ -1004,10 +1004,7 @@ raw AS
         -- interval with no executions, so the gap to the previous stored point is the interval's length PLUS
         -- every quiet interval before it. Only a point whose rows stored no end (collected before the column)
         -- keeps that gap, as sample_interval_seconds does (#3540).
-        COALESCE(
-            extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))),
-            extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))
-        ) AS interval_seconds
+        COALESCE(extract(epoch FROM (date_trunc('second', MAX(interval_end_time_utc)) - date_trunc('second', point_time))), extract(epoch FROM (date_trunc('second', point_time) - date_trunc('second', LAG(point_time) OVER (ORDER BY point_time))))) AS interval_seconds
     FROM placed
     GROUP BY point_time
 )
