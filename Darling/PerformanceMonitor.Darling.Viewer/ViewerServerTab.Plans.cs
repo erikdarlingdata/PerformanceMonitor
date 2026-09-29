@@ -98,6 +98,9 @@ public partial class ViewerServerTab
         header.Children.Add(closeBtn);
 
         var tab = new TabItem { Header = header, Content = viewer };
+        /* #4684: a StackPanel Header leaves the tab and its close button nameless to UI Automation (TabItem.ToString() fallback). */
+        System.Windows.Automation.AutomationProperties.SetName(tab, label);
+        System.Windows.Automation.AutomationProperties.SetName(closeBtn, $"Close {label}");
         closeBtn.Tag = tab;
         closeBtn.Click += ClosePlanTab_Click;
 

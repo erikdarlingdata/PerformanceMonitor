@@ -481,7 +481,7 @@
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                   Checked="DatabaseFilter_CheckChanged" Unchecked="DatabaseFilter_CheckChanged"
-                                                  Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
+                                                  Foreground="{DynamicResource ForegroundBrush}" FontSize="11" AutomationProperties.Name="{Binding DisplayName}">
                                             <TextBlock Text="{Binding DisplayName}"/>
                                         </CheckBox>
                                     </DataTemplate>
@@ -598,7 +598,7 @@
                                 <DataTemplate>
                                     <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                               Checked="WaitType_CheckChanged" Unchecked="WaitType_CheckChanged"
-                                              Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
+                                              Foreground="{DynamicResource ForegroundBrush}" FontSize="11" AutomationProperties.Name="{Binding DisplayName}">
                                         <TextBlock Text="{Binding DisplayName}"/>
                                     </CheckBox>
                                 </DataTemplate>
@@ -2219,7 +2219,7 @@
                                         <DataTemplate>
                                             <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                       Checked="MemoryClerk_CheckChanged" Unchecked="MemoryClerk_CheckChanged"
-                                                      Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
+                                                      Foreground="{DynamicResource ForegroundBrush}" FontSize="11" AutomationProperties.Name="{Binding DisplayName}">
                                                 <TextBlock Text="{Binding DisplayName}"/>
                                             </CheckBox>
                                         </DataTemplate>
@@ -2717,7 +2717,7 @@
                                 <DataTemplate>
                                     <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                               Checked="PerfmonCounter_CheckChanged" Unchecked="PerfmonCounter_CheckChanged"
-                                              Foreground="{DynamicResource ForegroundBrush}" FontSize="11">
+                                              Foreground="{DynamicResource ForegroundBrush}" FontSize="11" AutomationProperties.Name="{Binding DisplayName}">
                                         <TextBlock Text="{Binding DisplayName}"/>
                                     </CheckBox>
                                 </DataTemplate>

@@ -2197,7 +2197,7 @@
                     </Expander>
 
                     <!-- Wait Stats Summary -->
-                    <Expander IsExpanded="True" Margin="0,0,0,8">
+                    <Expander IsExpanded="True" Margin="0,0,0,8" AutomationProperties.Name="Wait Stats Summary">
                         <Expander.Header>
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="Wait Stats Summary" VerticalAlignment="Center"/>
@@ -2263,7 +2263,7 @@
                     </Expander>
 
                     <!-- Expensive Queries -->
-                    <Expander IsExpanded="True" Margin="0,0,0,8">
+                    <Expander IsExpanded="True" Margin="0,0,0,8" AutomationProperties.Name="Expensive Queries (Top 20 by CPU)">
                         <Expander.Header>
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="Expensive Queries (Top 20 by CPU)" VerticalAlignment="Center"/>

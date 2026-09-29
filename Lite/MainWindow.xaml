@@ -257,7 +257,7 @@
                         </StackPanel>
                         <Button Grid.Column="1" Content="«" Click="ToggleSidebar_Click"
                                 ToolTip="Toggle sidebar" VerticalAlignment="Top"
-                                Width="24" Height="24" Padding="0" FontSize="14"/>
+                                Width="24" Height="24" Padding="0" FontSize="14" AutomationProperties.Name="Toggle sidebar"/>
                     </Grid>
                 </Border>
 
@@ -295,47 +295,47 @@
                         <Button x:Name="ManageServersButton" Content="Manage Servers" Click="ManageServersButton_Click" Margin="0,8,0,0"/>
                         <Button x:Name="ManageTagsButton" Content="Manage Tags" Click="ManageTagsButton_Click" Margin="0,8,0,0"/>
                         <Button Click="OpenPlanViewerButton_Click" Margin="0,8,0,0"
-                                ToolTip="Open or paste an execution plan (independent of any server)">
+                                ToolTip="Open or paste an execution plan (independent of any server)" AutomationProperties.Name="Open Plan Viewer">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#x1F50D;" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <TextBlock Text="Open Plan Viewer" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
                         <Button x:Name="ImportDataButton" Click="ImportDataButton_Click" Margin="0,8,0,0"
-                                ToolTip="Import historical data from a previous Lite install">
+                                ToolTip="Import historical data from a previous Lite install" AutomationProperties.Name="{Binding Text, ElementName=ImportDataButtonText}">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE8B5;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <TextBlock x:Name="ImportDataButtonText" Text="Import Data" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
                         <Button x:Name="ImportSettingsButton" Click="ImportSettingsButton_Click" Margin="0,8,0,0"
-                                ToolTip="Import server connections and settings from a previous Lite install">
+                                ToolTip="Import server connections and settings from a previous Lite install" AutomationProperties.Name="Import Settings">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE8FA;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <TextBlock Text="Import Settings" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
                         <Button Click="ViewLogButton_Click" Margin="0,8,0,0"
-                                ToolTip="Open the current application log file">
+                                ToolTip="Open the current application log file" AutomationProperties.Name="View Log">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <TextBlock Text="View Log" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
                         <Button Click="OpenLogFolderButton_Click" Margin="0,8,0,0"
-                                ToolTip="Open the log folder in Explorer (for grabbing logs to attach to bug reports)">
+                                ToolTip="Open the log folder in Explorer (for grabbing logs to attach to bug reports)" AutomationProperties.Name="Open Log Folder">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE838;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <TextBlock Text="Open Log Folder" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
-                        <Button x:Name="SettingsButton" Click="SettingsButton_Click" Margin="0,8,0,0">
+                        <Button x:Name="SettingsButton" Click="SettingsButton_Click" Margin="0,8,0,0" AutomationProperties.Name="Settings">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <TextBlock Text="Settings" VerticalAlignment="Center"/>
                             </StackPanel>
                         </Button>
-                        <Button Click="AboutButton_Click" Margin="0,8,0,0">
+                        <Button Click="AboutButton_Click" Margin="0,8,0,0" AutomationProperties.Name="About">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="&#xE897;" FontFamily="Segoe MDL2 Assets" FontSize="12" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <TextBlock Text="About" VerticalAlignment="Center"/>
@@ -560,7 +560,7 @@
                     <TabItem Header="Recommendations" x:Name="RecommendationsTab">
                         <controls:RecommendationsTab x:Name="RecommendationsContent"/>
                     </TabItem>
-                    <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed">
+                    <TabItem x:Name="MainWindowPlanViewerTab" Visibility="Collapsed" AutomationProperties.Name="Plan Viewer">
                         <TabItem.Header>
                             <StackPanel Orientation="Horizontal">
                                 <!-- #4678: shadow the app-level TextBlock style so the label inherits the TabItem Foreground (AccentForegroundBrush when selected). -->
@@ -568,7 +568,7 @@
                                 <TextBlock Text="Plan Viewer" VerticalAlignment="Center" FontWeight="SemiBold"/>
                                 <Button Style="{DynamicResource TabCloseButton}"
                                         Click="MainWindowPlanViewerClose_Click"
-                                        Margin="4,0,0,0"/>
+                                        Margin="4,0,0,0" AutomationProperties.Name="Close Plan Viewer tab"/>
                             </StackPanel>
                         </TabItem.Header>
                         <Grid AllowDrop="True" PreviewDrop="MainWindowPlanViewer_Drop"
