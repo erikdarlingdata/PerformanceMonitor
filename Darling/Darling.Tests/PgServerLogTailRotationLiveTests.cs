@@ -257,8 +257,8 @@ public sealed class PgServerLogTailRotationLiveTests
         /* #4719: the burst starts on a fresh file. The stderr target rotates a file at log_rotation_size (10 MB by
            default), and the earlier tests of this collection leave lines in the current file (TheNextOffset writes
            2 MB). A burst on top of them rotated the file in the MIDDLE of the burst, so the lock-wait entry landed in
-           a new file that can share the old file's mtime second (the shipped query's newest-file pick then returns
-           the old file) or leave the marker and the entry in different files. On a fresh file the whole test stays
+           a new file that can share the old file's mtime second (a newest-file pick with no tiebreak can then return
+           the old file, #4723) or leave the marker and the entry in different files. On a fresh file the whole test stays
            inside one file whatever ran before it: 5000 records are ~6.7 MB, past the 4 MB window, ~3.7 MB under the bar. */
         await RotateAsync(connection, ct);
         _ = await LogAsync(connection, Marker(), ct);
