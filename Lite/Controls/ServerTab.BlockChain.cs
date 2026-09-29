@@ -72,8 +72,11 @@ public partial class ServerTab : UserControl
                 var endUtc = BlockingSlicer.SelectionEndUtc;
                 if (startUtc.HasValue && endUtc.HasValue)
                 {
-                    start = ServerTimeHelper.ToServerTime(startUtc.Value);
-                    end = ServerTimeHelper.ToServerTime(endUtc.Value);
+                    /* The slicer's selection is a pair of UTC instants and event_time is the Extended Events @timestamp,
+                       also UTC (BlockedProcessReportCollector), so the pair is passed as it is (#4766). It used to go
+                       through the process-wide server clock first and read a window shifted by that server's offset. */
+                    start = startUtc.Value;
+                    end = endUtc.Value;
                 }
                 else
                 {

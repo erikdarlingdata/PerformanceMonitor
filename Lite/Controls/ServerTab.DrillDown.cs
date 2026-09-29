@@ -61,8 +61,8 @@ public partial class ServerTab : UserControl
         if (sender is not MenuItem menuItem) return;
         if (menuItem.Tag is not (string waitType, DateTime time)) return;
 
-        // ±30 minute window around the clicked point (the chart still plots server local time, so the point goes to UTC first)
-        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30);
+        // ±30 minute window around the clicked point (the chart plots the UTC instant, so the point is the centre as it is)
+        var (fromDate, toDate) = GetDrillWindow(time, 30, 30);
 
         var window = new Windows.WaitDrillDownWindow(
             _dataService, _serverId, waitType, 1, fromDate, toDate,
@@ -130,7 +130,7 @@ public partial class ServerTab : UserControl
     /// </summary>
     private async void OnActiveQueriesDrillDown(DateTime time)
     {
-        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30);
+        var (fromDate, toDate) = GetDrillWindow(time, 30, 30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         SelectActiveQueriesForDrillDown();
@@ -142,7 +142,7 @@ public partial class ServerTab : UserControl
 
     private async void OnBlockingDrillDown(DateTime time)
     {
-        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30);
+        var (fromDate, toDate) = GetDrillWindow(time, 30, 30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 8; // Blocking
@@ -153,7 +153,7 @@ public partial class ServerTab : UserControl
 
     private async void OnDeadlockDrillDown(DateTime time)
     {
-        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30);
+        var (fromDate, toDate) = GetDrillWindow(time, 30, 30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 8; // Blocking

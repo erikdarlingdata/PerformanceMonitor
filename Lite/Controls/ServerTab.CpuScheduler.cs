@@ -35,7 +35,7 @@ public partial class ServerTab : UserControl
 
     private CpuSchedulerChartRenderer? _cpuSchedRendererField;
     private CpuSchedulerChartRenderer CpuSchedRenderer =>
-        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, t => ToServerLocal(t));
+        _cpuSchedRendererField ??= new CpuSchedulerChartRenderer(_chartHelper, t => t, GetPickerZone);
 
     /// <summary>Applies the shared chrome + hover to the scheduler chart up front (constructor), so it
     /// doesn't flash white before the tab's first load — matching the CPU/Memory charts.</summary>
@@ -43,7 +43,7 @@ public partial class ServerTab : UserControl
     {
         ApplyTheme(CpuSchedulerChart);
         CpuSchedulerChart.Refresh();
-        _cpuSchedulerHover = new ChartHoverHelper(CpuSchedulerChart, "tasks");
+        _cpuSchedulerHover = new ChartHoverHelper(CpuSchedulerChart, "tasks", displayZone: GetPickerZone);
     }
 
     /// <summary>
@@ -77,8 +77,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = ToServerLocal(fromDate.Value);
-            rangeEnd = ToServerLocal(toDate.Value);
+            rangeStart = fromDate.Value;
+            rangeEnd = toDate.Value;
         }
         else
         {
