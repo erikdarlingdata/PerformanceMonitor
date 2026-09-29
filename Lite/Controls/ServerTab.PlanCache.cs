@@ -78,8 +78,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         double globalMax = 0;

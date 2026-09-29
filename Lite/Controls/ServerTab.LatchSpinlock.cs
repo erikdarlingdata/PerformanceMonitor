@@ -91,8 +91,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         LatchSpinlockRenderer.Render(LatchStatsChart, _latchStatsHover, data,
@@ -113,8 +112,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         LatchSpinlockRenderer.Render(SpinlockStatsChart, _spinlockStatsHover, data,

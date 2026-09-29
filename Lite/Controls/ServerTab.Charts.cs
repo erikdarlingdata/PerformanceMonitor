@@ -69,8 +69,7 @@ public partial class ServerTab : UserControl
         _cpuHover?.Clear();
         ApplyTheme(CpuChart);
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -115,8 +114,7 @@ public partial class ServerTab : UserControl
         _memoryHover?.Clear();
         ApplyTheme(MemoryChart);
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -193,8 +191,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(MemoryGrantSizingChart);
         ApplyTheme(MemoryGrantActivityChart);
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -298,8 +295,7 @@ public partial class ServerTab : UserControl
         _memoryPressureEventsHover?.Clear();
         ApplyTheme(MemoryPressureEventsChart);
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -407,8 +403,7 @@ public partial class ServerTab : UserControl
         _tempDbHover?.Clear();
         ApplyTheme(TempDbChart);
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -464,8 +459,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(TempDbSizeChart);
         _tempDbSizeHover?.Clear();
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -501,8 +495,7 @@ public partial class ServerTab : UserControl
         _tempDbFileIoHover?.Clear();
         ApplyTheme(TempDbFileIoChart);
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -561,8 +554,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(FileIoReadChart);
         ApplyTheme(FileIoWriteChart);
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -673,8 +665,7 @@ public partial class ServerTab : UserControl
         ApplyTheme(FileIoReadThroughputChart);
         ApplyTheme(FileIoWriteThroughputChart);
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -762,8 +753,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _lockWaitTrendHover?.Clear();
@@ -826,8 +816,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _blockingTrendHover?.Clear();
@@ -905,8 +894,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _deadlockTrendHover?.Clear();
@@ -985,8 +973,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _currentWaitsDurationHover?.Clear();
@@ -1049,8 +1036,7 @@ public partial class ServerTab : UserControl
         }
         else
         {
-            rangeEnd = ToServerLocal(DateTime.UtcNow);
-            rangeStart = rangeEnd.AddHours(-hoursBack);
+            (rangeStart, rangeEnd) = GetChartWindow(hoursBack, null, null);
         }
 
         _currentWaitsBlockedHover?.Clear();
@@ -1104,8 +1090,8 @@ public partial class ServerTab : UserControl
 
     /// <summary>
     /// Draws the window's baseline discontinuities on one Performance Trends chart (#3653 A5): a dashed
-    /// vertical line per marker at its instant on the server's display clock (<c>UtcOffsetMinutes</c>, as
-    /// every point here is shifted), legend-named with the shared <see cref="BaselineDiscontinuities.Sentence"/>.
+    /// vertical line per marker at its instant on the server's clock, as every point here is placed,
+    /// legend-named with the shared <see cref="BaselineDiscontinuities.Sentence"/>.
     /// The identity-epoch carriers (#3694, #3705) forget this server's delta baselines when the target
     /// restarts, fails over, is renamed or has its statistics reset; the four series here are all
     /// delta-family rates, so across such an instant they show a step that is the instrument re-baselining,
@@ -1133,8 +1119,7 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(QueryDurationTrendChart, "Query Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -1168,8 +1153,7 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(ProcDurationTrendChart, "Procedure Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -1205,8 +1189,7 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(QueryStoreDurationTrendChart, "Query Store Duration", "Duration (ms/sec)"); return; }
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -1240,8 +1223,7 @@ public partial class ServerTab : UserControl
         var rated = data.Where(d => d.HasRate).ToList();
         if (rated.Count == 0) { RefreshEmptyChart(ExecutionCountTrendChart, "Executions", "Executions/sec"); return; }
 
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 
@@ -1528,8 +1510,7 @@ public partial class ServerTab : UserControl
            those reads take — the selected tab's. This runs from a chart on the visible tab, where that
            is this tab. */
         var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.ActiveServerClock);
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         chart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         chart.Plot.Axes.AutoScaleY();
         chart.Refresh();
@@ -1545,8 +1526,7 @@ public partial class ServerTab : UserControl
         /* Pin the X axis to the settable window (the same idiom as the CPU / tempdb-size charts) rather than
            AutoScale()'ing to the data — a bare AutoScale fits X to the data plus ScottPlot's ~10% side margins,
            which reads as symmetric dead space. This is the one chart the window-pin campaign missed. */
-        DateTime rangeEnd = toDate ?? ToServerLocal(DateTime.UtcNow);
-        DateTime rangeStart = fromDate ?? rangeEnd.AddHours(-hoursBack);
+        var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         double xMin = rangeStart.ToOADate();
         double xMax = rangeEnd.ToOADate();
 

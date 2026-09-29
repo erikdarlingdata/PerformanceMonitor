@@ -44,11 +44,11 @@ internal static class AxesExtensions
                    Apps that pre-convert plotted X (the Darling Viewer) leave UiTimeContext at its
                    identity default, making this a no-op there — do NOT also wire the hook in such
                    an app, that double-converts. Lite's converter follows the server's clock by date,
-                   so the conversion is not one fixed shift: converted values never decrease, but they
-                   are not strictly increasing, because server-local times inside a skipped hour convert
-                   to the same instant. The pass-reset comparison below counts an equal value as "did
-                   not increase", so a tick that repeats the one before it starts a new pass and prints
-                   its date again. */
+                   so the conversion is not one fixed shift, and converted values can decrease: across
+                   the spring gap ToUtc(02:30) is 07:30Z and ToUtc(03:00) is 07:00Z, because a time
+                   inside the skipped hour converts with the offset from before the gap. The pass-reset
+                   comparison below treats an equal or lower value as "did not increase", so a tick that
+                   repeats or falls behind the one before it starts a new pass and prints its date again. */
                 dt = UiTimeContext.ConvertForDisplay(dt);
 
                 /* ScottPlot re-invokes this formatter from the leftmost tick on every render
