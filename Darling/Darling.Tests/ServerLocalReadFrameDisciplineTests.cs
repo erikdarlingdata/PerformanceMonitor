@@ -85,7 +85,7 @@ public sealed class ServerLocalReadFrameDisciplineTests
     /// hour off there). Matched on the conversion because that is the step that puts the RETURNED value in
     /// UTC; the window bounds stay in SQL as an hour-wide pre-filter (<see cref="PgDeSkew"/>).</summary>
     private static readonly Regex ClockRowDeSkew =
-        new(@"clock\.ToUtc\(\s*reader\.GetDateTime\(0\)\s*\)");
+        new(@"clock\.ToUtc\(\s*reader\.GetDateTime\(0\)\s*\)|ServerLocalTimes\.TraceLinesInWindow\(");
 
     /// <summary>
     /// Every literal-SQL read of the Default Trace, with the de-skew form it must carry and why it differs.
@@ -104,8 +104,8 @@ public sealed class ServerLocalReadFrameDisciplineTests
            config captures' naive-UTC times, so an un-de-skewed bound would put the line OUTSIDE the span on
            every non-UTC server and the anchor would silently never resolve — the selection defect, not the
            rendering one. */
-        ("Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", 3, false, false,
-            "the pass's trace-anchor read (ReconfigureTraceLinesForAttributionSql): one projection + both span bounds, byte-identical in form to the MCP read"),
+        ("Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", 2, false, true,
+            "the pass's trace-anchor read (ReconfigureTraceLinesForAttributionSql): the raw event_time projection, converted per line in ServerLocalTimes.TraceLinesInWindow with the server's ServerClock, and both span bounds as an hour-wide pre-filter (#4821)"),
         ("Lite/Analysis/AnalysisService.cs", 0, true, false,
             "the Lite pass's trace-anchor read: both span bounds shifted into the server's frame by the one collected offset, then the row de-skewed in C#"),
     ];

@@ -58,7 +58,11 @@ public sealed class CreationTimeClockFrameDisciplineTests
     /// </summary>
     private static readonly Regex DeSkew =
         new(@"creation_time\s*-\s*(?:make_interval\s*\(\s*mins\s*=>\s*\w+\.offset_minutes\s*\)"
-            + @"|\w+\.offset_minutes\s*\*\s*INTERVAL\s*'1'\s*MINUTE)\s+AS\s+creation_time_utc",
+            + @"|\w+\.offset_minutes\s*\*\s*INTERVAL\s*'1'\s*MINUTE)\s+AS\s+creation_time_utc"
+            /* Darling's form since #4821: the exact conversion is the reader's (ServerLocalTimes.CreatedByWindowStart,
+               through the server's ServerClock), so the SQL keeps the newest offset only as a rough filter an hour
+               wider than the bound. Still a de-skewed comparison, never a bare one. */
+            + @"|creation_time\s*-\s*make_interval\s*\(\s*mins\s*=>\s*\w+\.offset_minutes\s*\)\s*<=\s*\$\d+\s*\+\s*interval\s*'1 hour'",
             RegexOptions.IgnoreCase);
 
     /// <summary>
@@ -155,6 +159,7 @@ public sealed class CreationTimeClockFrameDisciplineTests
             "AND   creation_time_utc <= $2",
             "creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,",
             "creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,",
+            "AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'",
             /* A projection, and a comparison against another COLUMN rather than a window bound. */
             "        creation_time,",
             "MAX(creation_time) AS creation_time,",
@@ -172,6 +177,7 @@ public sealed class CreationTimeClockFrameDisciplineTests
            by finding nothing rather than by the sites being present. */
         Assert.Matches(DeSkew, "creation_time - make_interval(mins => svr.offset_minutes) AS creation_time_utc,");
         Assert.Matches(DeSkew, "creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,");
+        Assert.Matches(DeSkew, "AND   creation_time - make_interval(mins => svr.offset_minutes) <= $2 + interval '1 hour'");
         Assert.DoesNotMatch(DeSkew, "        creation_time,");
     }
 
