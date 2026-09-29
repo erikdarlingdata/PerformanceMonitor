@@ -85,23 +85,75 @@ public sealed class DarlingCloudIdentityProbeTests
         Assert.Equal("Standard_D2s_v3", identity.InstanceType);
     }
 
+    /// <summary>A ceiling for a probe that never cancels its handler at all (#4741). It is a hang guard, not a
+    /// latency bound: the budget's timer callback and every continuation after it need a free thread-pool
+    /// thread, and a suite that has the pool's threads blocked delays them by seconds (see the test below).</summary>
+    private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(30);
+
     [Fact]
     public async Task ProbeAsync_NeitherCloudResponds_ReturnsNone_WithinItsOwnBudget()
     {
+        /* #4741: this used to assert stopwatch.ElapsedMilliseconds < 2000 around the whole call, and failed on
+           CI at 2035 and 2084 ms with the probe unchanged. CancelAfter's timer callback, and every continuation
+           after it, run on a thread-pool thread. When the shard's other tests hold the pool's threads the pool
+           adds one thread per ~500 ms, so the budget FIRES late — measured with the pool's threads blocked
+           (4 processors): 2 of 28 runs took 2289 and 2492 ms, the cancellation itself landing that late — so
+           the moment the handler's token is cancelled is no better a clock than the caller's stopwatch. The
+           clock cannot tell a slow probe from a starved pool, and the probe has no say in the second.
+           What the probe DOES own, asserted below with no upper time bound:
+             - it is the only thing that can cancel the handler's token (the caller passes
+               CancellationToken.None), so the request ended because the probe's budget cancelled it, not
+               because the probe walked away from a request it left pending;
+             - the budget cannot have fired early (a one-sided bound: starvation only makes it later);
+             - the budget it arms is 200 ms and only one is armed
+               (ProbeBudget_IsTwoHundredMilliseconds, CreateHandler_ArmsExactlyOneBudget_NotAPerRequestTimeout).
+           HangGuard is the only ceiling: a probe with no budget at all would otherwise wait on the handler
+           until CI's job timeout. */
+        var clock = new Stopwatch();
+        var handlerEndedAtMs = new long[] { -1 };
         var handler = new FakeHandler(async (_, cancellationToken) =>
         {
             /* Simulates a host with no metadata endpoint reachable at all: the request hangs until the
                probe's own 200 ms budget cancels IT, never until some external test timeout does. */
-            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref handlerEndedAtMs[0], clock.ElapsedMilliseconds);
+            }
+
             throw new InvalidOperationException("unreachable");
         });
 
-        var stopwatch = Stopwatch.StartNew();
-        var identity = await DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None);
-        stopwatch.Stop();
+        clock.Start();
+        CloudIdentity identity;
+        try
+        {
+            identity = await DarlingCloudIdentityProbe.ProbeAsync(handler, CancellationToken.None).WaitAsync(HangGuard);
+        }
+        catch (TimeoutException)
+        {
+            Assert.Fail($"ProbeAsync was still waiting after {HangGuard.TotalSeconds:0} s: nothing cancelled the handler's request, so the probe's own {DarlingCloudIdentityProbe.ProbeBudget.TotalMilliseconds:0} ms budget is not what bounds it");
+            throw;
+        }
 
         Assert.Equal(CloudIdentity.None, identity);
-        Assert.True(stopwatch.ElapsedMilliseconds < 2000, $"took {stopwatch.ElapsedMilliseconds} ms — the 200 ms budget did not bound it");
+        var endedAt = Interlocked.Read(ref handlerEndedAtMs[0]);
+        Assert.True(endedAt >= 0, "ProbeAsync returned while the handler's request was still pending: the budget must cancel the request, not abandon it");
+        Assert.True(
+            endedAt >= DarlingCloudIdentityProbe.ProbeBudget.TotalMilliseconds / 2,
+            $"the handler's request ended after {endedAt} ms, well before the {DarlingCloudIdentityProbe.ProbeBudget.TotalMilliseconds:0} ms budget: something other than the probe's budget ended it");
+    }
+
+    /// <summary>The number the timing test above no longer measures with a clock (#4741): the 200 ms total the
+    /// whole probe shares. The old wall-clock check also failed a budget that grew to seconds; this fails it
+    /// without a clock to race, so raising the budget is a deliberate edit of this test.</summary>
+    [Fact]
+    public void ProbeBudget_IsTwoHundredMilliseconds()
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(200), DarlingCloudIdentityProbe.ProbeBudget);
     }
 
     [Fact]
