@@ -489,11 +489,12 @@ public static class DarlingCliCommands
 
         /* A connection string Npgsql cannot parse (sslmode=NotARealSslMode, say) throws when the connection takes
            it: that is a problem with the setting, not an unreachable store, so it exits with the config code. */
-        await using var connection = new NpgsqlConnection();
+        NpgsqlConnection storeConnection;
         try
         {
-            connection.ConnectionString = DarlingStoreConnection.PinSessionTimeZoneUtc(
-                DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName));
+            storeConnection = new NpgsqlConnection(
+                DarlingStoreConnection.PinSessionTimeZoneUtc(
+                    DarlingStoreConnection.WithApplicationName(connectionString, DarlingManagedPostgres.CliApplicationName)));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -501,6 +502,7 @@ public static class DarlingCliCommands
             return CheckSettingsExitCode.ConfigError;
         }
 
+        await using var connection = storeConnection;
         try
         {
             await connection.OpenAsync(cancellationToken);
