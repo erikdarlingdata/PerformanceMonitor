@@ -11017,6 +11017,9 @@ LIMIT 1";
                this puts the sentence that names the setting and the issue beside it, on the same HostNote channel. */
             result = DarlingCollectorRunner.WithForeignZoneLinesNote(result);
 
+            /* #4699: a log read that fell back or skipped bytes or files says so beside the count. */
+            result = DarlingCollectorRunner.WithLogResumeNotes(result);
+
             /* #4058 L1: a plan-capture run that skipped forged captures (a NULL query id or duration out of
                the guarded CASE chain) carries their count; this puts the sentence that names the issue
                beside it, on the same HostNote channel, following the ForeignZoneLines pattern above. */

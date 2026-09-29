@@ -753,6 +753,34 @@ public sealed class DarlingCollectorRunner
     }
 
     /// <summary>
+    /// <paramref name="result"/> with the resume notes of the stderr log tail merged into its host note for each
+    /// resume measurement the run recorded above zero (#4699); otherwise unchanged.
+    /// </summary>
+    internal static CollectorRunResult WithLogResumeNotes(CollectorRunResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        var hostNote = result.HostNote;
+
+        foreach (var (label, note) in new[]
+        {
+            (PgServerLogTail.ResumeFileMissingMeasurement, PgServerLogTail.LogResumeLostNote),
+            (PgServerLogTail.ResumeFileRecycledMeasurement, PgServerLogTail.LogResumeLostNote),
+            (PgServerLogTail.FilesSkippedByRotationMeasurement, PgServerLogTail.LogFilesSkippedNote),
+            (PgServerLogTail.BytesSkippedMeasurement, PgServerLogTail.LogBytesSkippedNote),
+            (PgServerLogTail.MatchesLimitedMeasurement, PgServerLogTail.LogMatchesLimitedNote),
+        })
+        {
+            if (result.Measurements.Any(m => string.Equals(m.Label, label, StringComparison.Ordinal) && m.Value > 0))
+            {
+                hostNote = EnumeratedCollectorDriver.MergeNotes(hostNote, note);
+            }
+        }
+
+        return ReferenceEquals(hostNote, result.HostNote) ? result : result with { HostNote = hostNote };
+    }
+
+    /// <summary>
     /// <paramref name="result"/> with <see cref="PgPlanCaptureCollector.ForgedCaptureNote"/> merged into its host
     /// note when the run's definition recorded <see cref="PgPlanCaptureCollector.ForgedCaptureMeasurement"/>
     /// (#4058 L1), following the exact pattern <see cref="WithForeignZoneLinesNote"/> sets above; otherwise
