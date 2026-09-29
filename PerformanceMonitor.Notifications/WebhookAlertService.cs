@@ -14,6 +14,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
@@ -471,6 +472,61 @@ public class WebhookAlertService
     public (int ConsecutiveFailures, string? LastError) GetPagerDutyHealth() =>
         (_consecutivePagerDutyFailures, _lastPagerDutyError);
 
+    /// <summary>
+    /// The failures in a row at which a webhook channel counts as failing (#4750). It is the count the
+    /// channels' own logging already turns on: each channel logs its first this-many failures in a row at
+    /// Error and after that only every 50th, so a channel that reaches it has gone quiet in the log while it
+    /// is still failing. Darling's "Notification Channel Failing" alert and Lite's tray notice both read
+    /// this constant, so the point where the log goes quiet and the point where the signal speaks cannot
+    /// drift apart.
+    /// </summary>
+    public const int FailingChannelThreshold = 3;
+
+    /// <summary>
+    /// Every channel's failures in a row (#4750), for the hosts' "a channel keeps failing" signal: a channel
+    /// can fail for weeks while another one delivers every alert, and until this the counts were read only by
+    /// tests. The COUNT only, deliberately not the last error: a webhook error can carry the endpoint's URL,
+    /// and a Slack or Teams webhook URL is the credential, so nothing built from this can leak it. A channel
+    /// that never failed, or that delivered since its last failure, reads 0. Names are the
+    /// <see cref="NotificationRouter"/> channel names.
+    ///
+    /// <para><b>A channel with no destination left.</b> Turning a failing channel off is the expected response
+    /// to the signal, and a channel with nothing to send to can neither fail nor deliver, so its count would sit
+    /// at its last value until the process restarted and the signal would never close. Each count therefore
+    /// says whether the channel is still <see cref="WebhookChannelFailureCount.Configured"/>: the parent's
+    /// settings carry a destination, or an enabled route does
+    /// (<see cref="NotificationRouter.AnyRouteConfiguresWebhookChannel"/>; Lite has no routes, so there only the
+    /// settings count). For a channel with none, this returns that channel's CURRENT count with Configured
+    /// false, so the host can close what it announced, and THEN resets the count to 0 and clears the last
+    /// error, as a delivery does. A channel that is turned back on starts from zero, and does not raise the
+    /// signal at once on a count from before it was turned off. So the read is not idempotent for a channel
+    /// with no destination: the second read of it returns 0.</para>
+    /// </summary>
+    public IReadOnlyList<WebhookChannelFailureCount> GetChannelFailureCounts() => new[]
+    {
+        ChannelFailureCount(NotificationRouter.TeamsChannel, TeamsConfigured, ref _consecutiveTeamsFailures, ref _lastTeamsError),
+        ChannelFailureCount(NotificationRouter.SlackChannel, SlackConfigured, ref _consecutiveSlackFailures, ref _lastSlackError),
+        ChannelFailureCount(NotificationRouter.GenericChannel, GenericConfigured, ref _consecutiveGenericFailures, ref _lastGenericError),
+        ChannelFailureCount(NotificationRouter.PagerDutyChannel, PagerDutyConfigured, ref _consecutivePagerDutyFailures, ref _lastPagerDutyError),
+    };
+
+    /// <summary>One channel's entry for <see cref="GetChannelFailureCounts"/>: a configured channel reports its
+    /// count; one with no destination reports its current count as unconfigured and clears its tallies.</summary>
+    private WebhookChannelFailureCount ChannelFailureCount(
+        string channel, bool settingsConfigured, ref int failures, ref string? lastError)
+    {
+        var configured = settingsConfigured
+            || NotificationRouter.AnyRouteConfiguresWebhookChannel(_settings.NotificationRoutes, channel);
+        if (configured)
+        {
+            return new WebhookChannelFailureCount(channel, Volatile.Read(ref failures), Configured: true);
+        }
+
+        var count = Interlocked.Exchange(ref failures, 0);
+        lastError = null;
+        return new WebhookChannelFailureCount(channel, count, Configured: false);
+    }
+
     #region Teams
 
     /// <summary>Posts to Teams. Returns null when the post succeeded, or the error text when it did not —
@@ -501,7 +557,7 @@ public class WebhookAlertService
                 _consecutiveTeamsFailures++;
                 _lastTeamsError = error;
 
-                if (_consecutiveTeamsFailures <= 3)
+                if (_consecutiveTeamsFailures <= FailingChannelThreshold)
                     _logger.LogError($"TEAMS WEBHOOK FAILED ({_consecutiveTeamsFailures}x): {error}");
                 else if (_consecutiveTeamsFailures % 50 == 0)
                     _logger.LogError($"TEAMS WEBHOOK STILL FAILING: {_consecutiveTeamsFailures} failures. Last: {error}");
@@ -809,7 +865,7 @@ public class WebhookAlertService
                 _consecutiveSlackFailures++;
                 _lastSlackError = error;
 
-                if (_consecutiveSlackFailures <= 3)
+                if (_consecutiveSlackFailures <= FailingChannelThreshold)
                     _logger.LogError($"SLACK WEBHOOK FAILED ({_consecutiveSlackFailures}x): {error}");
                 else if (_consecutiveSlackFailures % 50 == 0)
                     _logger.LogError($"SLACK WEBHOOK STILL FAILING: {_consecutiveSlackFailures} failures. Last: {error}");
@@ -1851,7 +1907,7 @@ public class WebhookAlertService
         _consecutiveGenericFailures++;
         _lastGenericError = error;
 
-        if (_consecutiveGenericFailures <= 3)
+        if (_consecutiveGenericFailures <= FailingChannelThreshold)
             _logger.LogError($"GENERIC WEBHOOK FAILED ({_consecutiveGenericFailures}x): {error}");
         else if (_consecutiveGenericFailures % 50 == 0)
             _logger.LogError($"GENERIC WEBHOOK STILL FAILING: {_consecutiveGenericFailures} failures. Last: {error}");
@@ -2323,7 +2379,7 @@ public class WebhookAlertService
                 _consecutivePagerDutyFailures++;
                 _lastPagerDutyError = error;
 
-                if (_consecutivePagerDutyFailures <= 3)
+                if (_consecutivePagerDutyFailures <= FailingChannelThreshold)
                     _logger.LogError($"PAGERDUTY WEBHOOK FAILED ({_consecutivePagerDutyFailures}x): {error}");
                 else if (_consecutivePagerDutyFailures % 50 == 0)
                     _logger.LogError($"PAGERDUTY WEBHOOK STILL FAILING: {_consecutivePagerDutyFailures} failures. Last: {error}");
