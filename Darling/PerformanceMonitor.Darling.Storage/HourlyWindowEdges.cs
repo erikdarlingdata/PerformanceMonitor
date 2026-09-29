@@ -18,23 +18,55 @@ namespace PerformanceMonitor.Darling.Storage;
 /// </summary>
 public static class HourlyWindowEdges
 {
-    /// <summary>One sentence per edge that moved, joined; null only when neither edge moved (never true for the
-    /// end, because <c>&lt;=</c> on an aligned end still includes the following hour). All times are UTC.</summary>
-    public static string? Note(DateTime requestedStart, DateTime? firstBucket, DateTime requestedEnd)
+    /// <summary>The span an hourly read actually served: from the first bucket it held (the next hour edge when
+    /// the window start is unaligned and no bucket was found) to the top of the end hour, cut at the rollup's
+    /// materialization ceiling. The end is null when the rollup holds no materialized bucket at all.</summary>
+    public static (DateTime Start, DateTime? End) ServedSpan(
+        DateTime requestedStart, DateTime? firstBucket, DateTime requestedEnd, DateTime? ceiling)
     {
-        var parts = new System.Collections.Generic.List<string>(2);
         var startHour = FloorHour(requestedStart);
+        var start = firstBucket ?? (startHour != requestedStart ? startHour.AddHours(1) : requestedStart);
+        var wholeEnd = FloorHour(requestedEnd).AddHours(1);
+        DateTime? end = ceiling is null ? null : (ceiling.Value < wholeEnd ? ceiling.Value : wholeEnd);
+        return (start, end);
+    }
+
+    /// <summary>One sentence per edge that moved, joined. <paramref name="ceiling"/> is the materialization ceiling
+    /// of the relation serving the window end (null = nothing materialized). When the ceiling is at or before
+    /// the window end, the end sentence says nothing after it was read, and, if the start also moved, names the
+    /// whole served span. All times are UTC.</summary>
+    public static string? Note(DateTime requestedStart, DateTime? firstBucket, DateTime requestedEnd, DateTime? ceiling)
+    {
+        var parts = new System.Collections.Generic.List<string>(3);
+        var startHour = FloorHour(requestedStart);
+        var (served, servedEnd) = ServedSpan(requestedStart, firstBucket, requestedEnd, ceiling);
+        var startMoved = served != requestedStart;
         if (startHour != requestedStart)
         {
-            var served = firstBucket ?? startHour.AddHours(1);
             parts.Add(string.Create(CultureInfo.InvariantCulture,
-                $"hourly buckets start on the hour: the partial hour from {requestedStart:o} to {served:o} is not included"));
+                $"hourly buckets start on the hour: no bucket before {served:o}: the data from {requestedStart:o} to {served:o} is not included"));
         }
 
         var endHour = FloorHour(requestedEnd);
-        parts.Add(string.Create(CultureInfo.InvariantCulture,
-            $"the bucket at {endHour:o} is included whole, so up to {endHour.AddHours(1):o} is counted past as_of"));
-        return parts.Count == 0 ? null : string.Join("; ", parts);
+        if (ceiling is null)
+        {
+            parts.Add("the hourly rollup holds no materialized bucket at the window's end; nothing after it was read");
+        }
+        else if (ceiling.Value <= requestedEnd)
+        {
+            var cut = string.Create(CultureInfo.InvariantCulture,
+                $"the hourly rollup is materialized only to {ceiling.Value:o}; nothing after it was read");
+            parts.Add(startMoved
+                ? string.Create(CultureInfo.InvariantCulture, $"served from {served:o} to {ceiling.Value:o}; {cut}")
+                : cut);
+        }
+        else
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture,
+                $"the bucket at {endHour:o} is included whole, so up to {servedEnd!.Value:o} is counted past as_of"));
+        }
+
+        return string.Join("; ", parts);
     }
 
     private static DateTime FloorHour(DateTime value) =>

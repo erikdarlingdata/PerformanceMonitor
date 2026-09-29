@@ -20,8 +20,8 @@ public sealed class HourlyWindowEdgesTests
     [Fact]
     public void UnalignedStart_NamesThePartialHour()
     {
-        var note = HourlyWindowEdges.Note(Aligned.AddMinutes(37), Aligned.AddHours(1), Aligned.AddHours(4).AddMinutes(20));
-        Assert.Contains("the partial hour from", note, StringComparison.Ordinal);
+        var note = HourlyWindowEdges.Note(Aligned.AddMinutes(37), Aligned.AddHours(1), Aligned.AddHours(4).AddMinutes(20), Aligned.AddHours(9));
+        Assert.Contains("no bucket before " + Aligned.AddHours(1).ToString("o") + ": the data from", note, StringComparison.Ordinal);
         Assert.Contains(Aligned.AddMinutes(37).ToString("o"), note, StringComparison.Ordinal);
         Assert.Contains(Aligned.AddHours(1).ToString("o"), note, StringComparison.Ordinal);
     }
@@ -29,7 +29,7 @@ public sealed class HourlyWindowEdgesTests
     [Fact]
     public void AlignedStart_HasNoLeadingSentence()
     {
-        var note = HourlyWindowEdges.Note(Aligned, Aligned, Aligned.AddHours(4).AddMinutes(20));
+        var note = HourlyWindowEdges.Note(Aligned, Aligned, Aligned.AddHours(4).AddMinutes(20), Aligned.AddHours(9));
         Assert.DoesNotContain("partial hour", note, StringComparison.Ordinal);
     }
 
@@ -39,7 +39,50 @@ public sealed class HourlyWindowEdgesTests
     public void End_CountsTheWholeHourPastAsOf(int minute)
     {
         var end = Aligned.AddHours(4).AddMinutes(minute);
-        var note = HourlyWindowEdges.Note(Aligned, Aligned, end);
+        var note = HourlyWindowEdges.Note(Aligned, Aligned, end, Aligned.AddHours(9));
         Assert.Contains("up to " + Aligned.AddHours(5).ToString("o"), note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EndCutAtTheCeiling_SaysNothingAfterItWasRead()
+    {
+        var end = Aligned.AddHours(4).AddMinutes(20);
+        var ceiling = Aligned.AddHours(3);
+        var note = HourlyWindowEdges.Note(Aligned, Aligned, end, ceiling);
+        Assert.Contains("the hourly rollup is materialized only to " + ceiling.ToString("o") + "; nothing after it was read", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("included whole", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NoCeiling_SaysNoMaterializedBucketAtTheEnd()
+    {
+        var note = HourlyWindowEdges.Note(Aligned, Aligned, Aligned.AddHours(4), null);
+        Assert.Contains("holds no materialized bucket at the window's end", note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CeilingPastAsOf_ServesTheWholeEndHourOnly()
+    {
+        var end = Aligned.AddHours(4).AddMinutes(20);
+        var note = HourlyWindowEdges.Note(Aligned, Aligned, end, Aligned.AddHours(5).AddMinutes(30));
+        Assert.Contains("up to " + Aligned.AddHours(5).ToString("o"), note, StringComparison.Ordinal);
+        var low = HourlyWindowEdges.Note(Aligned, Aligned, end, Aligned.AddHours(5).AddMinutes(-30));
+        Assert.Contains("up to " + Aligned.AddHours(5).AddMinutes(-30).ToString("o"), low, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void StartSnappedAndEndCut_NamesTheServedSpan()
+    {
+        var ceiling = Aligned.AddHours(3);
+        var note = HourlyWindowEdges.Note(Aligned.AddMinutes(37), Aligned.AddHours(1), Aligned.AddHours(4).AddMinutes(20), ceiling);
+        Assert.Contains("served from " + Aligned.AddHours(1).ToString("o") + " to " + ceiling.ToString("o"), note, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ServedSpan_CutsTheEndAtTheCeiling()
+    {
+        var (start, end) = HourlyWindowEdges.ServedSpan(Aligned.AddMinutes(37), Aligned.AddHours(1), Aligned.AddHours(4).AddMinutes(20), Aligned.AddHours(3));
+        Assert.Equal(Aligned.AddHours(1), start);
+        Assert.Equal(Aligned.AddHours(3), end);
     }
 }

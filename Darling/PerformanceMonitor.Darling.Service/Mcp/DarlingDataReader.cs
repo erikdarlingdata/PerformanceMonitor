@@ -1288,6 +1288,26 @@ internal static class DarlingDataReader
     public const string HourlyFirstBucketSingleRelationSql =
         "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket <= $3 ORDER BY f.bucket LIMIT 1";
 
+    /// <summary>Awaits a probe task whose result is no longer wanted so its fault is observed, never thrown over
+    /// the exception already in flight.</summary>
+    private static async Task ObserveAsync(Task task)
+    {
+        try { await task; }
+        catch (Exception) { /* the ranked read's own exception is the one that propagates. */ }
+    }
+
+    /// <summary>The materialization ceiling of the relation that serves the END of an hourly window: the
+    /// successor when the read is stitched (the successor serves everything from the stitch floor on), otherwise
+    /// the one relation the splice names. Null when that relation has no measured ceiling (nothing materialized,
+    /// or an unknown coverage).</summary>
+    private static DateTime? HourlyEndCeiling(RollupCoverage coverage, string legacy, DateTime startUtc)
+    {
+        var relation = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, startUtc) is not null
+            ? TimescaleSupport.SuccessorOf(legacy)!
+            : coverage.HourlyRelationNameFor(legacy, startUtc);
+        return coverage.CeilingOf(relation);
+    }
+
     /// <summary>Runs the coverage probe for <paramref name="legacy"/>'s hourly tier: two ordered first-row probes
     /// split at the stitch floor when the read is stitched (<see cref="HourlyFirstBucketSql"/>), one probe when a
     /// single relation serves the window (<see cref="HourlyFirstBucketSingleRelationSql"/>). The single seam a
@@ -1359,7 +1379,7 @@ internal static class DarlingDataReader
     /// <paramref name="HourlyFirstBucket"/> is the first rollup bucket this server holds inside the window on
     /// the hourly tier (null when none, or on raw).</summary>
     public sealed record TopQueriesReadResult(
-        List<TopQueryRow> Rows, RetentionTier Tier, bool RawForced = false, DateTime? HourlyFirstBucket = null);
+        List<TopQueryRow> Rows, RetentionTier Tier, bool RawForced = false, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null);
 
     /// <summary>
     /// #4231 stage 3: <see cref="GetTopQueriesByCpuAsync"/>'s routed form, exposing the tier it read so a
@@ -1394,7 +1414,8 @@ internal static class DarlingDataReader
         if (tier == RetentionTier.Hourly)
         {
             var (hourlyRows, firstBucket) = await GetTopQueriesByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
-            return new TopQueriesReadResult(hourlyRows, RetentionTier.Hourly, HourlyFirstBucket: firstBucket);
+            return new TopQueriesReadResult(hourlyRows, RetentionTier.Hourly, HourlyFirstBucket: firstBucket,
+                HourlyCeiling: HourlyEndCeiling(coverage, TimescaleSupport.QueryStatsHourlyView, startUtc));
         }
 
         var rows = new List<TopQueryRow>();
@@ -1456,6 +1477,8 @@ internal static class DarlingDataReader
 
         var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView, serverId, startUtc, endUtc, cancellationToken);
         var rows = new List<TopQueryRow>();
+        try
+        {
         await using (var command = postgres.CreateCommand(sql))
         {
             command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
@@ -1483,6 +1506,12 @@ internal static class DarlingDataReader
                     DistinctTexts: 0,
                     DistinctQueryHashes: 1));
             }
+        }
+        }
+        catch
+        {
+            await ObserveAsync(firstBucketTask);
+            throw;
         }
 
         return (rows, await firstBucketTask);
@@ -1583,7 +1612,7 @@ internal static class DarlingDataReader
     /// <see cref="RetentionTier.Raw"/> or <see cref="RetentionTier.Hourly"/> (Daily is clamped to Hourly);
     /// the MCP tool's <c>tier_used</c> comes from here.</summary>
     public sealed record TopProceduresReadResult(
-        List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null);
+        List<TopProcedureRow> Rows, RetentionTier Tier, DateTime? HourlyFirstBucket = null, DateTime? HourlyCeiling = null);
 
     public static async Task<List<TopProcedureRow>> GetTopProceduresByCpuAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName, CancellationToken cancellationToken = default)
@@ -1612,7 +1641,8 @@ internal static class DarlingDataReader
         if (tier == RetentionTier.Hourly)
         {
             var (hourlyRows, firstBucket) = await GetTopProceduresByCpuHourlyAsync(postgres, coverage, serverId, startUtc, endUtc, top, databaseName, cancellationToken);
-            return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket);
+            return new TopProceduresReadResult(hourlyRows, RetentionTier.Hourly, firstBucket,
+                HourlyEndCeiling(coverage, TimescaleSupport.ProcedureStatsHourlyView, startUtc));
         }
 
         var rows = new List<TopProcedureRow>();
@@ -1666,6 +1696,8 @@ internal static class DarlingDataReader
 
         var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView, serverId, startUtc, endUtc, cancellationToken);
         var rows = new List<TopProcedureRow>();
+        try
+        {
         await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
@@ -1687,8 +1719,13 @@ internal static class DarlingDataReader
                 TotalLogicalReads: 0, TotalLogicalWrites: 0, TotalPhysicalReads: 0, TotalSpills: 0,
                 MinCpuUs: 0, MaxCpuUs: 0, MinElapsedUs: 0, MaxElapsedUs: 0));
         }
+        }
+        catch
+        {
+            await ObserveAsync(firstBucketTask);
+            throw;
+        }
 
-        await reader.DisposeAsync();
         return (rows, await firstBucketTask);
     }
 

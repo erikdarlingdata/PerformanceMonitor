@@ -604,7 +604,25 @@ public sealed class DarlingMcpDataTools
             {
                 precisionNote = "hourly-rollup rows: no host-object split (proc-hosted callers sharing a query_hash are combined); query_plan_hash, plan_handle, DOP, reads/writes/physical reads/rows/spills, distinct_texts and min/max cpu/elapsed are null — "
                     + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
-                    + " " + HourlyWindowEdges.Note(requestedStart, floor, now);
+                    + " sql_handle is the rollup's MAX(sql_handle), which can name a handle seen only on a zero-interval collection that raw excludes; totals are unaffected."
+                    + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
+            }
+
+            /* A forced-raw read (parallel_only / min_dop / group_by=host_object) over a window raw no longer
+               holds read nothing: the floor is null, and "the whole window" would be a claim about a table that
+               was empty. The rollup that does hold the window cannot apply those refinements. */
+            if (routed.RawForced && floor is null)
+            {
+                return McpHelpers.Status(
+                    "empty",
+                    "raw query_stats holds nothing in this window; the hourly rollup, which does, cannot apply parallel_only/min_dop/group_by=host_object",
+                    new
+                    {
+                        filter_applied = filterApplied,
+                        effective_start = (string?)null,
+                        effective_hours_back = (double?)null,
+                        window_truncated = true
+                    });
             }
 
             if (rows.Count == 0)
@@ -641,9 +659,10 @@ public sealed class DarlingMcpDataTools
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
+            var (attrStart, attrEnd, spanNote) = HourlyAttributionSpan(hourly, requestedStart, now, floor, routed.HourlyCeiling);
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
-                requestedStart, now,
+                attrStart, attrEnd,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.CpuCount ?? 0);
 
@@ -687,7 +706,7 @@ public sealed class DarlingMcpDataTools
                 // history where the split can't apply yet).
                 distinct_texts = hourly ? (long?)null : r.DistinctTexts,
                 text_note = hourly && r.QueryText is null
-                    ? "no raw query_stats row still holds this query_hash's text (raw keeps about 4 days); query_text is null, not empty — try get_query_store_top or get_query_trend for this hash."
+                    ? "no raw query_stats row still holds this query_hash's text (raw keeps about 4 days); query_text is null, not empty — try get_query_store_top or get_query_trend for this hash. On the hourly tier this row may be a WAITFOR shell, which raw query_stats filters out."
                     : r.DistinctTexts > 1
                     ? $"this group blends {r.DistinctTexts} distinct statement texts (ad-hoc literal variants; or history predating the host-object split for INSERT...EXEC callers); query_text is one representative"
                     : null,
@@ -723,7 +742,7 @@ public sealed class DarlingMcpDataTools
                     ranked_cpu_seconds = attribution.RankedCpuSeconds,
                     sql_cpu_seconds_in_window = attribution.SqlCpuSecondsInWindow,
                     attributed_cpu_ratio = attribution.AttributedCpuRatio,
-                    note = attribution.Note
+                    note = spanNote is null ? attribution.Note : (attribution.Note is null ? spanNote : attribution.Note + " " + spanNote)
                 },
                 /* #4231: the WINDOW floor, spelled the way #3653 item 17 fixed the vocabulary — never bare
                    `truncated`, which on every paged tool in this file means a limit bit. Nothing the caller
@@ -795,7 +814,7 @@ public sealed class DarlingMcpDataTools
             {
                 precisionNote = "hourly-rollup rows: object_type, sql_handle, plan_handle, reads/writes/physical reads/spills and min/max cpu/elapsed are null — "
                     + "the rollup does not carry them, and its min/max are per-collection sums, not per-execution extremes."
-                    + " " + HourlyWindowEdges.Note(requestedStart, floor, now);
+                    + " " + HourlyWindowEdges.Note(requestedStart, floor, now, routed.HourlyCeiling);
             }
 
             /* #2320: same attributed-CPU disclosure as the queries tool — one shared computation,
@@ -805,9 +824,10 @@ public sealed class DarlingMcpDataTools
             await Task.WhenAll(cpuAggregateTask, propertiesTask);
             var cpuAggregate = await cpuAggregateTask;
             var properties = await propertiesTask;
+            var (attrStart, attrEnd, spanNote) = HourlyAttributionSpan(hourly, requestedStart, now, floor, routed.HourlyCeiling);
             var attribution = CpuAttribution.Compute(
                 rows.Sum(r => r.TotalCpuUs) / 1_000_000.0,
-                requestedStart, now,
+                attrStart, attrEnd,
                 cpuAggregate.SampleCount, cpuAggregate.FirstSample, cpuAggregate.LastSample, cpuAggregate.AvgSqlCpuPercent,
                 properties?.CpuCount ?? 0);
 
@@ -857,7 +877,7 @@ public sealed class DarlingMcpDataTools
                     ranked_cpu_seconds = attribution.RankedCpuSeconds,
                     sql_cpu_seconds_in_window = attribution.SqlCpuSecondsInWindow,
                     attributed_cpu_ratio = attribution.AttributedCpuRatio,
-                    note = attribution.Note
+                    note = spanNote is null ? attribution.Note : (attribution.Note is null ? spanNote : attribution.Note + " " + spanNote)
                 },
                 /* #4231: the WINDOW floor (#3653 item 17 vocabulary) — never bare `truncated`. */
                 window_truncated = windowTruncated,
@@ -874,6 +894,26 @@ public sealed class DarlingMcpDataTools
         {
             return McpHelpers.FormatError("get_top_procedures_by_cpu", ex);
         }
+    }
+
+    /// <summary>The span the cpu_attribution ratio divides by. Raw reads keep the requested window; an hourly read
+    /// divides by the span it served (first bucket to the materialization ceiling, on hour edges), and says so.</summary>
+    private static (DateTime Start, DateTime End, string? Note) HourlyAttributionSpan(
+        bool hourly, DateTime requestedStart, DateTime requestedEnd, DateTime? firstBucket, DateTime? ceiling)
+    {
+        if (!hourly)
+        {
+            return (requestedStart, requestedEnd, null);
+        }
+
+        var (start, end) = HourlyWindowEdges.ServedSpan(requestedStart, firstBucket, requestedEnd, ceiling);
+        if (end is null || end.Value <= start)
+        {
+            return (requestedStart, requestedEnd, "hourly read served no bucket span; the ratio uses the requested window.");
+        }
+
+        return (start, end.Value, string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"Hourly tier: ranked CPU and the measured denominator both cover the served span {start:o} to {end.Value:o}."));
     }
 
     /// <summary>
