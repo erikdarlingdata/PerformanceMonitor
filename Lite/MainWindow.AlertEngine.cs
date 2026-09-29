@@ -92,10 +92,22 @@ public partial class MainWindow : Window
                switch at the upgrade reads as a single new sample rather than a freeze. */
             CpuSampleTimeUtc: summary.CpuSampleTimeUtc ?? summary.CpuSampleTime);
 
+        /* #4752: the app-lifetime token (_backgroundCts, cancelled once in MainWindow_Closing), so closing the app
+           ends an alert post still in flight instead of leaving it to run out its timeout against an endpoint that
+           never answers. Read into a local so the catch below judges the same token the engine was given. */
+        var stopping = _backgroundCts?.Token ?? CancellationToken.None;
+
         AlertSweepResult sweep;
         try
         {
-            sweep = await _alertEngine.EvaluateServerAsync(snapshot);
+            sweep = await _alertEngine.EvaluateServerAsync(snapshot, stopping);
+        }
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+        {
+            /* The app is closing and the engine stopped because it was asked to: that is not a failed sweep.
+               Nothing is logged as an error and the badges stay as they were, the same as the early return for a
+               sweep the master switch skipped. This is an async void method, so the cancel must not leave it. */
+            return;
         }
         catch (Exception ex)
         {
