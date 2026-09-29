@@ -42,8 +42,15 @@ internal static class ServerLocalTimes
     /// clock) was compiled at or before <paramref name="windowStartUtc"/> (naive UTC) — the "compiled before
     /// the window" test the parameter-sensitivity detectors make. A plan with no creation time is not.
     /// </summary>
-    public static bool CreatedByWindowStart(ServerClock clock, DateTime? creationTimeLocal, DateTime windowStartUtc) =>
-        creationTimeLocal is { } created && clock.ToUtc(created) <= windowStartUtc;
+    public static bool CreatedByWindowStart(ServerClock clock, DateTime? creationTimeLocal, DateTime windowStartUtc)
+    {
+        if (!creationTimeLocal.HasValue)
+        {
+            return false;
+        }
+
+        return clock.ToUtc(creationTimeLocal.Value) <= windowStartUtc;
+    }
 
     /// <summary>
     /// The default trace's sp_configure lines, with each event time converted to naive UTC through

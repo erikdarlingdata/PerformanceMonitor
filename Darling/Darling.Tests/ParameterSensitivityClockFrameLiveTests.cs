@@ -74,6 +74,9 @@ public sealed class ParameterSensitivityClockFrameLiveTests
     private const int UtcOffsetMinutes = 0;
     private const int FarEastOffsetMinutes = 600;
 
+    /* US Eastern in January (#4821): the offset in force at the plans, not the summer one the newest snapshot holds. */
+    private const int WinterEasternOffsetMinutes = -300;
+
     /* Minutes of the plan's compile instant relative to the window START, in UTC, and whether it
        therefore belongs in the offender set. Two plans straddle the bound by a single minute in each
        direction: that is what makes a wrong frame change the ANSWER rather than just the arithmetic. */
@@ -219,6 +222,62 @@ public sealed class ParameterSensitivityClockFrameLiveTests
     }
 
     /// <summary>
+    /// #4821: the newest snapshot is from the summer (-240) but the server reports its zone, and every plan was
+    /// compiled in January, when US Eastern is 5 hours behind UTC. Converting with the ONE newest offset puts each
+    /// plan an hour early, so the plan that really compiled a minute AFTER the window start reads as compiled
+    /// before it; the zone puts every plan at its real instant.
+    /// </summary>
+    [Fact]
+    public async Task TheCompiledBeforeTheWindowPredicate_ConvertsEachPlanWithTheOffsetInForceAtItsCompileTime()
+    {
+        var connectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(connectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4821 daylight-saving test.");
+
+        var ct = TestContext.Current.CancellationToken;
+        var bodySucceeded = false;
+
+        await using (var connection = new NpgsqlConnection(connectionString))
+        {
+            await connection.OpenAsync(ct);
+            await PgMigrations.MigrateAsync(connection, ct);
+        }
+
+        try
+        {
+            var windowEnd = new DateTime(2026, 1, 15, 18, 0, 0, DateTimeKind.Unspecified);
+            var windowStart = windowEnd.AddHours(-4);
+            var context = new AnalysisContext
+            {
+                ServerId = TestServerId,
+                ServerName = TestServerName,
+                TimeRangeStart = windowStart,
+                TimeRangeEnd = windowEnd,
+            };
+
+            await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
+            {
+                await DeleteTestRowsAsync(connection, ct);
+                await SeedServerPropertiesAsync(connection, windowEnd, EasternOffsetMinutes, ct, "Eastern Standard Time");
+                await SeedPlansAsync(connection, windowStart, WinterEasternOffsetMinutes, ct);
+            }
+
+            await using var postgres = NpgsqlDataSource.Create(connectionString!);
+            var fact = await CollectParameterSensitivityFactAsync(postgres, context);
+
+            Assert.NotNull(fact);
+            Assert.Equal(ExpectedOffenders, fact!.Metadata["offender_count"]);
+            Assert.Equal(ExpectedOffenders, await CountParameterSensitiveDrillDownAsync(postgres, context));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(connectionString!, bodySucceeded, DeleteTestRowsAsync);
+        }
+    }
+
+    /// <summary>
     /// Drives the drill-down's own copy of the detection through the real enrich seam. Severity is set
     /// past the display gate, below which the expensive drill-downs are skipped wholesale and this
     /// collector never runs at all.
@@ -253,18 +312,20 @@ public sealed class ParameterSensitivityClockFrameLiveTests
     }
 
     private static async Task SeedServerPropertiesAsync(
-        NpgsqlConnection connection, DateTime collectionTime, int offsetMinutes, CancellationToken ct)
+        NpgsqlConnection connection, DateTime collectionTime, int offsetMinutes, CancellationToken ct,
+        string? timeZoneId = null)
     {
         await using var cmd = new NpgsqlCommand(@"
 INSERT INTO server_properties
     (collection_id, collection_time, server_id, server_name, edition, product_version, product_level,
-     engine_edition, utc_offset_minutes)
-VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5)", connection);
+     engine_edition, utc_offset_minutes, time_zone_id)
+VALUES ($1, $2, $3, $4, 'Enterprise Edition', '16.0.4085.2', 'RTM', 3, $5, $6)", connection);
         cmd.Parameters.AddWithValue(-9_299_000L);
         cmd.Parameters.AddWithValue(DateTime.SpecifyKind(collectionTime, DateTimeKind.Unspecified));
         cmd.Parameters.AddWithValue(TestServerId);
         cmd.Parameters.AddWithValue(TestServerName);
         cmd.Parameters.AddWithValue(offsetMinutes);
+        cmd.Parameters.AddWithValue(NpgsqlTypes.NpgsqlDbType.Text, (object?)timeZoneId ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
