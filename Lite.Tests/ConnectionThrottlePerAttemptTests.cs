@@ -14,6 +14,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Darling.Tests;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Services;
@@ -38,6 +39,10 @@ namespace PerformanceMonitorLite.Tests;
 /// semaphore at the moment <c>RetryHelper</c> announces its backoff, and attempts that fail the way a dead
 /// server does. A source pin then ties <c>CreateConnectionAsync</c> to the seam and to the ordering the
 /// issue asks for: the interactive sign-in lock first, the throttle inside it.</para>
+///
+/// <para>The same source pin covers what an attempt does with the connection it built when its open fails:
+/// it disposes it, for every kind of server, so a run of failed attempts against a server that is down does
+/// not leave a run of undisposed connections behind.</para>
 /// </summary>
 public class ConnectionThrottlePerAttemptTests
 {
@@ -246,6 +251,49 @@ public class ConnectionThrottlePerAttemptTests
         Assert.DoesNotContain("s_connectionThrottle.WaitAsync", body, StringComparison.Ordinal);
         Assert.DoesNotContain("s_connectionThrottle.Release", body, StringComparison.Ordinal);
         Assert.DoesNotContain("RetryHelper.ExecuteWithRetryAsync", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AFailedOpen_DisposesItsConnection_ForEveryKindOfServer()
+    {
+        /* Each attempt builds a SqlConnection of its own, so a failed open used to leave one undisposed
+           per attempt - up to four per collector per cycle against a server that is down.
+           OpenAzureDatabaseConnectionAsync already disposes on failure (catch { conn.Dispose(); throw; });
+           this pins the same for the retry lambda. Read as code, comments and literals blanked, so the
+           braces counted below are the real ones. */
+        var code = CSharpSourceWalker.StripCommentsAndStrings(
+            ReadRepoFile(Path.Combine("Lite", "Services", "RemoteCollectorService.cs")).Replace("\r\n", "\n", StringComparison.Ordinal));
+        var body = MethodBody(code, "Task<SqlConnection> CreateConnectionAsync(");
+
+        var open = body.IndexOf("await connection.OpenAsync(", StringComparison.Ordinal);
+        Assert.True(open >= 0, "the retry lambda no longer opens 'connection' with OpenAsync");
+
+        var catchAt = body.IndexOf("catch", open, StringComparison.Ordinal);
+        Assert.True(catchAt >= 0, "the retry lambda no longer handles a failed open");
+        var openBrace = body.IndexOf('{', catchAt);
+        var clause = body[catchAt..openBrace].Trim();
+
+        /* Not filtered. The interactive branch decides whether a decline is recorded; it is not a reason
+           to keep the connection of a failed attempt alive, and a 'when (isInteractiveServer)' filter would
+           dispose for interactive servers only. */
+        Assert.Matches(@"^catch(\s*\(\s*Exception\s+\w+\s*\))?$", clause);
+
+        var block = CSharpSourceWalker.BraceBalanced(body, openBrace);
+        var dispose = block.IndexOf("connection.Dispose();", StringComparison.Ordinal);
+        var rethrow = block.LastIndexOf("throw;", StringComparison.Ordinal);
+
+        Assert.True(dispose >= 0, "a failed open must dispose the connection its attempt built");
+        Assert.True(rethrow > dispose, "the connection must be disposed before the failure is rethrown");
+
+        /* At the catch block's own depth, not inside the interactive branch: depth 1 is the catch's own
+           opening brace and nothing nested under it. */
+        var before = block[..dispose];
+        Assert.Equal(1, before.Count(c => c == '{') - before.Count(c => c == '}'));
+
+        /* Success still hands the open connection to the caller: nothing on the way to the catch disposes it. */
+        var attempt = body[open..catchAt];
+        Assert.Contains("return connection;", attempt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Dispose", attempt, StringComparison.Ordinal);
     }
 
     private static string MethodBody(string source, string signature)

@@ -1326,30 +1326,39 @@ WHERE server_id = $3";
                     await connection.OpenAsync(openCancellation?.Token ?? cancellationToken);
                     return connection;
                 }
-                catch (Exception ex) when (isInteractiveServer)
+                catch (Exception ex)
                 {
-                    /* Mark a user-declined sign-in immediately, so the other connections queued
-                       behind the lock abort instead of each raising their own prompt.
-
-                       Two detections, because the two interactive modes fail differently. Entra
-                       MFA reports cancellation in the exception MESSAGE, which is all the broker
-                       gives. Device code reports it as the cancellation of the token above - and
-                       the collector's own token is linked into that same source, so the token
-                       alone cannot say which side fired. A shutdown is not a decline: flagging
-                       one would leave the server skipped for the rest of the session over an app
-                       restart nobody chose. */
-                    var userDeclined =
-                        MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
-                        (deviceCode is not null
-                            && deviceCode.Token.IsCancellationRequested
-                            && !cancellationToken.IsCancellationRequested);
-
-                    if (userDeclined)
+                    if (isInteractiveServer)
                     {
-                        var serverStatus = _serverManager.GetConnectionStatus(server.Id);
-                        serverStatus.UserCancelledMfa = true;
-                        AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
+                        /* Mark a user-declined sign-in immediately, so the other connections queued
+                           behind the lock abort instead of each raising their own prompt.
+
+                           Two detections, because the two interactive modes fail differently. Entra
+                           MFA reports cancellation in the exception MESSAGE, which is all the broker
+                           gives. Device code reports it as the cancellation of the token above - and
+                           the collector's own token is linked into that same source, so the token
+                           alone cannot say which side fired. A shutdown is not a decline: flagging
+                           one would leave the server skipped for the rest of the session over an app
+                           restart nobody chose. */
+                        var userDeclined =
+                            MfaAuthenticationHelper.IsMfaCancelledException(ex) ||
+                            (deviceCode is not null
+                                && deviceCode.Token.IsCancellationRequested
+                                && !cancellationToken.IsCancellationRequested);
+
+                        if (userDeclined)
+                        {
+                            var serverStatus = _serverManager.GetConnectionStatus(server.Id);
+                            serverStatus.UserCancelledMfa = true;
+                            AppLogger.Info("Collector", $"  [{server.DisplayName}] interactive authentication cancelled by user - flagging to abort other pending connections");
+                        }
                     }
+
+                    /* Every attempt builds a connection of its own, so a failed one is disposed here instead
+                       of being left to the finalizer, once per attempt: up to four per collector per cycle
+                       against a server that is down. Success returns the open connection to the caller
+                       undisposed. */
+                    connection.Dispose();
                     throw;
                 }
             }, _logger, $"Connect to {server.DisplayName}", cancellationToken);
