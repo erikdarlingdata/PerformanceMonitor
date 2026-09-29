@@ -63,7 +63,8 @@ public interface IAlertStateStore
     /// <summary>
     /// Upserts the failed-job watermark for one server (see
     /// <see cref="LoadFailedJobWatermarkAsync"/> for the time-basis contract). Called on-change
-    /// only — when a failed-job alert actually fires.
+    /// only — after a failed-job alert fires, and not when every channel failed to deliver it (#4752),
+    /// so a saved value never covers a failure that every channel failed to deliver.
     /// </summary>
     Task SaveFailedJobWatermarkAsync(string serverKey, DateTime watermark);
 

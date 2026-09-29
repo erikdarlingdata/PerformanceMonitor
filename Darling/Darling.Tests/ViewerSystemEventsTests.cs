@@ -460,7 +460,7 @@ public sealed class ViewerSystemEventsTests
     // ── Default Trace (always-on server events; the Default Trace sub-tab) ──
 
     [Fact]
-    public void DefaultTraceEventsByWindowSql_ReadsBaseTable_DeSkewsLocalEventTimeToUtc_AndWindows()
+    public void DefaultTraceEventsByWindowSql_ReadsBaseTable_ReturnsTheLocalEventTimeRaw_AndPreFiltersAnHourWide()
     {
         var sql = ViewerDataService.DefaultTraceEventsByWindowSql;
 
@@ -469,15 +469,18 @@ public sealed class ViewerSystemEventsTests
         Assert.DoesNotContain("v_default_trace_events", sql, StringComparison.Ordinal);
         Assert.Contains("WHERE dte.server_id = $1", sql, StringComparison.Ordinal);
 
-        /* The Default Trace StartTime is server-LOCAL, so de-skew to naive-UTC via the collected offset
-           BEFORE windowing + returning — so the row shares the system_health rows' UTC frame (the cross-frame
-           caveat: system_health.event_time is UTC, default_trace.event_time is local). */
+        /* The Default Trace StartTime is server-LOCAL. #4766: the SQL returns it RAW and the C# side converts
+           it to naive-UTC with the server's ServerClock (its time zone, so the far side of a daylight-saving
+           change is not an hour off) — so the row shares the system_health rows' UTC frame (the cross-frame
+           caveat: system_health.event_time is UTC, default_trace.event_time is local). The latest offset
+           stays in the SQL only as a pre-filter an hour wider on each side, which the C# window then trims. */
         Assert.Contains("server_properties", sql, StringComparison.Ordinal);
         Assert.Contains("utc_offset_minutes", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) >= $2", sql, StringComparison.Ordinal);
-        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) <= $3", sql, StringComparison.Ordinal);
-        Assert.Contains("ORDER BY event_time_utc DESC", sql, StringComparison.Ordinal);
+        Assert.Contains("dte.event_time AS event_time_local", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("AS event_time_utc", sql, StringComparison.Ordinal);
+        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) >= $2 - interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'", sql, StringComparison.Ordinal);
+        Assert.Contains("ORDER BY event_time_local DESC", sql, StringComparison.Ordinal);
 
         /* Postgres dialect, positional params. */
         Assert.DoesNotContain("@", sql, StringComparison.Ordinal);

@@ -104,6 +104,13 @@ namespace PerformanceMonitor.Darling.Service;
 /// <c>ALTER TABLE</c> losing a race with live traffic, reachable on any store carrying a role- or
 /// database-level <c>lock_timeout</c>. The blocker is by definition a session that finishes, and the
 /// rung's transaction rolled back whole.</description></item>
+/// <item><description><b><c>53300</c> — too many connections (#4733).</b> A store at its connection limit
+/// when the service starts. A bring-your-own or compose store can be briefly full: after a restart storm,
+/// while the previous instance's connections are still closing, or while another application holds them.
+/// The count falls by itself as those connections close, which no other state in class <c>53</c> does. A
+/// store that stays full is not silent: the sustained arm logs its critical line once when the fast budget
+/// runs out and a warning on every attempt after it, so an operator who has to raise the limit still sees
+/// why.</description></item>
 /// </list>
 ///
 /// <para><b>Terminal, including the ones that are close calls.</b> Class <c>42</c> is a rung that cannot
@@ -111,9 +118,12 @@ namespace PerformanceMonitor.Darling.Service;
 /// old code was right about. Class <c>23</c> is a rung whose constraint is violated by data already in
 /// the store, which is V62's exact shape, and no amount of waiting changes the rows. <c>28P01</c> /
 /// <c>28000</c> is a credential, <c>3D000</c> a database that does not exist, <c>55000</c> a database
-/// somebody set <c>datallowconn = false</c> on. Class <c>53</c> — disk full, out of memory, too many
-/// connections — is a capacity finding an operator has to see now, and two minutes does not clear any of
-/// them; class <c>58</c> is the filesystem underneath the store. Two deserve naming because a
+/// somebody set <c>datallowconn = false</c> on. Class <c>53</c> is split state by state, the way class
+/// <c>57</c> is (#4733). <c>53300</c> (too many connections) is retried, above, because the connections
+/// filling the store close on their own. <c>53100</c> (disk full), <c>53200</c> (out of memory) and
+/// <c>53400</c> (configuration limit exceeded) stay terminal: each is a capacity finding an operator has
+/// to see now, and two minutes does not clear any of them. Class <c>58</c> is the filesystem underneath
+/// the store. Two deserve naming because a
 /// class-level rule would have swept them in with their neighbours: <c>57014</c> is somebody else's
 /// <c>statement_timeout</c> cancelling a rung, which will cancel the identical rung identically on every
 /// attempt, and <c>57P04</c> is the database having been dropped — both sit in the same class <c>57</c>
@@ -274,6 +284,11 @@ internal static class StartupFailureTriage
         PostgresErrorCodes.DeadlockDetected,
         PostgresErrorCodes.LockNotAvailable,
         PostgresErrorCodes.ObjectInUse,
+
+        /* The store is at its connection limit right now and stops being at it when other connections
+           close (#4733). The one state in class 53 that is retried; see the class remarks for why the other
+           three stay terminal. */
+        PostgresErrorCodes.TooManyConnections,
     };
 
     /// <summary>

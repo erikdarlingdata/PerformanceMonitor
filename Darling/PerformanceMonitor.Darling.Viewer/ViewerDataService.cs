@@ -14,6 +14,7 @@ using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Storage;
@@ -2634,6 +2635,52 @@ LIMIT 1";
         return result is null or DBNull
             ? null
             : Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// <see cref="ServerUtcOffsetSql"/> plus the zone: the newest <c>server_properties</c> row that has an
+    /// offset, with its <c>time_zone_id</c> (V134 — <c>CURRENT_TIMEZONE_ID()</c>, a Windows zone id such as
+    /// "Eastern Standard Time" on SQL Server 2022 and later, NULL before). Both columns come from the SAME
+    /// row, so the id and the offset describe one snapshot. The zone is what lets the Server-time display
+    /// mode follow a daylight-saving change; the offset is the fallback when the id is NULL or does not
+    /// resolve on the viewer's machine (#4766).
+    /// </summary>
+    public const string ServerClockSql = @"
+SELECT utc_offset_minutes, time_zone_id
+FROM server_properties
+WHERE server_id = $1
+AND   utc_offset_minutes IS NOT NULL
+ORDER BY collection_time DESC
+LIMIT 1";
+
+    /// <summary>
+    /// The active server's clock (#4766): its time zone where the newest snapshot carries a resolvable id,
+    /// else the snapshot's fixed offset. Returns null when no offset has been collected yet, so the caller
+    /// keeps the viewer machine's offset. A store below V134 has no <c>time_zone_id</c> column (42703): that
+    /// falls back to the offset-only read, exactly what this method did before the zone existed.
+    /// </summary>
+    public async Task<ServerClock?> GetServerClockAsync(int serverId, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var command = _dataSource.CreateCommand(ServerClockSql);
+            command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
+            command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = serverId });
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+            {
+                return null;
+            }
+
+            return ServerClock.Resolve(
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(0) ? null : reader.GetInt32(0));
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedColumn)
+        {
+            var offset = await GetServerUtcOffsetMinutesAsync(serverId, cancellationToken);
+            return offset.HasValue ? ServerClock.FixedOffset(offset.Value) : null;
+        }
     }
 
     /// <summary>
