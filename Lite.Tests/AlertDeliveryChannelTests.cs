@@ -83,6 +83,12 @@ public sealed class AlertDeliveryChannelTests
     /// excluding them from the parity comparison costs nothing real, and
     /// <see cref="EveryDisagreement_IsUnreachableOrTheDeliberateChange"/> holds the exclusion to exactly
     /// this predicate plus the one deliberate change, <see cref="WebhookFailureNowNamed"/>.</para>
+    ///
+    /// <para>The last clause is the shape that stores <c>undelivered</c>: a configured channel that nothing
+    /// consulted. Lite's settings still cannot produce it, because Lite has no notification routes and a
+    /// configured channel is always consulted there. Darling can (#4751): an alert no route covers, on a
+    /// deployment whose email is set up only through routes. <c>Darling.Tests.AlertDeliveryChannelTests</c>
+    /// and <c>EmailRouteRecipientsTests</c> pin that side.</para>
     /// </summary>
     private static bool Unreachable(EmailFanoutResult result, bool muted)
         => (result.SendError is not null) != (result.EmailOutcome == AlertChannelOutcome.Failed)

@@ -1428,7 +1428,7 @@ public partial class SettingsWindow : Window
         else if (!SmtpFromBox.Text.Trim().Contains('@'))
             errors.Add("From address must be a valid email");
         if (string.IsNullOrWhiteSpace(SmtpRecipientsBox.Text))
-            errors.Add("At least one recipient is required");
+            errors.Add("Default recipients are needed for alerts that no notification route covers.");
 
         if (errors.Count == 0)
         {

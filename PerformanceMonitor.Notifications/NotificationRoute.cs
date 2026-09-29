@@ -64,6 +64,11 @@ public sealed record NotificationRoute(
         || !string.IsNullOrWhiteSpace(GenericUrl)
         || !string.IsNullOrWhiteSpace(PagerDutyRoutingKey);
 
+    /// <summary>Whether this route names email recipients (#4751) — what decides whether the route can make
+    /// the email path send something the parent's default recipient list alone would not. Recipients only:
+    /// the host, from address and credentials still come from the parent.</summary>
+    public bool HasEmailDestination => !string.IsNullOrWhiteSpace(SmtpRecipients);
+
     /// <summary>Whether this route names <paramref name="metricName"/> ITSELF — case-insensitively and
     /// trimmed, the same latitude a mute rule's metric name gets. The most specific match there is.</summary>
     public bool MatchesName(string metricName) =>

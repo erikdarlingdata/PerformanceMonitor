@@ -61,8 +61,11 @@ public sealed class QsCaptureModeRungTests : IDisposable
         Assert.True(start >= 0, "DuckDbInitializer has no v64 block");
         var block = source[start..];
 
-        Assert.Contains("(\"query_store_health\", \"query_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
-        Assert.Contains("(\"query_store_health\", \"wait_stats_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        /* #4727: the entries live in DuckDbInitializer.AddedColumns; the step adds its own version's entries through
+           the shared AddMissingColumnsAsync. */
+        Assert.Contains("(64, \"query_store_health\", \"query_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        Assert.Contains("(64, \"query_store_health\", \"wait_stats_capture_mode\", \"VARCHAR\")", block, StringComparison.Ordinal);
+        Assert.Contains("AddMissingColumnsAsync(connection, AddedColumnsForVersion(64))", block, StringComparison.Ordinal);
         Assert.Contains("ADD COLUMN IF NOT EXISTS {column} {type}", block, StringComparison.Ordinal);
         Assert.Contains("Running migration to v64", block, StringComparison.Ordinal);
         foreach (var phrase in new[]
