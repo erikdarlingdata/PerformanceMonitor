@@ -183,6 +183,9 @@ LIMIT 2000";
        throws names csvlog rather than stderr — PgLogEventsCollector's csv branch makes the identical
        choice. */
     private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -199,6 +202,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        arms are cast through convert_to, the same reason PgLogEventsCollector's own binary-route csv pair
        gives. */
     private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
+SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -286,7 +292,7 @@ LIMIT 2000";
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
         context.PgLogUsesCsvlog
-            ? new(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
+            ? PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, PgServerLogTail.ResumeStateKeyCsv)
             : PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
