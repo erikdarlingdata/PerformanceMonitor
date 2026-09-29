@@ -26,7 +26,10 @@ public sealed partial class PgTargetAnomalyDetector
     /// scaled to a day. The window read reaches ONE sample before the window start (<c>LAG</c> over a set that begins
     /// an hour early) so the first in-window sample has a predecessor to difference against — otherwise a one-hour
     /// window over an hourly series would hold zero deltas and the detector would be silent on every default pass.
-    /// The peak sample's time rides along for the advice's age clause.
+    /// The peak sample's time rides along for the advice's age clause; its ORDER BY ends
+    /// <c>DESC NULLS LAST, collection_time DESC</c> like every peak-time sort (#4731). <c>bytes_per_day</c> is not NULL
+    /// in <c>rated</c> today (it keeps only samples with a growth difference and a positive gap), so the clause
+    /// changes no result here and keeps the one shape.
     /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
     /// </summary>
     public const string DatabaseGrowthWindowSql = @"
@@ -54,7 +57,7 @@ rated AS (
 SELECT MAX(bytes_per_day) AS peak_bytes_per_day,
        AVG(bytes_per_day) AS mean_bytes_per_day,
        COUNT(*)           AS sample_count,
-       (SELECT collection_time FROM rated ORDER BY bytes_per_day DESC, collection_time DESC LIMIT 1) AS peak_at
+       (SELECT collection_time FROM rated ORDER BY bytes_per_day DESC NULLS LAST, collection_time DESC LIMIT 1) AS peak_at
 FROM rated";
 
     /// <summary>

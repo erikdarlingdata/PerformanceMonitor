@@ -45,7 +45,7 @@ namespace PerformanceMonitorLite.Tests;
 /// </para>
 /// </summary>
 [Collection("app-alert-statics")]
-public class LiteAlertForwardingTests : IDisposable
+public partial class LiteAlertForwardingTests : IDisposable
 {
     private const string Key = "101";
     private const string Name = "SRV-A";
@@ -276,9 +276,13 @@ public class LiteAlertForwardingTests : IDisposable
         public bool Muted { get; set; }
         public DateTime Now { get; set; } = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
 
-        public AlertEngine Build() => new(
+        public AlertEngine Build() => Build(Deliverer);
+
+        /// <summary>The same engine over a deliverer of the caller's choosing (the real
+        /// <see cref="LiteAlertDeliverer"/> on its test seams, for the tests that need its answer).</summary>
+        public AlertEngine Build(IAlertDeliverer deliverer) => new(
             new AppAlertEngineSettings(),
-            Adapter, StateStore, Deliverer,
+            Adapter, StateStore, deliverer,
             isAlertMuted: _ => Muted,
             failedJobsFetcher: (_, _, _) => Task.FromResult(new List<FailedJobInfo>(FailedJobs)),
             resolutionCallback: (r, _) => { Resolutions.Add(r); return Task.CompletedTask; },
@@ -1019,7 +1023,7 @@ public class LiteAlertForwardingTests : IDisposable
                 sends.Add(new SendCall(
                     metricName, serverName, currentValue, thresholdValue, serverId, context, numCur, numThr,
                     muted, detailText, deliveryMode));
-                return Task.CompletedTask;
+                return Task.FromResult<AlertDelivery?>(null);
             },
             _ => serverOverride);
         return (deliverer, toasts, sends);
