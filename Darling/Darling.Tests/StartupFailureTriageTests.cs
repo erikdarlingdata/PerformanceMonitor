@@ -88,6 +88,10 @@ public class StartupFailureTriageTests
         { "40P01", "deadlock detected" },
         { "55P03", "lock not available" },
         { "55006", "object in use" },
+        /* #4733: the store is full right now and stops being full by itself when other connections close: a
+           restart storm, the previous instance's connections still closing, another application holding
+           them. Alone in class 53; the other three states there need an operator. */
+        { "53300", "too many connections" },
     };
 
     [Theory]
@@ -114,10 +118,10 @@ public class StartupFailureTriageTests
         /* Same class 57 as three retryable states, and both terminal — see the class-split test. */
         { "57014", "somebody else's statement_timeout cancelled the rung" },
         { "57P04", "the database was dropped" },
-        /* Capacity findings an operator has to see now; two minutes clears none of them. */
+        /* Capacity findings an operator has to see now; two minutes clears none of them. The fourth state in
+           class 53, 53300 too many connections, is retryable (#4733) and is in RetryableStates. */
         { "53100", "disk full" },
         { "53200", "out of memory" },
-        { "53300", "too many connections" },
         { "53400", "configuration limit exceeded" },
         { "58030", "I/O error under the store" },
         { "58P01", "undefined file" },
@@ -698,6 +702,63 @@ public class StartupFailureTriageTests
     public void NextAction_NonRetryableFailure_IsAlwaysStop(int attempt, int elapsedSeconds)
     {
         var terminal = new PostgresException("relation does not exist", "ERROR", "ERROR", "42P01");
+
+        var next = StartupFailureTriage.NextAction(attempt, TimeSpan.FromSeconds(elapsedSeconds), terminal);
+
+        Assert.Equal(StartupRetryDecision.Stop, next.Decision);
+        Assert.Equal(TimeSpan.Zero, next.Delay);
+    }
+
+    /// <summary>
+    /// #4733: a store at its connection limit when the service starts (<c>53300</c>, "sorry, too many
+    /// clients already") is retried, not stood down on. It clears by itself when other connections close,
+    /// and the old rule stopped collection until somebody restarted the service. Driven through the same
+    /// decision the three startup loops make, at the first attempt and inside the fast budget, so the
+    /// assertion is on what the loop would do and not on a predicate nobody calls.
+    /// </summary>
+    [Fact]
+    public void NextAction_TooManyConnectionsAtStart_IsRetryFast()
+    {
+        var full = new PostgresException("sorry, too many clients already", "FATAL", "FATAL", "53300");
+
+        var next = StartupFailureTriage.NextAction(attempt: 1, elapsed: TimeSpan.Zero, full);
+
+        Assert.Equal(StartupRetryDecision.RetryFast, next.Decision);
+        Assert.Equal(StartupFailureTriage.RetryDelay, next.Delay);
+    }
+
+    /// <summary>
+    /// #4733: a store that stays full past the fast budget keeps being retried on the sustained delay, the
+    /// same pacing every other retryable failure gets, instead of falling through to the terminal arm.
+    /// </summary>
+    [Fact]
+    public void NextAction_TooManyConnectionsPastTheFastBudget_IsRetrySustained()
+    {
+        var full = new PostgresException("sorry, too many clients already", "FATAL", "FATAL", "53300");
+
+        var next = StartupFailureTriage.NextAction(
+            attempt: StartupFailureTriage.Attempts, elapsed: StartupFailureTriage.RetryBudget, full);
+
+        Assert.Equal(StartupRetryDecision.RetrySustained, next.Decision);
+        Assert.Equal(StartupFailureTriage.SustainedRetryDelay, next.Delay);
+    }
+
+    /// <summary>
+    /// #4733: the other three states in class 53 still stop at the first attempt and after the budget. A
+    /// full disk, an exhausted memory limit and a configuration limit do not clear themselves, so retrying
+    /// them would trade the one diagnostic line for warnings on a cadence. This is the boundary the 53300
+    /// change must not blur: it is one state, not the class.
+    /// </summary>
+    [Theory]
+    [InlineData("53100", "could not extend file: No space left on device", 1, 0)]
+    [InlineData("53100", "could not extend file: No space left on device", 25, 120)]
+    [InlineData("53200", "out of memory", 1, 0)]
+    [InlineData("53200", "out of memory", 25, 120)]
+    [InlineData("53400", "configuration limit exceeded", 1, 0)]
+    [InlineData("53400", "configuration limit exceeded", 25, 120)]
+    public void NextAction_TheOtherClass53States_StillStop(string sqlState, string why, int attempt, int elapsedSeconds)
+    {
+        var terminal = new PostgresException(why, "ERROR", "ERROR", sqlState);
 
         var next = StartupFailureTriage.NextAction(attempt, TimeSpan.FromSeconds(elapsedSeconds), terminal);
 
