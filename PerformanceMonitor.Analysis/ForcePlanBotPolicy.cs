@@ -45,6 +45,15 @@ public sealed record ForcePlanBotSettings
     /// analysis pass.</summary>
     public int QueryCooldownHours { get; init; } = 24;
 
+    /// <summary>
+    /// #4769: how long a journaled row whose blocker is <c>state_unavailable</c> holds its candidate, instead
+    /// of <see cref="QueryCooldownHours"/>. That row says the bot could not SEE the engine state, not that it
+    /// judged the plan, so holding the candidate for a day would hide the real verdict long after the state
+    /// read recovers. One hour still journals a long outage once an hour, not once per pass. A constant, not a
+    /// setting: every other blocked or forced row keeps the configured cooldown.
+    /// </summary>
+    public const int StateUnavailableCooldownHours = 1;
+
     /// <summary>Rolling 24h cap on actionable decisions per server (would-force rows count too, so
     /// the dry run rehearses the same budget the live bot spends).</summary>
     public int MaxActionsPerServerPerDay { get; init; } = 3;
@@ -171,10 +180,14 @@ public sealed record ForcePlanBotDecision(
 /// <param name="RecentFailedForces">Failed forces for this query inside
 /// <see cref="ForcePlanBotSettings.FailedForceCooldownHours"/>: forces that would not stick, plus
 /// forces the self-review unforced as not-a-net-benefit.</param>
+/// <param name="LastJournalWasStateUnavailable">True when the newest journaled row for the query is a blocked
+/// row that carries the <c>state_unavailable</c> blocker (#4769); the cooldown then runs for
+/// <see cref="ForcePlanBotSettings.StateUnavailableCooldownHours"/> instead of the configured hours.</param>
 public sealed record ForcePlanBotHistory(
     DateTime? LastJournaledForQueryUtc,
     int ServerActionsLast24h,
-    int RecentFailedForces)
+    int RecentFailedForces,
+    bool LastJournalWasStateUnavailable = false)
 {
     public static ForcePlanBotHistory Empty { get; } = new(null, 0, 0);
 }
@@ -232,6 +245,15 @@ public static class ForcePlanBotPolicy
     public const string ReasonApcEnabledForDatabase = "apc_enabled_for_database";
 
     /// <summary>
+    /// #4770: the target's database has no <c>plan_correction</c> row inside the state read's lookback, on a
+    /// server where the plan_correction collector runs, so whether automatic plan correction owns plan
+    /// forcing there is unknown. A database can be missing for ordinary reasons (a capture lands one database
+    /// at a time and skips one that fails or runs over budget; the collector is off), and reading that as
+    /// "off" would let an unattended force through on a database APC may own.
+    /// </summary>
+    public const string ReasonApcEnablementUnknown = "apc_enablement_unknown";
+
+    /// <summary>
     /// The bot's whole blocker list for one target (#3654): the shared gate's verdict, BOTH halves
     /// (<see cref="FactRemediation.ForcePlanBlockers(ForcePlanTarget, ForcePlanTargetState?)"/> — the two
     /// target-carried blockers and the five #3652 added from the store's forcing and automatic-plan-
@@ -270,7 +292,7 @@ public static class ForcePlanBotPolicy
     /// <c>query_store_stats</c> row for the plan is ordinary for a best plan that is not executing, and
     /// no recommendation is ordinary for a query APC has not judged — but the enablement half comes from
     /// a row <c>PlanCorrectionCollector</c> writes for EVERY database it enumerates, recommendation or not,
-    /// at the server's newest capture with no lookback bound. All four halves absent means the store
+    /// as of the database's own newest row inside the lookback. All four halves absent means the store
     /// cannot see this database's FORCE_LAST_GOOD_PLAN state, so the arm above cannot be evaluated, and
     /// an unattended forcer on a database whose APC enablement is unknown is the one place "unknown"
     /// must mean "no". The advisory surface says <c>state_note: unknown</c> for both shapes and lets the
@@ -286,12 +308,17 @@ public static class ForcePlanBotPolicy
     /// </summary>
     /// <param name="state">What the store knows about this target now, or null when the read failed or
     /// returned nothing for it.</param>
+    /// <param name="enablementIsCollected">True when the plan_correction collector runs for this server (the
+    /// caller asks the collector's own <c>AppliesTo</c>), so a database with no enablement row in the lookback is
+    /// unknown and blocked (#4770). False (the default) leaves that case unblocked, as on a server the collector
+    /// never runs on.</param>
     /// <param name="stateUnavailableReason">The reader's stated reason when the whole read failed; quoted
     /// into the <c>state_unavailable</c> evidence so the journal says WHY the bot could not see.</param>
     public static IReadOnlyList<ForcePlanBlocker> Blockers(
         ForcePlanTarget target,
         ForcePlanTargetState? state,
-        string? stateUnavailableReason)
+        string? stateUnavailableReason,
+        bool enablementIsCollected = false)
     {
         if (target is null)
         {
@@ -320,6 +347,17 @@ public static class ForcePlanBotPolicy
             blockers.Add(new ForcePlanBlocker(
                 ReasonStateUnavailable,
                 $"the forcing and automatic-plan-correction state read ran and observed nothing for this target inside the last {ForcePlanTargetState.Lookback.TotalHours:0} hours: no query_store_stats row for plan {target.PlanId}, no forced sibling plan of query {target.QueryId}, no plan_correction recommendation, and no plan_correction capture for {target.Database} at all — FORCE_LAST_GOOD_PLAN enablement is unknown for this database, and an unattended force cannot proceed on unknown"));
+        }
+        else if (enablementIsCollected && state.EnablementObservedAtUtc is null)
+        {
+            /* #4770: the state has other halves, so it is not empty, but the database has no plan_correction row
+               inside the lookback. The collector writes one for EVERY database it enumerates on every capture, so
+               the row is missing because a capture skipped the database or the collector is off, not because
+               automatic plan correction is off. Only where the collector runs (the caller decides, with the
+               collector's own AppliesTo): on a server it never collects from, nothing was ever going to be there. */
+            blockers.Add(new ForcePlanBlocker(
+                ReasonApcEnablementUnknown,
+                $"plan_correction: no force_last_good_plan_actual_state row for {target.Database} in the last {ForcePlanTargetState.Lookback.TotalHours:0} hours — whether automatic plan correction owns plan forcing on this database is unknown (its captures skipped it, or the collector is off), and an unattended force cannot proceed on unknown"));
         }
 
         return blockers;
@@ -391,9 +429,14 @@ public static class ForcePlanBotPolicy
         /* The cooldown is checked BEFORE the blockers, deliberately: a blocked target is journaled
            once per window too. Analysis runs every few minutes, and a PSP-flagged query that stays
            regressed would otherwise write an identical 'blocked' row on every pass — an audit trail
-           that repeats itself into noise stops being read. */
+           that repeats itself into noise stops being read. The order stays; only the window differs (#4769):
+           a state_unavailable row holds for an hour, not the configured cooldown, so a failed state read does
+           not hide the real verdict for a day. */
+        var cooldownHours = history.LastJournalWasStateUnavailable
+            ? ForcePlanBotSettings.StateUnavailableCooldownHours
+            : settings.QueryCooldownHours;
         if (history.LastJournaledForQueryUtc is DateTime last &&
-            last > nowUtc.AddHours(-settings.QueryCooldownHours))
+            last > nowUtc.AddHours(-cooldownHours))
         {
             return new ForcePlanBotDecision(ForcePlanBotDecisionKind.Suppressed, new[] { ReasonQueryCooldownActive });
         }
