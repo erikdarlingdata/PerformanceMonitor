@@ -177,15 +177,9 @@ public sealed class TopQueriesHourlyRoutingLiveTests
         }
     }
 
-    /// <summary>
-    /// #4231 stage 3a live pin (brief step 1): with <c>min_dop</c> set, or <c>group_by="host_object"</c>, an
-    /// HOURLY-routed <c>get_top_queries_by_cpu</c> MCP payload carries a <c>precision_note</c> saying the
-    /// filter/roll-up was NOT applied (the rollup has no per-group DOP and no host_object_name — see
-    /// <c>DarlingDataReader.GetTopQueriesByCpuHourlyAsync</c>'s own doc comment). A RAW-routed payload for the
-    /// same request has no such note. RED on dev: no <c>precision_note</c> field exists on dev's payload at all.
-    /// </summary>
+    /// <summary>With <c>min_dop</c> or <c>group_by=host_object</c> on a window the age alone would send to the rollup, the read stays on raw and reports the window floor raw actually holds; the filter is never dropped.</summary>
     [Fact]
-    public async Task GetTopQueriesByCpu_HourlyRouted_WithDopOrRollUp_CarriesPrecisionNote()
+    public async Task GetTopQueriesByCpu_AgedWindow_WithMinDopOrRollUp_ReadsRaw_AndDisclosesTheFloor()
     {
         var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
         Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
@@ -215,63 +209,51 @@ public sealed class TopQueriesHourlyRoutingLiveTests
         var bodySucceeded = false;
         try
         {
-            /* maxDop: 2 on both seed rows — the min_dop=2 filter in TopQueriesSql/TopQueriesByHostObjectSql is a
-               HAVING COALESCE(MAX(max_dop), 0) >= $6 over the group; a row with max_dop left NULL (the
-               original seed here) fails that floor and the raw call returns zero rows, which returns the
-               "empty" status payload with no tier_used/precision_note field at all — a seed bug in this new
-               pin, not a router or cache problem (#4231 3a finding). */
             await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
             await PlantAsync(connection, ct, WindowStart.AddHours(2), "0xTOPQ2", "usp_HostA", 200_000L, 180_000L, 5L, 3600, maxDop: 2);
-
-            await using var dataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var survivor = WindowStart.AddHours(5);
+            await PlantAsync(connection, ct, survivor, "0xTOPQ3", "usp_HostA", 300_000L, 250_000L, 7L, 3600, maxDop: 2);
 
             var hoursBack = (int)Math.Ceiling((windowEnd - WindowStart).TotalHours);
             var asOf = windowEnd.ToString("o");
 
-            /* ── raw payload for the same request shape (min_dop set) — must carry NO precision_note. ── */
-            var rawJson = await DarlingMcpDataTools.GetTopQueriesByCpu(
-                dataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 2, as_of: asOf);
-            using var rawDoc = System.Text.Json.JsonDocument.Parse(rawJson);
-            Assert.True(rawDoc.RootElement.TryGetProperty("tier_used", out var rawTier));
-            Assert.Equal("raw", rawTier.GetString());
-            Assert.True(rawDoc.RootElement.TryGetProperty("precision_note", out var rawNote));
-            Assert.Equal(System.Text.Json.JsonValueKind.Null, rawNote.ValueKind);
-
             await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart, windowEnd.AddHours(1), ct);
-
             await using (var purge = new NpgsqlCommand(
                 "DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", connection))
             {
                 purge.Parameters.AddWithValue(ServerId);
                 purge.Parameters.AddWithValue(WindowStart);
-                purge.Parameters.AddWithValue(windowEnd);
+                purge.Parameters.AddWithValue(WindowStart.AddHours(3));
                 await purge.ExecuteNonQueryAsync(ct);
             }
 
-            /* ── hourly-routed payload with min_dop set — must carry a precision_note (rollup ignores min_dop).
-               A FRESH data source: the #4231 3a cache-freshness finding above (ComposeStoreAvailability caches
-               coverage per NpgsqlDataSource for 5 minutes; reusing dataSource here would replay the null
-               hourly floor the raw call's probe measured before RefreshAsync ran). ── */
+            /* A fresh data source: coverage is cached per data source, so it must be read after the refresh. */
             await using var hourlyDataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
-            var hourlyDopJson = await DarlingMcpDataTools.GetTopQueriesByCpu(
-                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 2, as_of: asOf);
-            using var hourlyDopDoc = System.Text.Json.JsonDocument.Parse(hourlyDopJson);
-            Assert.True(hourlyDopDoc.RootElement.TryGetProperty("tier_used", out var hourlyDopTier));
-            Assert.Equal("hourly", hourlyDopTier.GetString());
-            Assert.True(hourlyDopDoc.RootElement.TryGetProperty("precision_note", out var hourlyDopNote));
-            Assert.Equal(System.Text.Json.JsonValueKind.String, hourlyDopNote.ValueKind);
-            Assert.False(string.IsNullOrEmpty(hourlyDopNote.GetString()));
+            foreach (var call in new Func<Task<string>>[]
+            {
+                () => DarlingMcpDataTools.GetTopQueriesByCpu(hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 2, as_of: asOf),
+                () => DarlingMcpDataTools.GetTopQueriesByCpu(hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, group_by: "host_object", as_of: asOf),
+            })
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(await call());
+                var root = doc.RootElement;
+                Assert.Equal("raw", root.GetProperty("tier_used").GetString());
+                Assert.True(root.GetProperty("window_truncated").GetBoolean());
+                Assert.Equal(DarlingMcpTestData.TruncateToSeconds(survivor).ToString("o"), root.GetProperty("effective_start").GetString());
+                Assert.Contains("stayed on raw", root.GetProperty("precision_note").GetString());
+            }
 
-            /* ── hourly-routed payload with group_by=host_object — must also carry a precision_note (rollup has
-               no host_object_name to roll up by). ── */
-            var hourlyRollUpJson = await DarlingMcpDataTools.GetTopQueriesByCpu(
-                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, group_by: "host_object", as_of: asOf);
-            using var hourlyRollUpDoc = System.Text.Json.JsonDocument.Parse(hourlyRollUpJson);
-            Assert.True(hourlyRollUpDoc.RootElement.TryGetProperty("tier_used", out var hourlyRollUpTier));
-            Assert.Equal("hourly", hourlyRollUpTier.GetString());
-            Assert.True(hourlyRollUpDoc.RootElement.TryGetProperty("precision_note", out var hourlyRollUpNote));
-            Assert.Equal(System.Text.Json.JsonValueKind.String, hourlyRollUpNote.ValueKind);
-            Assert.False(string.IsNullOrEmpty(hourlyRollUpNote.GetString()));
+            using (var dopDoc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 2, as_of: asOf)))
+            {
+                Assert.NotEqual(System.Text.Json.JsonValueKind.Null, dopDoc.RootElement.GetProperty("filter_applied").ValueKind);
+            }
+
+            /* An empty forced-raw page says what part of the window it covered. */
+            using var emptyDoc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, min_dop: 5, as_of: asOf));
+            Assert.Contains("still holds (from", emptyDoc.RootElement.GetProperty("message").GetString() ?? emptyDoc.RootElement.ToString());
+            Assert.True(emptyDoc.RootElement.ToString().Contains("window_truncated", StringComparison.Ordinal));
 
             bodySucceeded = true;
         }
@@ -288,6 +270,162 @@ public sealed class TopQueriesHourlyRoutingLiveTests
         }
     }
 
+
+    /// <summary>On the hourly tier the columns the rollup does not carry are JSON null (not 0, false or empty), <c>sql_handle</c> is returned, and a hash whose raw text is gone has a null <c>query_text</c> with a <c>text_note</c>.</summary>
+    [Fact]
+    public async Task HourlyRouted_MissingColumnsAreNull_AndSqlHandleIsCarried()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4231 stage-3a routing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #4231 stage-3a routing test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var windowEnd = WindowStart.AddDays(1);
+        var bodySucceeded = false;
+        try
+        {
+            await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
+            var hoursBack = (int)Math.Ceiling((windowEnd - WindowStart).TotalHours);
+            var asOf = windowEnd.ToString("o");
+
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart, windowEnd.AddHours(1), ct);
+            await using (var purge = new NpgsqlCommand(
+                "DELETE FROM collect.query_stats WHERE server_id = $1 AND collection_time >= $2 AND collection_time < $3", connection))
+            {
+                purge.Parameters.AddWithValue(ServerId);
+                purge.Parameters.AddWithValue(WindowStart);
+                purge.Parameters.AddWithValue(windowEnd);
+                await purge.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var hourlyDataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            using var doc = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf));
+            Assert.Equal("hourly", doc.RootElement.GetProperty("tier_used").GetString());
+            var row = doc.RootElement.GetProperty("queries")[0];
+            foreach (var column in new[]
+            {
+                "total_logical_reads", "total_logical_writes", "total_physical_reads", "total_rows", "total_spills", "avg_reads",
+                "min_dop", "max_dop", "is_parallel", "query_plan_hash", "plan_handle", "min_cpu_ms", "max_cpu_ms",
+                "min_elapsed_ms", "max_elapsed_ms", "distinct_texts", "query_text",
+            })
+            {
+                Assert.Equal(System.Text.Json.JsonValueKind.Null, row.GetProperty(column).ValueKind);
+            }
+
+            Assert.Equal("0xTOPQ1", row.GetProperty("sql_handle").GetString());
+            Assert.Equal(System.Text.Json.JsonValueKind.String, row.GetProperty("text_note").ValueKind);
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+
+    /// <summary>Coverage on the hourly tier is checked per server: a server whose first bucket is later than the window start reports <c>window_truncated</c> with the first bucket as <c>effective_start</c>; a server covering the window does not.</summary>
+    [Fact]
+    public async Task HourlyRouted_YoungServer_ReportsWindowTruncated()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4231 stage-3a routing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #4231 stage-3a routing test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var windowEnd = WindowStart.AddDays(1);
+        var bodySucceeded = false;
+        try
+        {
+            const int youngServerId = ServerId + 1;
+            await DarlingMcpTestData.RegisterServerAsync(connection, youngServerId, ServerName + "-young", ct);
+            await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
+            await PlantAsync(connection, ct, WindowStart.AddHours(10), "0xTOPQ2", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2, serverId: youngServerId, serverName: ServerName + "-young");
+            var hoursBack = (int)Math.Ceiling((windowEnd - WindowStart).TotalHours);
+            var asOf = windowEnd.ToString("o");
+
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart, windowEnd.AddHours(1), ct);
+            await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE collection_time >= $1 AND collection_time < $2", connection))
+            {
+                purge.Parameters.AddWithValue(WindowStart);
+                purge.Parameters.AddWithValue(windowEnd);
+                await purge.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var hourlyDataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            using var young = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName + "-young", hours_back: hoursBack, top: 10, as_of: asOf));
+            Assert.Equal("hourly", young.RootElement.GetProperty("tier_used").GetString());
+            Assert.True(young.RootElement.GetProperty("window_truncated").GetBoolean());
+            Assert.Equal(WindowStart.AddHours(10).ToString("o"), young.RootElement.GetProperty("effective_start").GetString());
+            Assert.Contains("hourly rollup", young.RootElement.GetProperty("truncation_note").GetString());
+
+            using var covered = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf));
+            Assert.False(covered.RootElement.GetProperty("window_truncated").GetBoolean());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+
     private static Dictionary<string, (long CpuUs, long Executions)> RollUpByHash(IEnumerable<DarlingDataReader.TopQueryRow> rows)
     {
         var totals = new Dictionary<string, (long CpuUs, long Executions)>(StringComparer.Ordinal);
@@ -301,7 +439,7 @@ public sealed class TopQueriesHourlyRoutingLiveTests
 
     private static async Task PlantAsync(
         NpgsqlConnection connection, CancellationToken ct, DateTime at, string queryHash, string hostObjectName,
-        long cpuUs, long elapsedUs, long executions, int intervalSeconds, int maxDop = 0)
+        long cpuUs, long elapsedUs, long executions, int intervalSeconds, int maxDop = 0, int serverId = ServerId, string? serverName = null)
     {
         await using var insert = new NpgsqlCommand(@"
 INSERT INTO collect.query_stats
@@ -311,8 +449,8 @@ INSERT INTO collect.query_stats
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)", connection);
         insert.Parameters.AddWithValue(CollectionIdGenerator.Next());
         insert.Parameters.AddWithValue(DarlingMcpTestData.TruncateToSeconds(at));
-        insert.Parameters.AddWithValue(ServerId);
-        insert.Parameters.AddWithValue(ServerName);
+        insert.Parameters.AddWithValue(serverId);
+        insert.Parameters.AddWithValue(serverName ?? ServerName);
         insert.Parameters.AddWithValue(Db);
         insert.Parameters.AddWithValue(queryHash);
         insert.Parameters.AddWithValue("0x" + queryHash.TrimStart('0', 'x'));

@@ -1283,7 +1283,7 @@ internal static class DarlingDataReader
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
         var value = await command.ExecuteScalarAsync(cancellationToken);
-        return value is DateTime bucket ? DateTime.SpecifyKind(bucket, DateTimeKind.Utc) : null;
+        return value is DateTime bucket ? bucket : null;
     }
 
     /// <summary>
