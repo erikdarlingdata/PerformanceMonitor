@@ -128,8 +128,8 @@ public sealed class LiteMcpServerClockTests : IClassFixture<SharedDuckDbFixture>
             Assert.Null(StampOf(reports[53], field));
         }
 
-        /* The 01:30 stamp is the pair from the class summary: 06:30 UTC, not the 05:30 a -240 offset gives. */
-        Assert.Equal(At(2026, 3, 8, 6, 30), StampOf(reports[51], "blocked_last_batch_started"));
+        /* The row's 01:30 stamp is the pair from the class summary: 06:30 UTC, not the 05:30 a -240 offset gives. */
+        Assert.Equal(At(2026, 3, 8, 6, 30), StampOf(reports[51], "blocked_last_batch_completed"));
     }
 
     // ── get_running_jobs ──

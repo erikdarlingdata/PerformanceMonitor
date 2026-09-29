@@ -178,12 +178,14 @@ public sealed class McpBlockingTools
             if (limitError != null) return limitError;
 
             /* The stamps below are THIS server's local wall clock in the store, so putting them in the
-               naive-UTC frame every other field on this payload uses needs THIS server's offset, not the
-               desktop tab's. See McpServerLocalWindow. De-skewed HERE and not inside LocalDataService
-               because the WPF grids read the same rows and render them through ServerTimeHelper — that
-               surface has its own frame defect and its own issue, and folding the two together would fix
-               one by breaking the other. */
-            var utcOffsetMinutes = await McpServerLocalWindow.OffsetForAsync(dataService, resolved.ServerId);
+               naive-UTC frame every other field on this payload uses needs THIS server's clock, not the
+               desktop tab's, and converts each stamp at its own instant so one from before a daylight
+               saving change is not an hour off (#4793). See McpServerLocalWindow. De-skewed HERE and not
+               inside LocalDataService because the WPF grids read the same rows and render them through
+               ServerTimeHelper — that surface has its own frame defect and its own issue, and folding the
+               two together would fix one by breaking the other. */
+            var serverClock = await McpServerLocalWindow.ClockForAsync(dataService, resolved.ServerId);
+            string? UtcOrNull(DateTime? serverLocal) => serverLocal is { } stamp ? serverClock.ToUtc(stamp).ToString("o") : null;
 
             /* #3541 A3: the caller's limit + 1 as the fetch, the extra row as the OBSERVED truncation
                signal. The reader capped at 200 newest-first whatever `limit` said, so a 24-hour request on a
@@ -227,12 +229,12 @@ public sealed class McpBlockingTools
                 blocking_sql_text_truncated = !full_text && r.BlockingSqlText != null && r.BlockingSqlText.Length > SqlTextPreviewLength,
                 blocked_transaction_name = r.BlockedTransactionName,
                 blocking_transaction_name = r.BlockingTransactionName,
-                blocked_last_tran_started = r.BlockedLastTranStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocking_last_tran_started = r.BlockingLastTranStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocked_last_batch_started = r.BlockedLastBatchStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocking_last_batch_started = r.BlockingLastBatchStarted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocked_last_batch_completed = r.BlockedLastBatchCompleted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
-                blocking_last_batch_completed = r.BlockingLastBatchCompleted?.AddMinutes(-utcOffsetMinutes).ToString("o"),
+                blocked_last_tran_started = UtcOrNull(r.BlockedLastTranStarted),
+                blocking_last_tran_started = UtcOrNull(r.BlockingLastTranStarted),
+                blocked_last_batch_started = UtcOrNull(r.BlockedLastBatchStarted),
+                blocking_last_batch_started = UtcOrNull(r.BlockingLastBatchStarted),
+                blocked_last_batch_completed = UtcOrNull(r.BlockedLastBatchCompleted),
+                blocking_last_batch_completed = UtcOrNull(r.BlockingLastBatchCompleted),
                 blocked_priority = r.BlockedPriority,
                 blocking_priority = r.BlockingPriority
             });
