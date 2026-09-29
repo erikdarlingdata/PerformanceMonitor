@@ -28,7 +28,7 @@ namespace Darling.Tests;
 /// <c>shared_preload_libraries</c> — only the LATER <c>pg_stat_statements_reset()</c> / view read throws 55000
 /// — so the skip never fired on a rig that does not preload it. CI run 36082244687 failed the test with 55000
 /// on job "Darling PG tests (2)", then failed the collection's own residue check (#1873). It moved into its own
-/// scratch database (<c>#1776 own-store</c>), where whatever it creates is dropped whole on dispose.
+/// scratch database, where whatever it creates is dropped whole on dispose.
 ///
 /// <para><b>The count no longer goes through <c>pg_stat_statements</c> (PR #4681's full-suite run, after PR
 /// #4691).</b> The test passed alone and failed once in a full-suite run, and nobody recorded the count it read.
@@ -54,6 +54,9 @@ namespace Darling.Tests;
 /// database-name filter does not even rely on that, since it would count a read through a second data source
 /// too. A control command through the same data source proves the listener sees the database name and the text
 /// before the count is trusted, so a renamed tag reads as a loud failure rather than a silent 0.</para>
+///
+/// <para><b>Own store</b> (<c>#1776 own-store</c>): the class mints its own scratch database, so it cannot race the
+/// shared <c>live-postgres</c> store and needs no serialization against it.</para>
 /// </summary>
 public sealed class WaitRateTileReadCountLiveTests
 {
