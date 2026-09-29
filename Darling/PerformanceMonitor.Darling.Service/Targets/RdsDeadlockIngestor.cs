@@ -52,6 +52,12 @@ public sealed class RdsDeadlockIngestor
     /// </summary>
     private readonly RdsCsvlogCarryBook _csvCarry = new();
 
+    /// <summary>
+    /// The deadlock report a chunk ended inside, held for the next chunk (#4735 item 4). One book per ingestor, like
+    /// the csvlog one, for the same reason.
+    /// </summary>
+    private readonly RdsDeadlockCarryBook _reportCarry = new();
+
     public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
@@ -154,9 +160,17 @@ public sealed class RdsDeadlockIngestor
             ? _csvCarry.CarryFor(chunk.Value.Resume.Key, chunk.Value.StartsAtFileStart)
             : (RdsCsvlogCarry.CsvCarry.Empty, null, 0, null);
 
-        var (written, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry) = await StoreAsync(
+        var (heldReport, reportKey, reportFileName) = pgLogUsesCsvlog
+            ? (string.Empty, null, null)
+            : _reportCarry.CarryFor(chunk.Value.Resume.Key);
+
+        /* A chunk of a file that is no longer the newest and has nothing more pending is that file's last: a report
+           it ends inside can never be finished. */
+        var moreCanArrive = !chunk.Value.ReadAgain || chunk.Value.MoreAvailable;
+
+        var (written, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry, nextReport) = await StoreAsync(
             serverId, storageName, chunk.Value.Text, logTimezoneIsUtc, pgLogUsesCsvlog,
-            carry, chunk.Value.MoreAvailable, cancellationToken);
+            carry, chunk.Value.MoreAvailable, heldReport, moreCanArrive, cancellationToken);
 
         /* THE MARKER MOVES HERE AND NOWHERE ELSE. Reaching this line means everything the chunk held is
            either in the store or was nothing to store; anything else threw out of StoreAsync above and
@@ -174,6 +188,13 @@ public sealed class RdsDeadlockIngestor
         if (carryKey is not null && resumeAdvanced)
         {
             csvRecordsDiscarded += _csvCarry.Commit(carryKey, currentFileName, nextCarry, droppedByRotation);
+        }
+
+        /* The held report moves with the marker for the same reason, and only when it advanced: on a replay the same
+           chunk comes back, and holding its tail twice would glue it onto itself. */
+        if (reportKey is not null && resumeAdvanced)
+        {
+            _reportCarry.Commit(reportKey, reportFileName, nextReport);
         }
 
         /* #4708: the position is saved AFTER the chunk's rows are stored and the in-process position has moved, never
@@ -194,7 +215,7 @@ public sealed class RdsDeadlockIngestor
     /// deadlocks in it — is a legitimate zero that loses nothing, and every way it can FAIL leaves via an
     /// exception rather than a zero the caller would have to tell apart from those.
     /// </summary>
-    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, int RaiseShapedSkipped, RdsCsvlogCarry.CsvCarry NextCarry)> StoreAsync(
+    private async Task<(int Written, int ForeignZoneLines, int CsvRecordsDiscarded, int RaiseShapedSkipped, RdsCsvlogCarry.CsvCarry NextCarry, string NextReport)> StoreAsync(
         int serverId,
         string storageName,
         string text,
@@ -202,6 +223,8 @@ public sealed class RdsDeadlockIngestor
         bool pgLogUsesCsvlog,
         RdsCsvlogCarry.CsvCarry carry,
         bool additionalDataPending,
+        string heldReport,
+        bool moreCanArrive,
         CancellationToken cancellationToken)
     {
         List<PgDeadlockLogParser.ParsedDeadlock> deadlocks;
@@ -209,12 +232,13 @@ public sealed class RdsDeadlockIngestor
         var csvRecordsDiscarded = 0;
         var raiseShapedSkipped = 0;
         var nextCarry = RdsCsvlogCarry.CsvCarry.Empty;
+        var nextReport = string.Empty;
 
         if (pgLogUsesCsvlog)
         {
             if (string.IsNullOrEmpty(text) && string.IsNullOrEmpty(carry.Partial))
             {
-                return (0, 0, 0, 0, carry);
+                return (0, 0, 0, 0, carry, nextReport);
             }
 
             var portion = RdsCsvlogCarry.ParseCsvPortion(carry, text, additionalDataPending);
@@ -255,7 +279,8 @@ public sealed class RdsDeadlockIngestor
         {
             if (string.IsNullOrEmpty(text))
             {
-                return (0, 0, 0, 0, nextCarry);
+                /* Nothing new: nothing to store, and a held report has not seen a chunk. */
+                return (0, 0, 0, 0, nextCarry, heldReport);
             }
 
             /* Not inside IngestAsync's tolerant catch, which covers the AWS FETCH. A parse refusal is a
@@ -266,13 +291,24 @@ public sealed class RdsDeadlockIngestor
                ahead of the commit rather than around it: a refused zone that consumed the window would discard
                every report in it, and the setting that caused the refusal is fixable, so those reports are
                worth still being there afterwards (#3008). */
-            deadlocks = PgDeadlockLogParser.Extract(text, logTimezoneIsUtc, out foreignZoneLines);
+            var portion = RdsDeadlockCarry.Step(heldReport, text, moreCanArrive);
+            nextReport = portion.Next;
+
+            if (portion.StoredUnfinished)
+            {
+                _logger?.LogDebug(
+                    "RDS deadlock log for {Server}: a report is still unfinished after one more chunk, or nothing more can "
+                    + "arrive for it; storing it as it is (#4735)",
+                    storageName);
+            }
+
+            deadlocks = PgDeadlockLogParser.Extract(portion.Text, logTimezoneIsUtc, out foreignZoneLines);
         }
 
         if (deadlocks.Count == 0)
         {
             /* A log slab with no deadlocks in it is the ordinary case. Not worth a log line every cycle. */
-            return (0, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry);
+            return (0, foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry, nextReport);
         }
 
         var rows = new List<PgDeadlocksCollector.Row>(deadlocks.Count);
@@ -292,7 +328,7 @@ public sealed class RdsDeadlockIngestor
 
         return (
             await WriteAsync(serverId, storageName, rows, cancellationToken),
-            foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry);
+            foreignZoneLines, csvRecordsDiscarded, raiseShapedSkipped, nextCarry, nextReport);
     }
 
     /// <summary>
