@@ -131,7 +131,7 @@ internal sealed class DatabaseWatermarkCache
         }
     }
 
-    public void Seed(int serverId, string database, DateTime? value, DateTime floor, DateTime now, SeedToken token)
+    public void Seed(int serverId, string database, DateTime? value, DateTime floor, DateTime now, SeedToken token, DateTime? witness = null)
     {
         lock (_gate)
         {
