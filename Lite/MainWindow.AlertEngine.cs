@@ -381,6 +381,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #4795: the sweep now waits for each send's answer before it records it, so a second sweep for the same
+           server that starts meanwhile would decide the same alert again. One evaluation per server at a time; the
+           skipped one is harmless, the AG snapshots only change with the collectors. UI thread only. */
+        if (!_agSweepsRunning.Add(serverId))
+        {
+            return;
+        }
+
         try
         {
             var alerts = new List<AgAlert>();
@@ -433,7 +441,15 @@ public partial class MainWindow : Window
         {
             AppLogger.Error("AgAlerts", $"Availability Group alert evaluation failed for {serverName}: {ex.Message}");
         }
+        finally
+        {
+            _agSweepsRunning.Remove(serverId);
+        }
     }
+
+    /// <summary>Servers whose Availability Group evaluation is running (#4795), so a slow send cannot overlap the
+    /// next sweep's decision for the same server.</summary>
+    private readonly HashSet<int> _agSweepsRunning = new();
 
     /// <summary>
     /// Delivers one AG alert through the SAME path every other Lite alert uses — mute check, then
