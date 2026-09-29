@@ -280,6 +280,9 @@ LIMIT 5";
             finding.DrillDown!["top_spilling_queries"] = items;
     }
 
+    /// <summary>The most parameter-sensitive plans the drill-down lists. Applied after the exact creation-time test (#4821), not in SQL.</summary>
+    private const int ParameterSensitiveQueryCap = 5;
+
     /// <summary>
     /// Top parameter-sensitive plans behind a PARAMETER_SENSITIVITY finding.
     /// Re-runs Detector A's detection (standard analysis window) for the top 5 offenders.
@@ -297,18 +300,23 @@ WITH svr AS
     -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
     -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
     -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
-    SELECT COALESCE
+    -- #4821: the offset is only the ROUGH first filter now; the zone (time_zone_id, from the same newest
+    -- row) rides beside it and the exact test runs in C# with the offset in force when each plan was
+    -- compiled (PlanCreationClock).
+    SELECT
+        COALESCE(p.utc_offset_minutes, 0) AS offset_minutes,
+        p.time_zone_id
+    FROM (SELECT 1) AS one
+    LEFT JOIN
     (
-        (
-            SELECT utc_offset_minutes
-            FROM v_server_properties
-            WHERE server_id = $1
-            AND   utc_offset_minutes IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+        SELECT utc_offset_minutes, time_zone_id
+        FROM v_server_properties
+        WHERE server_id = $1
+        AND   utc_offset_minutes IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+    ) AS p
+      ON 1 = 1
 ),
 latest AS
 (
@@ -317,7 +325,10 @@ latest AS
         query_hash,
         query_plan_hash,
         execution_count,
+        creation_time,
         creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
+        svr.offset_minutes AS server_offset_minutes,
+        svr.time_zone_id AS server_time_zone_id,
         min_worker_time,
         max_worker_time,
         min_grant_kb,
@@ -346,25 +357,43 @@ SELECT
     max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) AS worker_ratio,
     max_grant_kb::DOUBLE PRECISION / NULLIF(min_grant_kb, 0) AS grant_ratio,
     CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
-    LEFT(query_text, 500) AS query_text
+    LEFT(query_text, 500) AS query_text,
+    creation_time,
+    server_offset_minutes,
+    server_time_zone_id
 FROM latest
 WHERE rn = 1
 AND   min_worker_time >= 10000
 AND   max_worker_time >= 250000
 AND   execution_count >= 20
-AND   creation_time_utc <= $2
+AND   creation_time_utc <= $4
 AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
-ORDER BY worker_ratio DESC
-LIMIT 5";
+ORDER BY worker_ratio DESC";
 
         cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeStart });
         cmd.Parameters.Add(new DuckDBParameter { Value = context.TimeRangeEnd });
+        /* $4: the first filter's bound, opened by an hour (#4821). The exact test is made below, per row. */
+        cmd.Parameters.Add(new DuckDBParameter { Value = PlanCreationClock.RoughBound(context.TimeRangeStart) });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
         while (await reader.ReadAsync(context.CancellationToken))
         {
+            /* The exact compiled-before-the-window test with the offset in force when the plan was compiled
+               (#4821); the five-row cap is applied after it, not in SQL. */
+            if (reader.IsDBNull(10)
+                || !PlanCreationClock.CompiledBeforeWindow(
+                    PlanCreationClock.ClockFrom(reader, 11, 12), reader.GetDateTime(10), context.TimeRangeStart))
+            {
+                continue;
+            }
+
+            if (items.Count >= ParameterSensitiveQueryCap)
+            {
+                break;
+            }
+
             items.Add(new
             {
                 database = reader.IsDBNull(0) ? "" : reader.GetString(0),
@@ -405,18 +434,23 @@ WITH svr AS
     -- Detector A's creation_time de-skew, same shape and same reason: creation_time is the monitored
     -- server's local wall clock, the window bound is naive UTC, and 0 covers a server whose
     -- server_properties has not been collected yet. The CTE returns exactly one row, so nothing is lost.
-    SELECT COALESCE
+    -- #4821: the offset is only the ROUGH first filter now; the zone (time_zone_id, from the same newest
+    -- row) rides beside it and the exact test runs in C# with the offset in force when each plan was
+    -- compiled (PlanCreationClock).
+    SELECT
+        COALESCE(p.utc_offset_minutes, 0) AS offset_minutes,
+        p.time_zone_id
+    FROM (SELECT 1) AS one
+    LEFT JOIN
     (
-        (
-            SELECT utc_offset_minutes
-            FROM v_server_properties
-            WHERE server_id = $1
-            AND   utc_offset_minutes IS NOT NULL
-            ORDER BY collection_time DESC
-            LIMIT 1
-        ),
-        0
-    ) AS offset_minutes
+        SELECT utc_offset_minutes, time_zone_id
+        FROM v_server_properties
+        WHERE server_id = $1
+        AND   utc_offset_minutes IS NOT NULL
+        ORDER BY collection_time DESC
+        LIMIT 1
+    ) AS p
+      ON 1 = 1
 ),
 psp_signature AS
 (
@@ -425,9 +459,12 @@ psp_signature AS
     -- the detector's own thresholds is what keeps the flag honest: a query flagged here IS one the
     -- detector counts when it fires, never a looser lookalike. Grant/spill divergence stay metadata
     -- on the PSP side — they do not fire the detector alone, so they do not fire this flag alone.
-    SELECT DISTINCT
+    -- #4821: the earliest creation_time per (database, query_hash) rides out so C# can make the exact
+    -- compiled-before-the-window test; the creation_time_utc filter below is only the rough first pass.
+    SELECT
         database_name,
-        query_hash
+        query_hash,
+        MIN(creation_time) AS creation_time
     FROM
     (
         SELECT
@@ -435,6 +472,7 @@ psp_signature AS
             query_hash,
             query_plan_hash,
             execution_count,
+            creation_time,
             creation_time - svr.offset_minutes * INTERVAL '1' MINUTE AS creation_time_utc,
             min_worker_time,
             max_worker_time,
@@ -453,8 +491,9 @@ psp_signature AS
     AND   min_worker_time >= 10000
     AND   max_worker_time >= 250000
     AND   execution_count >= 20
-    AND   creation_time_utc <= $3
+    AND   creation_time_utc <= $7
     AND   max_worker_time::DOUBLE PRECISION / NULLIF(min_worker_time, 0) >= 10
+    GROUP BY database_name, query_hash
 ),
 deduped AS
 (
@@ -588,13 +627,12 @@ compared AS
         -- #2138 gap 3: does this regressed query ALSO carry the parameter-sensitivity signature in the
         -- plan cache? Keyed on (database, query_hash) — the hash bridges Query Store and the cache.
         -- Steers the force-plan remediation's caution text; the future bot never auto-forces on true.
-        EXISTS
         (
-            SELECT 1
+            SELECT MIN(p.creation_time)
             FROM psp_signature AS p
             WHERE p.database_name = l.database_name
             AND   p.query_hash = l.query_hash
-        ) AS parameter_sensitivity_cofired
+        ) AS psp_creation_time
     FROM ranked AS l
     JOIN ranked AS b
       ON  b.database_name = l.database_name
@@ -617,9 +655,12 @@ SELECT
     regression_factor,
     LEFT(query_text, 500) AS query_text,
     replica_role,
-    parameter_sensitivity_cofired,
-    best_plan_last_seen
+    psp_creation_time,
+    best_plan_last_seen,
+    svr.offset_minutes AS server_offset_minutes,
+    svr.time_zone_id AS server_time_zone_id
 FROM compared
+CROSS JOIN svr
 WHERE regression_factor >= 2
 AND   latest_total_cpu_us >= 10000000
 ORDER BY regression_factor DESC
@@ -646,6 +687,9 @@ LIMIT 5";
         {
             Value = offenders is null ? DBNull.Value : offenders.Select(o => o.QueryId).ToList()
         });
+        /* $7 (#4821): the psp_signature filter's first-pass bound, opened by an hour. The exact
+           compiled-before-the-window test for the co-fired flag is made below, per row. */
+        cmd.Parameters.Add(new DuckDBParameter { Value = PlanCreationClock.RoughBound(context.TimeRangeStart) });
 
         var items = new List<object>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
@@ -672,7 +716,9 @@ LIMIT 5";
                 replica_role = reader.IsDBNull(11) ? "" : reader.GetString(11),
                 /* #2138 gap 3: the plan-cache PSP signature co-fired for this query's hash. Steers the
                    force-plan caution text; the future bot never auto-forces a flagged target. */
-                parameter_sensitivity_cofired = !reader.IsDBNull(12) && Convert.ToBoolean(reader.GetValue(12)),
+                parameter_sensitivity_cofired = !reader.IsDBNull(12)
+                    && PlanCreationClock.CompiledBeforeWindow(
+                        PlanCreationClock.ClockFrom(reader, 14, 15), Convert.ToDateTime(reader.GetValue(12)), context.TimeRangeStart),
                 /* #3953 parity with Darling: when the best plan last ran, appended so the ordinals above are
                    untouched. */
                 best_plan_last_seen = reader.IsDBNull(13) ? (DateTime?)null : Convert.ToDateTime(reader.GetValue(13))

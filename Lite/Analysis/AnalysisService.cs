@@ -829,39 +829,30 @@ AND   capture_time >= COALESCE(
 ORDER BY capture_time, trace_flag";
 
     /// <summary>
-    /// This server's collected UTC offset for the trace-anchor read (#3740) — the same statement
-    /// <c>LocalDataService.GetServerUtcOffsetMinutesAsync</c> runs, inlined because the analysis pass holds a
-    /// DuckDB connection and not a <c>LocalDataService</c>. Skips NULL offsets rather than taking the newest
-    /// row blindly: the column arrived in schema v42 and a store migrated from earlier holds pre-v42
-    /// snapshots that predate it. <c>$1</c> server_id. No row means no offset yet, and the caller treats
-    /// local as UTC — <c>McpServerLocalWindow</c>'s decision, for the same reason (a server with no offset
-    /// almost always has no server-local rows either).
+    /// How much wider than the exact span the trace-anchor read's first filter is, on each side (#4821). SQL
+    /// filters the server-local <c>event_time</c> against the span's bounds shifted into the server's frame;
+    /// a line near a daylight-saving change can sit up to an hour from where that shift puts it, so the bounds
+    /// are opened by an hour and the exact span is applied in C# after each row is converted.
     /// </summary>
-    internal const string ServerUtcOffsetForAttributionSql = @"
-SELECT utc_offset_minutes
-FROM v_server_properties
-WHERE server_id = $1
-AND   utc_offset_minutes IS NOT NULL
-ORDER BY collection_time DESC
-LIMIT 1";
+    private const int RoughFilterMarginMinutes = 60;
 
     /// <summary>
     /// The default trace's sp_configure lines for the attribution's trace anchor (#3740): every stored
     /// <c>ErrorLog</c> row carrying msg 15457 (<see cref="ConfigChangeAttribution.ReconfigureMessageNumber"/>)
-    /// whose event time falls in <c>($2, $3]</c>. Selected on <c>error_number</c>, not on the text — the number
+    /// whose event time falls in <c>($2, $3]</c> (the caller's rough bounds, see below). Selected on <c>error_number</c>, not on the text — the number
     /// is populated on the row and does not change with the instance's language; the attribution parses the
     /// text afterwards. Reads the <c>v_default_trace_events</c> archive view (hot UNION parquet) like the
     /// System Events read does, so a line that has already aged into parquet still anchors.
     ///
     /// <para><b>The stored <c>event_time</c> is the monitored server's LOCAL wall clock</b> —
     /// <c>fn_trace_gettable</c>'s <c>StartTime</c>, stored raw — while the capture times this span is made of
-    /// are naive UTC. Lite de-skews in C# rather than SQL, exactly as <c>LocalDataService.GetDefaultTraceEventsAsync</c>
-    /// does: the caller shifts BOTH bounds into the server's frame by the collected offset before binding
-    /// them, and subtracts the same offset from each returned row, so the bounds and the values can never
-    /// disagree about whose clock they are in (<c>ServerLocalReadFrameDisciplineTests</c> pins the row
-    /// de-skew). The Darling twin, <c>DarlingAnalysisService.ReconfigureTraceLinesForAttributionSql</c>, spells
-    /// the same de-skew in SQL. One offset covers the span, so a span straddling a DST transition is off by an
-    /// hour on its far side — the single-snapshot approximation every reader of this column makes.</para>
+    /// are naive UTC. Lite converts in C# rather than SQL, as <c>LocalDataService.GetDefaultTraceEventsAsync</c>
+    /// does: the caller shifts BOTH bounds into the server's frame by the server's clock
+    /// (<see cref="ServerClock"/>), opened by <see cref="RoughFilterMarginMinutes"/> on each side so this
+    /// statement is only a first filter, then converts each returned row to UTC with the offset in force at
+    /// that row and keeps the lines inside the exact span (#4821). A single collected offset put a line stamped
+    /// across a daylight-saving change an hour off. The Darling twin,
+    /// <c>DarlingAnalysisService.ReconfigureTraceLinesForAttributionSql</c>, spells the same de-skew in SQL.</para>
     /// </summary>
     internal const string ReconfigureTraceLinesForAttributionSql = @"
 SELECT event_time, text_data
@@ -1086,12 +1077,14 @@ ORDER BY event_time";
     /// already true without it, so a store fault here is logged at Warning and costs only the anchor. An
     /// abandonment still propagates to the caller's classified line (#2443).
     ///
-    /// <para>The offset is read first and used twice — to shift both span bounds into the server's local
-    /// frame and to de-skew each returned row back to UTC — off the ONE resolved value, so the bounds and
-    /// the values cannot disagree about which clock they are in (the discipline
-    /// <c>LocalDataService.GetDefaultTraceEventsAsync</c> states for its own parameter).</para>
+    /// <para>The server's clock is read first and used twice — to shift both span bounds into the server's local
+    /// frame for the first filter, and to convert each returned row back to UTC — off the ONE resolved clock, so
+    /// the bounds and the values cannot disagree about which clock they are in (the discipline
+    /// <c>LocalDataService.GetDefaultTraceEventsAsync</c> states for its own parameter). The clock follows the
+    /// server's time zone where SQL Server reports one, so a line on the far side of a daylight-saving change
+    /// converts with the offset that was in force then (#4821).</para>
     /// </summary>
-    private async Task<ConfigChangeAttribution.TraceAnchor?> ResolveTraceAnchorAsync(
+    internal async Task<ConfigChangeAttribution.TraceAnchor?> ResolveTraceAnchorAsync(
         AnalysisContext context, ConfigChangeAttribution.ChangeEvent change)
     {
         try
@@ -1102,31 +1095,32 @@ ORDER BY event_time";
             {
                 await connection.OpenAsync(context.CancellationToken);
 
-                var offset = 0;
-                using (var offsetCmd = connection.CreateCommand())
-                {
-                    offsetCmd.CommandText = ServerUtcOffsetForAttributionSql;
-                    offsetCmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-                    var scalar = await offsetCmd.ExecuteScalarAsync(context.CancellationToken);
-                    if (scalar is not null and not DBNull)
-                        offset = Convert.ToInt32(scalar);
-                }
+                /* The server's clock (#4821): its time zone where SQL Server reports one, else the collected
+                   fixed offset, else UTC. One offset for the whole span put a line stamped on the far side of a
+                   daylight-saving change an hour off. */
+                var (utcOffsetMinutes, timeZoneId) = await BaselineProvider.ReadServerClockAsync(
+                    connection, context.ServerId, context.CancellationToken);
+                var clock = ServerClock.Resolve(timeZoneId, utcOffsetMinutes);
 
                 using var cmd = connection.CreateCommand();
                 cmd.CommandText = ReconfigureTraceLinesForAttributionSql;
                 cmd.Parameters.Add(new DuckDBParameter { Value = context.ServerId });
-                /* Server-local bounds: the stored event_time is the server's wall clock, so the UTC span is
-                   shifted INTO that frame by the collected offset (local = UTC + offset). */
-                cmd.Parameters.Add(new DuckDBParameter { Value = change.PreviousCaptureTime.AddMinutes(offset) });
-                cmd.Parameters.Add(new DuckDBParameter { Value = change.ChangeTime.AddMinutes(offset) });
+                /* Rough server-local bounds: the stored event_time is the server's wall clock, so the UTC span
+                   is shifted INTO that frame, and an hour wider on each side so a line near a daylight-saving
+                   change cannot fall out of the first filter. The exact span is applied below, on UTC. */
+                cmd.Parameters.Add(new DuckDBParameter { Value = clock.ToServerLocal(change.PreviousCaptureTime).AddMinutes(-RoughFilterMarginMinutes) });
+                cmd.Parameters.Add(new DuckDBParameter { Value = clock.ToServerLocal(change.ChangeTime).AddMinutes(RoughFilterMarginMinutes) });
 
                 using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
                 while (await reader.ReadAsync(context.CancellationToken))
                 {
                     if (reader.IsDBNull(0))
                         continue;
-                    /* De-skew server-local StartTime -> naive-UTC, the same subtraction the System Events read makes. */
-                    var eventTimeUtc = reader.GetDateTime(0).AddMinutes(-offset);
+                    /* Server-local StartTime -> naive UTC with the offset in force at that row, then the exact
+                       span, the same (previous capture, change time] the anchor join applies. */
+                    var eventTimeUtc = clock.ToUtc(reader.GetDateTime(0));
+                    if (eventTimeUtc <= change.PreviousCaptureTime || eventTimeUtc > change.ChangeTime)
+                        continue;
                     lines.Add(new ConfigChangeAttribution.TraceLine(
                         eventTimeUtc,
                         reader.IsDBNull(1) ? null : reader.GetString(1)));

@@ -1118,17 +1118,21 @@ ORDER BY capture_time, trace_flag";
     ///
     /// <para><b>The stored <c>event_time</c> is the monitored server's LOCAL wall clock</b> —
     /// <c>fn_trace_gettable</c>'s <c>StartTime</c>, stored raw so the collector's watermark compares like with
-    /// like — while the capture times this is bounded by are naive UTC, so the column is de-skewed by the
-    /// collected <c>server_properties.utc_offset_minutes</c> on BOTH the projection and both bounds, in the
-    /// exact spelling <c>DarlingDefaultTraceReader.EventsByWindowSql</c> and the viewer's System Events read
-    /// use (<c>ServerLocalReadFrameDisciplineTests</c> counts the three sites and forbids an un-de-skewed
-    /// read of the aliased column). Getting this wrong is not a cosmetic skew: at UTC−4 an un-de-skewed line would
-    /// sit four hours later than its capture and fall OUT of the span, so the anchor would silently never
-    /// resolve on the very fleet it was built for. A server with no collected offset yet falls back to 0
-    /// (local == UTC) through the single-row COALESCE CTE, which also keeps the cross join from dropping the
-    /// events; one offset covers the span, so a span straddling a DST transition is off by an hour on its
-    /// far side — the same single-snapshot approximation every reader of this column makes, stated here
-    /// rather than implied.</para>
+    /// like — while the capture times this is bounded by are naive UTC. The column comes back RAW as
+    /// <c>event_time_local</c>, with the newest snapshot's <c>offset_minutes</c> and <c>time_zone_id</c> (one
+    /// <c>server_properties</c> row, so the two describe one snapshot), and
+    /// <see cref="ServerLocalTimes.TraceLinesInWindow"/> converts each line to UTC with the server's
+    /// <see cref="PerformanceMonitor.Analysis.Baselines.ServerClock"/> and applies the exact <c>($2, $3]</c>
+    /// window to the converted time (#4821). Converting in SQL with the one newest offset put a line from
+    /// before the zone's last daylight saving change an hour off, which could push it out of a span it was
+    /// inside. The SQL window is only a rough first filter: it still subtracts the newest offset, but widens
+    /// each bound by an hour, because the offset in force at a line can differ from the newest by an hour.
+    /// The read has no LIMIT, so the extra hour drops nothing; the lines inside the widened window and
+    /// outside the real one are dropped after the exact conversion. Getting the frame wrong is not a cosmetic
+    /// skew: at UTC−4 an unconverted line would sit four hours later than its capture and fall OUT of the
+    /// span, so the anchor would silently never resolve on the very fleet it was built for. A server with
+    /// no collected offset yet reads as UTC (<c>offset_minutes</c> 0, no zone) through the single-row
+    /// <c>svr</c> CTE, which also keeps the cross join from dropping the events.</para>
     ///
     /// <para><b>Cost.</b> No <c>event_time</c> index exists (the table is indexed <c>(server_id,
     /// collection_time)</c>), so this is a scan of the server's rows in a curated, low-volume table with a
@@ -1136,24 +1140,30 @@ ORDER BY capture_time, trace_flag";
     /// the connect cadence makes rare. Exposed const for the dialect pins.</para>
     /// </summary>
     public const string ReconfigureTraceLinesForAttributionSql = @"
-WITH svr AS (
-    SELECT COALESCE((
-        SELECT sp.utc_offset_minutes
-        FROM server_properties AS sp
-        WHERE sp.server_id = $1
-        AND   sp.utc_offset_minutes IS NOT NULL
-        ORDER BY sp.collection_time DESC
-        LIMIT 1), 0) AS offset_minutes
+WITH newest AS (
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+),
+svr AS (
+    SELECT
+        COALESCE((SELECT utc_offset_minutes FROM newest), 0) AS offset_minutes,
+        (SELECT time_zone_id FROM newest) AS time_zone_id
 )
 SELECT
-    dte.event_time - make_interval(mins => svr.offset_minutes) AS event_time_utc,
-    dte.text_data
+    dte.event_time AS event_time_local,
+    dte.text_data,
+    svr.offset_minutes,
+    svr.time_zone_id
 FROM default_trace_events AS dte, svr
 WHERE dte.server_id = $1
 AND   dte.error_number = 15457
-AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2
-AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3
-ORDER BY event_time_utc";
+AND   dte.event_time - make_interval(mins => svr.offset_minutes) > $2 - interval '1 hour'
+AND   dte.event_time - make_interval(mins => svr.offset_minutes) <= $3 + interval '1 hour'
+ORDER BY event_time_local";
 
     /// <summary>
     /// Step 2.5 of the pass (#3653 A10, Q2 and slice two): if a configuration value was first observed
@@ -1379,22 +1389,32 @@ ORDER BY event_time_utc";
     {
         try
         {
-            var lines = new List<ConfigChangeAttribution.TraceLine>();
+            var windowStart = DateTime.SpecifyKind(change.PreviousCaptureTime, DateTimeKind.Unspecified);
+            var windowEnd = DateTime.SpecifyKind(change.ChangeTime, DateTimeKind.Unspecified);
+            var rows = new List<(DateTime? EventTimeLocal, string? TextData)>();
+            ServerClock? clock = null;
             await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
             using var cmd = new NpgsqlCommand(ReconfigureTraceLinesForAttributionSql, connection) { CommandTimeout = AnalysisCommandTimeoutSeconds };
             cmd.Parameters.AddWithValue(context.ServerId);
-            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(change.PreviousCaptureTime, DateTimeKind.Unspecified));
-            cmd.Parameters.AddWithValue(DateTime.SpecifyKind(change.ChangeTime, DateTimeKind.Unspecified));
+            cmd.Parameters.AddWithValue(windowStart);
+            cmd.Parameters.AddWithValue(windowEnd);
 
             using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
             while (await reader.ReadAsync(context.CancellationToken))
             {
-                if (reader.IsDBNull(0))
-                    continue;
-                lines.Add(new ConfigChangeAttribution.TraceLine(
-                    reader.GetDateTime(0),
+                /* Every row carries the same newest-snapshot zone and offset (a one-row CTE), so the clock is built once. */
+                clock ??= ServerLocalTimes.ClockFrom(
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(2) ? null : reader.GetInt32(2));
+                rows.Add((
+                    reader.IsDBNull(0) ? null : reader.GetDateTime(0),
                     reader.IsDBNull(1) ? null : reader.GetString(1)));
             }
+
+            /* #4821: the exact ($2, $3] window on each line's own converted time; the SQL window was only a pre-filter. */
+            var lines = clock is null
+                ? new List<ConfigChangeAttribution.TraceLine>()
+                : ServerLocalTimes.TraceLinesInWindow(rows, clock, windowStart, windowEnd);
 
             return ConfigChangeAttribution.ResolveServerConfigTraceAnchor(change, lines);
         }

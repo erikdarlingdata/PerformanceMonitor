@@ -16,6 +16,8 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
+using PerformanceMonitor.Darling.Analysis;
 
 namespace PerformanceMonitor.Darling.Service;
 
@@ -1346,13 +1348,26 @@ LIMIT 1";
     /// <summary>
     /// Lite's anomalous-jobs read verbatim (running_jobs table). $2 is the threshold percent
     /// (multiplier x 100, as numeric — percent_of_average is numeric(10,1)).
-    /// <para><c>start_time</c> is the monitored server's own clock, so the server's collected UTC offset
-    /// is projected beside it — NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent offset as an
+    /// <para><c>start_time</c> is the monitored server's own clock, so the newest snapshot's collected UTC
+    /// offset and time zone id (one <c>server_properties</c> row, so the two describe one snapshot) are
+    /// projected beside it — NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent offset as an
     /// explicitly unconverted server-clock instant rather than as UTC (see
     /// <c>AlertTimestamp</c>), and coalescing here would take that choice away from it. Rides on this
     /// statement rather than a second command so the pass's command count is unchanged.</para>
+    /// <para>The reader turns that pair into the offset in force at EACH job's <c>start_time</c>
+    /// (<see cref="ServerLocalTimes.JobStartOffsetMinutes"/>, #4821), because the newest offset alone puts a
+    /// job that started before the zone's last daylight saving change an hour off in
+    /// <c>AnomalousJobInfo.StartTimeUtc</c> and in the alert's "Started" label.</para>
     /// </summary>
     public const string AnomalousJobsSql = @"
+WITH svr AS (
+    SELECT sp.utc_offset_minutes, sp.time_zone_id
+    FROM server_properties AS sp
+    WHERE sp.server_id = $1
+    AND   sp.utc_offset_minutes IS NOT NULL
+    ORDER BY sp.collection_time DESC
+    LIMIT 1
+)
 SELECT
     job_name,
     job_id,
@@ -1361,14 +1376,8 @@ SELECT
     p95_duration_seconds,
     percent_of_average,
     start_time,
-    (
-        SELECT sp.utc_offset_minutes
-        FROM server_properties AS sp
-        WHERE sp.server_id = $1
-        AND   sp.utc_offset_minutes IS NOT NULL
-        ORDER BY sp.collection_time DESC
-        LIMIT 1
-    ) AS utc_offset_minutes
+    (SELECT utc_offset_minutes FROM svr) AS utc_offset_minutes,
+    (SELECT time_zone_id FROM svr) AS time_zone_id
 FROM running_jobs
 WHERE server_id = $1
 AND collection_time = (SELECT MAX(collection_time) FROM running_jobs WHERE server_id = $1)
@@ -1423,9 +1432,14 @@ LIMIT 5";
         command.Parameters.AddWithValue(serverId);
         command.Parameters.AddWithValue(thresholdPercent);
 
+        ServerClock? clock = null;
         using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var startTime = reader.IsDBNull(6) ? DateTime.MinValue : reader.GetDateTime(6);
+            var snapshotOffset = reader.IsDBNull(7) ? (int?)null : reader.GetInt32(7);
+            /* #4821: every row carries the same newest-snapshot zone and offset, so the clock is built once. */
+            clock ??= ServerLocalTimes.ClockFrom(reader.IsDBNull(8) ? null : reader.GetString(8), snapshotOffset);
             items.Add(new AnomalousJobInfo
             {
                 JobName = reader.GetString(0),
@@ -1434,8 +1448,10 @@ LIMIT 5";
                 AvgDurationSeconds = reader.IsDBNull(3) ? 0 : reader.GetInt64(3),
                 P95DurationSeconds = reader.IsDBNull(4) ? 0 : reader.GetInt64(4),
                 PercentOfAverage = reader.IsDBNull(5) ? null : reader.GetDecimal(5),
-                StartTime = reader.IsDBNull(6) ? DateTime.MinValue : reader.GetDateTime(6),
-                UtcOffsetMinutes = reader.IsDBNull(7) ? null : reader.GetInt32(7)
+                StartTime = startTime,
+                /* The offset in force when THIS job started, so StartTimeUtc and the "Started" label are right for a
+                   job from before the last daylight saving change; a null offset stays null. */
+                UtcOffsetMinutes = ServerLocalTimes.JobStartOffsetMinutes(clock, startTime, snapshotOffset)
             });
         }
 

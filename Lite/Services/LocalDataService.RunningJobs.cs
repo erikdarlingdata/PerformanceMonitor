@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -93,8 +94,11 @@ ORDER BY current_duration_seconds DESC";
     /// <para><c>start_time</c> is the monitored server's own clock, so the server's collected UTC offset
     /// is projected beside it — deliberately NOT <c>COALESCE(..., 0)</c>: the alert body renders an absent
     /// offset as an explicitly unconverted server-clock instant rather than as UTC (see
-    /// <c>PerformanceMonitor.Notifications.AlertTimestamp</c>). Same projection as Darling's
-    /// <c>AnomalousJobsSql</c>, which is the parity this read is held to.</para>
+    /// <c>PerformanceMonitor.Notifications.AlertTimestamp</c>). The newest properties row's
+    /// <c>time_zone_id</c> rides beside it (#4821), and each job's <c>UtcOffsetMinutes</c> is the offset in
+    /// force at that job's <c>start_time</c>: a job that started before the last daylight-saving change is not
+    /// stated an hour off. Same projection as Darling's <c>AnomalousJobsSql</c>, which is the parity this read
+    /// is held to.</para>
     /// </summary>
     public async Task<List<AnomalousJobInfo>> GetAnomalousJobsAsync(int serverId, int multiplier)
     {
@@ -112,15 +116,19 @@ SELECT
     p95_duration_seconds,
     percent_of_average,
     start_time,
-    (
-        SELECT sp.utc_offset_minutes
-        FROM v_server_properties AS sp
-        WHERE sp.server_id = $1
-        AND   sp.utc_offset_minutes IS NOT NULL
-        ORDER BY sp.collection_time DESC
-        LIMIT 1
-    ) AS utc_offset_minutes
+    svr.utc_offset_minutes,
+    svr.time_zone_id
 FROM v_running_jobs
+LEFT JOIN
+(
+    SELECT utc_offset_minutes, time_zone_id
+    FROM v_server_properties
+    WHERE server_id = $1
+    AND   utc_offset_minutes IS NOT NULL
+    ORDER BY collection_time DESC
+    LIMIT 1
+) AS svr
+  ON 1 = 1
 WHERE server_id = $1
 AND collection_time = (SELECT MAX(collection_time) FROM v_running_jobs WHERE server_id = $1)
 AND avg_duration_seconds >= 60
@@ -144,11 +152,31 @@ LIMIT 5";
                 P95DurationSeconds = ToInt64(reader.GetValue(4)),
                 PercentOfAverage = reader.IsDBNull(5) ? null : Convert.ToDecimal(reader.GetValue(5)),
                 StartTime = reader.GetDateTime(6),
-                UtcOffsetMinutes = reader.IsDBNull(7) ? null : Convert.ToInt32(reader.GetValue(7))
+                UtcOffsetMinutes = OffsetInForceAt(reader, 7, 8, reader.GetDateTime(6))
             });
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// The UTC offset that was in force on the monitored server at <paramref name="startTime"/> (#4821), so
+    /// <c>AnomalousJobInfo.StartTimeUtc</c> and the alert's "Started" label state a winter job's start with the
+    /// winter offset even when the newest properties row was collected in summer. The clock follows the zone
+    /// the newest row carries (SQL Server 2022 and later) and keeps that row's fixed offset otherwise. A NULL
+    /// offset stays NULL, never 0: no properties row means the alert renders the start as an explicitly
+    /// unconverted server-clock instant rather than as UTC.
+    /// </summary>
+    private static int? OffsetInForceAt(System.Data.Common.DbDataReader reader, int offsetOrdinal, int zoneOrdinal, DateTime startTime)
+    {
+        if (reader.IsDBNull(offsetOrdinal))
+        {
+            return null;
+        }
+
+        var newestOffset = Convert.ToInt32(reader.GetValue(offsetOrdinal));
+        var clock = ServerClock.Resolve(reader.IsDBNull(zoneOrdinal) ? null : reader.GetString(zoneOrdinal), newestOffset);
+        return (int)Math.Round((startTime - clock.ToUtc(startTime)).TotalMinutes);
     }
 }
 
