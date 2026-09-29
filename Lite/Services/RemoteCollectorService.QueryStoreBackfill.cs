@@ -181,6 +181,12 @@ public partial class RemoteCollectorService
     /// </summary>
     private readonly QueryStoreBackfillFailureLedger _sliceFailures = new();
 
+    /// <summary>Which of the candidate and stored-floor reads are in a run of failures (#4772): each read turns an
+    /// error into "no work", so the first failure of a run is logged at Warning and the repeats at Debug, and a
+    /// read that completes ends the run. The twin of Darling's field. In memory on purpose, like the ledger
+    /// above.</summary>
+    private readonly QueryStoreBackfillReadFailureRuns _readFailures = new();
+
     /// <summary>Test-only seam: when set, replaces the slice body (called with the database and the window
     /// span the slice would have used). A throw counts as a failed slice and a normal return as a completed
     /// one, through the same accounting. Null in production, where it changes nothing.</summary>
@@ -258,7 +264,7 @@ public partial class RemoteCollectorService
         /* #4197: the same rule as Darling's twin — floorLimit is computed before the candidate read so
            it can bind the read's own lower bound, then the store's list is unioned with every database
            a hole key already names (state is loaded above, for free). */
-        var databases = await GetBackfillCandidateDatabasesAsync(serverId, floorLimit, state, cancellationToken);
+        var databases = await GetBackfillCandidateDatabasesAsync(serverId, floorLimit, state, cancellationToken, server.DisplayName);
 
         /* Databases whose slices keep failing: their slice is held back while any other database has work
            (see QueryStoreBackfillFailureLedger), then one of them is retried after the walk. */
@@ -297,7 +303,7 @@ public partial class RemoteCollectorService
             /* The derived ceiling: everything at or above the stored MIN shipped complete. Null
                means the live path has not made first contact for this database yet. */
             var storedFloor = await GetMinCollectedTimeForDatabaseAsync(
-                serverId, QueryStoreCollector.Instance.TargetTable, "last_execution_time", "database_name", databaseName, floorLimit, cancellationToken);
+                serverId, QueryStoreCollector.Instance.TargetTable, "last_execution_time", "database_name", databaseName, floorLimit, cancellationToken, server.DisplayName);
             if (storedFloor is null)
             {
                 continue;
@@ -550,9 +556,11 @@ public partial class RemoteCollectorService
     /// <paramref name="floorLimit"/> the loop uses to decide whether a database still needs digging,
     /// then merged with <see cref="QueryStoreBackfillState.MergeHoleDatabases"/> so a database that
     /// has gone fully quiet does not lose a recorded hole. DuckDB has no chunks to decompress, so the
-    /// bound buys Lite nothing but the shared rule; see the PR body's measured table.</summary>
+    /// bound buys Lite nothing but the shared rule; see the PR body's measured table. #4772: a failed read
+    /// logs one Warning for each run of failures (<see cref="QueryStoreBackfillReadFailureRuns"/>);
+    /// <paramref name="serverLabel"/> names the server in it and falls back to the id.</summary>
     internal async Task<List<string>> GetBackfillCandidateDatabasesAsync(
-        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
+        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken, string? serverLabel = null)
     {
         var databases = new List<string>();
         try
@@ -571,10 +579,24 @@ public partial class RemoteCollectorService
                     databases.Add(reader.GetString(0));
                 }
             }
+
+            _readFailures.RecordSuccess(serverId);
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "query_store backfill candidate read failed; skipping this tick");
+            /* #4772, the twin of Darling's catch: one Warning at the first failure of a run, the repeats at Debug.
+               A cancelled read is a shutdown, not a failure: it neither warns nor starts a run. */
+            if (ex is not OperationCanceledException && _readFailures.RecordFailure(serverId))
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "query_store backfill on '{Server}': reading the databases to backfill failed, so no hole or tail on this server is filled until a read succeeds. Further failures are logged at debug level until then.",
+                    serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                _logger?.LogDebug(ex, "query_store backfill candidate read failed; skipping this tick");
+            }
         }
 
         return QueryStoreBackfillState.MergeHoleDatabases(databases, state);
@@ -584,9 +606,11 @@ public partial class RemoteCollectorService
     /// <see cref="GetLastCollectedTimeForDatabaseAsync"/>. Null skips this tick; failure never invents
     /// a boundary. #4197: the twin of Darling's exact bounded form — see
     /// <c>QueryStoreBackfill.GetStoredFloorAsync</c> for why the EXISTS-then-bounded-MIN pair returns
-    /// the same value an unbounded MIN would.</summary>
+    /// the same value an unbounded MIN would. #4772: a failed read logs one Warning for each run of failures
+    /// for that database (<see cref="QueryStoreBackfillReadFailureRuns"/>); <paramref name="serverLabel"/>
+    /// names the server in it and falls back to the id.</summary>
     internal async Task<DateTime?> GetMinCollectedTimeForDatabaseAsync(
-        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, DateTime floorLimit, CancellationToken cancellationToken)
+        int serverId, string tableName, string columnName, string databaseColumnName, string databaseName, DateTime floorLimit, CancellationToken cancellationToken, string? serverLabel = null)
     {
         try
         {
@@ -602,6 +626,7 @@ public partial class RemoteCollectorService
                 var hit = await exists.ExecuteScalarAsync(cancellationToken);
                 if (hit is not null)
                 {
+                    _readFailures.RecordSuccess(serverId, databaseName);
                     return floorLimit;
                 }
             }
@@ -613,6 +638,7 @@ public partial class RemoteCollectorService
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = databaseName });
                 min.Parameters.Add(new DuckDB.NET.Data.DuckDBParameter { Value = floorLimit });
                 var result = await min.ExecuteScalarAsync(cancellationToken);
+                _readFailures.RecordSuccess(serverId, databaseName);
                 if (result is DateTime dt)
                 {
                     return dt;
@@ -621,7 +647,18 @@ public partial class RemoteCollectorService
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "query_store backfill floor read failed for [{Database}]; skipping this tick", databaseName);
+            /* #4772, the twin of Darling's catch: one Warning at the first failure of a run for this database. */
+            if (ex is not OperationCanceledException && _readFailures.RecordFailure(serverId, databaseName))
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "query_store backfill on '{Server}' [{Database}]: reading the stored floor failed, so this database is not backfilled until a read succeeds. Further failures are logged at debug level until then.",
+                    serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture), databaseName);
+            }
+            else
+            {
+                _logger?.LogDebug(ex, "query_store backfill floor read failed for [{Database}]; skipping this tick", databaseName);
+            }
         }
 
         return null;

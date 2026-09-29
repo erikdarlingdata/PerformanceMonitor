@@ -216,7 +216,7 @@ public sealed class QueryStoreBackfill
            bound, then the store's list is unioned with every database a hole key already names (state
            is loaded above, for free) — see GetCandidateDatabasesAsync and
            QueryStoreBackfillState.MergeHoleDatabases for why the union is required, not just cheaper. */
-        var databases = await GetCandidateDatabasesAsync(server.ServerId, floorLimit, state, cancellationToken);
+        var databases = await GetCandidateDatabasesAsync(server.ServerId, floorLimit, state, cancellationToken, server.Config.DisplayName);
 
         /* Databases whose slices keep failing: their slice is held back while any other database has work
            (see QueryStoreBackfillFailureLedger), then one of them is retried after the walk. */
@@ -257,7 +257,7 @@ public sealed class QueryStoreBackfill
             /* The derived ceiling: everything at or above the stored MIN shipped complete. Null
                means the live path has not made first contact for this database yet — its 60-minute
                first window establishes the ceiling this worker digs below. */
-            var storedFloor = await GetStoredFloorAsync(server.ServerId, databaseName, floorLimit, cancellationToken);
+            var storedFloor = await GetStoredFloorAsync(server.ServerId, databaseName, floorLimit, cancellationToken, server.Config.DisplayName);
             if (storedFloor is null)
             {
                 continue;
@@ -323,6 +323,13 @@ public sealed class QueryStoreBackfill
     /// purpose, like the live counters.
     /// </summary>
     private readonly QueryStoreBackfillFailureLedger _sliceFailures = new();
+
+    /// <summary>
+    /// Which of the candidate and stored-floor reads are in a run of failures (#4772): each read turns an error
+    /// into "no work", so the first failure of a run is logged at Warning and the repeats at Debug, and a read that
+    /// completes ends the run. In memory on purpose, like the ledger above.
+    /// </summary>
+    private readonly QueryStoreBackfillReadFailureRuns _readFailures = new();
 
     /// <summary>Test-only seam: when set, replaces the slice body (called with the database and the
     /// window span the slice would have used). A throw counts as a failed slice and a normal return as a
@@ -601,9 +608,13 @@ public sealed class QueryStoreBackfill
     /// <paramref name="state"/> the caller already loaded. A database with no hole key and nothing
     /// newer than <paramref name="floorLimit"/> is either done or has never made first contact, and
     /// either way this tick has nothing to do for it.</para>
+    ///
+    /// <para>#4772: a failed read logs one Warning for each run of failures
+    /// (<see cref="QueryStoreBackfillReadFailureRuns"/>); <paramref name="serverLabel"/> names the server in it
+    /// and falls back to the id.</para>
     /// </summary>
     internal async Task<List<string>> GetCandidateDatabasesAsync(
-        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken)
+        int serverId, DateTime floorLimit, IReadOnlyDictionary<string, string> state, CancellationToken cancellationToken, string? serverLabel = null)
     {
         var databases = new List<string>();
         try
@@ -629,10 +640,25 @@ public sealed class QueryStoreBackfill
                     databases.Add(reader.GetString(0));
                 }
             }
+
+            _readFailures.RecordSuccess(serverId);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger?.LogDebug(ex, "query_store backfill candidate read failed; skipping this tick");
+            /* #4772: this read turns an error into "no candidates", so no hole or tail on the server fills until
+               it works again, and at Debug (dropped at the default level) nothing said so. One Warning at the
+               first failure of a run; the repeats stay at Debug. */
+            if (_readFailures.RecordFailure(serverId))
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "query_store backfill on '{Server}': reading the databases to backfill failed, so no hole or tail on this server is filled until a read succeeds. Further failures are logged at debug level until then.",
+                    serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                _logger?.LogDebug(ex, "query_store backfill candidate read failed; skipping this tick");
+            }
         }
 
         return QueryStoreBackfillState.MergeHoleDatabases(databases, state);
@@ -654,8 +680,12 @@ public sealed class QueryStoreBackfill
     /// Otherwise (no row that old exists) every stored row is strictly newer than floorLimit, so the
     /// MIN bounded the same way — <c>collection_time &gt; floorLimit</c> — ranges over the exact same
     /// rows the unbounded MIN would have, and returns the exact same value.</para>
+    ///
+    /// <para>#4772: a failed read logs one Warning for each run of failures for that database
+    /// (<see cref="QueryStoreBackfillReadFailureRuns"/>); <paramref name="serverLabel"/> names the server in it
+    /// and falls back to the id.</para>
     /// </summary>
-    internal async Task<DateTime?> GetStoredFloorAsync(int serverId, string databaseName, DateTime floorLimit, CancellationToken cancellationToken)
+    internal async Task<DateTime?> GetStoredFloorAsync(int serverId, string databaseName, DateTime floorLimit, CancellationToken cancellationToken, string? serverLabel = null)
     {
         try
         {
@@ -671,6 +701,7 @@ public sealed class QueryStoreBackfill
                 var hit = await exists.ExecuteScalarAsync(cancellationToken);
                 if (hit is not null)
                 {
+                    _readFailures.RecordSuccess(serverId, databaseName);
                     return floorLimit;
                 }
             }
@@ -683,6 +714,7 @@ public sealed class QueryStoreBackfill
                 min.Parameters.AddWithValue(databaseName);
                 min.Parameters.AddWithValue(DateTime.SpecifyKind(floorLimit, DateTimeKind.Unspecified));
                 var result = await min.ExecuteScalarAsync(cancellationToken);
+                _readFailures.RecordSuccess(serverId, databaseName);
                 if (result is DateTime dt)
                 {
                     return dt;
@@ -691,7 +723,18 @@ public sealed class QueryStoreBackfill
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            _logger?.LogDebug(ex, "query_store backfill floor read failed for [{Database}]; skipping this tick", databaseName);
+            /* #4772: as for the candidate read, one Warning at the first failure of a run for this database. */
+            if (_readFailures.RecordFailure(serverId, databaseName))
+            {
+                _logger?.LogWarning(
+                    ex,
+                    "query_store backfill on '{Server}' [{Database}]: reading the stored floor failed, so this database is not backfilled until a read succeeds. Further failures are logged at debug level until then.",
+                    serverLabel ?? serverId.ToString(CultureInfo.InvariantCulture), databaseName);
+            }
+            else
+            {
+                _logger?.LogDebug(ex, "query_store backfill floor read failed for [{Database}]; skipping this tick", databaseName);
+            }
         }
 
         return null;
