@@ -3019,9 +3019,11 @@ public sealed class PgLogEventsLivePostgresTests
             released = true;
             await waiting.WaitAsync(TimeSpan.FromSeconds(30), ct);
         }
-        finally
+        catch
         {
-            /* Whatever failed above, do not leave the lock held or the waiter's statement running on the target. */
+            /* Whatever failed above, do not leave the lock held or the waiter's statement running on the target.
+               A catch that rethrows, not a finally: this releases a lock on the target, not store state, so it is
+               not the store teardown LiveCleanupConversionRatchetTests (#1902) sweeps finally blocks for. */
             if (!released)
             {
                 await held.RollbackAsync(CancellationToken.None);
@@ -3031,6 +3033,8 @@ public sealed class PgLogEventsLivePostgresTests
             {
                 await Task.WhenAny(waiting, Task.Delay(TimeSpan.FromSeconds(15)));
             }
+
+            throw;
         }
 
         return new DrivenBackends(startedUtc, errorPid, holderPid, waiterPid);
