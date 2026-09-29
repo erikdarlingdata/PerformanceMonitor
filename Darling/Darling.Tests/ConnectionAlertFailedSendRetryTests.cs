@@ -55,16 +55,25 @@ public sealed class ConnectionAlertFailedSendRetryTests
 
         public AlertDelivery? Answer { get; set; }
 
+        /// <summary>Runs inside a send, after it is recorded and before the answer comes back: what happens to the
+        /// service while a slow send is out. The send is not finished until it returns.</summary>
+        public Func<AlertOutcome, Task>? WhileSending { get; set; }
+
         public Task DeliverAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
             Outcomes.Add(outcome);
             return Task.CompletedTask;
         }
 
-        public Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
+        public async Task<AlertDelivery?> DeliverAndReportAsync(AlertOutcome outcome, CancellationToken cancellationToken = default)
         {
             Outcomes.Add(outcome);
-            return Task.FromResult(Answer);
+            if (WhileSending is { } whileSending)
+            {
+                await whileSending(outcome);
+            }
+
+            return Answer;
         }
     }
 
@@ -239,6 +248,110 @@ public sealed class ConnectionAlertFailedSendRetryTests
         await rig.AtAsync(TimeSpan.FromMinutes(3), () => rig.ConnectionAsync(false));
         Assert.Equal(2, rig.Fires);
         Assert.Equal("Server Unreachable", rig.Last.MetricName);
+    }
+
+    /* A send to a dead mail host can take half a minute to fail. If the server is removed and added again while it is
+       out, the send's answer arrives after Forget and must write nothing for the registration that took its place. */
+
+    [Fact]
+    public async Task ALostWhoseSendFailedAfterItsServerWasRemoved_LeavesNoRetryForTheReAddedOne()
+    {
+        var rig = new Rig { Answer = Failed() };
+        await rig.ConnectionAsync(true);
+
+        rig.Deliverer.WhileSending = _ =>
+        {
+            rig.Evaluator.Forget(ServerId);
+            return Task.CompletedTask;
+        };
+        await rig.ConnectionAsync(false);
+        rig.Deliverer.WhileSending = null;
+        Assert.Equal(1, rig.Fires);
+
+        /* Added again, still down: the first pass is the silent baseline and the next is steady. The retry the failed
+           send would have made due belonged to the outage the removed server had. */
+        await rig.AtAsync(TimeSpan.FromSeconds(60), () => rig.ConnectionAsync(false));
+        await rig.AtAsync(TimeSpan.FromSeconds(90), () => rig.ConnectionAsync(false));
+        Assert.Equal(1, rig.Fires);
+    }
+
+    [Fact]
+    public async Task ALostWhoseSendFailedWhileAnotherServerWasRemoved_IsStillSentAgainAMinuteLater()
+    {
+        var rig = new Rig { Answer = Failed() };
+        await rig.ConnectionAsync(true);
+
+        /* The same slow send, but the removal is some other server's: this one was not forgotten, so the failed send
+           records its retry as it always did. */
+        rig.Deliverer.WhileSending = _ =>
+        {
+            rig.Evaluator.Forget(ServerId + 1);
+            return Task.CompletedTask;
+        };
+        await rig.ConnectionAsync(false);
+        rig.Deliverer.WhileSending = null;
+        Assert.Equal(1, rig.Fires);
+
+        await rig.AtAsync(TimeSpan.FromSeconds(60), () => rig.ConnectionAsync(false));
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal("Server Unreachable", rig.Last.MetricName);
+    }
+
+    [Fact]
+    public async Task ADeliveredLostWhoseServerWasRemovedDuringTheSend_LeavesNoRefireClockForTheReAddedOne()
+    {
+        var rig = new Rig(connectionRefireMinutes: 10) { Answer = Delivered() };
+        await rig.ConnectionAsync(true);
+
+        rig.Deliverer.WhileSending = _ =>
+        {
+            rig.Evaluator.Forget(ServerId);
+            return Task.CompletedTask;
+        };
+        await rig.ConnectionAsync(false);
+        rig.Deliverer.WhileSending = null;
+        Assert.Equal(1, rig.Fires);
+
+        /* Added again, still down. The first pass is the silent baseline. The next finds no down alert on record for
+           THIS registration, which re-fire treats as due now; a stamp written when the removed server's send returned
+           would hold that back for the rest of its window. */
+        await rig.AtAsync(TimeSpan.FromMinutes(2), () => rig.ConnectionAsync(false));
+        Assert.Equal(1, rig.Fires);
+        await rig.AtAsync(TimeSpan.FromMinutes(3), () => rig.ConnectionAsync(false));
+        Assert.Equal(2, rig.Fires);
+        Assert.Equal("Server Unreachable", rig.Last.MetricName);
+    }
+
+    [Fact]
+    public async Task ARestoredWhoseServerWasRemovedDuringTheSend_LeavesTheDownStampOfTheReAddedOneAlone()
+    {
+        var rig = new Rig(connectionRefireMinutes: 10) { Answer = Delivered() };
+        await rig.ConnectionAsync(true);
+        await rig.ConnectionAsync(false);
+        Assert.Equal(1, rig.Fires);
+
+        /* Back up a minute later. While that notice is sending the server is removed, added again, and goes down: its
+           first pass is the baseline, its second is a real drop, and the down alert for it is delivered and stamped. */
+        rig.Deliverer.WhileSending = async outcome =>
+        {
+            if (outcome.MetricName != "Server Restored")
+            {
+                return;
+            }
+
+            rig.Evaluator.Forget(ServerId);
+            await rig.ConnectionAsync(true);
+            await rig.ConnectionAsync(false);
+        };
+        await rig.AtAsync(TimeSpan.FromMinutes(1), () => rig.ConnectionAsync(true));
+        rig.Deliverer.WhileSending = null;
+        Assert.Equal(3, rig.Fires);
+        Assert.Equal("Server Unreachable", rig.Last.MetricName);
+
+        /* The notice that returns last belongs to the registration that was forgotten; clearing the down stamp for it
+           would let the new registration's next pass announce a second time, two minutes into a ten-minute window. */
+        await rig.AtAsync(TimeSpan.FromMinutes(3), () => rig.ConnectionAsync(false));
+        Assert.Equal(3, rig.Fires);
     }
 
     [Fact]

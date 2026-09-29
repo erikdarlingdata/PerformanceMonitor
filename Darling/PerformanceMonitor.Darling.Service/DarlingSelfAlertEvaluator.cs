@@ -3703,6 +3703,13 @@ internal sealed class DarlingSelfAlertEvaluator
     public async Task ApplyConnectionOutcomeAsync(
         int serverId, string serverName, bool online, string? error, CancellationToken cancellationToken)
     {
+        /* #4795: the server's generation, read before anything else. A send to a dead mail host can take 30
+           seconds to fail, and a removal lands on another thread while it does. The state advanced below went with
+           the removal, and whatever the send's answer would write when it returns (the down stamp, the retry due
+           time) would land on the registration that takes the server's place, which has the same id: it is a hash
+           of the storage name. Both delivery branches check the generation after their send. Removal and add both
+           bump it, so a send that spans either is stale. */
+        var generation = GenerationOf(serverId);
         var key = Key(serverId);
         var previous = _connectionState.TryGetValue(key, out var s) ? s : ConnectionState.Unknown;
         _connectionState[key] = online ? ConnectionState.Online : ConnectionState.Offline;
@@ -3768,6 +3775,13 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* "Online" both sides. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                /* #4795: the removal already dropped this server's down stamp. Clearing it now would clear the
+                   stamp of a registration that took its place and went down while this notice was sending. */
+                if (IsStaleSweep(serverId, generation))
+                {
+                    return;
+                }
+
                 _lastConnectionDownAlertUtc.TryRemove(key, out _);
             }
             else if (decision is ConnectionAlertDecision.Lost
@@ -3800,6 +3814,16 @@ internal sealed class DarlingSelfAlertEvaluator
                        was never a measurement of this server's reachability. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                /* #4795: the server was removed (or removed and added again) while this was sending. What the
+                   answer would record, the down stamp and a retry due time, belongs to the registration that was
+                   forgotten, and Forget has cleared both already. Written now, they would make the next
+                   registration's still-down pass send "the previous alert reached no channel" for an alert it
+                   never had, or hold back the announcement its re-fire is about to make. */
+                if (IsStaleSweep(serverId, generation))
+                {
+                    return;
+                }
+
                 _lastConnectionDownAlertUtc[key] = _utcNow();
                 NoteRetrySend(_connectionRetries, key, "Server Unreachable", delivery);
             }
