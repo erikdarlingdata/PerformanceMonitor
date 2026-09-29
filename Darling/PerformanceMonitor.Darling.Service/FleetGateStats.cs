@@ -19,7 +19,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// </summary>
 /// <param name="Run">Collector slots that ran.</param>
 /// <param name="Skipped">Slots that came due but never ran, because a run landed after the next slot was already
-/// due (<see cref="CollectorCadence.SkippedSlots"/>).</param>
+/// due (<see cref="CollectorCadence.SkippedSlots"/>), counted only from the moment the sweep loop was running
+/// (<see cref="SkipCreditFloor"/>).</param>
 /// <param name="QueueWaits">Collection bodies that waited for, and got, a fleet gate slot.</param>
 /// <param name="QueueWaitTotal">The sum of those waits.</param>
 /// <param name="QueueWaitMax">The longest single wait.</param>
@@ -69,8 +70,8 @@ internal sealed class FleetGateStats
 
     /// <summary>
     /// Records one collector slot that ran (#4732), and how many slots it stepped over on the way. Called where a
-    /// collector's due time advances on the grid, with <see cref="CollectorCadence.SkippedSlots"/> for that step;
-    /// 0 for a run on time.
+    /// collector's due time advances on the grid, with <see cref="SkipCreditFloor.Skipped"/> for that step (the slots
+    /// stepped over that came due while the sweep loop was running); 0 for a run on time.
     /// </summary>
     public void RecordSlot(long skipped)
     {
