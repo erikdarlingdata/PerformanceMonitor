@@ -5499,7 +5499,7 @@ public sealed class DarlingWorker : BackgroundService
                     DatabaseName = finding.Subject,
                 }) ?? false;
 
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         snapshot.ServerKey,
                         snapshot.ServerName,
@@ -5528,6 +5528,12 @@ public sealed class DarlingWorker : BackgroundService
                         finding.ShortMessage),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: the cooldown was stamped above, before the send, so a send that reached no channel
+                   would hold this subject for the whole cooldown. Back-date the stamp instead: the subject is
+                   tried again after a minute, doubling, never later than the cooldown. This family moves no
+                   other marker, so the stamp is all there is to put right. */
+                AfterPgFire(finding.MetricName, _lastPostgresAlert, cooldownKey, now, cooldown, delivery);
             }
         }
         catch (OperationCanceledException)
@@ -5863,7 +5869,7 @@ public sealed class DarlingWorker : BackgroundService
                    rides — so the history grids and get_alert_history read the tier this fire wore. */
                 var grade = GradePgCpuFire(reading.CpuPercent, reading.AcuUtilizationPercent);
 
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
@@ -5891,6 +5897,12 @@ public sealed class DarlingWorker : BackgroundService
                             + $"(threshold: {alertSettings.CpuThresholdPercent}%)"),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: only the cooldown stamp moved before the send. The gate's record (Firing, the
+                   streak, the observed-sample watermark) was saved above from the samples, not from the
+                   delivery, and it stays Firing, so the retry sweep reaches this same arm as a standing
+                   condition and fires once the back-dated stamp opens. Nothing else to put back. */
+                AfterPgFire(metricName, _lastPgCpuAlert, key, now, cooldown, delivery);
             }
             else if (outcome == PersistenceOutcome.Resolve)
             {
@@ -6050,7 +6062,7 @@ public sealed class DarlingWorker : BackgroundService
                    the persisted context (#2090) before the row is written, which is what #3635's grids and
                    get_alert_history read. The SQL engine sets both because it serves two SKUs' deliverers;
                    this host serves one. */
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
@@ -6069,6 +6081,23 @@ public sealed class DarlingWorker : BackgroundService
                         ShortMessage: $"{count} deadlock(s) in the last hour"),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: the cooldown stamp above and the count watermark (moved to this count by the gate,
+                   and saved, before the send) were both written ahead of delivery. A send that reached no
+                   channel gets the stamp back-dated, and the watermark goes back to the value it had before
+                   this fire, in memory and in the saved row: the retry sweep then sees the count above the
+                   watermark and fires again at the same count, instead of waiting for the count to rise.
+                   The SQL Server twin does the same (#4752). */
+                if (AfterPgFire(metricName, _lastPgDeadlockAlert, key, now, cooldown, delivery))
+                {
+                    var unannouncedWatermark = PgUnannouncedWatermark(watermark, count);
+                    _lastAlertedPgDeadlockCount[key] = unannouncedWatermark;
+                    if (unannouncedWatermark != decision.Watermark)
+                    {
+                        await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, unannouncedWatermark);
+                        readClock.Restart();
+                    }
+                }
             }
             else if (!decision.Active && wasActive)
             {
@@ -6208,7 +6237,7 @@ public sealed class DarlingWorker : BackgroundService
                    explains) rather than leaving #3635's by-name replay arm to imply it. Warning, and only
                    Warning — PgBlockingFireSeverity's doc says which bars were considered and why none
                    qualifies as a Critical tier tonight. */
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
@@ -6227,6 +6256,20 @@ public sealed class DarlingWorker : BackgroundService
                         ShortMessage: $"{count} blocking session(s)"),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: the deadlock arm explains it — the stamp is back-dated and the count watermark put
+                   back to its pre-fire value (in memory and saved) when no channel delivered, so the retry
+                   sweep fires again at the same count. */
+                if (AfterPgFire(metricName, _lastPgBlockingAlert, key, now, cooldown, delivery))
+                {
+                    var unannouncedWatermark = PgUnannouncedWatermark(watermark, count);
+                    _lastAlertedPgBlockingCount[key] = unannouncedWatermark;
+                    if (unannouncedWatermark != decision.Watermark)
+                    {
+                        await stateStore.SaveEdgeTriggerWatermarkAsync(key, metricName, unannouncedWatermark);
+                        readClock.Restart();
+                    }
+                }
             }
             else if (!decision.Active && wasActive)
             {
@@ -6417,7 +6460,7 @@ public sealed class DarlingWorker : BackgroundService
                 /* #3653 (A8e, the PostgreSQL host): an explicit tier in place of Severity: null, for the
                    reason the blocking arm above gives. Warning, and only Warning —
                    PgLongRunningQueryFireSeverity's doc says why. */
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         key,
                         snapshot.ServerName,
@@ -6444,6 +6487,11 @@ public sealed class DarlingWorker : BackgroundService
                             + (worst.DatabaseName is null ? "" : $" on {worst.DatabaseName}")),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: a live-state check with no count watermark and no collection-time marker, so the
+                   cooldown stamp is the only thing the fire moved. A send that reached no channel gets it
+                   back-dated, and the next sweep that still sees a long-running query fires again. */
+                AfterPgFire(metricName, _lastPgLongRunningQueryAlert, key, now, cooldown, delivery);
             }
             else if (wasActive)
             {
@@ -6632,8 +6680,10 @@ public sealed class DarlingWorker : BackgroundService
                 var newestCollection = newestCollectionBySubject.TryGetValue(finding.Subject, out var nc)
                     ? nc
                     : DateTime.MinValue;
-                var hasFreshCollection = !_lastPgPoisonWaitCollectionTime.TryGetValue(cooldownKey, out var lastCollection)
-                    || newestCollection > lastCollection;
+                /* Whether a time was recorded, and which, is kept for #4795: a fire that reaches no channel
+                   puts it back. */
+                var hadPriorCollection = _lastPgPoisonWaitCollectionTime.TryGetValue(cooldownKey, out var lastCollection);
+                var hasFreshCollection = !hadPriorCollection || newestCollection > lastCollection;
                 if (!hasFreshCollection)
                 {
                     continue;
@@ -6659,7 +6709,7 @@ public sealed class DarlingWorker : BackgroundService
                     WaitType = finding.Subject,
                 }) ?? false;
 
-                await _alertDeliverer.DeliverAsync(
+                var delivery = await _alertDeliverer.DeliverAndReportAsync(
                     new AlertOutcome(
                         serverKey,
                         snapshot.ServerName,
@@ -6687,6 +6737,16 @@ public sealed class DarlingWorker : BackgroundService
                         finding.ShortMessage),
                     cancellationToken);
                 readClock.Restart();
+
+                /* #4795: two markers were written before the send, the cooldown stamp and the collection time
+                   this fire counted. A send that reached no channel gets the stamp back-dated, and the
+                   collection time goes back to what it was (or to no entry, when this was the first fire for
+                   the subject): otherwise the retry sweep reads the same collection as already reported and
+                   never fires on it, which is the #2704 guard doing its job on a fire nobody received. */
+                if (AfterPgFire(finding.MetricName, _lastPgPoisonWaitAlert, cooldownKey, now, cooldown, delivery))
+                {
+                    RestorePgPoisonCollectionTime(_lastPgPoisonWaitCollectionTime, cooldownKey, hadPriorCollection ? lastCollection : null);
+                }
             }
 
             /* The Cleared edge, per subject: previously active, no longer over the bar, ON AN OBSERVED WINDOW
