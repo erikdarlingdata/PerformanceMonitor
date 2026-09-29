@@ -391,13 +391,16 @@ public partial class PlanViewerControl
 
     /// <summary>
     /// Returns the brush for the edge feeding <paramref name="child"/>, colored by how far its actual
-    /// row count diverged from its estimate, on the same per-execution basis as the node label above
-    /// (#4627). Only actual plans get non-default colors. The pure ratio-to-tier logic lives in
-    /// <see cref="PlanEdgeColour"/> so it can be pinned without WPF.
+    /// row count diverged from the rows it was expected to return (#4627). The node is handed to
+    /// <see cref="PlanEdgeColour"/> whole: <see cref="RowEstimateHelper"/> decides from its place in the
+    /// tree whether ActualExecutions is a real loop count (Nested Loops inner side) or a parallel zone's
+    /// thread count, which no caller here can judge from the numbers alone. Only actual plans get
+    /// non-default colors. The pure ratio-to-tier logic lives in <see cref="PlanEdgeColour"/> so it can
+    /// be pinned without WPF.
     /// </summary>
     private SolidColorBrush GetLinkColorBrush(PlanNode child)
     {
-        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.ActualExecutions, child.EstimateRows, AccuracyRatioDivergenceLimit);
+        var key = PlanEdgeColour.ForChild(child, AccuracyRatioDivergenceLimit);
         return key switch
         {
             PlanEdgeColourKey.LightOrange => EdgeLightOrangeBrush,

@@ -70,10 +70,16 @@ public static class RowEstimateHelper
     /// expected rows but some actual rows is an unbounded miss (double.MaxValue).
     /// </summary>
     public static double GetRowAccuracyRatio(PlanNode node)
-    {
-        var expectedRows = GetExpectedRows(node);
-        return expectedRows > 0
-            ? node.ActualRows / expectedRows
-            : (node.ActualRows > 0 ? double.MaxValue : 1.0);
-    }
+        => GetRowAccuracyRatio(node.ActualRows, GetExpectedRows(node));
+
+    /// <summary>
+    /// The same ratio for a caller that already holds the two numbers: <paramref name="actualRows"/>
+    /// over <paramref name="expectedRows"/>, with the zero-estimate handling described on the node
+    /// overload. The node overload is this one fed <see cref="GetExpectedRows"/>, so the arithmetic
+    /// exists in one place, and a caller with numbers (the plan-edge colour tiers) can't drift from it.
+    /// </summary>
+    public static double GetRowAccuracyRatio(double actualRows, double expectedRows)
+        => expectedRows > 0
+            ? actualRows / expectedRows
+            : (actualRows > 0 ? double.MaxValue : 1.0);
 }
