@@ -106,9 +106,12 @@ public partial class RemoteCollectorService
     public DeltaCalculator DeltaCalculator => _deltaCalculator;
 
     /// <summary>
-    /// Limits how many SQL connections are <em>opened</em> at once — the semaphore is released
-    /// when OpenAsync returns, not when the connection is disposed — smoothing the login storm
-    /// when many servers are polled together. It does not cap the number of open connections.
+    /// Limits how many SQL connections are <em>opened</em> at once, smoothing the login storm when many
+    /// servers are polled together. A slot is held for one connect attempt - from the top of the attempt,
+    /// through any sign-in token it acquires, until OpenAsync returns or fails - and is released then, not
+    /// when the connection is later disposed. It is never held across the backoff RetryHelper waits out
+    /// between attempts (#4722), so a server that is down cannot sit on a slot while it waits to be
+    /// retried. It does not cap the number of open connections.
     /// </summary>
     private static readonly SemaphoreSlim s_connectionThrottle = new(7, 7);
 
@@ -1298,6 +1301,11 @@ WHERE server_id = $3";
 
             var connStr = builder.ConnectionString;
 
+            /* The throttle is taken inside this call, once per attempt, so a server that is down holds a
+               slot for one connect timeout at a time and none across the backoff between attempts
+               (#4722). The interactive sign-in lock above stays outer and first, and the attempt body -
+               the device-code prompt and the open - stays inside the throttle, so a slot is already held
+               when a window shows. */
             return await ExecuteThrottledWithRetryAsync(s_connectionThrottle, async () =>
             {
                 var connection = new SqlConnection(connStr);
@@ -1357,9 +1365,12 @@ WHERE server_id = $3";
     }
 
     /// <summary>
-    /// Runs one connect operation under <see cref="RetryHelper"/> with <paramref name="throttle"/> held
-    /// around the whole retry loop. Split out of <see cref="CreateConnectionAsync"/> so the throttle can be
-    /// exercised against a semaphore of a test's own, without a server.
+    /// Runs one connect operation under <see cref="RetryHelper"/>, holding <paramref name="throttle"/> for
+    /// each attempt and for nothing else: a slot is taken at the top of every attempt and given back in a
+    /// <c>finally</c> when that attempt returns or fails, so the backoff <see cref="RetryHelper"/> waits out
+    /// between attempts never holds one (#4722). A wait for a slot that is cancelled hands nothing back,
+    /// because the slot was never held. Split out of <see cref="CreateConnectionAsync"/> so the throttle can
+    /// be exercised against a semaphore of a test's own, without a server.
     /// </summary>
     internal static async Task<T> ExecuteThrottledWithRetryAsync<T>(
         SemaphoreSlim throttle,
@@ -1368,15 +1379,18 @@ WHERE server_id = $3";
         string operationName,
         CancellationToken cancellationToken)
     {
-        await throttle.WaitAsync(cancellationToken);
-        try
+        return await RetryHelper.ExecuteWithRetryAsync<T>(async () =>
         {
-            return await RetryHelper.ExecuteWithRetryAsync<T>(attempt, logger, operationName, cancellationToken: cancellationToken);
-        }
-        finally
-        {
-            throttle.Release();
-        }
+            await throttle.WaitAsync(cancellationToken);
+            try
+            {
+                return await attempt();
+            }
+            finally
+            {
+                throttle.Release();
+            }
+        }, logger, operationName, cancellationToken: cancellationToken);
     }
 
     /// <summary>
