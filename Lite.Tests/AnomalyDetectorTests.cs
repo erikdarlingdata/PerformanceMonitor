@@ -622,6 +622,35 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.Equal((double)later.Ticks, cpu.Metadata["peak_time_ticks"]);
     }
 
+    /// <summary>
+    /// #4731: a sample with no CPU value is never the tile's peak time. DuckDB compares the arg_max key's STRUCT
+    /// field by field and treats a NULL field as LARGER than any value, so without the aggregate's
+    /// <c>FILTER (WHERE sqlserver_cpu_utilization IS NOT NULL)</c> a NULL row would beat the real peak and the fact
+    /// would report ITS time - while the peak value beside it (a MAX, which ignores NULLs) is the real peak's. The
+    /// NULL row is stored LATER than the peak, so neither "earlier row wins" nor "later row wins" can hide it.
+    /// </summary>
+    [Fact]
+    public async Task DetectCpuAnomalies_ASampleWithNoValueNextToTheRealPeak_IsNeverThePeakTime()
+    {
+        await SeedBaselineCpu(10, variance: 2);
+        for (int i = 0; i < 16; i++)
+            await SeedCpuAsync(_analysisStart.AddMinutes(i * 15), 70);
+
+        // Both rows sit inside ONE wall-clock hour tile, 10 minutes apart, well inside the 4 h window.
+        var hourTop = _analysisStart.AddHours(2);
+        hourTop = hourTop.Date.AddHours(hourTop.Hour);
+        var peak = hourTop.AddMinutes(10);
+        var noValue = hourTop.AddMinutes(20);
+        await SeedCpuAsync(peak, 90);
+        await SeedCpuWithoutValueAsync(noValue);
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var cpu = Assert.Single(anomalies, f => f.Key == "ANOMALY_CPU_SPIKE");
+        Assert.Equal(90.0, cpu.Metadata["peak_cpu"]);
+        Assert.Equal((double)peak.Ticks, cpu.Metadata["peak_time_ticks"]);
+    }
+
     [Fact]
     public async Task DetectIoAnomalies_ReadsThePeakAndMeanPair_OneHotFileRowDoesNotFire_ASustainedWindowDoes()
     {
@@ -977,6 +1006,23 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
         cmd.Parameters.Add(new DuckDBParameter { Value = time });
         cmd.Parameters.Add(new DuckDBParameter { Value = cpuValue });
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Seeds a CPU sample whose <c>sqlserver_cpu_utilization</c> is NULL - a row with no reading.</summary>
+    private async Task SeedCpuWithoutValueAsync(DateTime time)
+    {
+        using var readLock = _duckDb.AcquireReadLock();
+        var conn = await SeedConnectionAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"INSERT INTO cpu_utilization_stats
+            (collection_id, collection_time, server_id, server_name, sample_time,
+             sqlserver_cpu_utilization, other_process_cpu_utilization)
+            VALUES ($1, $2, $3, 'TestServer', $4, NULL, 2)";
+        cmd.Parameters.Add(new DuckDBParameter { Value = _nextId-- });
+        cmd.Parameters.Add(new DuckDBParameter { Value = time });
+        cmd.Parameters.Add(new DuckDBParameter { Value = ServerId });
+        cmd.Parameters.Add(new DuckDBParameter { Value = time });
         await cmd.ExecuteNonQueryAsync();
     }
 
