@@ -26,9 +26,13 @@ namespace Darling.Tests;
 /// built from. Nodes 7, 8, 10 and 12 are Nested-Loops-inner-side operators whose per-execution
 /// estimate was within the default 10x divergence limit (their node labels were never red); node 9
 /// diverged by about 22x, comfortably inside the old bug's inflated ratio but only into the first
-/// (LightOrange) tier once normalized. These pin both the ratio <see cref="PlanRowAccuracy"/> now
-/// returns — the one place both the node label and <see cref="PlanEdgeColour"/> get it from — and
-/// the resulting edge color, so the two can't drift apart again.</para>
+/// (LightOrange) tier once normalized. These pin both the ratio <see cref="RowEstimateHelper"/>
+/// returns for them — the figure the edge color takes its tier from — and the resulting edge color.
+/// Every one of these nodes is on a Nested Loops inner side, where the expected rows (the estimate
+/// times ActualExecutions) and the old per-execution normalization are the same arithmetic, so the
+/// expected ratios below did not move when the edge color changed how it gets there. The case where
+/// they DO differ — a parallel zone, where ActualExecutions counts threads — is pinned in
+/// <see cref="Viewer4627EdgeColourTests"/>.</para>
 /// </summary>
 public sealed class Viewer4627Tests
 {
@@ -80,14 +84,19 @@ public sealed class Viewer4627Tests
         Assert.Equal(expectedEstimateRows, node.EstimateRows, precision: 5);
         Assert.True(node.HasActualStats);
 
-        // Pin the ratio PlanRowAccuracy returns — the single source both the label and the edge use.
-        var actualRowsPerExecution = PlanRowAccuracy.ActualRowsPerExecution(node.ActualRows, node.ActualExecutions);
-        var ratio = PlanRowAccuracy.Ratio(actualRowsPerExecution, node.EstimateRows);
+        // Each one is on a Nested Loops inner side: that is what makes ActualExecutions a real loop count
+        // and the expected rows EstimateRows x ActualExecutions. Off that side the ratio below would be
+        // a different number entirely, so name the position rather than let a moved fixture surface as
+        // an unexplained ratio failure.
+        Assert.True(RowEstimateHelper.IsInnerSideOfNestedLoops(node));
+
+        // Pin the ratio the edge color takes its tier from: total ActualRows over the expected rows.
+        var ratio = RowEstimateHelper.GetRowAccuracyRatio(node);
         Assert.Equal(expectedRatio, ratio, precision: 5);
 
         // The edge color must agree with that ratio, not with the old total-over-per-execution math
         // (which put every one of these at FluoRed — see the "old buggy math" fact below).
-        var key = PlanEdgeColour.ForChild(node.HasActualStats, node.ActualRows, node.ActualExecutions, node.EstimateRows, PlanEdgeColour.DefaultDivergenceLimit);
+        var key = PlanEdgeColour.ForChild(node, PlanEdgeColour.DefaultDivergenceLimit);
         Assert.Equal(expectedKey, key);
         Assert.NotEqual(PlanEdgeColourKey.FluoRed, key);
     }
@@ -109,8 +118,10 @@ public sealed class Viewer4627Tests
         var node = FindNode(plan, nodeId);
 
         // The pre-fix call shape: ForChild(hasActualStats, TOTAL actualRows, PER-EXECUTION estimateRows,
-        // divergenceLimit), with no ActualExecutions normalization — reproduced here by passing 1 execution.
-        var oldKey = PlanEdgeColour.ForChild(node.HasActualStats, node.ActualRows, actualExecutions: 1, node.EstimateRows, PlanEdgeColour.DefaultDivergenceLimit);
+        // divergenceLimit), with no ActualExecutions normalization — reproduced by handing the numeric
+        // overload the bare EstimateRows as the expected rows, which is what a caller that skips the node
+        // overload would do.
+        var oldKey = PlanEdgeColour.ForChild(node.HasActualStats, node.ActualRows, expectedRows: node.EstimateRows, PlanEdgeColour.DefaultDivergenceLimit);
         Assert.Equal(oldBuggyKey, oldKey);
     }
 }

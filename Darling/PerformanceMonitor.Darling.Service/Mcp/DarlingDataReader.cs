@@ -1728,7 +1728,7 @@ internal static class DarlingDataReader
     /// the two reads cannot drift below <c>ranked</c>. Chosen per call by
     /// <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>; every unfiltered/filtered combination this read
     /// supports must agree with <see cref="QueryStoreTopSql"/> over the same window.
-    /// $1 server_id, $2 the gate's clamp (<c>max(window start, raw's chunk floor)</c>), $3 window end (naive
+    /// $1 server_id, $2 the gate's <c>ReadStart</c> (<c>max(window start, raw's chunk floor)</c> at and above the floor, or the exact below-floor start), $3 window end (naive
     /// UTC — the MCP surface always supplies a literal instant here, never an open/preset end), $4 top,
     /// $5 database, $6 execution outcome.
     /// </summary>
@@ -1778,9 +1778,9 @@ internal static class DarlingDataReader
     /// <summary>
     /// The table read's head (#3953): <c>query_store_interval_wide</c> already holds the latest snapshot per
     /// interval — the raw prefix's ROW_NUMBER dedupe above, maintained as the table is written — so this reads
-    /// it directly and sets <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's own clamp,
-    /// <c>max(window start, raw's chunk floor)</c>: raw chunks drop whole, so bounding the table read there
-    /// returns exactly the raw read's own answer over the snapshots raw still holds. $3 is bound the same way
+    /// it directly and sets <c>rn</c> to a literal 1 rather than computing a rank. $2 is the gate's <c>ReadStart</c>:
+    /// <c>max(window start, raw's chunk floor)</c> at and above the floor, where raw chunks drop whole and the table
+    /// returns exactly the raw read's own answer, and the exact below-floor start beneath it. $3 is bound the same way
     /// raw's own $3 is (a plain lower bound, never NULL): the MCP surface has no concept of an open/preset end.
     /// $6 is repeated here, before this CTE's own GROUP BY-eligible rows reach <c>ranked</c>, mirroring the raw
     /// prefix's placement — <c>execution_type_desc</c> is a <c>ranked</c> GROUP BY key, not filtered again
@@ -1917,6 +1917,12 @@ internal static class DarlingDataReader
         CancellationToken cancellationToken = default) =>
         GetQueryStoreTopAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType: null, moduleName: null, cancellationToken);
 
+    /// <summary>The rows, and the table read's plan when the interval table served them.</summary>
+    /// <param name="Rows">The top rows.</param>
+    /// <param name="Table">The read's <see cref="QueryStoreIntervalWide.WideReadPlan"/> when the interval table
+    /// served; null when the raw tier did.</param>
+    public readonly record struct QueryStoreTopRead(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan? Table);
+
     /// <summary>
     /// #3953: reads <c>query_store_interval_wide</c> when <see cref="QueryStoreIntervalWide.ReadsTableAsync"/>
     /// says its coverage holds the window; any fault or a "no" reads <see cref="QueryStoreTopSql"/> unchanged,
@@ -1927,6 +1933,16 @@ internal static class DarlingDataReader
     /// </summary>
     public static async Task<List<QueryStoreRow>> GetQueryStoreTopAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
+        string? executionType, string? moduleName, CancellationToken cancellationToken = default) =>
+        (await GetQueryStoreTopWithReachAsync(postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken)).Rows;
+
+    /// <summary>
+    /// <see cref="GetQueryStoreTopAsync(NpgsqlDataSource,int,DateTime,DateTime,int,string,string,string,CancellationToken)"/>
+    /// plus which tier served it: when the interval table did, <see cref="QueryStoreTopRead.Table"/> carries the
+    /// bound it read from so the caller can say how far back the answer reaches.
+    /// </summary>
+    public static async Task<QueryStoreTopRead> GetQueryStoreTopWithReachAsync(
+        NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         string? executionType, string? moduleName, CancellationToken cancellationToken = default)
     {
         /* Review D4R H1: the window check first, before the gate's own round trips even open — this surface
@@ -1936,11 +1952,11 @@ internal static class DarlingDataReader
            land on raw (UseTable's clause 5). */
         if (StorageVersion.SchemaVersion >= QueryStoreTopTableMinSchemaVersion && endUtc - startUtc >= QueryStoreTopMinWindow)
         {
-            var tableRows = await TryGetQueryStoreTopFromTableAsync(
+            var table = await TryGetQueryStoreTopFromTableAsync(
                 postgres, serverId, startUtc, endUtc, top, databaseName, executionType, moduleName, cancellationToken);
-            if (tableRows is not null)
+            if (table is var (tableRows, tablePlan))
             {
-                return tableRows;
+                return new QueryStoreTopRead(tableRows, tablePlan);
             }
         }
 
@@ -1958,7 +1974,7 @@ internal static class DarlingDataReader
             rows.Add(ReadQueryStoreTopRow(reader));
         }
 
-        return rows;
+        return new QueryStoreTopRead(rows, null);
     }
 
     /// <summary>The transaction's own read-only statement (#3953). Named, not inline, so this store-only
@@ -1979,7 +1995,7 @@ internal static class DarlingDataReader
     /// returns null (except cancellation, which propagates): the gate already does this for its own statements,
     /// and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
-    private static async Task<List<QueryStoreRow>?> TryGetQueryStoreTopFromTableAsync(
+    private static async Task<(List<QueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopFromTableAsync(
         NpgsqlDataSource postgres, int serverId, DateTime startUtc, DateTime endUtc, int top, string? databaseName,
         string? executionType, string? moduleName, CancellationToken cancellationToken)
     {
@@ -1993,10 +2009,10 @@ internal static class DarlingDataReader
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, startUtc, endUtc, endUtc, QueryStoreTopMinWindow,
                 McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
-            if (!useTable)
+            if (!plan.UseTable)
             {
                 return null;
             }
@@ -2004,7 +2020,7 @@ internal static class DarlingDataReader
             var rows = new List<QueryStoreRow>();
             await using var command = new NpgsqlCommand(QueryStoreTopTableSql, connection) { Transaction = transaction, CommandTimeout = McpCommandDeadlines.ReadSeconds };
             AddInt(command, serverId);
-            AddTimestamp(command, clampedStart);
+            AddTimestamp(command, plan.ReadStart);
             AddTimestamp(command, endUtc);
             AddInt(command, top);
             AddNullableText(command, databaseName);
@@ -2016,7 +2032,7 @@ internal static class DarlingDataReader
                 rows.Add(ReadQueryStoreTopRow(reader));
             }
 
-            return rows;
+            return (rows, plan);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

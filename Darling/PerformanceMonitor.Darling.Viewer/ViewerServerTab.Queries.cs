@@ -210,10 +210,10 @@ public partial class ViewerServerTab
            applied_through. A preset's endUtc is GetWindowUtc()'s own DateTime.UtcNow (the viewer's clock, not
            the store's), so passing it as a literal here would send a slow-clocked viewer to raw on every
            ordinary read (M1) — null tells the gate this end is open. */
-        var rows = await _dataService.GetQueryStoreTopQueriesAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
+        var (rows, widePlan) = await _dataService.GetQueryStoreTopQueriesWithReachAsync(_server.ServerId, startUtc, endUtc, databaseNames: SelectedDatabaseFilter, literalEndUtc: IsCustomRange ? endUtc : null);
         _queryStoreFilterMgr!.UpdateData(rows);
         SetDefaultSortIfNone(QueryStoreGrid, "TotalDurationMs", ListSortDirection.Descending);
-        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc);
+        UpdateTruncationBanner(QueryStoreTruncationBanner, await floorTask, startUtc, widePlan: widePlan);
         await LoadQueryStoreSlicerAsync(startUtc, endUtc);
         await RefreshQueryStoreComparisonAsync(startUtc, endUtc);
     }
@@ -226,8 +226,41 @@ public partial class ViewerServerTab
     /// form, in <see cref="ViewerTimeHelper.ForDisplay"/>'s own <c>yyyy-MM-dd HH:mm</c>, the format every trend
     /// chart title already uses for a head timestamp.
     /// </summary>
-    internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null)
+    internal static void UpdateTruncationBanner(TextBlock banner, DateTime? floor, DateTime requestedStartUtc, string? tierSuffix = null,
+        QueryStoreIntervalWide.WideReadPlan? widePlan = null)
     {
+        /* #4689: when the interval table served, the rows start at the plan's EffectiveStart, not at raw's
+           floor. The banner names that start and the bound that set it; the slicer still reads raw, so a
+           truncated raw floor is named beside it. The raw route's banner below is unchanged. */
+        if (widePlan?.EffectiveStart is DateTime wideStart)
+        {
+            var wideTruncated = RawWindowFloor.IsTruncated(wideStart, requestedStartUtc);
+            /* The slicer and comparison read raw whatever tier served the grid, so a truncated raw floor is
+               named whether or not the grid itself was cut. */
+            var slicerTruncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
+            if (wideTruncated || slicerTruncated || !string.IsNullOrEmpty(tierSuffix))
+            {
+                var slicerSince = slicerTruncated
+                    ? ViewerTimeHelper.ForDisplay(RawWindowFloor.EffectiveStart(floor, requestedStartUtc)).ToString("yyyy-MM-dd HH:mm")
+                    : null;
+                var text = wideTruncated
+                    ? $"Showing since {ViewerTimeHelper.ForDisplay(wideStart):yyyy-MM-dd HH:mm}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
+                        + (slicerSince is null ? string.Empty : $" · slicer since {slicerSince}")
+                    : slicerSince is null
+                        ? $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}"
+                        : $"Slicer since {slicerSince} (the grid shows the full window)";
+
+                banner.Text = text + tierSuffix;
+                banner.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                banner.Visibility = Visibility.Collapsed;
+            }
+
+            return;
+        }
+
         var truncated = RawWindowFloor.IsTruncated(floor, requestedStartUtc);
         /* #4231 stage 3: the raw-floor truncation and the hourly-tier suffix are independent facts (a window
            can be BOTH aged past raw's floor and routed to the hourly rollup) — so the banner shows whenever

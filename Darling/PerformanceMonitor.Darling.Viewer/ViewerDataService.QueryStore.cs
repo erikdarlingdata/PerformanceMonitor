@@ -400,6 +400,17 @@ public sealed partial class ViewerDataService
     public async Task<List<ViewerQueryStoreRow>> GetQueryStoreTopQueriesAsync(
         int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null,
         DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
+        => (await GetQueryStoreTopQueriesWithReachAsync(serverId, startUtc, endUtc, top, databaseNames, literalEndUtc, cancellationToken)).Rows;
+
+    /// <summary>
+    /// <see cref="GetQueryStoreTopQueriesAsync"/> plus the read plan when the interval table served
+    /// (#4689): the plan's <see cref="QueryStoreIntervalWide.WideReadPlan.ReadStart"/> is the lower bound the
+    /// table read bound, which reaches below raw's chunk floor, so the grid banner can name where the rows start
+    /// and why. The plan is null when the read was raw.
+    /// </summary>
+    public async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan? Plan)> GetQueryStoreTopQueriesWithReachAsync(
+        int serverId, DateTime startUtc, DateTime endUtc, int top = TopQueriesPageSize, IReadOnlyList<string>? databaseNames = null,
+        DateTime? literalEndUtc = null, CancellationToken cancellationToken = default)
     {
         /* Review D4R H1: the window check comes FIRST, before the schema probe (a 121-column
            EXISTS catalog query) and before TryGetQueryStoreTopQueriesFromTableAsync (a second
@@ -411,11 +422,11 @@ public sealed partial class ViewerDataService
             var schemaVersion = _cachedStoreSchemaVersion ??= await GetStoreSchemaVersionAsync(cancellationToken);
             if (schemaVersion is int version && version >= QueryStoreIntervalWideMinSchemaVersion)
             {
-                var tableRows = await TryGetQueryStoreTopQueriesFromTableAsync(
+                var tableRead = await TryGetQueryStoreTopQueriesFromTableAsync(
                     serverId, startUtc, endUtc, literalEndUtc, top, databaseNames, cancellationToken);
-                if (tableRows is not null)
+                if (tableRead is { } served)
                 {
-                    return tableRows;
+                    return (served.Rows, served.Plan);
                 }
             }
         }
@@ -433,7 +444,7 @@ public sealed partial class ViewerDataService
             rows.Add(ReadQueryStoreTopRow(reader));
         }
 
-        return rows;
+        return (rows, null);
     }
 
     /// <summary>
@@ -446,7 +457,7 @@ public sealed partial class ViewerDataService
     /// propagates): the gate already does this for its own statements (<see cref="QueryStoreIntervalWide.ReadsTableAsync"/>'s
     /// catch), and the table read must fail the same way rather than surface to the caller as an error.
     /// </summary>
-    private async Task<List<ViewerQueryStoreRow>?> TryGetQueryStoreTopQueriesFromTableAsync(
+    private async Task<(List<ViewerQueryStoreRow> Rows, QueryStoreIntervalWide.WideReadPlan Plan)?> TryGetQueryStoreTopQueriesFromTableAsync(
         int serverId, DateTime startUtc, DateTime endUtc, DateTime? literalEndUtc, int top, IReadOnlyList<string>? databaseNames, CancellationToken cancellationToken)
     {
         try
@@ -459,10 +470,12 @@ public sealed partial class ViewerDataService
                 await readOnly.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            var (useTable, clampedStart) = await QueryStoreIntervalWide.ReadsTableAsync(
+            /* #4689: bind the plan's ReadStart, which reaches below raw's chunk floor down to the earliest
+               instant the table provably equals what raw held; the banner names it. */
+            var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                 connection, serverId, startUtc, endUtc, literalEndUtc, QueryStoreIntervalWide.GridWideMinWindow,
                 ViewerCommandDeadlines.CurrentInteractiveReadSeconds, logger: null, cancellationToken);
-            if (!useTable)
+            if (!plan.UseTable)
             {
                 return null;
             }
@@ -470,7 +483,7 @@ public sealed partial class ViewerDataService
             var rows = new List<ViewerQueryStoreRow>();
             await using var command = new Npgsql.NpgsqlCommand(QueryStoreTopTableSql, connection, transaction) { CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds };
             command.Parameters.Add(new Npgsql.NpgsqlParameter<int> { TypedValue = serverId });
-            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(clampedStart, DateTimeKind.Unspecified) });
+            command.Parameters.Add(new Npgsql.NpgsqlParameter<DateTime> { TypedValue = DateTime.SpecifyKind(plan.ReadStart, DateTimeKind.Unspecified) });
             command.Parameters.Add(new Npgsql.NpgsqlParameter
             {
                 NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Timestamp,
@@ -484,7 +497,7 @@ public sealed partial class ViewerDataService
                 rows.Add(ReadQueryStoreTopRow(reader));
             }
 
-            return rows;
+            return (rows, plan);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

@@ -1169,7 +1169,11 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$
             .ToArray();
 
         using (var all = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName)))
+        {
             Assert.Equal(new (string?, long)[] { ("Aborted", 3L), ("Regular", 100L) }, Outcomes(all.RootElement.GetProperty("queries")));
+            /* No interval-table coverage on this store, so the raw tier served. */
+            Assert.Equal("raw", all.RootElement.GetProperty("history_source").GetString());
+        }
 
         using (var aborted = JsonDocument.Parse(await DarlingMcpDataTools.GetQueryStoreTop(postgres, ServerName, execution_type: "aborted")))
             Assert.Equal(new (string?, long)[] { ("Aborted", 3L) }, Outcomes(aborted.RootElement.GetProperty("queries")));

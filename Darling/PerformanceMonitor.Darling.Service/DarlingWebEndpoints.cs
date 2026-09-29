@@ -1253,10 +1253,12 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
            HERE, in the runner, before compiling, because ComposeCompiler.Compile stays pure and never opens
            a connection. Only checked for a panel that actually reads query_store_stats; every other panel
            pays nothing extra. */
-        var queryStoreWideEligible = plan!.Measure.SourceTable == "query_store_stats"
-            && await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken);
+        var wideResolution = plan!.Measure.SourceTable == "query_store_stats"
+            ? await ResolveQueryStoreWideEligibleAsync(postgres, serverScope, start, end, hasWindowEnd ? end : (DateTime?)null, cancellationToken)
+            : default;
+        var queryStoreWideEligible = wideResolution.Eligible;
 
-        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible);
+        var runContext = new ComposeRunContext(serverScope, start, end, values, rollups, now, coverage, queryStoreWideEligible, wideResolution.WideStart);
         var (compiled, compileError) = ComposeCompiler.Compile(plan!, runContext);
         if (compileError is not null)
         {
@@ -1291,6 +1293,18 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                     ComposeStoreAvailability.BuildRowCapNotice(plan.Mode, rows.Count)) is string notice)
             {
                 payload["notice"] = notice;
+            }
+
+            /* #4689: the interval table served this panel from a start later than the window's, so say where it
+               starts and why. Absent when the table did not serve or nothing was cut. */
+            if (queryStoreWideEligible && wideResolution.WideStart is DateTime historyStart && historyStart > start)
+            {
+                payload["query_store_history_starts"] = historyStart.ToString("o");
+                payload["query_store_history_note"] = QueryStoreHistoryNote(historyStart, wideResolution.Bound, wideResolution.SettingServer);
+                if (wideResolution.SettingServer is not null)
+                {
+                    payload["query_store_history_set_by"] = wideResolution.SettingServer;
+                }
             }
 
             return ComposeRunOutcome.Ok(payload);
@@ -1329,7 +1343,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>#4617: see <see cref="QueryStoreWideSchemaVersionSql"/>.</summary>
     private const string QueryStoreWideServerIdsSql =
-        "SELECT server_id FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
+        "SELECT server_id, server_name FROM collect.servers WHERE is_enabled AND ($1::text[] IS NULL OR server_name = ANY($1))";
 
     /// <summary>
     /// #4605: whether a composed Query Store panel over <paramref name="start"/>..<paramref name="end"/>
@@ -1343,13 +1357,13 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// a refused clause on any server in scope makes the whole panel raw — every input here leans toward raw,
     /// the same rule #3953 already applies to the single-server reads.
     /// </summary>
-    private static async Task<bool> ResolveQueryStoreWideEligibleAsync(
+    internal static async Task<(bool Eligible, DateTime? WideStart, QueryStoreIntervalWide.WideStartBound Bound, string? SettingServer)> ResolveQueryStoreWideEligibleAsync(
         NpgsqlDataSource postgres, IReadOnlyList<string>? serverScope, DateTime start, DateTime end,
         DateTime? literalWindowEnd, System.Threading.CancellationToken cancellationToken)
     {
         if (end - start < ComposeQueryStoreWideMinWindow)
         {
-            return false;
+            return default;
         }
 
         try
@@ -1364,10 +1378,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
             if (schemaVersion < 145)
             {
-                return false;
+                return default;
             }
 
-            var serverIds = new List<int>();
+            var wideServers = new List<(int Id, string Name)>();
             await using (var servers = new NpgsqlCommand(QueryStoreWideServerIdsSql, connection) { CommandTimeout = McpCommandDeadlines.ReadSeconds })
             {
                 servers.Parameters.Add(new NpgsqlParameter
@@ -1378,27 +1392,40 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                 await using var reader = await servers.ExecuteReaderAsync(cancellationToken);
                 while (await reader.ReadAsync(cancellationToken))
                 {
-                    serverIds.Add(reader.GetInt32(0));
+                    wideServers.Add((reader.GetInt32(0), reader.GetString(1)));
                 }
             }
 
-            if (serverIds.Count == 0)
+            if (wideServers.Count == 0)
             {
-                return false;
+                return default;
             }
 
-            foreach (var serverId in serverIds)
+            /* #4689: every server in scope reads from ONE common start, the latest of the per-server read
+               starts, so each is exact from there; Bound and SettingServer are the bound and the server_name (the spelling
+               the panel's rows carry) of the server that set it. */
+            var wideStart = start;
+            var bound = QueryStoreIntervalWide.WideStartBound.Window;
+            string? settingServer = null;
+            foreach (var (serverId, serverName) in wideServers)
             {
-                var (useTable, _) = await QueryStoreIntervalWide.ReadsTableAsync(
+                var plan = await QueryStoreIntervalWide.ResolveReadAsync(
                     connection, serverId, start, end, literalWindowEnd, ComposeQueryStoreWideMinWindow,
                     McpCommandDeadlines.ReadSeconds, logger: null, cancellationToken);
-                if (!useTable)
+                if (!plan.UseTable)
                 {
-                    return false;
+                    return default;
+                }
+
+                if (plan.ReadStart > wideStart)
+                {
+                    wideStart = plan.ReadStart;
+                    bound = plan.StartBound;
+                    settingServer = serverName;
                 }
             }
 
-            return true;
+            return (true, wideStart, bound, settingServer);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1406,9 +1433,14 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
                alone is enough to distinguish a fault here (this check never answers an HTTP response either
                way, but the census sweeps every ex.Message in this file regardless of destination). */
             System.Diagnostics.Trace.TraceWarning($"#4605 compose Query Store wide-table eligibility check failed; reading raw: {ex.GetType().Name}");
-            return false;
+            return default;
         }
     }
+
+    /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a
+    /// start later than the window's. Same wording as the MCP top-queries table route.</summary>
+    internal static string QueryStoreHistoryNote(DateTime historyStart, QueryStoreIntervalWide.WideStartBound bound, string? settingServer = null) =>
+        QueryStoreIntervalWide.HistoryNote(historyStart, bound, manyServers: true, settingServer);
 
     /// <summary>Maps a failed (non-<see cref="ComposeRunOutcome.Payload"/>) <see cref="ComposeRunOutcome"/> onto
     /// its HTTP answer — factored out of the <c>/api/compose/run</c> route (the <see cref="ToHttpResult"/> /

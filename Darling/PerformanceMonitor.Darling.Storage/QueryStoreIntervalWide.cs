@@ -9,10 +9,12 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Npgsql;
+using PerformanceMonitor.Collectors;
 using NpgsqlTypes;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -402,6 +404,11 @@ FROM batch_rows AS b;";
        its MCP twin) have an upper bound and a per-read minimum window that PLAN_REGRESSION's
        always-open, always-14-day read does not. V143's shape is still the model for clauses 1-3; read it once,
        by offset, before touching this. */
+    /* The clamp (ClampedStart) is the read's lower bound AT and ABOVE raw's chunk floor. Below that floor the
+       table is the only record left, and ResolveReadAsync extends the bound down to
+       ExactBelowFloorStart = max(window start, filled_since, table floor + one day) and no further: those are the
+       three bounds under which the table provably holds what raw held before its purge.
+       There is no per-server probe on this table: its only secondary index leads with first_execution_time. */
 
     /// <summary>
     /// This table's store-shape inputs for one server: its coverage row's <c>filled_since</c> and
@@ -511,6 +518,56 @@ SELECT EXISTS
     /// </summary>
     public static readonly TimeSpan IntervalSpanMargin = TimeSpan.FromDays(1);
 
+    /// <summary>The slowest Query Store collection cadence (and the longest gap between two collections near the
+    /// purge edge) for which a read may go below raw's floor.</summary>
+    public static readonly TimeSpan MaxBelowFloorCadence = TimeSpan.FromMinutes(60);
+
+    /// <summary>How far past <c>first_execution_time</c> a deleted interval's last snapshot can still land in raw:
+    /// one interval length, plus the slowest allowed collection cadence, plus the collector's catch-up cap.</summary>
+    public static readonly TimeSpan PurgeEdgeMargin = IntervalSpanMargin + MaxBelowFloorCadence + WatermarkPolicy.MaxCatchup;
+
+    /// <summary>True when the server's effective <c>query_store</c> cadence (null: the default) is at most
+    /// <see cref="MaxBelowFloorCadence"/> and the largest gap between successive collections near the purge edge is
+    /// too. An unknown gap (no collection-log rows there) is not allowed.</summary>
+    public static bool CadenceAllowsBelowFloor(int? effectiveQueryStoreCadenceMinutes, TimeSpan? maxObservedGap) =>
+        TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(
+            effectiveQueryStoreCadenceMinutes ?? CollectorScheduleDefaults.All["query_store"].FrequencyMinutes)) <= MaxBelowFloorCadence
+        && maxObservedGap is TimeSpan g && g <= MaxBelowFloorCadence;
+
+    /// <summary>The per-server and fleet-wide <c>query_store</c> frequency overrides. $1 server_id.</summary>
+    public const string CadenceOverridesSql = @"
+SELECT server_id, frequency_minutes
+FROM config.config_collector_schedules
+WHERE lower(collector_name) = 'query_store'
+AND   (server_id = $1 OR server_id IS NULL)";
+
+    /// <summary>The largest gap between successive successful (<c>status = 'SUCCESS'</c>) <c>query_store</c> collections whose time is in
+    /// [$2, $3], as seconds. The two boundary instants join the log rows as virtual rows, so the lead-in gap (from
+    /// $2 to the first row) and the tail gap (from the last row to $3) count; a range with no log row therefore
+    /// reads as the whole span, which is not allowed. Only SUCCESS rows count: the sole Darling writer of
+    /// <c>collect.collection_log</c> (DarlingObservability.cs:87, called with <c>collection_time = UtcNow</c> at
+    /// insert, :271) never backdates a row, so a settled window's answer cannot change; SKIPPED is written only by
+    /// Lite, which has no interval table. Bounded range on
+    /// <c>idx_collection_log_watermark (server_id, collector_name, collection_time DESC)</c>. $1 server_id.</summary>
+    public static readonly string MaxCollectionGapSql = @"
+SELECT MAX(EXTRACT(EPOCH FROM (t.collection_time - t.prev)))::float8
+FROM (
+    SELECT c.collection_time, LAG(c.collection_time) OVER (ORDER BY c.collection_time) AS prev
+    FROM (
+        SELECT $2::timestamp AS collection_time
+        UNION ALL
+        SELECT $3::timestamp
+        UNION ALL
+        SELECT l.collection_time
+        FROM collect.collection_log AS l
+        WHERE l.server_id = $1
+        AND   l.collector_name = 'query_store'
+        AND   l.status = 'SUCCESS'
+        AND   l.collection_time >= $2
+        AND   l.collection_time <= $3
+    ) AS c
+) AS t";
+
     /// <summary>
     /// The rule: read <c>query_store_interval_wide</c> for a grid/MCP top read if and only if all five of
     /// these hold, otherwise run today's raw statement unchanged (ruling issuecomment-5836972848; review D4R
@@ -578,16 +635,289 @@ SELECT EXISTS
         return windowEnd - windowStart >= minWindow;
     }
 
-    /// <summary>The clamp (review D4R H3): the table read's own lower bound, <c>max(windowStart, rawFloor)</c>.
+    /// <summary>The clamp (review D4R H3): the table read's own lower bound AT and ABOVE raw's floor,
+    /// <c>max(windowStart, rawFloor)</c>; <see cref="ResolveReadAsync"/> extends it below the floor.
     /// Raw chunks drop whole, so bounding the table there returns exactly the raw read's own answer over the
     /// snapshots raw still holds, reaching further back only where raw has already dropped the chunk.</summary>
     public static DateTime ClampedStart(DateTime? rawFloor, DateTime windowStart) =>
         rawFloor is DateTime r && r > windowStart ? r : windowStart;
 
     /// <summary>
-    /// <see cref="UseTable"/> plus the store round trips it needs, and the clamp (<see cref="ClampedStart"/>) the
-    /// caller's own table read must use as its lower bound — computed from the SAME <c>rawFloor</c> this decision
-    /// read, on the SAME connection, so the decision and the clamp cannot see different snapshots.
+    /// Option D: what one <c>_wide</c> read may bind as its lower bound, and what it must disclose. At or above
+    /// raw's chunk floor the bound is <see cref="ClampedStart"/>, unchanged: raw chunks drop whole, so the table
+    /// there returns exactly the raw read's answer. Below the floor raw no longer holds anything to compare, and
+    /// the table is the only record. It reads down to <see cref="ExactBelowFloorStart"/> and no further, because
+    /// below that bound it cannot prove it holds what raw held before the purge.
+    /// </summary>
+    /// <param name="UseTable">The gate's answer (<see cref="UseTable"/> plus clause 6), unchanged.</param>
+    /// <param name="ClampedStart">Today's clamp, <c>max(windowStart, rawFloor)</c>.</param>
+    /// <param name="ReadStart">The bound the caller's table read binds as its lower bound: the below-floor start
+    /// when one exists, else <see cref="ClampedStart"/>.</param>
+    /// <param name="BelowFloorStart">Non-null only when the read reaches below raw's floor.</param>
+    /// <param name="StartBound">Which bound set <see cref="ReadStart"/>; a surface names it when the read is
+    /// truncated.</param>
+    public readonly record struct WideReadPlan(
+        bool UseTable,
+        DateTime ClampedStart,
+        DateTime ReadStart,
+        DateTime? BelowFloorStart,
+        WideStartBound StartBound = WideStartBound.Window)
+    {
+        /// <summary>Where the table's proven-complete history starts for this read: <see cref="ReadStart"/>
+        /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the
+        /// surface then reports the raw tier's own reach.</summary>
+        public DateTime? EffectiveStart => UseTable ? ReadStart : null;
+    }
+
+    /// <summary>#4689: which bound set a <c>_wide</c> read's lower bound.</summary>
+    public enum WideStartBound
+    {
+        /// <summary>The window's own start: nothing was cut.</summary>
+        Window,
+        /// <summary>The table's coverage claim (<c>filled_since</c>) starts later than the window.</summary>
+        FilledSince,
+        /// <summary>The 9-day purge edge plus the one-day interval-span margin starts later than the window.</summary>
+        TablePurgeEdge,
+        /// <summary>No exact span below raw's chunk floor: the read is clamped at the floor, as before #4689.</summary>
+        RawFloor,
+        /// <summary>The server's Query Store collection cadence, or a gap in its collection log near the purge edge, is
+        /// over <see cref="MaxBelowFloorCadence"/>: the read is clamped at raw's floor.</summary>
+        RawFloorSlowCadence,
+        /// <summary>The table is younger than the gap check's window: the collection log does not yet cover the
+        /// interval table's purge edge, so the read is clamped at raw's floor.</summary>
+        RawFloorLogNotYetCovering,
+    }
+
+    /// <summary>#4689: the note a table-served Query Store read carries when the interval table started it later than
+    /// the window. The MCP top-queries table route (one server) and Compose's panel (the servers in scope) both
+    /// take their text from here. <paramref name="settingServer"/> names the server whose history set the common
+    /// start of a many-server read; when null the reason says "these servers".</summary>
+    public static string HistoryNote(DateTime effectiveStart, WideStartBound bound, bool manyServers, string? settingServer = null)
+    {
+        var scope = manyServers ? "the servers in scope" : "this server";
+        var reason = bound switch
+        {
+            WideStartBound.FilledSince =>
+                $"The interval table began keeping complete history for {(!manyServers ? "this server" : settingServer ?? "these servers")} at {effectiveStart:o}.",
+            WideStartBound.TablePurgeEdge =>
+                "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
+            WideStartBound.RawFloorSlowCadence =>
+                $"{(!manyServers ? "This server's" : settingServer is null ? "A server's" : settingServer + "'s")} Query Store collection cadence is over 60 minutes, or its collection log shows a longer gap, so older intervals are not read from the interval table.",
+            WideStartBound.RawFloorLogNotYetCovering =>
+                "The collection log does not yet cover the interval table's purge edge, so older intervals are not read from the interval table.",
+            _ =>
+                "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
+        };
+        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
+            + reason;
+    }
+
+    /// <summary>#4689: the short parenthetical a table-served grid banner appends to its "Showing since" line, or
+    /// null when the window's own start or raw's floor set the start.</summary>
+    public static string? BannerReason(WideStartBound bound) => bound switch
+    {
+        WideStartBound.FilledSince => " (interval table complete from then)",
+        WideStartBound.TablePurgeEdge => " (interval table keeps 9 days)",
+        WideStartBound.RawFloorSlowCadence => " (slow Query Store cadence)",
+        WideStartBound.RawFloorLogNotYetCovering => " (collection log not yet covering the purge edge)",
+        _ => null,
+    };
+
+    /// <summary>The window, in days after the table floor's UTC day, the cached gap verdict covers. A superset of
+    /// the two days the decision needs from any floor inside that day, so the cached maximum gap is never smaller
+    /// than the exact one: a gap inside the decision's sub-window lies inside a gap of the superset series. The
+    /// verdict can only clamp more, never less.</summary>
+    internal const int GapCacheWindowDays = 3;
+
+    /// <summary>A settle margin beyond <see cref="WatermarkPolicy.MaxCatchup"/>: a gap window counts as settled
+    /// (no collection can still land inside it) only once its end is this much older than the catch-up cap.</summary>
+    internal static readonly TimeSpan GapSettleMargin = TimeSpan.FromMinutes(5);
+
+    /// <summary>True when the gap window of <paramref name="floorDay"/> ends at least
+    /// <see cref="WatermarkPolicy.MaxCatchup"/> + <see cref="GapSettleMargin"/> before now.</summary>
+    internal static bool GapWindowSettled(DateTime floorDay) =>
+        floorDay.AddDays(GapCacheWindowDays) <= GapCacheClock() - WatermarkPolicy.MaxCatchup - GapSettleMargin;
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string StoreKey, int ServerId, DateTime FloorDay, int CadenceMinutes), TimeSpan?> GapCache = new();
+
+    private static int _gapReads;
+
+    /// <summary>The clock the settled-window rule reads; tests replace it.</summary>
+    internal static Func<DateTime> GapCacheClock = static () => DateTime.UtcNow;
+
+    private static readonly ConcurrentDictionary<string, int> GapReadsByStore = new();
+
+    private static string GapStoreKey(NpgsqlConnection connection) => connection.Host + ":" + connection.Port + "/" + connection.Database;
+
+    /// <summary>Actual executions of <see cref="MaxCollectionGapSql"/> against the connection's store since the last reset.</summary>
+    internal static int GapReadsForStoreForTests(NpgsqlConnection connection) => GapReadsByStore.TryGetValue(GapStoreKey(connection), out var n) ? n : 0;
+
+    /// <summary>Actual executions of <see cref="MaxCollectionGapSql"/> since the last reset.</summary>
+    internal static int GapReadsForTests => Volatile.Read(ref _gapReads);
+
+    /// <summary>Empties the gap-verdict cache and zeroes <see cref="GapReadsForTests"/>.</summary>
+    internal static void ResetGapCacheForTests()
+    {
+        GapCache.Clear();
+        Volatile.Write(ref _gapReads, 0);
+        GapReadsByStore.Clear();
+        GapCacheClock = static () => DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// The largest query_store collection gap over [floor day, floor day + <see cref="GapCacheWindowDays"/>],
+    /// cached per (store, server, floor day, cadence). The range sits 7-9 days back in compressed
+    /// <c>collection_log</c> chunks, so each uncached read decompresses them. Caching is exact because the
+    /// range is in the past and <c>collection_log</c> rows are only ever inserted with the wall-clock
+    /// <c>collection_time</c> of the insert (DarlingObservability.InsertCollectionLogSql callers pass
+    /// UtcNow), never backdated. Only a SETTLED verdict, lifted or clamped, is cached: the window's end
+    /// (floor day + 3 d) must be at least <see cref="WatermarkPolicy.MaxCatchup"/> + <see cref="GapSettleMargin"/>
+    /// in the past (<see cref="GapWindowSettled"/>), because a collection can still land in a window that is not.
+    /// An unsettled verdict is recomputed on every decision. The
+    /// window derives from the key's floor day, never from the raw floor, so a verdict cached for day D can
+    /// never serve a floor in day D+1. One entry is kept per (store, server): storing a new floor day or
+    /// cadence removes that server's older entries. A read that yields no value is not cached.
+    /// </summary>
+    internal static async Task<TimeSpan?> MaxCollectionGapCachedAsync(
+        NpgsqlConnection connection, int serverId, DateTime tableFloor, int frequencyMinutes, int commandTimeoutSeconds, CancellationToken cancellationToken)
+    {
+        var floorDay = DateTime.SpecifyKind(tableFloor.Date, DateTimeKind.Unspecified);
+        var storeKey = GapStoreKey(connection);
+        var key = (storeKey, serverId, floorDay, frequencyMinutes);
+        if (GapCache.TryGetValue(key, out var cached))
+        {
+            return cached;
+        }
+
+        TimeSpan? gap = null;
+        await using (var gapCommand = new NpgsqlCommand(MaxCollectionGapSql, connection) { CommandTimeout = commandTimeoutSeconds })
+        {
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floorDay });
+            gapCommand.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Timestamp, Value = floorDay.AddDays(GapCacheWindowDays) });
+            Interlocked.Increment(ref _gapReads);
+            GapReadsByStore.AddOrUpdate(storeKey, 1, (_, n) => n + 1);
+            if (await gapCommand.ExecuteScalarAsync(cancellationToken) is double seconds)
+            {
+                gap = TimeSpan.FromSeconds(seconds);
+            }
+        }
+
+        if (gap is not null && GapWindowSettled(floorDay))
+        {
+            foreach (var stale in GapCache.Keys)
+            {
+                if (stale.StoreKey == storeKey && stale.ServerId == serverId)
+                {
+                    GapCache.TryRemove(stale, out _);
+                }
+            }
+
+            GapCache[key] = gap;
+        }
+
+        return gap;
+    }
+
+    private enum BelowFloorVerdict
+    {
+        Allowed,
+        SlowCadence,
+        LogNotYetCovering,
+    }
+
+    private static async Task<BelowFloorVerdict> CadenceAllowsAsync(
+        NpgsqlConnection connection, int serverId, DateTime tableFloor, int commandTimeoutSeconds, ILogger? logger, CancellationToken cancellationToken)
+    {
+        int? perServer = null;
+        int? fleet = null;
+        try
+        {
+            await using var cadence = new NpgsqlCommand(CadenceOverridesSql, connection) { CommandTimeout = commandTimeoutSeconds };
+            cadence.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Integer, Value = serverId });
+            await using var reader = await cadence.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var minutes = reader.IsDBNull(1) ? (int?)null : reader.GetInt32(1);
+                if (reader.IsDBNull(0))
+                {
+                    fleet = minutes;
+                }
+                else
+                {
+                    perServer = minutes;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            /* The cadence is unknown, so reading below the floor is not allowed; the at-floor table read stands. */
+            logger?.LogWarning(ex, "Query Store cadence probe failed for server {ServerId}; not reading below raw's floor", serverId);
+            return BelowFloorVerdict.SlowCadence;
+        }
+
+        var frequency = CollectorScheduleDefaults.ResolveFrequencyMinutes("query_store", perServer, fleet);
+        if (TimeSpan.FromMinutes(CollectorScheduleDefaults.EffectiveRecurringIntervalMinutes(frequency)) > MaxBelowFloorCadence)
+        {
+            return BelowFloorVerdict.SlowCadence;
+        }
+
+        /* A young table's gap window reaches into time the log has not settled over yet: its virtual end row would
+           read as a long tail gap, so name the real reason before reading the gap. */
+        if (!GapWindowSettled(DateTime.SpecifyKind(tableFloor.Date, DateTimeKind.Unspecified)))
+        {
+            return BelowFloorVerdict.LogNotYetCovering;
+        }
+
+        var gap = await MaxCollectionGapCachedAsync(connection, serverId, tableFloor, frequency, commandTimeoutSeconds, cancellationToken);
+
+        return CadenceAllowsBelowFloor(frequency, gap) ? BelowFloorVerdict.Allowed : BelowFloorVerdict.SlowCadence;
+    }
+
+    /// <summary>
+    /// The lowest instant below raw's floor from which the table provably equals what raw said before its purge,
+    /// or NULL when the read cannot go below the floor (no floor, the floor at or below the window start, an
+    /// empty table, or no exact span left). Three bounds, each a hazard:
+    /// <list type="bullet">
+    /// <item><paramref name="filledSince"/>: the coverage claim starts there and is never backdated, and a gap
+    /// check restarts it above a hole (<see cref="ResetCoverageSql"/>).</item>
+    /// <item><paramref name="tableFloor"/> + <see cref="IntervalSpanMargin"/>: the 9-day purge deletes row by
+    /// row on <c>first_execution_time</c>, so a row whose interval began before the table floor is gone even when
+    /// its <c>collection_time</c> is inside the window.</item>
+    /// <item><paramref name="windowStart"/>: never read before the window asked for.</item>
+    /// </list>
+    /// </summary>
+    public static (DateTime Start, WideStartBound Bound)? ExactBelowFloorStart(
+        DateTime? rawFloor, DateTime windowStart, DateTime filledSince, DateTime? tableFloor)
+    {
+        if (rawFloor is not DateTime r || r <= windowStart || tableFloor is not DateTime h)
+        {
+            return null;
+        }
+
+        /* Ties prefer the coverage claim over the purge edge over the window. */
+        var start = windowStart;
+        var bound = WideStartBound.Window;
+        var retentionSafe = h + PurgeEdgeMargin;
+        if (retentionSafe >= start)
+        {
+            start = retentionSafe;
+            bound = WideStartBound.TablePurgeEdge;
+        }
+
+        if (filledSince >= start)
+        {
+            start = filledSince;
+            bound = WideStartBound.FilledSince;
+        }
+
+        return start < r ? (start, bound) : null;
+    }
+
+    /// <summary>
+    /// <see cref="ResolveReadAsync"/> reduced to the gate's answer and the clamp (<see cref="ClampedStart"/>): the
+    /// table read's lower bound at and above raw's chunk floor. A caller that reads the table below the floor uses
+    /// <see cref="ResolveReadAsync"/> and binds <see cref="WideReadPlan.ReadStart"/> instead.
     /// </summary>
     public static async Task<(bool UseTable, DateTime ClampedStart)> ReadsTableAsync(
         NpgsqlConnection connection,
@@ -600,6 +930,34 @@ SELECT EXISTS
         ILogger? logger,
         CancellationToken cancellationToken)
     {
+        var p = await ResolveReadAsync(
+            connection, serverId, windowStart, windowEnd, literalWindowEnd, minWindow,
+            commandTimeoutSeconds, logger, cancellationToken);
+        return (p.UseTable, p.ClampedStart);
+    }
+
+    /// <summary>
+    /// <see cref="UseTable"/> plus the store round trips it needs, the clamp (<see cref="ClampedStart"/>), and the
+    /// lower bound the table read may bind (<see cref="WideReadPlan.ReadStart"/>), which reaches below raw's chunk
+    /// floor down to <see cref="ExactBelowFloorStart"/> — all computed from the SAME <c>rawFloor</c> this decision
+    /// read, on the SAME connection, so the decision and the bound cannot see different snapshots.
+    /// </summary>
+    public static async Task<WideReadPlan> ResolveReadAsync(
+        NpgsqlConnection connection,
+        int serverId,
+        DateTime windowStart,
+        DateTime windowEnd,
+        DateTime? literalWindowEnd,
+        TimeSpan minWindow,
+        int commandTimeoutSeconds,
+        ILogger? logger,
+        CancellationToken cancellationToken)
+    {
+        /* The probes bind these as timestamp-without-time-zone, which Npgsql refuses for Kind=Utc; a caller that
+           resolves its window from DateTime.UtcNow (the MCP tool) would otherwise fail every decision and read raw. */
+        windowStart = DateTime.SpecifyKind(windowStart, DateTimeKind.Unspecified);
+        windowEnd = DateTime.SpecifyKind(windowEnd, DateTimeKind.Unspecified);
+        literalWindowEnd = literalWindowEnd is DateTime lw ? DateTime.SpecifyKind(lw, DateTimeKind.Unspecified) : null;
         try
         {
             DateTime? filledSince;
@@ -619,7 +977,7 @@ SELECT EXISTS
 
             if (filledSince is null || hasPending)
             {
-                return (false, windowStart);
+                return new WideReadPlan(false, windowStart, windowStart, null);
             }
 
             /* Review D4R H1: clauses 4 and 5 need no table floor at all, so check them before the two
@@ -628,7 +986,7 @@ SELECT EXISTS
                ever land on "raw" (UseTable's own tail), so failing here saves both queries. */
             if (windowEnd - windowStart < minWindow || (literalWindowEnd is DateTime e && e < appliedThrough))
             {
-                return (false, windowStart);
+                return new WideReadPlan(false, windowStart, windowStart, null);
             }
 
             DateTime? rawFloor = null;
@@ -650,7 +1008,7 @@ SELECT EXISTS
                scan, instead of after it. */
             if (filledSince > ClampedStart(rawFloor, windowStart))
             {
-                return (false, windowStart);
+                return new WideReadPlan(false, windowStart, windowStart, null);
             }
 
             if (!tableIsHypertable)
@@ -682,15 +1040,34 @@ SELECT EXISTS
                 }
             }
 
+            var below = useTable
+                ? ExactBelowFloorStart(rawFloor, windowStart, filledSince.Value, tableFloor)
+                : null;
+            var clampReason = (WideStartBound?)null;
+            if (below is not null && tableFloor is DateTime tf)
+            {
+                var verdict = await CadenceAllowsAsync(connection, serverId, tf, commandTimeoutSeconds, logger, cancellationToken);
+                if (verdict != BelowFloorVerdict.Allowed)
+                {
+                    below = null;
+                    clampReason = verdict == BelowFloorVerdict.LogNotYetCovering ? WideStartBound.RawFloorLogNotYetCovering : WideStartBound.RawFloorSlowCadence;
+                }
+            }
+
+            var belowFloorStart = below?.Start;
+            var readStart = belowFloorStart ?? clampedStart;
+            var startBound = below?.Bound
+                ?? (clampReason ?? (rawFloor is DateTime rf && rf > windowStart ? WideStartBound.RawFloor : WideStartBound.Window));
+
             logger?.LogDebug(
-                "Query Store wide-table source for server {ServerId}: {Source} (coverage since {FilledSince:o}; applied through {AppliedThrough:o}; raw floor {RawFloor:o}; window {WindowStart:o}-{WindowEnd:o}; literal end {LiteralEnd:o}; table floor {TableFloor:o})",
-                serverId, useTable ? "interval table" : "raw", filledSince, appliedThrough, rawFloor, windowStart, windowEnd, literalWindowEnd, tableFloor);
-            return (useTable, clampedStart);
+                "Query Store wide-table source for server {ServerId}: {Source} (coverage since {FilledSince:o}; applied through {AppliedThrough:o}; raw floor {RawFloor:o}; window {WindowStart:o}-{WindowEnd:o}; literal end {LiteralEnd:o}; table floor {TableFloor:o}; read start {ReadStart:o}; below-floor start {BelowFloorStart:o})",
+                serverId, useTable ? "interval table" : "raw", filledSince, appliedThrough, rawFloor, windowStart, windowEnd, literalWindowEnd, tableFloor, readStart, belowFloorStart);
+            return new WideReadPlan(useTable, clampedStart, readStart, belowFloorStart, useTable ? startBound : WideStartBound.Window);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger?.LogWarning(ex, "Query Store wide-table source decision failed for server {ServerId}; reading raw", serverId);
-            return (false, windowStart);
+            return new WideReadPlan(false, windowStart, windowStart, null);
         }
     }
 
