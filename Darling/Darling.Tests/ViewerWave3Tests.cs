@@ -16,7 +16,6 @@ using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
 using PerformanceMonitor.Notifications;
-using PerformanceMonitor.Ui;
 using Xunit;
 
 namespace Darling.Tests;
@@ -156,9 +155,6 @@ public sealed class ViewerWave3SqlTests
 /// mapping (Lite's AlertHistoryRow), the shared severity classification, the alert-detail
 /// composition (fingerprint disclosure), and the finding row's muted label.
 /// </summary>
-/* Serialized: TimeLocal_TreatsTheStoredValueAsUtc flips the process-wide ViewerTimeHelper display mode (it restores
-   in finally), so it runs with the other classes that do (#4766). */
-[Collection("viewer-time-statics")]
 public sealed class ViewerWave3DisplayTests
 {
     private static ViewerAlertRow AlertRow(
@@ -346,21 +342,9 @@ public sealed class ViewerWave3DisplayTests
     [Fact]
     public void TimeLocal_TreatsTheStoredValueAsUtc()
     {
-        /* Local mode is the machine's own conversion of the instant. The default Server mode converts on the
-           active clock, which is a fixed offset taken when the process started, so on a machine whose zone changes
-           offset between then and the row's date it would name another hour. */
-        var savedMode = ViewerTimeHelper.CurrentDisplayMode;
-        try
-        {
-            ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.LocalTime;
-            var row = AlertRow();
-            var expected = DateTime.SpecifyKind(row.AlertTime, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-            Assert.Equal(expected, row.TimeLocal);
-        }
-        finally
-        {
-            ViewerTimeHelper.CurrentDisplayMode = savedMode;
-        }
+        var row = AlertRow();
+        var expected = DateTime.SpecifyKind(row.AlertTime, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+        Assert.Equal(expected, row.TimeLocal);
     }
 
     [Fact]
