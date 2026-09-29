@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -693,23 +694,49 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
     /// applied on read via the shared <see cref="DefaultTraceEventSignificance"/>.
     /// </summary>
     /// <param name="utcOffsetMinutes">
-    /// <paramref name="serverId"/>'s OWN UTC offset. Used TWICE here — to build the server-local window and
-    /// to de-skew each returned row — and both uses read the one resolved value, so the bounds and the
-    /// timestamps can never disagree about which server's clock they are in. <c>null</c> means "use the
-    /// desktop UI's selected-tab offset" (<see cref="ServerTimeHelper.UtcOffsetMinutes"/>); see
-    /// <see cref="LocalDataService.GetCpuUtilizationAsync"/> for why a caller that picks its own
-    /// <paramref name="serverId"/> must not take that default.
+    /// <paramref name="serverId"/>'s OWN UTC offset, as a FIXED shift: the clock this read converts through when
+    /// <paramref name="serverClock"/> is not given. <c>null</c> means "use the desktop UI's selected-tab clock"
+    /// (<see cref="ServerTimeHelper.ActiveServerClock"/>); see <see cref="LocalDataService.GetCpuUtilizationAsync"/>
+    /// for why a caller that picks its own <paramref name="serverId"/> must not take that default.
     /// </param>
-    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? utcOffsetMinutes = null)
+    /// <param name="serverClock">
+    /// <paramref name="serverId"/>'s OWN clock (#4766): its time zone where one was collected, else its fixed
+    /// offset. Wins over <paramref name="utcOffsetMinutes"/>. The window is resolved to exact UTC bounds through
+    /// it, the SQL windows on the server-local bounds of that span widened by one hour on each side (a
+    /// pre-filter only), and each returned row is converted to UTC through the same clock, so a range or a row
+    /// on the far side of a daylight-saving change is not an hour off; the exact UTC window is then applied to
+    /// the converted rows. A skipped local hour moves forward by the gap and a repeated one reads as its first
+    /// occurrence (<see cref="ServerClock.ToUtc"/>), so no row throws.
+    /// </param>
+    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? utcOffsetMinutes = null, ServerClock? serverClock = null)
     {
         using var _q = TimeQuery("GetDefaultTraceEventsAsync", "v_default_trace_events significant-set read");
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        /* Default Trace event_time is server-LOCAL, so window on server-local bounds (the same helper the
-           CPU/sample_time reads use). Bind db filter params immediately after the 3 fixed params ($4+). */
-        var offset = utcOffsetMinutes ?? ServerTimeHelper.UtcOffsetMinutes;
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, offset);
+        /* Default Trace event_time is server-LOCAL. The exact window is UTC (fromDate/toDate arrive in the
+           server's wall clock, converted through the clock; a preset is anchored on UTC), and the SQL only
+           pre-filters on the server-local bounds of that window widened by an hour on each side, which is
+           enough to cover a daylight-saving change inside the span. Each row is then converted to UTC through
+           the same clock and held to the exact window below (#4766). Bind db filter params immediately after
+           the 3 fixed params ($4+). */
+        var clock = serverClock
+            ?? (utcOffsetMinutes.HasValue ? ServerClock.FixedOffset(utcOffsetMinutes.Value) : ServerTimeHelper.ActiveServerClock);
+        DateTime windowStartUtc;
+        DateTime windowEndUtc;
+        if (fromDate.HasValue && toDate.HasValue)
+        {
+            windowStartUtc = clock.ToUtc(fromDate.Value);
+            windowEndUtc = clock.ToUtc(toDate.Value);
+        }
+        else
+        {
+            windowEndUtc = asOfUtc ?? DateTime.UtcNow;
+            windowStartUtc = windowEndUtc.AddHours(-hoursBack);
+        }
+
+        var startTime = clock.ToServerLocal(windowStartUtc).AddHours(-1);
+        var endTime = clock.ToServerLocal(windowEndUtc).AddHours(1);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -743,8 +770,12 @@ ORDER BY event_time DESC";
         using var reader = await command.ExecuteReaderAsync();
         while (await reader.ReadAsync())
         {
-            /* De-skew server-local StartTime -> naive-UTC so the row shares the system_health rows' UTC frame. */
-            var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : reader.GetDateTime(0).AddMinutes(-offset);
+            /* De-skew server-local StartTime -> naive-UTC so the row shares the system_health rows' UTC frame. Per row,
+               through the clock: the offset in force at the row's own date, not the newest one (#4766). The SQL
+               window is only a pre-filter, so the exact UTC window is applied here. */
+            var eventTimeUtc = reader.IsDBNull(0) ? (DateTime?)null : clock.ToUtc(reader.GetDateTime(0));
+            if (eventTimeUtc is { } convertedUtc && (convertedUtc < windowStartUtc || convertedUtc > windowEndUtc))
+                continue;
             var eventName = reader.IsDBNull(1) ? null : reader.GetString(1);
             var severity = reader.IsDBNull(10) ? (int?)null : reader.GetInt32(10);
 

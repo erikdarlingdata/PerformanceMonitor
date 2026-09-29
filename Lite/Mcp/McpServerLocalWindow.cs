@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Services;
 
 namespace PerformanceMonitorLite.Mcp;
@@ -71,4 +72,12 @@ internal static class McpServerLocalWindow
     /// </summary>
     public static async Task<int> OffsetForAsync(LocalDataService dataService, int serverId)
         => await dataService.GetServerUtcOffsetMinutesAsync(serverId) ?? 0;
+
+    /// <summary>
+    /// <see cref="OffsetForAsync"/> as a clock (#4766): the server's time zone where one was collected, else its
+    /// fixed offset, else UTC (the same "no offset means local is UTC" decision as <see cref="OffsetForAsync"/>).
+    /// For a read whose window or returned rows can cross a daylight-saving change.
+    /// </summary>
+    public static async Task<ServerClock> ClockForAsync(LocalDataService dataService, int serverId)
+        => await dataService.GetServerClockAsync(serverId) ?? ServerClock.Utc;
 }
