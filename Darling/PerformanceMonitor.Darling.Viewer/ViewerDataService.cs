@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -474,6 +475,34 @@ public sealed partial class ViewerDataService : IAsyncDisposable
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(effectiveConnectionString, ViewerSettings.ApplicationName)));
         StoreIsOnThisMachine = StoreHostIsLoopback(connectionString);
+    }
+
+    /// <summary>
+    /// Builds the data service, or says why the store connection string cannot be used (S-8). The constructor
+    /// throws when Npgsql cannot parse the string, and the caller (<c>MainWindow.OnLoaded</c>, an <c>async void</c>
+    /// handler) let that escape into the dispatcher's unhandled-exception log, which writes the exception's message
+    /// and its inner exception. Npgsql's text for a parse failure can quote part of the string (a password with an
+    /// unquoted ';' makes the text after it the "keyword"), so the string is parsed first and
+    /// <paramref name="unusable"/> is <see cref="DarlingStoreConnection.DescribeParseFailure"/>'s text, which the
+    /// caller shows and logs. A string that fails to parse never reaches the constructor, so nothing it
+    /// publishes (<see cref="ViewerStorePool"/>) changes.
+    /// </summary>
+    internal static bool TryCreate(
+        string connectionString,
+        int? connectionTimeoutSeconds,
+        [NotNullWhen(true)] out ViewerDataService? dataService,
+        out string unusable)
+    {
+        dataService = null;
+        if (DarlingStoreConnection.TryDescribeParseFailure(connectionString) is { } parseFailure)
+        {
+            unusable = "postgres.connectionString could not be used: " + parseFailure;
+            return false;
+        }
+
+        dataService = new ViewerDataService(connectionString, connectionTimeoutSeconds);
+        unusable = string.Empty;
+        return true;
     }
 
     /// <summary>

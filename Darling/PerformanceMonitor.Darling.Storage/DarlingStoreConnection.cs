@@ -6,6 +6,7 @@
  * Licensed under the MIT License. See LICENSE file in the project root for full license information.
  */
 
+using System;
 using Npgsql;
 
 namespace PerformanceMonitor.Darling.Storage;
@@ -80,4 +81,56 @@ public static class DarlingStoreConnection
         builder.ApplicationName = applicationName;
         return builder.ConnectionString;
     }
+
+    /// <summary>
+    /// The text a site prints or logs when a STORE connection string cannot be parsed (S-8), in place of the
+    /// exception's own message. Npgsql reports a keyword it cannot set as <c>Couldn't set &lt;keyword&gt;</c>, and
+    /// the .NET parser lowercases that keyword. A password with an unquoted <c>;</c> makes the text from that
+    /// <c>;</c> to the next <c>=</c> the "keyword", and a password that starts with <c>=</c> puts the whole
+    /// password there, so the message (and its <c>ParamName</c>, and the inner exception) can quote part of a
+    /// secret. A bad value for a real keyword (<c>Port</c>, <c>SSL Mode</c>) names only the key, and the value
+    /// sits in the inner exception.
+    ///
+    /// <para>This method never includes <c>ex.Message</c> or any inner exception's message. It names
+    /// <see cref="ArgumentException.ParamName"/> only when <see cref="NpgsqlConnectionStringBuilder.ContainsKey"/>
+    /// says it is a keyword Npgsql knows, so the only text it takes from the exception is one entry of Npgsql's
+    /// own fixed keyword list. Anything else gets one fixed hint. The result is the same for every secret, so a
+    /// site that passes it to a logger must not also pass the exception: a logger appends the exception's message
+    /// (and, on the console and in the Event Log, its inner exceptions).</para>
+    /// </summary>
+    public static string DescribeParseFailure(Exception ex)
+    {
+        ArgumentNullException.ThrowIfNull(ex);
+
+        if (ex is ArgumentException { ParamName: { Length: > 0 } keyword }
+            && new NpgsqlConnectionStringBuilder().ContainsKey(keyword))
+        {
+            return "Npgsql rejected the value for the '" + keyword + "' keyword. Check that value. " + ParseErrorNotShown;
+        }
+
+        return "Npgsql rejected the string. A value that contains ';' or '=' must be quoted, for example Password='pa;ss'. "
+            + ParseErrorNotShown;
+    }
+
+    /// <summary>
+    /// <see cref="DescribeParseFailure"/>'s text when <paramref name="connectionString"/> cannot be parsed, or null
+    /// when it can. For a site that builds a data source or a connection from the string right afterwards and
+    /// wants to say why it cannot, without a catch around the statement that builds it: every later step in the
+    /// chain (<see cref="WithApplicationName"/>, <see cref="PinSessionTimeZoneUtc"/>, Npgsql's own constructor)
+    /// parses this same string first, so a string that passes here cannot fail there for this reason.
+    /// </summary>
+    public static string? TryDescribeParseFailure(string connectionString)
+    {
+        try
+        {
+            _ = new NpgsqlConnectionStringBuilder(connectionString);
+            return null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return DescribeParseFailure(ex);
+        }
+    }
+
+    private const string ParseErrorNotShown = "The parse error is left out on purpose, because it can quote part of a secret.";
 }

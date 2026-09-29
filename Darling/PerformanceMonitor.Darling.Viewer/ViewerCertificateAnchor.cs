@@ -99,7 +99,8 @@ public static class ViewerCertificateAnchor
         }
         catch (Exception)
         {
-            /* An unparseable string is Npgsql's to reject, with its own message, at connect time. */
+            /* An unparseable string is rejected when the data service is built (ViewerDataService.TryCreate), with
+               DarlingStoreConnection.DescribeParseFailure's text: Npgsql's own message can quote part of the string. */
             return connectionString;
         }
 

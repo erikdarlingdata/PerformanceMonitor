@@ -121,10 +121,59 @@ public sealed class DarlingCliUnusableStoreConnectionTests
         {
             var path = WriteByoConfig(root, MalformedConnectionString);
 
-            var (exit, _, error) = await RunVerbAsync(verb, path);
+            var (exit, output, error) = await RunVerbAsync(verb, path);
 
             Assert.Equal(1, exit);
             Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
+
+            /* S-8: the keyword Npgsql could not set is named, and the value it was given is not printed. */
+            Assert.Contains("value for the 'sslmode' keyword", error, StringComparison.Ordinal);
+            Assert.DoesNotContain("NotARealSslMode", error, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("NotARealSslMode", output, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// S-8, every verb that can open a bring-your-own store: a password with an unquoted ';' makes Npgsql report a
+    /// keyword built out of the password itself (the text from the ';' to the next '=', lowercased), and a password
+    /// that starts with '=' puts the whole password there. The verb exits with one and prints no piece of either
+    /// password on either stream. The four endpoint toggles are not here for the reason
+    /// <see cref="ConnectionStringThatDoesNotParse_ExitsWithOne_AndNamesTheSetting"/> gives.
+    /// </summary>
+    [Theory]
+    [InlineData("--validate-config", StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData("--check-settings", StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData("--collapse-legacy-slices", StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData("--recompress-plan-dim", StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData("--add-server", StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData("--backfill-rollups", StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData("--enable-collector", StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData("--disable-collector", StoreParseFailureFixtures.SemicolonInPassword)]
+    [InlineData("--validate-config", StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData("--check-settings", StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData("--collapse-legacy-slices", StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData("--recompress-plan-dim", StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData("--add-server", StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData("--backfill-rollups", StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData("--enable-collector", StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData("--disable-collector", StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    public async Task ConnectionStringWithAPasswordThatBreaksTheParse_ExitsWithOne_AndNeverEchoesIt(string verb, string connectionString)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-cli-s8-fragment-");
+        try
+        {
+            var path = WriteByoConfig(root, connectionString);
+
+            var (exit, output, error) = await RunVerbAsync(verb, path);
+
+            Assert.Equal(1, exit);
+            Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
+            StoreParseFailureFixtures.AssertNoFragment(error, $"{verb} stderr");
+            StoreParseFailureFixtures.AssertNoFragment(output, $"{verb} stdout");
         }
         finally
         {

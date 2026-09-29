@@ -97,8 +97,11 @@ public static class StoreConnectionSelfTest
         }
         catch (Exception ex)
         {
+            /* The formatter's text, never the exception's own message: Npgsql's message for a parse failure can
+               quote part of the string (a password with an unquoted ';' makes the text after it the "keyword"),
+               and this detail goes into the failure overlay and the viewer log. */
             results.Add(new LayerResult(ConfigLayer, LayerOutcome.Failed,
-                $"connection string did not parse: {ex.Message}", stopwatch.Elapsed));
+                $"connection string did not parse: {DarlingStoreConnection.DescribeParseFailure(ex)}", stopwatch.Elapsed));
             AddNotReached(results, DnsLayer, TcpLayer, TlsLayer, AuthLayer, SchemaLayer);
             return results;
         }

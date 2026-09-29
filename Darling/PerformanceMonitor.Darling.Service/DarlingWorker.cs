@@ -1961,6 +1961,18 @@ public sealed class DarlingWorker : BackgroundService
            result rather than the two being one call), so the census below only has to look for the
            pin on the Create line itself — no reassignment in between for a future edit to slip
            an unpinned read behind. */
+
+        /* A string Npgsql cannot parse throws from the Create below, leaves this method and ExecuteAsync, and the
+           host logs that exception to the console, the Event Log and the file log with its message and its inner
+           exception. Npgsql's text for that can quote part of the string (a password with an unquoted ';' makes the
+           text after it the "keyword"). So parse the string first: the exception that leaves is the formatter's
+           text, with no inner exception, and the host still stops exactly as it did. Every later step in the chain
+           parses this same string first, so a string that passes here cannot fail below for this reason. */
+        if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
+        {
+            throw new InvalidOperationException("postgres.connectionString could not be used: " + unusableStoreString);
+        }
+
         await using var postgres = NpgsqlDataSource.Create(
             DarlingStoreConnection.PinSessionTimeZoneUtc(
                 DarlingStoreConnection.WithApplicationName(
