@@ -9328,6 +9328,22 @@ AND   j.hypertable_name = '{relation}'", connection))
             return;
         }
 
+        /* #4710: the attempt ran before the fleet permit, and a reload can replace the definition while it
+           ran or while this body waited for the permit. A runtime built from the OLD definition must not be
+           installed on an edited server: ReconcileServers already cleared Runtime and NextConnectAttempt for
+           the edit, so nothing would reconnect and the server would keep collecting from the old target. A
+           failed OLD attempt must not put the NEW definition into backoff either. ServerDefinitionEquals, not
+           reference equality: a cost or alert-delivery edit replaces the held definition too, and that attempt
+           is still good. The failure count is left alone (the edit's reconcile already reset it). */
+        if (!ServerDefinitionEquals(server.Config, attempt.Value.Config))
+        {
+            _logger.LogInformation(
+                "[{Server}] Definition changed during the connect attempt - connecting again with the new one",
+                server.Config.DisplayName);
+            server.NextConnectAttempt = DateTime.MinValue;
+            return;
+        }
+
         try
         {
             if (attempt.Value.Failure is { } connectFailure)

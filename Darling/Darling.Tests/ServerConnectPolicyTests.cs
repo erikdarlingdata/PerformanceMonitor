@@ -185,6 +185,141 @@ public sealed class ServerConnectGateOccupancyTests
     }
 }
 
+/// <summary>
+/// #4710: a connect attempt is made before the fleet permit is taken, so a reload can replace the server's
+/// definition while the attempt runs or while the body waits for the permit. The install step must not put a
+/// runtime built from the OLD definition on a server that has since been edited, nor back off the NEW
+/// definition because the old one failed.
+/// </summary>
+public sealed class ServerConnectDefinitionEditTests
+{
+    private static readonly Type LoopState = typeof(DarlingWorker).GetNestedType("ServerLoopState", BindingFlags.NonPublic)!;
+
+    private static DarlingWorker NewWorker()
+    {
+        var worker = (DarlingWorker)RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
+        typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_connectProbeGate", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, new SemaphoreSlim(ServerConnectProbe.GateWidth, ServerConnectProbe.GateWidth));
+        return worker;
+    }
+
+    private static ServerRuntime RuntimeFor(MonitoredServer config) => new()
+    {
+        Config = config,
+        ConnectionString = "Server=s.invalid;Integrated Security=true",
+        Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.SqlServer },
+        StorageName = "s",
+        ServerId = 7,
+    };
+
+    private static void Set(object state, string name, object? value) => LoopState.GetProperty(name)!.SetValue(state, value);
+
+    private static object? Get(object state, string name) => LoopState.GetProperty(name)!.GetValue(state);
+
+    /// <summary>
+    /// Calls TryConnectAsync with the definition the server holds NOW (<paramref name="current"/>) and an
+    /// attempt made with <paramref name="attempted"/>. Retired is set so a runtime that IS installed is dropped
+    /// again at the retired re-check, right after the install bookkeeping and before any store work: the
+    /// seeded failure count (5) and failure text are what tell an install from a discard.
+    /// </summary>
+    private static async Task<object> TryConnectAsync(MonitoredServer current, MonitoredServer attempted, bool failed)
+    {
+        var state = ServerConnectBackoffTests.NewLoopState(LoopState, current);
+        Set(state, "ConsecutiveConnectFailures", 5);
+        Set(state, "NextConnectAttempt", DateTime.UtcNow.AddMinutes(5));
+        Set(state, "LastConnectFailureLogged", "earlier failure");
+        LoopState.GetField("Retired")!.SetValue(state, true);
+
+        var attempt = new ConnectAttempt(
+            attempted,
+            failed ? null : RuntimeFor(attempted),
+            failed ? new InvalidOperationException("unreachable") : null);
+        var tryConnect = typeof(DarlingWorker).GetMethod("TryConnectAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        await (Task)tryConnect.Invoke(NewWorker(), new object?[] { state, null, new DarlingConfig(), attempt, CancellationToken.None })!;
+        return state;
+    }
+
+    [Fact]
+    public async Task ConnectionEditAfterTheAttempt_InstallsNothing_AndConnectsAgainAtOnce()
+    {
+        var state = await TryConnectAsync(
+            current: new MonitoredServer { Name = "s", Host = "new.invalid", StoredServerId = 7 },
+            attempted: new MonitoredServer { Name = "s", Host = "old.invalid", StoredServerId = 7 },
+            failed: false);
+
+        Assert.Null(Get(state, "Runtime"));
+        Assert.Equal(DateTime.MinValue, (DateTime)Get(state, "NextConnectAttempt")!);
+        Assert.Equal(5, (int)Get(state, "ConsecutiveConnectFailures")!);
+        Assert.Equal("earlier failure", (string?)Get(state, "LastConnectFailureLogged"));
+    }
+
+    [Fact]
+    public async Task NonConnectionEditAfterTheAttempt_StillInstallsTheRuntime()
+    {
+        /* A cost (or alert-delivery) edit replaces the held definition too. ServerDefinitionEquals ignores
+           it, so this attempt is still good: comparing references would throw away every connect that raced a
+           FinOps edit. */
+        var state = await TryConnectAsync(
+            current: new MonitoredServer { Name = "s", Host = "same.invalid", StoredServerId = 7, MonthlyCostUsd = 900m },
+            attempted: new MonitoredServer { Name = "s", Host = "same.invalid", StoredServerId = 7, MonthlyCostUsd = 100m },
+            failed: false);
+
+        Assert.Equal(0, (int)Get(state, "ConsecutiveConnectFailures")!);
+        Assert.Null(Get(state, "LastConnectFailureLogged"));
+    }
+
+    [Fact]
+    public async Task FailedAttemptWithTheOldDefinition_DoesNotBackOffTheNewOne()
+    {
+        var state = await TryConnectAsync(
+            current: new MonitoredServer { Name = "s", Host = "new.invalid", StoredServerId = 7 },
+            attempted: new MonitoredServer { Name = "s", Host = "old.invalid", StoredServerId = 7 },
+            failed: true);
+
+        Assert.Equal(DateTime.MinValue, (DateTime)Get(state, "NextConnectAttempt")!);
+        Assert.Equal(5, (int)Get(state, "ConsecutiveConnectFailures")!);
+        Assert.Equal("earlier failure", (string?)Get(state, "LastConnectFailureLogged"));
+    }
+
+    [Fact]
+    public async Task ADefinitionEditDuringTheAttempt_IsConnectedAgainWithTheNewDefinitionOnTheNextBody()
+    {
+        var original = new MonitoredServer { Name = "s", Host = "old.invalid", StoredServerId = 7 };
+        var edited = new MonitoredServer { Name = "s", Host = "new.invalid", StoredServerId = 7 };
+        var state = ServerConnectBackoffTests.NewLoopState(LoopState, original);
+        /* Skip the self-alert pass: it needs the store, and this test is about the connect. */
+        Set(state, "NextSelfAlertSweep", DateTime.MaxValue);
+        var list = Activator.CreateInstance(typeof(List<>).MakeGenericType(LoopState))!;
+        list.GetType().GetMethod("Add")!.Invoke(list, new[] { state });
+
+        var worker = NewWorker();
+        var hosts = new List<string>();
+        worker.ConnectOverride = (target, _) =>
+        {
+            hosts.Add(target.Host);
+            if (hosts.Count == 1)
+            {
+                /* The reload lands while the first attempt is in flight. */
+                typeof(DarlingWorker).GetMethod("ReconcileServers", BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .Invoke(worker, new object[] { list, new List<MonitoredServer> { edited } });
+            }
+
+            return Task.FromResult(RuntimeFor(target));
+        };
+
+        var process = typeof(DarlingWorker).GetMethod("ProcessServerSweepAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        using var fleetGate = new SemaphoreSlim(4, 4);
+        for (var body = 0; body < 2; body++)
+        {
+            await (Task)process.Invoke(worker, new object?[] { state, null, null, null, null, new DarlingConfig(), fleetGate, CancellationToken.None })!;
+        }
+
+        Assert.Equal(new[] { "old.invalid", "new.invalid" }, hosts);
+    }
+}
+
 public sealed class ConnectionFaultDispositionTests
 {
     private static ServerRuntime SqlRuntime() => new()

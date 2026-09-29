@@ -41,8 +41,13 @@ internal static class ServerConnectBackoff
     }
 }
 
-/// <summary>The outcome of one connect attempt: a runtime, or the exception that stopped it.</summary>
-internal readonly record struct ConnectAttempt(ServerRuntime? Runtime, Exception? Failure);
+/// <summary>
+/// The outcome of one connect attempt: a runtime, or the exception that stopped it. <c>Config</c> is the
+/// definition the attempt was made WITH (#4710): a reload can replace the server's definition while the attempt
+/// runs or while the body waits for the fleet permit, and the install step needs to know whether what it is
+/// about to install (or back off from) still describes the server.
+/// </summary>
+internal readonly record struct ConnectAttempt(MonitoredServer Config, ServerRuntime? Runtime, Exception? Failure);
 
 /// <summary>
 /// Runs a server's connect attempt in its own small gate instead of the fleet collection gate (#4710).
@@ -70,11 +75,11 @@ internal static class ServerConnectProbe
         await probeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return new ConnectAttempt(await connect(config, cancellationToken).ConfigureAwait(false), null);
+            return new ConnectAttempt(config, await connect(config, cancellationToken).ConfigureAwait(false), null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return new ConnectAttempt(null, ex);
+            return new ConnectAttempt(config, null, ex);
         }
         finally
         {
