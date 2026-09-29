@@ -10,6 +10,7 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Controls;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -45,7 +46,7 @@ public sealed class ComparisonWindowUtcTests
         // now use for "current": server-local pickers converted back to UTC by LocalDataService.GetQueriesTabWindowUtc.
         var fromServerLocal = new DateTime(2026, 3, 10, 9, 0, 0, DateTimeKind.Unspecified);
         var toServerLocal = new DateTime(2026, 3, 10, 17, 0, 0, DateTimeKind.Unspecified);
-        var (currentStartUtc, currentEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromServerLocal, toServerLocal, utcOffsetMinutes);
+        var (currentStartUtc, currentEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromServerLocal, toServerLocal, ServerClock.FixedOffset(utcOffsetMinutes));
 
         var yesterday = ServerTab.ShiftComparisonRange(1, currentStartUtc, currentEndUtc);
         Assert.NotNull(yesterday);
@@ -117,7 +118,7 @@ public sealed class ComparisonWindowUtcTests
         // CompareToCombo_SelectionChanged routes its three comparison refreshes through the same
         // GetQueriesTabWindowUtc tuple the grid reads use, not a bare DateTime.UtcNow/fromDate pair.
         Assert.Contains(
-            "var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);",
+            "var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);",
             comparisonSource);
     }
 

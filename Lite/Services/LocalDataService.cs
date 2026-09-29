@@ -201,43 +201,49 @@ public partial class LocalDataService
     }
 
     /// <summary>
-    /// The UTC offset of the desktop's currently selected server tab, for a read whose server-local
+    /// The clock of the desktop's currently selected server tab, for a read whose server-local
     /// <c>fromDate</c>/<c>toDate</c> can only have come from that tab's own toolbar pickers.
     ///
-    /// <para>Named rather than spelled <c>ServerTimeHelper.UtcOffsetMinutes</c> inline because it is an
+    /// <para>Named rather than spelled <c>ServerTimeHelper.ActiveServerClock</c> inline because it is an
     /// answer, not a value: it says "this window belongs to whichever server the desktop has selected".
     /// That is true only for a read the selected tab drives. It is the wrong answer for a read that can
-    /// run for a server other than the selected one, and such a read has to take the offset of the server
+    /// run for a server other than the selected one, and such a read has to take the clock of the server
     /// it names — see <see cref="GetAlertCountsAsync"/>, which does.</para>
     ///
-    /// <para>The offset is applied twice per window and the two applications have to name the same
+    /// <para>The clock is applied twice per window and the two applications have to name the same
     /// server or they stop cancelling: <c>ServerTab.GetCurrentWindow</c> converts the pickers from the
     /// display mode into server time, and the custom-range branch below converts back out to UTC. In
     /// <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> the pair cancels; in <c>ServerTime</c>, the
-    /// default, only the branch below applies anything. A caller that changes one side's offset source
+    /// default, only the branch below applies anything. A caller that changes one side's clock source
     /// without the other breaks the two modes that cancel, so the two are paired per path.</para>
     /// </summary>
-    private static int SelectedServerTabUtcOffsetMinutes => ServerTimeHelper.UtcOffsetMinutes;
+    private static ServerClock SelectedServerTabServerClock => ServerTimeHelper.ActiveServerClock;
 
     /// <summary>
     /// Gets the time range for queries based on hoursBack or explicit date range.
     /// Returns UTC time for collection_time queries (most tables store collection_time in UTC).
+    ///
+    /// <para><c>internal</c> so the tests can call it. A custom range converts each bound with the offset in force
+    /// at that bound (#4766): a range from a winter time to a summer time is not shifted by one offset at both
+    /// ends, which left the far bound an hour off.</para>
     /// </summary>
-    /// <param name="utcOffsetMinutes">
-    /// The UTC offset of the server whose rows this window will select — the same server as the
-    /// <c>server_id</c> in the predicate beside it. REQUIRED rather than defaulted: an offset and a
-    /// server_id are two halves of one question, and taking the offset from ambient state is how they came
-    /// to name two different servers. A caller with no server-specific offset to give has to say so at the
-    /// call site instead of inheriting one silently. Ignored unless <paramref name="fromDate"/> and
-    /// <paramref name="toDate"/> are both supplied, since only that branch converts.
+    /// <param name="serverClock">
+    /// The clock of the server whose rows this window will select — the same server as the
+    /// <c>server_id</c> in the predicate beside it. REQUIRED rather than defaulted: a clock and a
+    /// server_id are two halves of one question, and taking the clock from ambient state is how they came
+    /// to name two different servers. A caller with no server-specific clock to give has to say so at the
+    /// call site (<see cref="ServerClock.Utc"/>) instead of inheriting one silently. Ignored unless
+    /// <paramref name="fromDate"/> and <paramref name="toDate"/> are both supplied, since only that branch
+    /// converts.
     /// </param>
-    private static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, int utcOffsetMinutes)
+    internal static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, ServerClock serverClock)
     {
         if (fromDate.HasValue && toDate.HasValue)
         {
-            /* Custom date range - convert from server time back to UTC for storage lookup */
-            var startUtc = fromDate.Value.AddMinutes(-utcOffsetMinutes);
-            var endUtc = toDate.Value.AddMinutes(-utcOffsetMinutes);
+            /* Custom date range - convert from server time back to UTC for storage lookup. Each bound goes
+               through the clock on its own, so the offset is the one in force at that bound (#4766). */
+            var startUtc = serverClock.ToUtc(fromDate.Value);
+            var endUtc = serverClock.ToUtc(toDate.Value);
             return (startUtc, endUtc);
         }
 
@@ -264,51 +270,48 @@ public partial class LocalDataService
     /// GetTimeRange's custom-range branch and came out UTC -- the grid and its banner silently disagreed on
     /// any server not on UTC (#4279).
     /// </summary>
-    /// <param name="utcOffsetMinutes">
-    /// The SAME offset the caller's ServerTab.GetCurrentWindow used to produce <paramref name="fromDate"/>/
-    /// <paramref name="toDate"/> -- the selected tab's <c>ServerTimeHelper.UtcOffsetMinutes</c>, not
-    /// necessarily this tab's own. GetTimeRange's custom-range branch subtracts this same value back out, so
-    /// a mismatched offset here breaks the round trip the same way a mismatched one breaks it inside
+    /// <param name="serverClock">
+    /// The SAME clock the caller's ServerTab.GetCurrentWindow used to produce <paramref name="fromDate"/>/
+    /// <paramref name="toDate"/> -- the selected tab's <c>ServerTimeHelper.ActiveServerClock</c>, not
+    /// necessarily this tab's own. GetTimeRange's custom-range branch converts back out through this same
+    /// clock, so a mismatched clock here breaks the round trip the same way a mismatched one breaks it inside
     /// GetTopQueriesByCpuAsync.
     /// </param>
-    internal static (DateTime startUtc, DateTime endUtc) GetQueriesTabWindowUtc(int hoursBack, DateTime? fromDate, DateTime? toDate, int utcOffsetMinutes)
-        => GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, utcOffsetMinutes);
+    internal static (DateTime startUtc, DateTime endUtc) GetQueriesTabWindowUtc(int hoursBack, DateTime? fromDate, DateTime? toDate, ServerClock serverClock)
+        => GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, serverClock);
 
     /// <summary>
     /// Gets the time range in server local time (for tables like cpu_utilization_stats.sample_time).
+    ///
+    /// <para>An hours-back window is the server-local rendering of its two UTC ends (#4766): the end is the
+    /// anchor on the server's clock and the start is <c>anchor - hoursBack</c> on the server's clock, each with
+    /// the offset in force at its own instant. A window that spans a daylight saving change is therefore as long
+    /// in real time as the caller asked, and its wall-clock span is an hour more or less than <c>hoursBack</c>.
+    /// <c>internal</c> so the tests can call it.</para>
     /// </summary>
-    /// <param name="utcOffsetMinutes">
-    /// The UTC offset of the server whose rows this window will select — the same server as the
-    /// <c>server_id</c> in the predicate beside it. REQUIRED rather than defaulted: an offset and a
-    /// server_id are two halves of one question, and taking the offset from ambient state is how they came
-    /// to name two different servers. A caller with no server-specific offset to give has to say so at the
-    /// call site instead of inheriting one silently.
+    /// <param name="serverClock">
+    /// The clock of the server whose rows this window will select — the same server as the
+    /// <c>server_id</c> in the predicate beside it. REQUIRED rather than defaulted: a clock and a
+    /// server_id are two halves of one question, and taking the clock from ambient state is how they came
+    /// to name two different servers. A caller with no server-specific clock to give has to say so at the
+    /// call site instead of inheriting one silently. Ignored when <paramref name="fromDate"/> and
+    /// <paramref name="toDate"/> are both supplied: those are already server-local.
     /// </param>
-    private static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, int utcOffsetMinutes)
+    internal static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, ServerClock serverClock)
     {
-        /* The anchor arrives in UTC (see GetTimeRange) and is carried into server-local here, so both
-           families answer the same instant even though they window on differently-based columns. */
-        var serverNow = (asOfUtc ?? DateTime.UtcNow).AddMinutes(utcOffsetMinutes);
-
         if (fromDate.HasValue && toDate.HasValue)
         {
             /* fromDate/toDate are already in server time from the caller */
             return (fromDate.Value, toDate.Value);
         }
 
-        return (serverNow.AddHours(-hoursBack), serverNow);
+        /* The anchor arrives in UTC (see GetTimeRange) and is carried into server-local here, so both
+           families answer the same instant even though they window on differently-based columns. The start is
+           converted from its own UTC instant, not derived from the server-local end, so a change inside the
+           window moves it by the right amount. */
+        var anchor = asOfUtc ?? DateTime.UtcNow;
+        return (serverClock.ToServerLocal(anchor.AddHours(-hoursBack)), serverClock.ToServerLocal(anchor));
     }
-
-    /* Compile-only stand-ins for the clock overloads, so the tests that pin the clock behaviour build against the
-       one-offset shape and fail on it. The commit after this one replaces these and the int overloads above. */
-    internal static (DateTime startTime, DateTime endTime) GetTimeRange(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, ServerClock serverClock)
-        => GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, serverClock.OffsetMinutesAt(DateTime.UtcNow));
-
-    internal static (DateTime startTime, DateTime endTime) GetTimeRangeServerLocal(int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime? asOfUtc, ServerClock serverClock)
-        => GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, serverClock.OffsetMinutesAt(DateTime.UtcNow));
-
-    public Task<(int blockingCount, int deadlockCount, DateTime? latestEventTime)> GetAlertCountsAsync(int serverId, int hoursBack, DateTime? fromDate, DateTime? toDate, ServerClock serverClock)
-        => GetAlertCountsAsync(serverId, hoursBack, fromDate, toDate, serverClock.OffsetMinutesAt(DateTime.UtcNow));
 
     /// <summary>
     /// Starts query timing for performance logging. Use with 'using' statement.

@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
 using PerformanceMonitor.Collectors;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Mcp;
 using PerformanceMonitorLite.Models;
@@ -395,7 +396,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
             await SeedCpuAsync(_serverId, "TimeHonestySrv", utcC.AddMinutes(CollectedOffset), null, 33);
             await SeedCpuAsync(_serverId, "TimeHonestySrv", utcD.AddMinutes(SampleOffsetAtTheInstant), utcD, 44);
 
-            var rows = await _dataService.GetCpuUtilizationAsync(_serverId, hoursBack: 1, asOfUtc: now, utcOffsetMinutes: CollectedOffset);
+            var rows = await _dataService.GetCpuUtilizationAsync(_serverId, hoursBack: 1, asOfUtc: now, serverClock: ServerClock.FixedOffset(CollectedOffset));
 
             Assert.Equal(new[] { 22, 11 }, rows.Select(r => r.SqlServerCpu).ToArray());   /* ordered on the local stamp: B's EST stamp sorts first */
 
@@ -476,7 +477,7 @@ public sealed class TimeHonestyRungReadTests : IClassFixture<SharedDuckDbFixture
         var fromLocal = now.AddHours(-1).AddMinutes(CollectedOffset);
         var toLocal = now.AddMinutes(CollectedOffset);
 
-        var rows = await _dataService.GetCpuUtilizationAsync(_serverId, fromDate: fromLocal, toDate: toLocal, utcOffsetMinutes: CollectedOffset);
+        var rows = await _dataService.GetCpuUtilizationAsync(_serverId, fromDate: fromLocal, toDate: toLocal, serverClock: ServerClock.FixedOffset(CollectedOffset));
         var row = Assert.Single(rows);
         Assert.Equal(22, row.SqlServerCpu);
         Assert.Equal(utcB.AddMinutes(SampleOffsetAtTheInstant), row.SampleTime);

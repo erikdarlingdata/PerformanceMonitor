@@ -154,7 +154,7 @@ VALUES ($1, $2, $3, 'TestSrv', $4, 'Server Memory Change', NULL, NULL, NULL, NUL
 
         /* The int offset is the fixed-offset clock: 03:30 at UTC-5 is 08:30 UTC on both sides of the change. */
         var rows = await service.GetDefaultTraceEventsAsync(
-            ServerId, fromDate: At(2026, 3, 8, 0, 0), toDate: At(2026, 3, 8, 12, 0), utcOffsetMinutes: -300);
+            ServerId, fromDate: At(2026, 3, 8, 0, 0), toDate: At(2026, 3, 8, 12, 0), serverClock: ServerClock.FixedOffset(-300));
 
         Assert.Equal(At(2026, 3, 8, 8, 30), Assert.Single(rows).EventTimeUtc);
     }

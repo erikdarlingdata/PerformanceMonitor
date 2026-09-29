@@ -9,6 +9,7 @@
 using System;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
@@ -283,14 +284,14 @@ public sealed class AlertBadgeServerOffsetTests : IClassFixture<SharedDuckDbFixt
         var toDate = ServerTimeHelper.DisplayTimeToServerTime(PickerValueFor(WindowEndUtc, mode, utcOffsetMinutes), mode, utcOffsetMinutes);
 
         var (blocking, deadlocks, _) = await new LocalDataService(_duckDb)
-            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: fromDate, toDate: toDate, utcOffsetMinutes: utcOffsetMinutes);
+            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: fromDate, toDate: toDate, serverClock: ServerClock.FixedOffset(utcOffsetMinutes));
         return (blocking, deadlocks);
     }
 
     private async Task<(int Blocking, int Deadlocks)> ReadPresetBadgeAsync(int serverId, int utcOffsetMinutes)
     {
         var (blocking, deadlocks, _) = await new LocalDataService(_duckDb)
-            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: null, toDate: null, utcOffsetMinutes: utcOffsetMinutes);
+            .GetAlertCountsAsync(serverId, hoursBack: 24, fromDate: null, toDate: null, serverClock: ServerClock.FixedOffset(utcOffsetMinutes));
         return (blocking, deadlocks);
     }
 

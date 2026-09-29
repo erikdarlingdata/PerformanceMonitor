@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -26,7 +27,7 @@ public partial class LocalDataService
     /// collector writes <c>sample_time_utc</c> — the same instant in UTC — beside the local stamp. This read's
     /// window is a UTC question (<paramref name="hoursBack"/> back from <paramref name="asOfUtc"/>, or a
     /// picker range the caller expressed in server time) that used to be answered ONLY by shifting the bounds
-    /// into the server's frame by the one <paramref name="utcOffsetMinutes"/> the store holds now
+    /// into the server's frame by the one offset the store holds now
     /// (<c>GetTimeRangeServerLocal</c>) and comparing them against the local stamp. That is exact while every
     /// sample and the collected offset sit on the same side of a DST transition and an hour wrong for every
     /// sample on the far side — silently, in the plausible direction. The predicate is now
@@ -38,32 +39,36 @@ public partial class LocalDataService
     /// exactly what the store never recorded. The MCP <c>get_cpu_utilization</c> and the WPF chart both come
     /// through here, so both windows are honest for post-rung rows and neither's display frame changes.</para>
     /// </summary>
-    /// <param name="utcOffsetMinutes">
-    /// <paramref name="serverId"/>'s OWN UTC offset, which is what the server-local window has to be
-    /// expressed in. <c>null</c> means "use the desktop UI's selected-tab offset"
-    /// (<see cref="ServerTimeHelper.UtcOffsetMinutes"/>) — correct for the WPF tab that set it and for
+    /// <param name="serverClock">
+    /// <paramref name="serverId"/>'s OWN clock, which is what the server-local window has to be
+    /// expressed in. <c>null</c> means "use the desktop UI's selected-tab clock"
+    /// (<see cref="ServerTimeHelper.ActiveServerClock"/>) — correct for the WPF tab that set it and for
     /// nobody else. Any caller that picks its own <paramref name="serverId"/> (every MCP tool does) must
-    /// pass that server's offset, or the window and the server_id name two different servers and the read
+    /// pass that server's clock, or the window and the server_id name two different servers and the read
     /// comes back shifted or empty with no error.
     /// </param>
-    public async Task<List<CpuUtilizationRow>> GetCpuUtilizationAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, int? utcOffsetMinutes = null)
+    public async Task<List<CpuUtilizationRow>> GetCpuUtilizationAsync(int serverId, int hoursBack = 4, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, ServerClock? serverClock = null)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
         /* sample_time is in server local time, not UTC. The server-local bounds are what this read always
-           computed; the UTC bounds are the same instants un-shifted (the picker branch converts the
-           server-time range back to UTC exactly as GetTimeRange does), and the offset rides along as $4 so
-           the pre-rung fallback arm can re-derive the local comparison inside the predicate. */
-        var offset = utcOffsetMinutes ?? ServerTimeHelper.UtcOffsetMinutes;
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, asOfUtc, offset);
-        var startUtc = startTime.AddMinutes(-offset);
-        var endUtc = endTime.AddMinutes(-offset);
+           computed; the UTC bounds are the same instants, taken from the one anchor so a preset window is
+           exact (the picker branch converts the server-time range back to UTC exactly as GetTimeRange does,
+           each bound with the offset in force there, #4766). The offset rides along as $4 so the pre-rung
+           fallback arm can re-derive the local comparison inside the predicate; it is the offset at the
+           window's end, one number for every pre-rung row. */
+        var clock = serverClock ?? ServerTimeHelper.ActiveServerClock;
+        var anchor = asOfUtc ?? DateTime.UtcNow;
+        var (startUtc, endUtc) = GetTimeRange(hoursBack, fromDate, toDate, anchor, clock);
+        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, anchor, clock);
+        var offset = clock.OffsetMinutesAt(endUtc);
 
         /* #4234: bucketed to TrendBudget.Chart's point budget so the Overview lane and this same read's CPU
            tab chart stop shipping one point per collection over a multi-day window. seriesCount is always 1 —
-           SqlServerCpu/OtherProcessCpu ride the SAME row/bucket, not separate series. */
-        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
+           SqlServerCpu/OtherProcessCpu ride the SAME row/bucket, not separate series. The bucket width comes
+           from the window's real length, not its wall-clock span, which a daylight saving change moves by an hour. */
+        var windowMinutes = Math.Max(1, (int)Math.Ceiling((endUtc - startUtc).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
 
         command.CommandText = CpuUtilizationTrendSql;

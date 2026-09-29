@@ -10,6 +10,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 
 namespace PerformanceMonitorLite.Services;
@@ -84,7 +85,7 @@ ranked AS (
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"WITH{FileIoRankedCte}
 SELECT database_name, file_type, file_name, files, stall_ms, ops, series_rank
@@ -126,7 +127,7 @@ ORDER BY series_rank";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"WITH{FileIoRankedCte},
 labelled AS (
@@ -257,7 +258,7 @@ rated AS
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"WITH{LockWaitRatedCtes}
 SELECT
@@ -298,7 +299,7 @@ ORDER BY wait_type";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"WITH{LockWaitRatedCtes},
 per_collection AS
@@ -360,7 +361,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"
 WITH raw AS
@@ -440,7 +441,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"
 WITH raw AS
@@ -506,14 +507,15 @@ ORDER BY 1";
     /// averages; a NULL reading counts as 0, as that read always read it. Stamped at each bucket's start, unclamped,
     /// as Darling's twin (<c>DarlingDataReader.CpuUtilizationBucketedSql</c>) is.
     /// </summary>
-    internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, int utcOffsetMinutes, int bucketMinutes)
+    internal async Task<List<CpuBucketPoint>> GetCpuBucketsAsync(int serverId, int hoursBack, DateTime asOfUtc, ServerClock serverClock, int bucketMinutes)
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null, asOfUtc, utcOffsetMinutes);
-        var startUtc = startTime.AddMinutes(-utcOffsetMinutes);
-        var endUtc = endTime.AddMinutes(-utcOffsetMinutes);
+        /* The window is a UTC one: hoursBack back from the UTC anchor. The offset is only for a pre-v63 row's
+           fallback arm below, so it is the offset at the window's end, one number for every such row (#4766). */
+        var (startUtc, endUtc) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock);
+        var utcOffsetMinutes = serverClock.OffsetMinutesAt(endUtc);
 
         command.CommandText = $@"
 SELECT
@@ -567,7 +569,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"
 SELECT
@@ -624,7 +626,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"
 SELECT
@@ -670,7 +672,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         command.CommandText = $@"
 WITH grants AS
@@ -734,7 +736,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, utcOffsetMinutes: 0);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
 
         var isArtifact = "COALESCE((" + WaitStatisticsArtifact.ArtifactPredicateSql(
             "cntr_type", "object_name", "prev_value", "cntr_value", "next_value") + "), false)";

@@ -331,7 +331,7 @@ ORDER BY event_time DESC";
     public async Task<List<SchedulerIssueRow>> GetSchedulerIssuesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSchedulerIssuesAsync", "v_system_health_events scheduler_monitor shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SchedulerMonitorEvent);
 
         var rows = new List<SchedulerIssueRow>();
@@ -355,7 +355,7 @@ ORDER BY event_time DESC";
     public async Task<List<SevereErrorRow>> GetSevereErrorsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSevereErrorsAsync", "v_system_health_events error_reported shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var map = await GetDatabaseNameMapAsync(serverId);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.ErrorReportedEvent);
 
@@ -381,7 +381,7 @@ ORDER BY event_time DESC";
     public async Task<List<MemoryConditionsRow>> GetMemoryConditionsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryConditionsAsync", "v_system_health_events sp_server_diagnostics RESOURCE shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<MemoryConditionsRow>();
@@ -401,7 +401,7 @@ ORDER BY event_time DESC";
     public async Task<List<MemoryBrokerRow>> GetMemoryBrokerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryBrokerAsync", "v_system_health_events memory_broker shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryBrokerEvent);
 
         var rows = new List<MemoryBrokerRow>();
@@ -420,7 +420,7 @@ ORDER BY event_time DESC";
     public async Task<List<MemoryNodeOomRow>> GetMemoryNodeOomAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetMemoryNodeOomAsync", "v_system_health_events memory_node_oom shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.MemoryNodeOomEvent);
 
         var rows = new List<MemoryNodeOomRow>();
@@ -454,7 +454,7 @@ ORDER BY event_time DESC";
     public async Task<(List<SignificantWaitRow> Rows, int CapturedCount)> GetSignificantWaitsWithCaptureAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSignificantWaitsAsync", "v_system_health_events wait_info shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.WaitInfoEvent);
 
         var rows = new List<SignificantWaitRow>();
@@ -532,7 +532,7 @@ AND   event_xml IS NOT NULL";
     /// </summary>
     public async Task<int> CountSystemHealthEventsAsync(int serverId, string eventType, int hoursBack = 24, DateTime? asOfUtc = null)
     {
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate: null, toDate: null, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate: null, toDate: null, asOfUtc, SelectedServerTabServerClock);
 
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
@@ -563,7 +563,7 @@ AND   event_xml IS NOT NULL";
     public async Task<List<CpuTasksRow>> GetCpuTasksAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetCpuTasksAsync", "v_system_health_events sp_server_diagnostics QUERY_PROCESSING shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<CpuTasksRow>();
@@ -587,7 +587,7 @@ AND   event_xml IS NOT NULL";
     public async Task<List<IoIssuesRow>> GetIoIssuesAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetIoIssuesAsync", "v_system_health_events sp_server_diagnostics IO_SUBSYSTEM shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var rows = new List<IoIssuesRow>();
@@ -616,7 +616,7 @@ AND   event_xml IS NOT NULL";
     public async Task<List<SystemHealthRecord>> GetSystemHealthAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null)
     {
         using var _q = TimeQuery("GetSystemHealthAsync", "v_system_health_events sp_server_diagnostics SYSTEM shred");
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabUtcOffsetMinutes);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
         var xmls = await ReadSystemHealthEventXmlAsync(serverId, startTime, endTime, SystemHealthParser.SpServerDiagnosticsEvent);
 
         var records = new List<SystemHealthRecord>();
@@ -693,22 +693,19 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
     /// global database filter is pushed into SQL on <c>database_name</c>. The ErrorLog severity gate is
     /// applied on read via the shared <see cref="DefaultTraceEventSignificance"/>.
     /// </summary>
-    /// <param name="utcOffsetMinutes">
-    /// <paramref name="serverId"/>'s OWN UTC offset, as a FIXED shift: the clock this read converts through when
-    /// <paramref name="serverClock"/> is not given. <c>null</c> means "use the desktop UI's selected-tab clock"
-    /// (<see cref="ServerTimeHelper.ActiveServerClock"/>); see <see cref="LocalDataService.GetCpuUtilizationAsync"/>
-    /// for why a caller that picks its own <paramref name="serverId"/> must not take that default.
-    /// </param>
     /// <param name="serverClock">
     /// <paramref name="serverId"/>'s OWN clock (#4766): its time zone where one was collected, else its fixed
-    /// offset. Wins over <paramref name="utcOffsetMinutes"/>. The window is resolved to exact UTC bounds through
+    /// offset. <c>null</c> means "use the desktop UI's selected-tab clock"
+    /// (<see cref="ServerTimeHelper.ActiveServerClock"/>); see <see cref="LocalDataService.GetCpuUtilizationAsync"/>
+    /// for why a caller that picks its own <paramref name="serverId"/> must not take that default.
+    /// The window is resolved to exact UTC bounds through
     /// it, the SQL windows on the server-local bounds of that span widened by one hour on each side (a
     /// pre-filter only), and each returned row is converted to UTC through the same clock, so a range or a row
     /// on the far side of a daylight-saving change is not an hour off; the exact UTC window is then applied to
     /// the converted rows. A skipped local hour moves forward by the gap and a repeated one reads as its first
     /// occurrence (<see cref="ServerClock.ToUtc"/>), so no row throws.
     /// </param>
-    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, int? utcOffsetMinutes = null, ServerClock? serverClock = null)
+    public async Task<List<DefaultTraceEventRow>> GetDefaultTraceEventsAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, IReadOnlyList<string>? databaseNames = null, DateTime? asOfUtc = null, ServerClock? serverClock = null)
     {
         using var _q = TimeQuery("GetDefaultTraceEventsAsync", "v_default_trace_events significant-set read");
         using var connection = await OpenConnectionAsync();
@@ -720,8 +717,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY database_id ORDER BY collection_time DES
            enough to cover a daylight-saving change inside the span. Each row is then converted to UTC through
            the same clock and held to the exact window below (#4766). Bind db filter params immediately after
            the 3 fixed params ($4+). */
-        var clock = serverClock
-            ?? (utcOffsetMinutes.HasValue ? ServerClock.FixedOffset(utcOffsetMinutes.Value) : ServerTimeHelper.ActiveServerClock);
+        var clock = serverClock ?? ServerTimeHelper.ActiveServerClock;
         DateTime windowStartUtc;
         DateTime windowEndUtc;
         if (fromDate.HasValue && toDate.HasValue)

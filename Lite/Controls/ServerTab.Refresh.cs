@@ -61,10 +61,10 @@ public partial class ServerTab : UserControl
     /// </summary>
     /// <param name="clock">
     /// Whose server time the returned bounds are in. Every read given this window converts the bounds back
-    /// out to UTC using an offset of its own, and the two have to be the same server's or the pair stops
+    /// out to UTC using a clock of its own, and the two have to be the same server's or the pair stops
     /// cancelling — so this argument is chosen to match the read being fed, not chosen once for the tab.
-    /// <c>ServerTimeHelper.ActiveServerClock</c> for the sub-tab reads, which take their offset from the
-    /// selected tab; this tab's own clock for the badge read, which takes its offset from the server it
+    /// <c>ServerTimeHelper.ActiveServerClock</c> for the sub-tab reads, which take their clock from the
+    /// selected tab; this tab's own clock for the badge read, which takes its clock from the server it
     /// names. The picker value converts through the clock (#4766), so a time on either side of a daylight-saving
     /// change lands on the server's wall clock at that instant.
     /// </param>
@@ -201,10 +201,10 @@ public partial class ServerTab : UserControl
     /// Runs on every timer tick when the Blocking tab is NOT visible so the tab badge stays current.
     ///
     /// <para>Derives its own window instead of taking the caller's, and derives it in THIS tab's
-    /// <c>UtcOffsetMinutes</c> rather than in the selected tab's. Every other windowed read here sits
-    /// behind the <c>IsVisible</c> gate, where this tab is the selected tab and the two offsets are the
-    /// same value; the badge is the one that runs for a background tab, whose server can be in a
-    /// different zone from the one on screen. The same offset goes into the picker conversion and into
+    /// <c>ServerClock</c> rather than in the selected tab's. Every other windowed read here sits
+    /// behind the <c>IsVisible</c> gate, where this tab is the selected tab and the two clocks are the
+    /// same one; the badge is the one that runs for a background tab, whose server can be in a
+    /// different zone from the one on screen. The same clock goes into the picker conversion and into
     /// <see cref="LocalDataService.GetAlertCountsAsync"/>, which is what keeps the two applications
     /// cancelling in the UTC and Local display modes while leaving the ServerTime default correct.</para>
     /// </summary>
@@ -213,7 +213,7 @@ public partial class ServerTab : UserControl
         try
         {
             var (hoursBack, fromDate, toDate) = GetCurrentWindow(_serverClock);
-            var (blockingCount, deadlockCount, latestEventTime) = await Task.Run(() => _dataService.GetAlertCountsAsync(_serverId, hoursBack, fromDate, toDate, UtcOffsetMinutes));
+            var (blockingCount, deadlockCount, latestEventTime) = await Task.Run(() => _dataService.GetAlertCountsAsync(_serverId, hoursBack, fromDate, toDate, ServerClock));
             AlertCountsChanged?.Invoke(blockingCount, deadlockCount, latestEventTime);
         }
         catch (Exception ex)
@@ -289,7 +289,7 @@ public partial class ServerTab : UserControl
                         _ = LoadActiveQueriesSlicerAsync();
                         break;
                     case 2: // Top Queries by Duration
-                        var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes, SelectedDatabaseFilter));
+                        var queryStats = await Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter));
                         _queryStatsFilterMgr!.UpdateData(queryStats);
                         SetDefaultSortIfNone(QueryStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadQueryStatsSlicerAsync();
@@ -297,20 +297,20 @@ public partial class ServerTab : UserControl
                             /* #4284: the comparison and the banner both read UTC collection_time, so they
                                share the SAME UTC window GetTopQueriesByCpuAsync just read
                                (LocalDataService.GetQueriesTabWindowUtc) -- computed once and handed to both. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
                             await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
                         }
                         break;
                     case 3: // Top Procedures by Duration
-                        var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes, SelectedDatabaseFilter));
+                        var procStats = await Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter));
                         _procStatsFilterMgr!.UpdateData(procStats);
                         SetDefaultSortIfNone(ProcedureStatsGrid, "TotalElapsedMs", ListSortDirection.Descending);
                         _ = LoadProcStatsSlicerAsync();
                         {
                             /* #4284: UTC comparison and banner window, computed once -- see the twin comment
                                on the Top Queries case above. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
                             await RefreshProcStatsComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart, windowEnd);
                         }
@@ -323,7 +323,7 @@ public partial class ServerTab : UserControl
                         {
                             /* #4284: UTC comparison and banner window, computed once -- see the twin comment
                                on the Top Queries case above. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
                             await RefreshQueryStoreComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, windowStart, windowEnd);
                         }
@@ -345,8 +345,8 @@ public partial class ServerTab : UserControl
 
             /* Full refresh: load all sub-tabs */
             var snapshotsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.Snapshots", () => Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter)));
-            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes, SelectedDatabaseFilter)));
-            var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, UtcOffsetMinutes, SelectedDatabaseFilter)));
+            var queryStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStats", () => Task.Run(() => _dataService.GetTopQueriesByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter)));
+            var procStatsTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.ProcStats", () => Task.Run(() => _dataService.GetTopProceduresByCpuAsync(_serverId, hoursBack, 50, fromDate, toDate, ServerClock, SelectedDatabaseFilter)));
             var queryStoreTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryStore", () => Task.Run(() => _dataService.GetQueryStoreTopQueriesAsync(_serverId, hoursBack, 50, fromDate, toDate, SelectedDatabaseFilter)));
             var planCorrectionTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.PlanCorrections", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetPlanCorrectionsAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
             var queryDurationTrendTask = Helpers.MethodProfiler.TimeAsync("QueryPerformance.QueryDurationTrends", () => Task.Run(() => SafeQueryAsync(() => _dataService.GetQueryDurationTrendAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter))));
@@ -377,7 +377,7 @@ public partial class ServerTab : UserControl
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
                 await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
             }
@@ -387,7 +387,7 @@ public partial class ServerTab : UserControl
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart2, windowEnd2) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                var (windowStart2, windowEnd2) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
                 await RefreshProcStatsComparisonAsync(windowStart2, windowEnd2);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart2, windowEnd2);
             }
@@ -397,7 +397,7 @@ public partial class ServerTab : UserControl
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart3, windowEnd3) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.UtcOffsetMinutes);
+                var (windowStart3, windowEnd3) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
                 await RefreshQueryStoreComparisonAsync(windowStart3, windowEnd3);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, windowStart3, windowEnd3);
             }
