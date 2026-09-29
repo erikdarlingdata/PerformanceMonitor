@@ -254,6 +254,56 @@ public sealed class PlanForceActionStoreTests
         }
     }
 
+    [Fact]
+    public async Task TheNewestRowsStateUnavailableBlocker_ShortensTheHold_ByTheWholeReasonToken()
+    {
+        Assert.SkipWhen(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DARLING_TEST_PG")),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live journal round-trip.");
+        Assert.True(_fixture.Established, "The live-postgres fixture did not establish the store.");
+
+        await using var postgres = NpgsqlDataSource.Create(_fixture.ConnectionString!);
+        var store = new PgPlanForceActionStore(postgres);
+        var ct = TestContext.Current.CancellationToken;
+        var now = DateTime.UtcNow;
+
+        await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded: true,
+            (cleanup, cleanupCt) => DeleteRowsAsync(cleanup, cleanupCt));
+
+        var bodySucceeded = false;
+        try
+        {
+            /* #4769: no row yet, so no flag. */
+            var none = await store.GetQueryHistoryAsync(TestServerId, "orders", 42, ForcePlanBotSettings.Default, now, ct);
+            Assert.False(none.LastJournalWasStateUnavailable);
+
+            async Task<bool> JournalAndReadAsync(int minutesAgo, string reasons)
+            {
+                await store.JournalAsync(Record(now.AddMinutes(-minutesAgo),
+                    action: PgPlanForceActionStore.ActionBlocked, decision: PgPlanForceActionStore.ActionBlocked,
+                    reasons: reasons, outcome: PgPlanForceActionStore.OutcomeLogged), ct);
+                var history = await store.GetQueryHistoryAsync(
+                    TestServerId, "orders", 42, ForcePlanBotSettings.Default, now, ct);
+                Assert.NotNull(history.LastJournaledForQueryUtc);
+                return history.LastJournalWasStateUnavailable;
+            }
+
+            Assert.True(await JournalAndReadAsync(50, "state_unavailable"));
+            /* The newest row rules: a later row with a different blocker restores the full cooldown. */
+            Assert.False(await JournalAndReadAsync(40, "apc_owns_it"));
+            /* The token is matched wherever it sits in the comma-joined names... */
+            Assert.True(await JournalAndReadAsync(30, "parameter_sensitivity_cofired,state_unavailable"));
+            /* ...and only as a whole token. */
+            Assert.False(await JournalAndReadAsync(20, "state_unavailable_elsewhere"));
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(_fixture.ConnectionString!, bodySucceeded,
+                (cleanup, cleanupCt) => DeleteRowsAsync(cleanup, cleanupCt));
+        }
+    }
+
     private static PlanForceActionRecord Record(
         DateTime timeUtc,
         string action,

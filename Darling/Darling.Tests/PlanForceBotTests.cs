@@ -499,6 +499,54 @@ public sealed class PlanForceBotTests
         Assert.Empty(store.Journaled);
     }
 
+    /* ---------------- a failed state read holds its candidate for an hour, not a day (#4769) ---------------- */
+
+    [Fact]
+    public async Task AfterAStateReadFailure_TheCandidateIsJudgedAgainAfterAnHour_NotADay()
+    {
+        var (bot, store) = Build(Enabled(dryRun: false));
+        store.History = new ForcePlanBotHistory(
+            DateTime.UtcNow.AddMinutes(-90), 0, 0, LastJournalWasStateUnavailable: true);
+
+        await bot.RunAfterAnalysisAsync(Runtime(), Config(optedIn: true),
+            new[] { Finding(Target()) }, CancellationToken.None);
+
+        var row = Assert.Single(store.Journaled);
+        Assert.Equal(PgPlanForceActionStore.ActionForce, row.Action);
+    }
+
+    [Fact]
+    public async Task RepeatedStateReadFailuresInsideTheHour_JournalOnce()
+    {
+        var (bot, store) = Build(Enabled(dryRun: false));
+        store.StateReadFailure = "the state read failed (timeout)";
+
+        await bot.RunAfterAnalysisAsync(Runtime(), Config(optedIn: true),
+            new[] { Finding(Target()) }, CancellationToken.None);
+        var first = Assert.Single(store.Journaled);
+        Assert.Equal(ForcePlanBotPolicy.ReasonStateUnavailable, first.Reasons);
+
+        /* The journal now holds that row: the store reads it back as the newest one, flagged. */
+        store.History = new ForcePlanBotHistory(first.ActionTimeUtc, 0, 0, LastJournalWasStateUnavailable: true);
+        await bot.RunAfterAnalysisAsync(Runtime(), Config(optedIn: true),
+            new[] { Finding(Target()) }, CancellationToken.None);
+
+        Assert.Single(store.Journaled);
+    }
+
+    [Fact]
+    public async Task ARowWithAnyOtherBlocker_StillHoldsTheCandidateForADay()
+    {
+        var (bot, store) = Build(Enabled(dryRun: false));
+        store.History = new ForcePlanBotHistory(
+            DateTime.UtcNow.AddHours(-23), 0, 0, LastJournalWasStateUnavailable: false);
+
+        await bot.RunAfterAnalysisAsync(Runtime(), Config(optedIn: true),
+            new[] { Finding(Target()) }, CancellationToken.None);
+
+        Assert.Empty(store.Journaled);
+    }
+
     /* ---------------- a database missing from the automatic-tuning captures (#4770) ---------------- */
 
     [Fact]

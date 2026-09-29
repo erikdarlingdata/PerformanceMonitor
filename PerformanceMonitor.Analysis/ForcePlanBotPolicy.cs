@@ -45,6 +45,15 @@ public sealed record ForcePlanBotSettings
     /// analysis pass.</summary>
     public int QueryCooldownHours { get; init; } = 24;
 
+    /// <summary>
+    /// #4769: how long a journaled row whose blocker is <c>state_unavailable</c> holds its candidate, instead
+    /// of <see cref="QueryCooldownHours"/>. That row says the bot could not SEE the engine state, not that it
+    /// judged the plan, so holding the candidate for a day would hide the real verdict long after the state
+    /// read recovers. One hour still journals a long outage once an hour, not once per pass. A constant, not a
+    /// setting: every other blocked or forced row keeps the configured cooldown.
+    /// </summary>
+    public const int StateUnavailableCooldownHours = 1;
+
     /// <summary>Rolling 24h cap on actionable decisions per server (would-force rows count too, so
     /// the dry run rehearses the same budget the live bot spends).</summary>
     public int MaxActionsPerServerPerDay { get; init; } = 3;
@@ -171,10 +180,14 @@ public sealed record ForcePlanBotDecision(
 /// <param name="RecentFailedForces">Failed forces for this query inside
 /// <see cref="ForcePlanBotSettings.FailedForceCooldownHours"/>: forces that would not stick, plus
 /// forces the self-review unforced as not-a-net-benefit.</param>
+/// <param name="LastJournalWasStateUnavailable">True when the newest journaled row for the query is a blocked
+/// row that carries the <c>state_unavailable</c> blocker (#4769); the cooldown then runs for
+/// <see cref="ForcePlanBotSettings.StateUnavailableCooldownHours"/> instead of the configured hours.</param>
 public sealed record ForcePlanBotHistory(
     DateTime? LastJournaledForQueryUtc,
     int ServerActionsLast24h,
-    int RecentFailedForces)
+    int RecentFailedForces,
+    bool LastJournalWasStateUnavailable = false)
 {
     public static ForcePlanBotHistory Empty { get; } = new(null, 0, 0);
 }
@@ -416,9 +429,14 @@ public static class ForcePlanBotPolicy
         /* The cooldown is checked BEFORE the blockers, deliberately: a blocked target is journaled
            once per window too. Analysis runs every few minutes, and a PSP-flagged query that stays
            regressed would otherwise write an identical 'blocked' row on every pass — an audit trail
-           that repeats itself into noise stops being read. */
+           that repeats itself into noise stops being read. The order stays; only the window differs (#4769):
+           a state_unavailable row holds for an hour, not the configured cooldown, so a failed state read does
+           not hide the real verdict for a day. */
+        var cooldownHours = history.LastJournalWasStateUnavailable
+            ? ForcePlanBotSettings.StateUnavailableCooldownHours
+            : settings.QueryCooldownHours;
         if (history.LastJournaledForQueryUtc is DateTime last &&
-            last > nowUtc.AddHours(-settings.QueryCooldownHours))
+            last > nowUtc.AddHours(-cooldownHours))
         {
             return new ForcePlanBotDecision(ForcePlanBotDecisionKind.Suppressed, new[] { ReasonQueryCooldownActive });
         }
