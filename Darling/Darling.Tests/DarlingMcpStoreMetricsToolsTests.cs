@@ -1541,6 +1541,81 @@ public sealed class DarlingMcpStoreMetricsToolsTests
         Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(Array.Empty<DarlingStoreMetricsReader.StoreMetricDailyPoint>()));
         Assert.Empty(DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5) }));
     }
+
+    /* ---------------- #4734: a gap in the series is not one day's growth ---------------- */
+
+    /// <summary>
+    /// The store recorded nothing for one or more whole days (the service was down), so the first day back is
+    /// compared with a baseline several days old. That pair must not be labeled as the later day's growth: the
+    /// whole gap's bytes would read as one day's spike, and the per-server rate built on it would overstate what
+    /// onboarding a server costs. The pair is skipped, and the days on either side keep their own one-day numbers.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(10)]
+    public void ComputeDailyGrowth_AGapOfSeveralDays_IsNotOneDaysGrowth_AndTheDaysOnEitherSideAreRight(int missingDays)
+    {
+        var firstDayAfterTheGap = 2 + missingDays + 1;
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[]
+        {
+            StoreDay(1, 1_000, 10),
+            StoreDay(2, 1_100, 10),
+            /* the days in between recorded nothing; the whole gap's growth lands on the first day back */
+            StoreDay(firstDayAfterTheGap, 1_700, 10),
+            StoreDay(firstDayAfterTheGap + 1, 1_800, 20),
+        });
+
+        Assert.Equal(
+            new[] { new DateTime(2026, 8, 2), new DateTime(2026, 8, firstDayAfterTheGap + 1) },
+            growth.Select(g => g.Day).ToArray());
+        Assert.DoesNotContain(growth, g => g.Day == new DateTime(2026, 8, firstDayAfterTheGap));
+
+        /* No single-day spike: the 600 bytes the gap accumulated are on no day. */
+        Assert.All(growth, g => Assert.Equal(100, g.DeltaBytes));
+        Assert.Equal(100 / 10.0, growth[0].PerServerBytes);
+        Assert.Equal(100 / 20.0, growth[1].PerServerBytes);
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_ASeriesWithoutAGap_GivesEveryDayItsOwnNumbers()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[]
+        {
+            StoreDay(1, 5_000, 10),
+            StoreDay(2, 5_400, 10),
+            StoreDay(3, 5_250, 12),
+            StoreDay(4, 5_250, 0),
+            StoreDay(5, 5_700, 15),
+            StoreDay(6, 6_000, 20),
+        });
+
+        Assert.Equal(
+            new (DateTime Day, long Delta, double? PerServer)[]
+            {
+                (new DateTime(2026, 8, 2), 400, 40.0),
+                (new DateTime(2026, 8, 3), -150, -12.5),
+                (new DateTime(2026, 8, 4), 0, null),
+                (new DateTime(2026, 8, 5), 450, 30.0),
+                (new DateTime(2026, 8, 6), 300, 15.0),
+            },
+            growth.Select(g => (g.Day, g.DeltaBytes, g.PerServerBytes)).ToArray());
+    }
+
+    /// <summary>
+    /// The daily read now projects the day's last snapshot time as its last column, so a growth point can say
+    /// when its reading was taken (today's point is a partial day, and only the time shows how far in). Paired
+    /// with the ordinal the reader takes it from.
+    /// </summary>
+    [Fact]
+    public void StoreMetricsDailySql_ProjectsTheDaysLastSnapshotTime_AndTheReaderTakesItFromThatColumn()
+    {
+        var sql = DarlingStoreMetricsReader.StoreMetricsDailySql.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("    toast_live_bytes,\n    metric_time\nFROM collect.store_metrics", sql, StringComparison.Ordinal);
+
+        var source = File.ReadAllText(ReaderSourcePath());
+        Assert.Contains("reader.GetDateTime(15)", source, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>
