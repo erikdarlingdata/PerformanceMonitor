@@ -8,11 +8,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Data.Common;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Collectors;
 using PerformanceMonitor.Darling.Storage;
 
@@ -510,8 +514,14 @@ public static class ComposeCompiler
     /// capped at <see cref="ComposeLimits.MaxAnnotationEvents"/> and ordered by event time. Returns one
     /// <c>(sourceKey, compiled)</c> pair per requested source (empty when the panel requests none). Annotations
     /// never change the measure query — the endpoint runs these separately and returns their events alongside it.
+    ///
+    /// <para><paramref name="serverClocks"/> is what <see cref="ReadServerClocksAsync"/> returned for
+    /// <see cref="CompileServerClockRead"/>, keyed by server name. Only a
+    /// <see cref="AnnotationClockFrame.ServerLocal"/> source uses it; pass <see cref="NoServerClocks"/> when the
+    /// panel has none. A server missing from it reads as UTC.</para>
     /// </summary>
-    public static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(PanelPlan plan, ComposeRunContext context)
+    public static IReadOnlyList<(string Source, ComposeCompiled Compiled)> CompileAnnotations(
+        PanelPlan plan, ComposeRunContext context, IReadOnlyDictionary<string, ServerClock> serverClocks)
     {
         if (plan is null)
         {
@@ -523,6 +533,11 @@ public static class ComposeCompiler
             throw new ArgumentNullException(nameof(context));
         }
 
+        if (serverClocks is null)
+        {
+            throw new ArgumentNullException(nameof(serverClocks));
+        }
+
         if (plan.Annotations.Count == 0)
         {
             return Array.Empty<(string, ComposeCompiled)>();
@@ -531,35 +546,198 @@ public static class ComposeCompiler
         var results = new List<(string, ComposeCompiled)>(plan.Annotations.Count);
         foreach (var source in plan.Annotations)
         {
-            results.Add((source.Key, CompileAnnotation(source, context)));
+            results.Add((source.Key, CompileAnnotation(source, context, serverClocks)));
         }
 
         return results;
     }
 
-    /// <summary>The per-server latest collected UTC offset, joined in for a
-    /// <see cref="AnnotationClockFrame.ServerLocal"/> annotation source. Keyed on <c>server_name</c> because
-    /// that is the column an annotation query already scopes on, and <c>DISTINCT ON</c> because each server
-    /// carries its own offset — one panel routinely overlays several servers at once, so a single scalar
-    /// would de-skew all of them by whichever server answered first. Every identifier is a compiler
-    /// constant, and the join adds no parameter of its own.
+    /// <summary>No server clock at all: every server-local marker reads as UTC. For a panel with no
+    /// server-local annotation source, which needs no clock read.</summary>
+    public static readonly IReadOnlyDictionary<string, ServerClock> NoServerClocks =
+        new Dictionary<string, ServerClock>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The read that runs before a panel's <see cref="AnnotationClockFrame.ServerLocal"/> annotation query
+    /// (#4821): each server's newest <c>server_properties</c> row that has an offset, with the
+    /// <c>time_zone_id</c> from that SAME row, the row <c>DarlingServerClockReader</c> reads for one server.
     ///
     /// <para><c>server_properties</c> is indexed <c>(server_id, collection_time)</c> and NOT on
-    /// <c>server_name</c>, so this subquery's <c>DISTINCT ON</c> sort has no index to ride. When the panel
-    /// names its servers, the SAME bound array the outer query filters on scopes the subquery too, which
-    /// bounds the sort by the requested servers instead of the whole fleet's retained offset history. That
-    /// is safe rather than merely cheaper: every <c>f</c> row surviving the outer predicate already has a
-    /// <c>server_name</c> in that array, so restricting the right side of the LEFT JOIN to it cannot change
-    /// which offset any surviving row matches. A fleet-wide panel supplies no array and needs the whole
-    /// relation, so it keeps the unscoped form.</para></summary>
-    private static string ServerOffsetJoin(string? serverScopeParam) =>
-        "LEFT JOIN (\n"
-        + "        SELECT DISTINCT ON (server_name) server_name, utc_offset_minutes\n"
-        + "        FROM " + PgSchemaGenerator.CollectSchema + ".server_properties\n"
-        + "        WHERE utc_offset_minutes IS NOT NULL\n"
-        + (serverScopeParam is null ? "" : "        AND   server_name = ANY(" + serverScopeParam + ")\n")
-        + "        ORDER BY server_name, collection_time DESC\n"
-        + "      ) AS o ON o.server_name = f.server_name\n";
+    /// <c>server_name</c>, so the <c>DISTINCT ON</c> sort has no index to ride. When the panel names its
+    /// servers, the same list the annotation query filters on bounds it, so the sort covers the requested
+    /// servers instead of the whole fleet's retained history. A fleet-wide panel names none and reads every
+    /// server, as the old in-query join did.</para>
+    /// </summary>
+    public static ComposeCompiled CompileServerClockRead(ComposeRunContext context)
+    {
+        if (context is null)
+        {
+            throw new ArgumentNullException(nameof(context));
+        }
+
+        var p = new ParamList();
+        var sql = new StringBuilder();
+        sql.Append("SELECT DISTINCT ON (server_name) server_name, time_zone_id, utc_offset_minutes\n");
+        sql.Append("FROM ").Append(PgSchemaGenerator.CollectSchema).Append(".server_properties\n");
+        sql.Append("WHERE utc_offset_minutes IS NOT NULL\n");
+        if (context.Servers is { Count: > 0 })
+        {
+            sql.Append("AND   server_name = ANY(").Append(p.AddTextArray(context.Servers)).Append(")\n");
+        }
+
+        sql.Append("ORDER BY server_name, collection_time DESC");
+
+        return new ComposeCompiled(sql.ToString(), p.Parameters, ComposeRoute.Raw);
+    }
+
+    /// <summary>
+    /// One <see cref="ServerClock"/> per server from the rows of <see cref="CompileServerClockRead"/>, through
+    /// <see cref="ServerClock.Resolve"/>: the zone where the server reports one (SQL Server 2022 and later) and
+    /// it resolves on this machine, else the fixed offset. Servers with the same zone and offset share one
+    /// clock, so <see cref="ServerLocalRanges"/> works each distinct clock out once.
+    /// </summary>
+    public static async Task<IReadOnlyDictionary<string, ServerClock>> ReadServerClocksAsync(
+        DbDataReader reader, CancellationToken cancellationToken)
+    {
+        if (reader is null)
+        {
+            throw new ArgumentNullException(nameof(reader));
+        }
+
+        var clocks = new Dictionary<string, ServerClock>(StringComparer.Ordinal);
+        var shared = new Dictionary<(string?, int), ServerClock>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (reader.IsDBNull(0) || reader.IsDBNull(2))
+            {
+                continue;
+            }
+
+            var key = (reader.IsDBNull(1) ? null : reader.GetString(1), reader.GetInt32(2));
+            if (!shared.TryGetValue(key, out var clock))
+            {
+                clock = ServerClock.Resolve(key.Item1, key.Item2);
+                shared[key] = clock;
+            }
+
+            clocks[reader.GetString(0)] = clock;
+        }
+
+        return clocks;
+    }
+
+    /// <summary>One stretch of a server's local time over which <see cref="ServerClock.ToUtc"/> subtracts one
+    /// offset: <c>[LocalFrom, LocalTo)</c>.</summary>
+    internal readonly record struct ServerLocalRange(string ServerName, DateTime LocalFrom, DateTime LocalTo, int UtcOffsetMinutes);
+
+    /// <summary>
+    /// Every server's clock as stretches of its local time, each with the ONE offset
+    /// <see cref="ServerClock.ToUtc"/> subtracts across it (#4821), in server-name order. A zone gets a new
+    /// stretch at each daylight saving change; a fixed offset gets one stretch.
+    ///
+    /// <para>Each stretch boundary is where <see cref="ServerClock.ToUtc"/> itself changes offset, found by
+    /// stepping a day at a time and halving to the tick, so the stretches reproduce it exactly, including the
+    /// repeated hour (first occurrence) and the skipped hour (read forward by the gap). Stepping a day at a
+    /// time would miss two changes less than a day apart; no zone has them.</para>
+    ///
+    /// <para>The stretches cover <c>[start - 1 day, end + 1 day)</c> of local time. No zone is more than 14
+    /// hours from UTC, so that holds every local time that can land in the window; a row outside it matches
+    /// no stretch and falls back to UTC, which leaves it outside the window as well.</para>
+    /// </summary>
+    internal static IReadOnlyList<ServerLocalRange> ServerLocalRanges(
+        IReadOnlyDictionary<string, ServerClock> serverClocks, DateTime startUtc, DateTime endUtc)
+    {
+        var from = ShiftDays(startUtc, -1);
+        var to = ShiftDays(endUtc, 1);
+        var byClock = new Dictionary<ServerClock, List<(DateTime From, DateTime To, int Offset)>>();
+        var ranges = new List<ServerLocalRange>();
+        foreach (var (server, clock) in serverClocks.OrderBy(c => c.Key, StringComparer.Ordinal))
+        {
+            if (!byClock.TryGetValue(clock, out var stretches))
+            {
+                stretches = Stretches(clock, from, to);
+                byClock[clock] = stretches;
+            }
+
+            foreach (var (stretchFrom, stretchTo, offset) in stretches)
+            {
+                ranges.Add(new ServerLocalRange(server, stretchFrom, stretchTo, offset));
+            }
+        }
+
+        return ranges;
+    }
+
+    private static List<(DateTime From, DateTime To, int Offset)> Stretches(ServerClock clock, DateTime from, DateTime to)
+    {
+        var stretches = new List<(DateTime, DateTime, int)>();
+        var stretchFrom = from;
+        var offset = LocalOffsetMinutes(clock, from);
+        var probe = from;
+        while (probe < to)
+        {
+            var next = to - probe > TimeSpan.FromDays(1) ? probe.AddDays(1) : to;
+            if (LocalOffsetMinutes(clock, next) == offset)
+            {
+                probe = next;
+                continue;
+            }
+
+            /* The first tick in (probe, next] on the new offset. */
+            long before = probe.Ticks, after = next.Ticks;
+            while (after - before > 1)
+            {
+                var middle = before + (after - before) / 2;
+                if (LocalOffsetMinutes(clock, new DateTime(middle, DateTimeKind.Unspecified)) == offset)
+                {
+                    before = middle;
+                }
+                else
+                {
+                    after = middle;
+                }
+            }
+
+            var change = new DateTime(after, DateTimeKind.Unspecified);
+            stretches.Add((stretchFrom, change, offset));
+            stretchFrom = change;
+            offset = LocalOffsetMinutes(clock, change);
+            probe = change;
+        }
+
+        if (stretchFrom < to)
+        {
+            stretches.Add((stretchFrom, to, offset));
+        }
+
+        return stretches;
+    }
+
+    /// <summary>The offset <see cref="ServerClock.ToUtc"/> subtracts from this local time, in minutes.</summary>
+    private static int LocalOffsetMinutes(ServerClock clock, DateTime local) =>
+        (int)((local.Ticks - clock.ToUtc(local).Ticks) / TimeSpan.TicksPerMinute);
+
+    /// <summary>A naive time moved by whole days, held at the ends of the calendar instead of throwing.</summary>
+    private static DateTime ShiftDays(DateTime value, int days) =>
+        new(Math.Clamp(value.Ticks + (days * TimeSpan.TicksPerDay), DateTime.MinValue.Ticks, DateTime.MaxValue.Ticks), DateTimeKind.Unspecified);
+
+    /// <summary>The <see cref="ServerLocalRanges"/> stretches as bound arrays, joined in for a
+    /// <see cref="AnnotationClockFrame.ServerLocal"/> source on the row's server AND its own local time, so
+    /// each row takes the offset in force on its own date. Every value is bound and every identifier is a
+    /// compiler constant. The stretches do not overlap, so a row joins at most one and no row is repeated.</summary>
+    private static string ServerLocalRangeJoin(ParamList p, string timeColumn, IReadOnlyList<ServerLocalRange> ranges)
+    {
+        var servers = p.AddTextArray(ranges.Select(r => r.ServerName).ToArray());
+        var localFrom = p.AddTimestampArray(ranges.Select(r => r.LocalFrom).ToArray());
+        var localTo = p.AddTimestampArray(ranges.Select(r => r.LocalTo).ToArray());
+        var offsets = p.AddIntArray(ranges.Select(r => r.UtcOffsetMinutes).ToArray());
+
+        return "LEFT JOIN unnest(" + servers + "::text[], " + localFrom + "::timestamp[], " + localTo + "::timestamp[], "
+            + offsets + "::integer[]) AS o(server_name, local_from, local_to, utc_offset_minutes)\n"
+            + "        ON  o.server_name = " + FactAlias + ".server_name\n"
+            + "        AND " + FactAlias + "." + timeColumn + " >= o.local_from\n"
+            + "        AND " + FactAlias + "." + timeColumn + " < o.local_to\n";
+    }
 
     /// <summary>Compiles one annotation source into its bounded, catalog-only, schema-qualified event query:
     /// <c>SELECT &lt;ts&gt; AS ts, f.&lt;labelCol&gt; AS label FROM collect.&lt;table&gt; AS f WHERE
@@ -570,11 +748,14 @@ public static class ComposeCompiler
     /// <c>f.&lt;timeCol&gt; - make_interval(mins =&gt; COALESCE(o.utc_offset_minutes, 0))</c> for a
     /// <see cref="AnnotationClockFrame.ServerLocal"/> one, and the SAME expression both returns and bounds —
     /// the measure query it decorates buckets on naive-UTC <c>collection_time</c>, so a server-local marker
-    /// would be selected from the wrong slice and drawn at the wrong x-position. <c>LEFT JOIN</c> with
-    /// <c>COALESCE(..., 0)</c> keeps a server whose <c>server_properties</c> has not been collected yet:
-    /// treating its clock as UTC is the same fallback the reader-side de-skews take, and it beats dropping
-    /// the server's markers with no explanation.</para></summary>
-    private static ComposeCompiled CompileAnnotation(ComposeAnnotationSource source, ComposeRunContext context)
+    /// would be selected from the wrong slice and drawn at the wrong x-position. <c>o</c> is
+    /// <see cref="ServerLocalRangeJoin"/>: the offset in force at the row's own local time (#4821), where it
+    /// used to be the server's one newest offset, which put a marker from before the last daylight saving
+    /// change an hour off. <c>LEFT JOIN</c> with <c>COALESCE(..., 0)</c> keeps a server whose
+    /// <c>server_properties</c> has not been collected yet: treating its clock as UTC is the same fallback the
+    /// reader-side de-skews take, and it beats dropping the server's markers with no explanation.</para></summary>
+    private static ComposeCompiled CompileAnnotation(
+        ComposeAnnotationSource source, ComposeRunContext context, IReadOnlyDictionary<string, ServerClock> serverClocks)
     {
         var p = new ParamList();
         var startParam = p.AddTimestamp(context.StartUtc);
@@ -594,7 +775,8 @@ public static class ComposeCompiler
             .Append(" AS ").Append(FactAlias).Append('\n');
         if (serverLocal)
         {
-            sql.Append("      ").Append(ServerOffsetJoin(serverScopeParam));
+            var ranges = ServerLocalRanges(serverClocks, context.StartUtc, context.EndUtc);
+            sql.Append("      ").Append(ServerLocalRangeJoin(p, source.TimeColumn, ranges));
         }
 
         sql.Append("WHERE ").Append(ts).Append(" >= ").Append(startParam).Append('\n');
@@ -880,6 +1062,22 @@ public static class ComposeCompiler
         public string AddTextArray(IReadOnlyList<string> values)
         {
             _parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text, Value = values.ToArray() });
+            return Placeholder();
+        }
+
+        public string AddTimestampArray(IReadOnlyList<DateTime> values)
+        {
+            _parameters.Add(new NpgsqlParameter
+            {
+                NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Timestamp,
+                Value = values.Select(v => DateTime.SpecifyKind(v, DateTimeKind.Unspecified)).ToArray(),
+            });
+            return Placeholder();
+        }
+
+        public string AddIntArray(IReadOnlyList<int> values)
+        {
+            _parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer, Value = values.ToArray() });
             return Placeholder();
         }
 
