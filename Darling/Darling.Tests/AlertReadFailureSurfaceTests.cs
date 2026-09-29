@@ -2487,8 +2487,10 @@ public sealed class AlertReadFailureSurfaceTests
 
         Assert.NotNull(classify);
         /* 10 since #3240 added extensionMissingCount (a run-class count, not an alert-read term); 9 since
-           #4000 removed isOnLoad, because callers now resolve an on-load collector's cadence to daily. */
-        Assert.Equal(9, classify!.GetParameters().Length);
+           #4000 removed isOnLoad, because callers now resolve an on-load collector's cadence to daily; 10
+           since #4748 appended latestRunNote (the newest run's partial-failure note - a run outcome, not an
+           alert-read term, which the no-"alert" assertion below still holds). */
+        Assert.Equal(10, classify!.GetParameters().Length);
         Assert.DoesNotContain(
             "alert",
             string.Join("|", classify.GetParameters().Select(p => p.Name)),
