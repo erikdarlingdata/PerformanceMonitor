@@ -24,6 +24,7 @@ public sealed class PgDeadlocksPlanCaptureResumeTests
         Deltas = new CollectorDeltaCalculator(),
         Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
         PgReadBinaryFileGranted = binary,
+        LogHashKey = TestLogHashKeys.Fixed,
     };
 
     private static object?[] DeadlockFiller() => new object?[] { "not a deadlock report", "UTC" };
@@ -128,6 +129,43 @@ public sealed class PgDeadlocksPlanCaptureResumeTests
         });
         await Assert.ThrowsAsync<PgLoggingCollectorOffException>(
             async () => await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Deadlocks_TheCsvRoute_StagesTheCsvKey_AndNeverTheStderrKey()
+    {
+        var context = Context();
+        context.PgLogUsesCsvlog = true;
+        using var reader = new ListReader(new[] { new object?[] { ResumeRow, null } });
+        await PgDeadlocksCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        Assert.Equal(Expected, context.PendingState[PgServerLogTail.ResumeStateKeyCsv]);
+        Assert.False(context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey));
+    }
+
+    [Fact]
+    public async Task Plans_TheCsvRoute_StagesTheCsvKey_AndNeverTheStderrKey()
+    {
+        var context = Context();
+        context.PgLogUsesCsvlog = true;
+        using var reader = new ListReader(new[] { new object?[] { ResumeRow, null } });
+        await PgPlanCaptureCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        Assert.Equal(Expected, context.PendingState[PgServerLogTail.ResumeStateKeyCsv]);
+        Assert.False(context.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey));
+    }
+
+    [Theory]
+    [InlineData(false, false, "log_resume")]
+    [InlineData(true, false, "log_resume_csv")]
+    [InlineData(false, true, "log_resume_json")]
+    public async Task LogEvents_EveryRoute_StagesItsOwnKeyOnly(bool csv, bool json, string key)
+    {
+        var context = Context();
+        context.PgLogUsesCsvlog = csv;
+        context.PgLogUsesJsonlog = json;
+        using var reader = new ListReader(new[] { new object?[] { ResumeRow, null } });
+        await PgLogEventsCollector.Instance.ReadAsync(reader, context, CancellationToken.None);
+        Assert.Equal(Expected, context.PendingState[key]);
+        Assert.Single(context.PendingState);
     }
 
     private sealed class ListReader : System.Data.Common.DbDataReader

@@ -192,8 +192,8 @@ public sealed class PgServerLogTailResumeTests
         bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyFor(csv));
         Assert.Contains(bound.Parameters, p => Equals(p.Value, "f.csv"));
 
-        var staged = Context();
-        Assert.True(PgServerLogTail.TryConsumeResumeRow("pm-log-resume|9|0|0||f.csv", true, true, staged, PgServerLogTail.ResumeStateKeyCsv));
+        var staged = FormatContext(false);
+        Assert.True(PgServerLogTail.TryConsumeResumeRow("pm-log-resume|9|0|0||f.csv", true, true, staged));
         Assert.Equal("9|f.csv", staged.PendingState[PgServerLogTail.ResumeStateKeyCsv]);
         Assert.False(staged.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey));
     }

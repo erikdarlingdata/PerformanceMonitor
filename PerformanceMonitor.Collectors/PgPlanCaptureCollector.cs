@@ -385,6 +385,13 @@ LIMIT " + RowLimitLiteral;
                 throw new PgLoggingCollectorOffException();
             }
 
+            /* The resume row (#4699) on the csvlog route: the csv tail is not row-limited, so the marker is
+               staged as it is consumed, under the csv key. The timezone column is NULL on it and never on a real row. */
+            if (PgServerLogTail.TryConsumeResumeRow(body, reader.FieldCount > 1 && reader.IsDBNull(1), true, context))
+            {
+                continue;
+            }
+
             if (string.Equals(body, PgNoCsvlogFileException.Marker, StringComparison.Ordinal))
             {
                 throw new PgNoCsvlogFileException();
