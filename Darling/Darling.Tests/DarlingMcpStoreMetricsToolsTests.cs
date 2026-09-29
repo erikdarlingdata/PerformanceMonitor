@@ -1421,6 +1421,23 @@ public sealed class DarlingMcpStoreMetricsToolsTests
     }
 
     /// <summary>
+    /// #4758: the description's <c>requested</c> field says what PostgreSQL's counter counts. A requested
+    /// checkpoint is started by WAL volume reaching <c>max_wal_size</c>, a base backup or a <c>CHECKPOINT</c>
+    /// statement, and the counter does not say which, so the description must not call them all WAL-forced.
+    /// </summary>
+    [Fact]
+    public void TheDescription_SaysARequestedCheckpointHasThreeCauses_NotOnlyWalVolume()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+
+        Assert.Contains(
+            "requested (checkpoints started by WAL volume reaching max_wal_size, a base backup, or a CHECKPOINT statement rather than by checkpoint_timeout; the counter does not say which)",
+            description!, StringComparison.Ordinal);
+        Assert.DoesNotContain("checkpoints forced by WAL volume", description!, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// #3582: the description names every new kind, the coverage fields and the reconciliation bar,
     /// asserted TOGETHER with the sweep arms that write the kinds and the constants that set the bar.
     /// </summary>
