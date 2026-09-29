@@ -43,7 +43,7 @@ public sealed class ArchiveCompactionSwapLockTests : IDisposable
     /* 5 hot rows, plus 10 per archive file across four files. */
     private const long TotalRows = 45;
 
-    /* How long a helper thread is given to return. The longest wait any probe makes is 5 seconds, so a thread
+    /* How long a probe thread is given to return. The longest wait any probe makes is 5 seconds, so a thread
        that has not returned by then is stuck, and a bound the write-lock hold census (WriteLockBudgetTests)
        can read is what lets this file take the lock with no timeout. */
     private static readonly TimeSpan ProbeJoinLimit = TimeSpan.FromSeconds(10);

@@ -595,8 +595,9 @@ COPY (
         }
 
         /* Finishing a swap deletes the files the views read and undoing one moves them, so a reader in between
-           finds the same missing rows or empty glob the per-group swap in CompactParquetFiles guards against.
-           The lock is held to the end of the method, past the rebuild below, for the reason given there. */
+           finds the same missing rows or empty glob that the per-group swap in CompactParquetFiles explains
+           (#4720). The lock is held to the end of the method, past the rebuild below, so no reader gets in
+           between the two. */
         using var writeLock = _duckDb.AcquireWriteLock();
         foreach (var journalPath in journalPaths)
         {
