@@ -1598,13 +1598,34 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         NpgsqlDataSource postgres, PanelPlan plan, ComposeRunContext runContext, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
     {
         var annotations = new JsonArray();
-        foreach (var (source, compiled) in ComposeCompiler.CompileAnnotations(plan, runContext))
+        var serverClocks = plan.Annotations.Any(a => a.Frame == AnnotationClockFrame.ServerLocal)
+            ? await ReadServerClocksAsync(postgres, runContext, composedQuerySeconds, cancellationToken)
+            : ComposeCompiler.NoServerClocks;
+        foreach (var (source, compiled) in ComposeCompiler.CompileAnnotations(plan, runContext, serverClocks))
         {
             var events = await RunComposedQueryAsync(postgres, compiled, composedQuerySeconds, cancellationToken);
             annotations.Add(new JsonObject { ["source"] = source, ["events"] = events });
         }
 
         return annotations;
+    }
+
+    /// <summary>Each panel server's clock, read before a server-local annotation query so that query can place
+    /// every marker by the offset in force on its own date (#4821). Same pool and same timeout as the
+    /// annotation queries; a failure surfaces through the caller's try/catch the same way.</summary>
+    private static async Task<IReadOnlyDictionary<string, PerformanceMonitor.Analysis.Baselines.ServerClock>> ReadServerClocksAsync(
+        NpgsqlDataSource postgres, ComposeRunContext runContext, int composedQuerySeconds, System.Threading.CancellationToken cancellationToken)
+    {
+        var compiled = ComposeCompiler.CompileServerClockRead(runContext);
+        await using var command = postgres.CreateCommand(compiled.Sql);
+        command.CommandTimeout = composedQuerySeconds;
+        foreach (var parameter in compiled.Parameters)
+        {
+            command.Parameters.Add(parameter);
+        }
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await ComposeCompiler.ReadServerClocksAsync(reader, cancellationToken);
     }
 
     private static JsonValue? DbValueToJson(object value) => value switch

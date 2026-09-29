@@ -256,8 +256,10 @@ public sealed class ServerLocalReadFrameDisciplineTests
                 Assert.Contains($"{deSkewed} >= $1", sql, StringComparison.Ordinal);
                 Assert.Contains($"{deSkewed} <= $2", sql, StringComparison.Ordinal);
                 /* The per-server join, not one scalar for the whole overlay: a panel routinely spans servers
-                   at different offsets, and a single offset would de-skew all of them by one of them. */
-                Assert.Contains("DISTINCT ON (server_name) server_name, utc_offset_minutes", sql, StringComparison.Ordinal);
+                   at different offsets, and a single offset would de-skew all of them by one of them. The
+                   join is on the row's own local time as well (#4821), so each row takes the offset in force
+                   on its own date. */
+                Assert.Contains("AS o(server_name, local_from, local_to, utc_offset_minutes)", sql, StringComparison.Ordinal);
                 Assert.Contains("LEFT JOIN", sql, StringComparison.Ordinal);
                 /* No bare occurrence survives anywhere — projection or bound. */
                 Assert.DoesNotContain($"{bare} AS ts", sql, StringComparison.Ordinal);
@@ -273,42 +275,46 @@ public sealed class ServerLocalReadFrameDisciplineTests
                 Assert.DoesNotContain("utc_offset_minutes", sql, StringComparison.Ordinal);
             }
 
-            /* Unchanged by the de-skew: the offset table and column are compiler constants, so the join
-               introduces no parameter and the window/server binds keep their ordinals. */
+            /* Unchanged by the de-skew: the join's stretches are bound AFTER the window and server binds, so
+               those keep their ordinals, and every identifier in the join is a compiler constant. */
             Assert.DoesNotContain("config.", sql, StringComparison.Ordinal);
         }
     }
 
     /// <summary>
-    /// The offset join is scoped by the panel's own server array when it has one, and unscoped when it does
-    /// not. <c>server_properties</c> is indexed <c>(server_id, collection_time)</c>, so this subquery's
+    /// The server clock read is scoped by the panel's own server array when it has one, and unscoped when it
+    /// does not. <c>server_properties</c> is indexed <c>(server_id, collection_time)</c>, so that read's
     /// <c>DISTINCT ON (server_name)</c> sort has no index to ride and would otherwise sort the whole fleet's
-    /// retained offset history on every compile of a server-scoped panel.
+    /// retained offset history on every run of a server-scoped panel.
     ///
-    /// <para>Asserted as the parameter COUNT as well as the predicate, because the cheap way to scope a
-    /// subquery is to bind the server list a second time — which would work, would look right here, and
-    /// would silently shift the ordinals every other assertion in <c>DarlingComposeTests</c> depends on.
-    /// Reusing the array the outer query already binds is the whole point.</para>
+    /// <para>The annotation query itself binds the server list ONCE, as <c>$3</c>, and the per-server offset
+    /// stretches after it (#4821). Asserted as the parameter COUNT as well as the predicate, because binding
+    /// the list a second time would work, would look right here, and would silently shift the ordinals every
+    /// other assertion in <c>DarlingComposeTests</c> depends on.</para>
     /// </summary>
     [Fact]
-    public void CompiledAnnotationSql_ScopesTheOffsetJoin_ToThePanelsOwnServerArray()
+    public void CompiledAnnotationSql_ScopesTheServerClockRead_ToThePanelsOwnServerArray()
     {
         var serverLocal = MeasureCatalog.AnnotationSources
             .Single(a => a.Frame == AnnotationClockFrame.ServerLocal).Key;
+        var servers = new[] { "SERVER-A", "SERVER-B" };
 
-        var scoped = CompiledAnnotation(serverLocal, new[] { "SERVER-A", "SERVER-B" });
-        Assert.Contains("AND   server_name = ANY($3)", scoped.Sql, StringComparison.Ordinal);
-        /* The outer predicate is still there and still binds the same $3 — one array, two uses. */
+        var clockRead = ComposeCompiler.CompileServerClockRead(RunContext(servers));
+        Assert.Contains("AND   server_name = ANY($1)", clockRead.Sql, StringComparison.Ordinal);
+        Assert.Single(clockRead.Parameters);
+
+        var scoped = CompiledAnnotation(serverLocal, servers);
         Assert.Contains("f.server_name = ANY($3)", scoped.Sql, StringComparison.Ordinal);
-        Assert.Equal(3, scoped.Parameters.Count);
-        Assert.DoesNotContain("$4", scoped.Sql, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(scoped.Sql, @"ANY\("));
+        Assert.Equal(7, scoped.Parameters.Count);
         Assert.DoesNotContain("SERVER-A", scoped.Sql, StringComparison.Ordinal);
 
-        /* A fleet-wide panel names no servers, so it needs the whole relation and binds only the window. */
+        /* A fleet-wide panel names no servers: the clock read covers the whole relation, and the annotation
+           query binds the window and the stretches only. */
+        Assert.DoesNotContain("ANY(", ComposeCompiler.CompileServerClockRead(RunContext(null)).Sql, StringComparison.Ordinal);
         var fleet = CompiledAnnotation(serverLocal, null);
         Assert.DoesNotContain("server_name = ANY", fleet.Sql, StringComparison.Ordinal);
-        Assert.Contains("DISTINCT ON (server_name) server_name, utc_offset_minutes", fleet.Sql, StringComparison.Ordinal);
-        Assert.Equal(2, fleet.Parameters.Count);
+        Assert.Equal(6, fleet.Parameters.Count);
     }
 
     /* ───────────────────────── the discriminators, both directions ───────────────────────── */
@@ -397,13 +403,17 @@ public sealed class ServerLocalReadFrameDisciplineTests
         Assert.True(error is null, error);
         Assert.NotNull(plan);
 
-        var start = new DateTime(2026, 7, 18, 0, 0, 0, DateTimeKind.Utc);
-        var end = new DateTime(2026, 7, 18, 6, 0, 0, DateTimeKind.Utc);
-        var compiled = ComposeCompiler.CompileAnnotations(
-            plan!,
-            new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown));
+        var compiled = ComposeCompiler.CompileAnnotations(plan!, RunContext(servers), ComposeCompiler.NoServerClocks);
 
         return Assert.Single(compiled).Compiled;
+    }
+
+    private static ComposeRunContext RunContext(IReadOnlyList<string>? servers)
+    {
+        var start = new DateTime(2026, 7, 18, 0, 0, 0, DateTimeKind.Utc);
+        var end = new DateTime(2026, 7, 18, 6, 0, 0, DateTimeKind.Utc);
+
+        return new ComposeRunContext(servers, start, end, ComposeRunContext.NoVariables, RollupAvailability.All, end, RollupCoverage.Unknown);
     }
 
     /// <summary>Comment spans out, string literals kept — the SQL under test IS a verbatim literal, and this
