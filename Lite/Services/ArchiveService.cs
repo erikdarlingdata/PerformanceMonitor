@@ -170,7 +170,18 @@ public class ArchiveService
                         continue;
                     }
 
-                    await ExportToParquet(readConnection, table, timeColumn, cutoffDate, tempParquetPath);
+                    /* DuckDB keeps the partial file when a COPY fails partway through its query, and the move
+                       below never runs then, so nothing else would remove it: the hourly retry would add
+                       another partial file each time. */
+                    try
+                    {
+                        await ExportToParquet(readConnection, table, timeColumn, cutoffDate, tempParquetPath);
+                    }
+                    catch
+                    {
+                        try { File.Delete(tempParquetPath); } catch { /* best effort */ }
+                        throw;
+                    }
                 }
 
                 /* Promote the temp only after the COPY has fully succeeded. The name carries this cycle's
@@ -976,13 +987,18 @@ COPY (
                             .Replace("\\", "/");
                         var tempParquetPath = parquetPath + ".tmp";
 
+                        /* Tracked BEFORE the COPY runs: DuckDB keeps the partial file when a COPY fails partway
+                           through its query, and DiscardResetAttempt removes every tracked temp. Added after the
+                           COPY, a table whose export threw left its partial file on disk on every attempt, which
+                           the 15-minute backoff repeats up to 96 times a day. */
+                        exports.Add((tempParquetPath, parquetPath));
+
                         await WithRaisedCopyMemoryLimit(connection, async () =>
                         {
                             using var exportCmd = connection.CreateCommand();
                             exportCmd.CommandText = $"COPY (SELECT * FROM {table}) TO '{EscapeSqlPath(tempParquetPath)}' (FORMAT PARQUET, COMPRESSION ZSTD)";
                             await exportCmd.ExecuteNonQueryAsync();
                         });
-                        exports.Add((tempParquetPath, parquetPath));
 
                         _logger?.LogInformation("Archived {Count} rows from {Table}", rowCount, table);
                     }
