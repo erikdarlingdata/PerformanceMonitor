@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Alerting;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -58,8 +59,18 @@ public sealed class ViewerAlertRow
 
     public string? ContextJson { get; init; }
 
-    /// <summary>Stored naive-UTC; shown in the viewer machine's local time (the viewer convention).</summary>
-    public string TimeLocal => ViewerTimeHelper.ForDisplay(AlertTime).ToString("yyyy-MM-dd HH:mm:ss");
+    /// <summary>This row's own server's clock (its time zone where one is known, else its UTC offset; the viewer
+    /// machine's offset while none is collected), set by <see cref="ViewerDataService.GetAlertHistoryAsync"/>
+    /// from one clock read per load (#4766). The all-servers list holds rows of many servers, so each converts on
+    /// its own clock and not on the active server tab's. Null (a row built without one) falls back to the active
+    /// server's clock.</summary>
+    public ServerClock? Clock { get; init; }
+
+    /// <summary>Stored naive-UTC; shown in the viewer's time display mode (Server/Local/UTC), Server on this row's
+    /// own server's clock (<see cref="Clock"/>).</summary>
+    public string TimeLocal =>
+        ViewerTimeHelper.ConvertToDisplay(AlertTime, ViewerTimeHelper.CurrentDisplayMode, Clock ?? ViewerTimeHelper.ActiveServerClock)
+            .ToString("yyyy-MM-dd HH:mm:ss");
 
     public string CurrentValueDisplay => AlertMetricClassifier.FormatHistoryValue(MetricName, CurrentValue);
 
@@ -169,6 +180,12 @@ LIMIT $2";
     {
         var rows = new List<ViewerAlertRow>();
 
+        /* One clock read for the whole list (#4766): each row is stamped with its own server's clock, or the
+           viewer machine's offset where none is collected, so the list's times are each server's own hour in
+           Server mode. */
+        var clocks = await GetServerClocksAsync(serverId, cancellationToken);
+        var nowUtc = DateTime.UtcNow;
+
         await using var command = _dataSource.CreateCommand(serverId.HasValue ? AlertHistorySql : AlertHistoryAllServersSql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
         command.Parameters.Add(new NpgsqlParameter<DateTime>
@@ -184,10 +201,12 @@ LIMIT $2";
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
+            var rowServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
             rows.Add(new ViewerAlertRow
             {
                 AlertTime = reader.GetDateTime(0),
-                ServerId = reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
+                ServerId = rowServerId,
+                Clock = ViewerTimeHelper.ClockForServerOrMachine(clocks, rowServerId, TimeZoneInfo.Local, nowUtc),
                 ServerName = reader.IsDBNull(2) ? "" : reader.GetString(2),
                 MetricName = reader.IsDBNull(3) ? "" : reader.GetString(3),
                 CurrentValue = reader.IsDBNull(4) ? 0 : reader.GetDouble(4),

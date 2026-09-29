@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Ui;
 
@@ -127,13 +128,50 @@ public static class ViewerTimeHelper
             : ConvertToDisplay(clock.ToUtc(serverLocal), mode, clock);
 
     /// <summary>
-    /// Inverse of <see cref="ForDisplay"/> for the custom-range pickers: a wall-clock value the user typed
-    /// IN THE CURRENT display mode, back to the store's naive-UTC window bound.
+    /// The zone a time is drawn in, and typed text is read in, for <paramref name="mode"/> (#4766): UTC for UTC,
+    /// the viewer machine's zone for Local, and the server's own zone for Server-time (<paramref name="clock"/>,
+    /// a fixed-offset zone where the server reports no zone id). The custom-range pickers draw the held instants
+    /// through it and read a typed value back through it (<see cref="CustomRangeState"/>); pure, so a test names
+    /// the clock instead of setting the process-wide one.
+    /// </summary>
+    public static TimeZoneInfo DisplayZoneFor(TimeDisplayMode mode, ServerClock clock) => mode switch
+    {
+        TimeDisplayMode.LocalTime => TimeZoneInfo.Local,
+        TimeDisplayMode.ServerTime => clock.AsTimeZone(),
+        _ => TimeZoneInfo.Utc,
+    };
+
+    /// <summary>The zone of the current display mode on the active server's clock. A tab that holds its own
+    /// server's clock asks <see cref="DisplayZoneFor"/> with that clock instead, so it never reads another
+    /// server's.</summary>
+    public static TimeZoneInfo CurrentDisplayZone() => DisplayZoneFor(CurrentDisplayMode, ActiveServerClock);
+
+    /// <summary>
+    /// The clock a list row for <paramref name="serverId"/> converts on (#4766): the server's own entry in
+    /// <paramref name="clocks"/> (<c>ViewerDataService.GetServerClocksAsync</c>) when it has one, else the viewer
+    /// machine's offset at <paramref name="utcNow"/>. That is the offset this helper and a server tab start from
+    /// until the server's <c>utc_offset_minutes</c> has been collected, so Server mode shows about the machine's
+    /// time for such a server, in every list beside it too. <c>ViewerDataService.ClockFor</c> reads that server as
+    /// UTC, which is what the stored-times reads that use it (Job History, system events) want. The machine and the
+    /// current time come in as arguments so the choice is unit-testable without depending on the test machine's zone.
+    /// </summary>
+    internal static ServerClock ClockForServerOrMachine(
+        IReadOnlyDictionary<int, ServerClock> clocks, int serverId, TimeZoneInfo machine, DateTime utcNow)
+    {
+        return clocks.TryGetValue(serverId, out var known)
+            ? known
+            : ServerClock.FixedOffset((int)machine.GetUtcOffset(utcNow).TotalMinutes);
+    }
+
+    /// <summary>
+    /// Inverse of <see cref="ForDisplay"/> for a chart X the user clicked: a wall-clock value in the CURRENT
+    /// display mode, back to the store's naive-UTC instant. The custom-range pickers no longer parse through it
+    /// (they hold the instants, <see cref="CustomRangeState"/>); the chart drill-down still does until the charts
+    /// move to the display zone.
     /// </summary>
     public static DateTime DisplayToNaiveUtc(DateTime display) => ConvertFromDisplay(display, CurrentDisplayMode, _serverClock);
 
-    /// <summary>As <see cref="DisplayToNaiveUtc(DateTime)"/> but for an explicit mode (the active offset) —
-    /// used when re-reading the pickers in their OLD mode during a mode switch.</summary>
+    /// <summary>As <see cref="DisplayToNaiveUtc(DateTime)"/> but for an explicit mode (the active offset).</summary>
     public static DateTime DisplayToNaiveUtc(DateTime display, TimeDisplayMode mode) => ConvertFromDisplay(display, mode, _serverClock);
 
     /// <summary>Pure (static-free) display → naive-UTC inverse for an explicit mode + fixed offset.</summary>
@@ -150,4 +188,35 @@ public static class ViewerTimeHelper
         TimeDisplayMode.ServerTime => clock.ToUtc(display),
         _ => DateTime.SpecifyKind(display, DateTimeKind.Unspecified), /* UTC — the picker IS naive UTC */
     };
+
+    /// <summary>
+    /// A short label naming the zone a time is shown in under <paramref name="mode"/>, for the text that sits
+    /// next to a rendered time: "UTC", the viewer machine's zone name, or the server's UTC offset (for example
+    /// <c>UTC-4:00</c>). The viewer's port of Lite's <c>ServerTimeHelper.GetTimezoneLabel</c>, with one
+    /// difference: it takes the instant that was converted (<paramref name="naiveUtc"/>, the stored naive-UTC
+    /// value). The server's offset and the machine's standard-or-daylight zone name both change across a
+    /// daylight saving change, so a label built from the offset in force now would name a different zone than
+    /// the one <see cref="ConvertToDisplay(DateTime, TimeDisplayMode, ServerClock)"/> used for a finding from
+    /// the other side of that change (#4766). Pure (static-free).
+    /// </summary>
+    public static string GetTimezoneLabel(TimeDisplayMode mode, ServerClock clock, DateTime naiveUtc) => mode switch
+    {
+        TimeDisplayMode.LocalTime => LocalZoneName(naiveUtc),
+        TimeDisplayMode.UTC => "UTC",
+        _ => OffsetLabel(clock.OffsetMinutesAt(naiveUtc)),
+    };
+
+    private static string LocalZoneName(DateTime naiveUtc)
+    {
+        var zone = TimeZoneInfo.Local;
+        return zone.IsDaylightSavingTime(DateTime.SpecifyKind(naiveUtc, DateTimeKind.Utc))
+            ? zone.DaylightName
+            : zone.StandardName;
+    }
+
+    private static string OffsetLabel(int utcOffsetMinutes)
+    {
+        var magnitude = Math.Abs(utcOffsetMinutes);
+        return $"UTC{(utcOffsetMinutes < 0 ? "-" : "+")}{magnitude / 60}:{magnitude % 60:D2}";
+    }
 }

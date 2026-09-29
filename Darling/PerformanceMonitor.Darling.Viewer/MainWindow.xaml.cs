@@ -1278,16 +1278,16 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// "Apply to All" from one server tab's toolbar: copy its selected range (and, for a custom range, the
-    /// From/To in the current display-mode wall clock) to every OTHER open server tab so they window on the
-    /// same period. The source tab is skipped — it already holds the range.
+    /// held From/To as naive-UTC instants, which each tab draws in its own server's zone) to every OTHER open
+    /// server tab so they window on the same period. The source tab is skipped — it already holds the range.
     /// </summary>
-    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, int index, DateTime? customFromLocal, DateTime? customToLocal)
+    private void OnApplyTimeRangeToAllRequested(ViewerServerTab source, int index, DateTime? customFromUtc, DateTime? customToUtc)
     {
         foreach (var tab in _openServerTabs.Values)
         {
             if (tab.Content is ViewerServerTab serverTab && !ReferenceEquals(serverTab, source))
             {
-                serverTab.ApplyExternalTimeRange(index, customFromLocal, customToLocal);
+                serverTab.ApplyExternalTimeRange(index, customFromUtc, customToUtc);
             }
         }
     }
@@ -1726,16 +1726,31 @@ public partial class MainWindow : Window
            store) = neither. */
         var analysisState = await _dataService.GetAnalysisStateAsync(server.ServerId);
 
+        /* #4766: the Ask-AI prompt names each finding's window in the SELECTED server's local time, so the cards
+           take that server's own clock (its time zone where SQL Server reported one, else its offset), from the
+           per-server source the viewer's other reads use, and convert each end of the window at its own instant.
+           This used to be the viewer machine's offset in force now, added to every window: another zone's clock
+           for a server elsewhere, and an hour off for a finding from before a daylight saving change. A server
+           with no collected clock yet gets the machine's offset, which is what Server mode shows for it, not UTC. */
+        var serverClock = ViewerTimeHelper.ClockForServerOrMachine(
+            await _dataService.GetServerClocksAsync(server.ServerId, System.Threading.CancellationToken.None),
+            server.ServerId, TimeZoneInfo.Local, DateTime.UtcNow);
+
         ApplyRecommendationsViewModel(
             RecommendationsViewModel.FromFindings(
-                rows, server.DisplayName, LocalUtcOffsetMinutes(),
+                rows, server.DisplayName, serverClock,
                 insufficientData: analysisState?.InsufficientData == true,
                 insufficientDataMessage: analysisState?.Message,
                 windowEmpty: analysisState?.WindowEmpty == true,
                 windowEmptyMessage: analysisState?.Message));
 
+        /* #4766: the status line's time and the zone named after it both come from the selected server's clock in
+           the display mode now in force. It used to end in a fixed "(local)" on a time that follows the display
+           mode, so it was wrong in Server and UTC modes; and its time went through the process-wide clock the
+           last server tab set, which may be another server's. */
         RecommendationsStatusText.Text = rows.Count > 0
-            ? $"Last analyzed {rows[0].AnalysisTimeLocal:yyyy-MM-dd HH:mm:ss} (local)"
+            ? RecommendationsViewModel.FormatLastAnalyzed(
+                rows[0].Finding.AnalysisTime, ViewerTimeHelper.CurrentDisplayMode, serverClock)
             : string.Empty;
         StatusText.Text = $"{server.DisplayName} — refreshed {DateTime.Now:HH:mm:ss}";
     }
@@ -1793,10 +1808,6 @@ public partial class MainWindow : Window
                 break;
         }
     }
-
-    /// <summary>The viewer machine's current UTC offset in minutes, for the Ask-AI prompt's local-time window.</summary>
-    private static int LocalUtcOffsetMinutes()
-        => (int)Math.Round(TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow).TotalMinutes);
 
     /// <summary>The tab's own server selector drives it (independent of the sidebar); reload on change.</summary>
     private async void RecommendationsServerSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
