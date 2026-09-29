@@ -408,6 +408,11 @@ LEFT JOIN query_text_dim AS qtd
   ON qtd.digest = o.query_text_digest
 ORDER BY o.worker_ratio DESC";
 
+    public const string ParameterSensitiveTextSql = "";
+
+    internal static IReadOnlyList<byte[]> DigestsToResolve(IEnumerable<(string? InlineText, byte[]? Digest)> keptRows) =>
+        throw new NotImplementedException();
+
     /// <summary>
     /// Top parameter-sensitive plans behind a PARAMETER_SENSITIVITY finding.
     /// Re-runs Detector A's detection (standard analysis window) for the top 5 offenders.
