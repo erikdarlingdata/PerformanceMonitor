@@ -479,13 +479,17 @@ public sealed partial class ViewerDataService : IAsyncDisposable
 
     /// <summary>
     /// Builds the data service, or says why the store connection string cannot be used (S-8). The constructor
-    /// throws when Npgsql cannot parse the string, and the caller (<c>MainWindow.OnLoaded</c>, an <c>async void</c>
+    /// throws when Npgsql cannot use the string, and the caller (<c>MainWindow.OnLoaded</c>, an <c>async void</c>
     /// handler) let that escape into the dispatcher's unhandled-exception log, which writes the exception's message
-    /// and its inner exception. Npgsql's text for a parse failure can quote part of the string (a password with an
-    /// unquoted ';' makes the text after it the "keyword"), so the string is parsed first and
-    /// <paramref name="unusable"/> is <see cref="DarlingStoreConnection.DescribeParseFailure"/>'s text, which the
-    /// caller shows and logs. A string that fails to parse never reaches the constructor, so nothing it
-    /// publishes (<see cref="ViewerStorePool"/>) changes.
+    /// and its inner exception. Npgsql's text for that can quote part of the string (a password with an unquoted ';'
+    /// makes the text after it the "keyword", and a password tail that becomes a Host value with a ':' in it makes
+    /// the text after the ':' a bad port), so the string is proved first, with Npgsql's own construction step (the
+    /// guard builds and disposes a data source, and opens nothing), and <paramref name="unusable"/> is
+    /// <see cref="DarlingStoreConnection.DescribeParseFailure"/>'s text, which the caller shows and logs. A string
+    /// the guard rejects never reaches the constructor, so <see cref="ViewerStorePool.Publish"/> (the constructor's
+    /// first step) does not run for it and the pool state does not change. The constructor adds a connect timeout, an
+    /// application name and a session time zone before it creates the data source, and none of those takes part in
+    /// Npgsql's construction checks.
     /// </summary>
     internal static bool TryCreate(
         string connectionString,

@@ -1962,12 +1962,15 @@ public sealed class DarlingWorker : BackgroundService
            pin on the Create line itself — no reassignment in between for a future edit to slip
            an unpinned read behind. */
 
-        /* A string Npgsql cannot parse throws from the Create below, leaves this method and ExecuteAsync, and the
+        /* A string Npgsql cannot use throws from the Create below, leaves this method and ExecuteAsync, and the
            host logs that exception to the console, the Event Log and the file log with its message and its inner
            exception. Npgsql's text for that can quote part of the string (a password with an unquoted ';' makes the
-           text after it the "keyword"). So parse the string first: the exception that leaves is the formatter's
-           text, with no inner exception, and the host still stops exactly as it did. Every later step in the chain
-           parses this same string first, so a string that passes here cannot fail below for this reason. */
+           text after it the "keyword", and a password tail that becomes a Host value with a ':' in it makes the text
+           after the ':' a bad port). So prove the string first, with Npgsql's own construction step (the guard builds
+           and disposes a data source, and opens nothing): the exception that leaves is the formatter's text, with no
+           inner exception, and the host still stops exactly as it did. The keywords added below (search path,
+           application name, session time zone) take part in none of Npgsql's construction checks, so a string that
+           passes here does not throw from the Create below for a parse or a validation reason. */
         if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
         {
             throw new InvalidOperationException("postgres.connectionString could not be used: " + unusableStoreString);

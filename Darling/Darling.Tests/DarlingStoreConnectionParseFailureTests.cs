@@ -42,9 +42,22 @@ internal static class StoreParseFailureFixtures
     internal const string LeadingEqualsInPassword =
         "Host=127.0.0.1;Port=5432;Username=darling;Password==Zq7Pw;Database=darlingtest";
 
-    /// <summary>The lowercased pieces of the two strings above that Npgsql's message quotes. Compared with
+    /// <summary>
+    /// A password with an unquoted ';' whose tail is a <c>Host=</c> pair with a colon suffix. Npgsql's string parser
+    /// accepts it, and its construction step (a data source or a connection) then splits the Host value on the last ':'
+    /// and throws a <see cref="FormatException"/> whose message quotes the text after the colon ('W0rd').
+    /// </summary>
+    internal const string PortTailInHost =
+        "Host=127.0.0.1;Port=5432;Username=darling;Password=Zq7;Host=S3cret:W0rd;Database=darlingtest";
+
+    /// <summary>The same shape with a port that is a number outside the range: the construction step throws an
+    /// <see cref="ArgumentOutOfRangeException"/> whose message quotes '-4401'.</summary>
+    internal const string NegativePortInHost =
+        "Host=127.0.0.1;Username=darling;Password=Zq7;Host=S3cret:-4401;Database=darlingtest";
+
+    /// <summary>The lowercased pieces of the strings above that Npgsql's message quotes. Compared with
     /// <see cref="StringComparison.OrdinalIgnoreCase"/>, because the parser changes their case.</summary>
-    internal static readonly string[] Fragments = ["w0rd", "zq7pw"];
+    internal static readonly string[] Fragments = ["w0rd", "zq7pw", "s3cret", "-4401"];
 
     internal static void AssertNoFragment(string text, string where)
     {
@@ -129,13 +142,13 @@ public sealed class DarlingStoreConnectionParseFailureTests
         Assert.Equal(first, third);
     }
 
-    /// <summary>A bad value for a keyword Npgsql knows names the key and never the value. The value sits in the inner
-    /// exception, and the message names only the key.</summary>
+    /// <summary>A bad value for a keyword Npgsql knows names the key, in Npgsql's canonical spelling, and never the
+    /// value. The value sits in the inner exception, and the message names only the key.</summary>
     [Theory]
-    [InlineData("Host=h;Port=Abc;Username=u;Password=pw;Database=db", "port", "Abc")]
-    [InlineData("Host=h;Username=u;Password=pw;Database=db;SSL Mode=NotARealSslMode", "ssl mode", "NotARealSslMode")]
-    [InlineData("Host=h;Username=u;Password=pw;Timeout=Xyz", "timeout", "Xyz")]
-    [InlineData("Host=h;Username=u;Password=Ab;Port=S3cret;Database=db", "port", "S3cret")]
+    [InlineData("Host=h;Port=Abc;Username=u;Password=pw;Database=db", "Port", "Abc")]
+    [InlineData("Host=h;Username=u;Password=pw;Database=db;SSL Mode=NotARealSslMode", "SSL Mode", "NotARealSslMode")]
+    [InlineData("Host=h;Username=u;Password=pw;Timeout=Xyz", "Timeout", "Xyz")]
+    [InlineData("Host=h;Username=u;Password=Ab;Port=S3cret;Database=db", "Port", "S3cret")]
     public void ARealKeywordWithABadValue_NamesTheKey_AndNotTheValue(string connectionString, string key, string value)
     {
         var ex = Parse(connectionString);
@@ -166,7 +179,7 @@ public sealed class DarlingStoreConnectionParseFailureTests
         Assert.StartsWith(FixedHintStart, unknown, StringComparison.Ordinal);
         Assert.StartsWith(FixedHintStart, other, StringComparison.Ordinal);
         Assert.StartsWith(FixedHintStart, keyNotFound, StringComparison.Ordinal);
-        Assert.Contains("'port'", known, StringComparison.Ordinal);
+        Assert.Contains("'Port'", known, StringComparison.Ordinal);
         foreach (var text in new[] { unknown, known, other, keyNotFound })
         {
             StoreParseFailureFixtures.AssertNoFragment(text, "a hand-built exception");
@@ -191,8 +204,83 @@ public sealed class DarlingStoreConnectionParseFailureTests
         Assert.NotNull(typed);
         StoreParseFailureFixtures.AssertNoFragment(semicolon!, "TryDescribeParseFailure");
         StoreParseFailureFixtures.AssertNoFragment(leadingEquals!, "TryDescribeParseFailure");
-        Assert.Contains("'port'", typed, StringComparison.Ordinal);
+        Assert.Contains("'Port'", typed, StringComparison.Ordinal);
         Assert.DoesNotContain("S3cret", typed, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The string parser accepts both strings, and Npgsql's construction step (what a data source runs) is what throws:
+    /// it splits the Host value on its last ':' and the exception's message quotes the text after it. The guard runs
+    /// that step, so it returns the formatter's text and the text holds nothing from the exception.
+    /// </summary>
+    [Theory]
+    [InlineData(StoreParseFailureFixtures.PortTailInHost, "W0rd")]
+    [InlineData(StoreParseFailureFixtures.NegativePortInHost, "-4401")]
+    public void TheGuard_RunsNpgsqlsConstructionStep_SoAPasswordTailInHostIsNotQuoted(string connectionString, string quoted)
+    {
+        _ = new NpgsqlConnectionStringBuilder(connectionString);
+        var thrown = Assert.ThrowsAny<Exception>(() => { using var dataSource = NpgsqlDataSource.Create(connectionString); });
+        Assert.Contains(quoted, thrown.Message, StringComparison.Ordinal);
+
+        var text = DarlingStoreConnection.TryDescribeParseFailure(connectionString);
+
+        Assert.NotNull(text);
+        Assert.StartsWith(FixedHintStart, text, StringComparison.Ordinal);
+        StoreParseFailureFixtures.AssertNoFragment(text!, "the guard's text");
+        Assert.DoesNotContain(thrown.Message, text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Npgsql's own setting conflicts are fixed text with no operator input. The formatter maps each to a sentence of
+    /// its own that names the conflict, instead of the hint about quoting a value, and does not pass Npgsql's message
+    /// through. The exception comes from the real Npgsql (both the data source and the connection constructor, which
+    /// the CLI proves with), so a Npgsql that rewords a message makes this test fail.
+    /// </summary>
+    [Theory]
+    [InlineData("Host=127.0.0.1;Username=u;Password=pw;Multiplexing=true;Pooling=false", "Multiplexing needs Pooling to be on.")]
+    [InlineData("Host=127.0.0.1;Username=u;Password=pw;SslNegotiation=direct;SSL Mode=Prefer", "SSL Negotiation=Direct needs SSL Mode Require, Verify CA or Verify Full.")]
+    [InlineData("Host=127.0.0.1;Username=u;Password=pw;Target Session Attributes=primary", "Target Session Attributes other than Any needs more than one host in Host.")]
+    [InlineData("Host=127.0.0.1;Username=u;Password=pw;Minimum Pool Size=10;Maximum Pool Size=5", "Maximum Pool Size is smaller than Minimum Pool Size.")]
+    public void ASettingConflictNpgsqlRejects_GetsASentenceThatNamesIt_NotTheHintAboutQuoting(string connectionString, string sentence)
+    {
+        var expected = "Npgsql rejected the settings: " + sentence;
+        var fromDataSource = Assert.ThrowsAny<Exception>(() => { using var dataSource = NpgsqlDataSource.Create(connectionString); });
+        var fromConnection = Assert.ThrowsAny<Exception>(() => { using var connection = new NpgsqlConnection(connectionString); });
+
+        Assert.Equal(expected, DarlingStoreConnection.DescribeParseFailure(fromDataSource));
+        Assert.Equal(expected, DarlingStoreConnection.DescribeParseFailure(fromConnection));
+        Assert.Equal(expected, DarlingStoreConnection.TryDescribeParseFailure(connectionString));
+        Assert.DoesNotContain(FixedHintStart, expected, StringComparison.Ordinal);
+        Assert.DoesNotContain(fromDataSource.Message, expected, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Npgsql's keyword lookup folds some non-ASCII characters into ASCII ones (U+017F, LATIN SMALL LETTER LONG S,
+    /// upper-cases to 'S'), so <c>ContainsKey</c> accepts a keyword spelled with one. The formatter prints Npgsql's
+    /// canonical spelling from its own list and never the spelling in the exception, which here came from the
+    /// password.
+    /// </summary>
+    [Fact]
+    public void AKeywordSpelledWithAFoldingCharacter_PrintsNothingOfTheSecretsOwnSpelling()
+    {
+        var ex = Parse("Host=h;Username=u;Password=Zq7;\u017Fslmode=W0rd;Database=db");
+        var paramName = Assert.IsAssignableFrom<ArgumentException>(ex).ParamName!;
+        Assert.Contains('\u017F', paramName);
+        Assert.True(new NpgsqlConnectionStringBuilder().ContainsKey(paramName), "Npgsql accepts the folded spelling");
+
+        var text = DarlingStoreConnection.DescribeParseFailure(ex);
+
+        Assert.DoesNotContain('\u017F', text);
+        Assert.All(text, c => Assert.True(c < 128, $"a non-ASCII character reached the output: {text}"));
+        StoreParseFailureFixtures.AssertNoFragment(text, "the folded spelling");
+
+        /* An ASCII spelling that differs from Npgsql's own only in case or spacing prints the canonical one. */
+        foreach (var spelling in new[] { "sslmode", "SSLMODE", "ssl mode", "Ssl Mode" })
+        {
+            var canonical = DarlingStoreConnection.DescribeParseFailure(new ArgumentException("x", spelling));
+            Assert.Contains("'SSL Mode'", canonical, StringComparison.Ordinal);
+            Assert.DoesNotContain(spelling, canonical.Replace("'SSL Mode'", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
+        }
     }
 
     /* ---------------------------------------------------------------------------------------------------
@@ -253,6 +341,8 @@ public sealed class DarlingStoreConnectionParseFailureTests
     [Theory]
     [InlineData(StoreParseFailureFixtures.SemicolonInPassword)]
     [InlineData(StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData(StoreParseFailureFixtures.PortTailInHost)]
+    [InlineData(StoreParseFailureFixtures.NegativePortInHost)]
     public async Task TheWorker_FailsWithTheFormattersText_AndTheHostsLogLineHoldsNoFragment(string connectionString)
     {
         var worker = new DarlingWorker(
@@ -311,6 +401,8 @@ public sealed class DarlingStoreConnectionParseFailureTests
     [Theory]
     [InlineData(StoreParseFailureFixtures.SemicolonInPassword)]
     [InlineData(StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData(StoreParseFailureFixtures.PortTailInHost)]
+    [InlineData(StoreParseFailureFixtures.NegativePortInHost)]
     public async Task TheMcpHost_LogsTheFormattersText_WhenItsStoreStringDoesNotParse(string connectionString)
     {
         var logger = new CapturingLogger<DarlingMcpHostService>();
@@ -329,6 +421,8 @@ public sealed class DarlingStoreConnectionParseFailureTests
     [Theory]
     [InlineData(StoreParseFailureFixtures.SemicolonInPassword)]
     [InlineData(StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData(StoreParseFailureFixtures.PortTailInHost)]
+    [InlineData(StoreParseFailureFixtures.NegativePortInHost)]
     public async Task TheWebHost_LogsTheFormattersText_WhenItsStoreStringDoesNotParse(string connectionString)
     {
         var logger = new CapturingLogger<DarlingWebHostService>();
@@ -369,6 +463,22 @@ public sealed class DarlingStoreConnectionParseFailureTests
         StoreParseFailureFixtures.AssertNoFragment(report, "the self-test report");
     }
 
+    /// <summary>A string that parses but that Npgsql's construction step rejects stops at the config layer with the
+    /// formatter's text. It used to pass the layer and print the password tail as the endpoint.</summary>
+    [Theory]
+    [InlineData(StoreParseFailureFixtures.PortTailInHost)]
+    [InlineData(StoreParseFailureFixtures.NegativePortInHost)]
+    public async Task TheSelfTestsConfigLayer_ProvesTheStringWithNpgsqlsConstructionStep(string connectionString)
+    {
+        var results = await StoreConnectionSelfTest.RunAsync(connectionString);
+
+        var config = results[0];
+        Assert.Equal(StoreConnectionSelfTest.LayerOutcome.Failed, config.Outcome);
+        Assert.Contains("connection string parsed but cannot be used: " + FixedHintStart, config.Detail, StringComparison.Ordinal);
+        Assert.All(results.Skip(1), r => Assert.Equal(StoreConnectionSelfTest.LayerOutcome.NotReached, r.Outcome));
+        StoreParseFailureFixtures.AssertNoFragment(StoreConnectionSelfTest.FormatReport(results), "the self-test report");
+    }
+
     [Fact]
     public async Task TheSelfTestsConfigLayer_NamesARealKeyword_AndNotItsValue()
     {
@@ -376,7 +486,7 @@ public sealed class DarlingStoreConnectionParseFailureTests
             "Host=127.0.0.1;Username=u;Password=pw;Database=db;SSL Mode=NotARealSslMode");
 
         Assert.Equal(StoreConnectionSelfTest.LayerOutcome.Failed, results[0].Outcome);
-        Assert.Contains("'ssl mode'", results[0].Detail, StringComparison.Ordinal);
+        Assert.Contains("'SSL Mode'", results[0].Detail, StringComparison.Ordinal);
         Assert.DoesNotContain("NotARealSslMode", StoreConnectionSelfTest.FormatReport(results), StringComparison.OrdinalIgnoreCase);
     }
 
@@ -389,6 +499,8 @@ public sealed class DarlingStoreConnectionParseFailureTests
     [Theory]
     [InlineData(StoreParseFailureFixtures.SemicolonInPassword)]
     [InlineData(StoreParseFailureFixtures.LeadingEqualsInPassword)]
+    [InlineData(StoreParseFailureFixtures.PortTailInHost)]
+    [InlineData(StoreParseFailureFixtures.NegativePortInHost)]
     public void TheViewersDataService_SaysWhyAStringCannotBeUsed_WithoutTheFragment(string connectionString)
     {
         var created = ViewerDataService.TryCreate(connectionString, 5, out var service, out var unusable);
@@ -439,5 +551,7 @@ public sealed class DarlingStoreConnectionParseFailureTests
         var selfTest = Read("Darling", "PerformanceMonitor.Darling.Storage", "StoreConnectionSelfTest.cs");
         Assert.Contains("connection string did not parse: {DarlingStoreConnection.DescribeParseFailure(ex)}", selfTest, StringComparison.Ordinal);
         Assert.DoesNotContain("connection string did not parse: {ex.Message}", selfTest, StringComparison.Ordinal);
+        Assert.Contains("DarlingStoreConnection.TryDescribeParseFailure(connectionString)", selfTest, StringComparison.Ordinal);
+        Assert.Contains("connection string parsed but cannot be used: {unusable}", selfTest, StringComparison.Ordinal);
     }
 }

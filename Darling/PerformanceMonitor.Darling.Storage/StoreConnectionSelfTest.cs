@@ -116,6 +116,19 @@ public static class StoreConnectionSelfTest
             return results;
         }
 
+        /* The string parses and names a Host, but Npgsql's construction step still validates it (it splits a Host value
+           on its last ':' and range-checks the port, and it rejects setting conflicts), and the exception for that
+           can quote part of the string: a password whose unquoted ';' is followed by "host=x:y" makes y the bad port.
+           The guard runs that step (it builds and disposes a data source and opens nothing) and gives the formatter's
+           text, so neither the exception's message nor a host built out of a password tail reaches this detail. */
+        if (DarlingStoreConnection.TryDescribeParseFailure(connectionString) is { } unusable)
+        {
+            results.Add(new LayerResult(ConfigLayer, LayerOutcome.Failed,
+                $"connection string parsed but cannot be used: {unusable}", stopwatch.Elapsed));
+            AddNotReached(results, DnsLayer, TcpLayer, TlsLayer, AuthLayer, SchemaLayer);
+            return results;
+        }
+
         var sslDisabled = builder.SslMode == SslMode.Disable;
         results.Add(new LayerResult(ConfigLayer, LayerOutcome.Passed,
             $"parsed; endpoint {host}:{port.ToString(CultureInfo.InvariantCulture)}, ssl mode {builder.SslMode}", stopwatch.Elapsed));

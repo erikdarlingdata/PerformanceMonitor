@@ -275,7 +275,7 @@ public sealed class DarlingCollectorToggleExitCodeTests
             Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
 
             /* S-8: the message names the keyword Npgsql could not set and never the value it was given. */
-            Assert.Contains("value for the 'sslmode' keyword", error, StringComparison.Ordinal);
+            Assert.Contains("value for the 'SSL Mode' keyword", error, StringComparison.Ordinal);
             Assert.DoesNotContain("NotARealSslMode", error, StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("NotARealSslMode", output, StringComparison.OrdinalIgnoreCase);
         }
@@ -364,7 +364,7 @@ public sealed class DarlingCollectorToggleExitCodeTests
             Assert.Contains("postgres.connectionString could not be used:", error.ToString(), StringComparison.Ordinal);
 
             /* S-8: the keyword is named, and the value Npgsql was given is not. */
-            Assert.Contains("value for the 'sslmode' keyword", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains("value for the 'SSL Mode' keyword", error.ToString(), StringComparison.Ordinal);
             Assert.DoesNotContain("NotARealSslMode", error.ToString(), StringComparison.OrdinalIgnoreCase);
             Assert.DoesNotContain("NotARealSslMode", output.ToString(), StringComparison.OrdinalIgnoreCase);
         }

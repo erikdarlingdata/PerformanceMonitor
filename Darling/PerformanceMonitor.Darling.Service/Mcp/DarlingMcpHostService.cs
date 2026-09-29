@@ -410,11 +410,14 @@ public sealed class DarlingMcpHostService : BackgroundService
                 }
             }
 
-            /* A string Npgsql cannot parse throws from the Create below into the catch at the end of this method,
+            /* A string Npgsql cannot use throws from the Create below into the catch at the end of this method,
                which logs the exception's message, and Npgsql's text for that can quote part of the string (a password
-               with an unquoted ';' makes the text after it the "keyword"). So parse it first and log the formatter's
-               text instead. Every later step in the chain parses this same string first, so a string that passes here
-               cannot fail below for this reason. */
+               with an unquoted ';' makes the text after it the "keyword", and a password tail that becomes a Host
+               value with a ':' in it makes the text after the ':' a bad port). So prove it first, with Npgsql's own
+               construction step (the guard builds and disposes a data source, and opens nothing), and log the
+               formatter's text instead. The keywords added below (application name, session time zone) take part in
+               none of Npgsql's construction checks, so a string that passes here does not throw from the Create below
+               for a parse or a validation reason. */
             if (DarlingStoreConnection.TryDescribeParseFailure(storeConnectionString) is { } unusableStoreString)
             {
                 _logger.LogError(
