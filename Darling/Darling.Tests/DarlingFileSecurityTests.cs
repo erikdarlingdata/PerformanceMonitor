@@ -646,7 +646,7 @@ public sealed class DarlingFileSecurityTests
 
         /* The owner descriptor is READ from the file, and read close enough to the SetOwner to be the same
            object rather than an unrelated Get-Acl elsewhere in the script. */
-        var reRead = script.IndexOf("$owner = Get-Acl -Path $secretFile", StringComparison.Ordinal);
+        var reRead = script.IndexOf("$owner = Get-Acl -LiteralPath $secretFile", StringComparison.Ordinal);
         Assert.True(reRead >= 0 && reRead < setOwner,
             "the owner must be set on the file's CURRENT ACL ($owner = Get-Acl ...), not on a fresh " +
             "FileSecurity — Set-Acl writes the whole descriptor, so a bare one wipes the hardened DACL (#1957).");
@@ -661,7 +661,7 @@ public sealed class DarlingFileSecurityTests
             "inherited BUILTIN\\Users read come straight back.");
 
         /* And the verification must judge the FINAL state — after both the DACL and the owner. */
-        var verify = script.IndexOf("$after = Get-Acl -Path $secretFile", StringComparison.Ordinal);
+        var verify = script.IndexOf("$after = Get-Acl -LiteralPath $secretFile", StringComparison.Ordinal);
         Assert.True(verify > setOwner,
             "the per-file verification must run AFTER the owner step, or it certifies a state the installer " +
             "then changes.");
