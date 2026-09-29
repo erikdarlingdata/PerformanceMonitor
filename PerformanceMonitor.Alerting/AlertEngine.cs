@@ -227,6 +227,11 @@ public sealed class AlertEngine
     private readonly ConcurrentDictionary<string, int> _lastAlertedBlockingCount = new();
     private readonly ConcurrentDictionary<string, int> _lastAlertedDeadlockCount = new();
 
+    /* #4752: consecutive fires per (family, key) whose every channel failed. Grows the retry delay in
+       AfterFire (1, 2, 4 ... minutes, capped at the cooldown) and is dropped by the next fire that reached
+       an operator. In memory only: a restart starts the backoff over, which is the safe direction. */
+    private readonly ConcurrentDictionary<(string Family, string Key), int> _channelFailureStreak = new();
+
     /* Newest already-alerted failed-job run time (SERVER-LOCAL) — Lite's MainWindow.xaml.cs:96;
        persisted through IAlertStateStore on change (#1145 parity). */
     private readonly ConcurrentDictionary<string, DateTime> _lastAlertedFailedJobTime = new();
@@ -853,7 +858,7 @@ public sealed class AlertEngine
                    BOTH the context and the outcome for the reason the deadlock and Poison Wait sites give:
                    Lite's deliverer persists only the context, Darling's folds the outcome in. */
                 var cpuGrade = GradeCpuFire(alertCpuValue.Value);
-                await FireAsync(new AlertOutcome(
+                var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, "High CPU",
                     $"{alertCpuValue:F0}% ({cpuMetricLabel})",
                     $"{_settings.CpuThresholdPercent}%",
@@ -861,6 +866,7 @@ public sealed class AlertEngine
                     NumericCurrentValue: alertCpuValue, NumericThresholdValue: _settings.CpuThresholdPercent,
                     Muted: isMuted, Severity: cpuGrade,
                     ShortMessage: $"{cpuMetricLabel} at {alertCpuValue:F0}% (threshold: {_settings.CpuThresholdPercent}%)"), ct);
+                AfterFire("High CPU", _lastCpuAlert, key, now, alertCooldown, delivery);
             }
         }
         else if (outcome == PersistenceOutcome.Resolve)                              /* :101 */
@@ -1103,7 +1109,7 @@ public sealed class AlertEngine
                IAlertDeliverer concern; the engine emits one outcome. ShortMessage = the toast body
                of :167. Numerics carried explicitly (#1830): the count text happens to parse today,
                but the stored value must not depend on parse luck. */
-            await FireAsync(new AlertOutcome(
+            var delivery = await FireAsync(new AlertOutcome(
                 key, serverName, "Blocking Detected",
                 effectiveBlockingCount.ToString(),
                 _settings.BlockingCountThreshold.ToString(),
@@ -1111,6 +1117,19 @@ public sealed class AlertEngine
                 NumericCurrentValue: effectiveBlockingCount, NumericThresholdValue: _settings.BlockingCountThreshold,
                 Muted: isMuted, Severity: blockingContext?.SeverityOverride,
                 ShortMessage: $"{effectiveBlockingCount} blocking session(s)"), ct);
+            AfterFire("Blocking Detected", _lastBlockingAlert, key, now, alertCooldown, delivery);
+
+            /* #4752: the gate advanced the watermark to this count, and it was saved, BEFORE delivery. A fire
+               whose every channel failed would leave the retry sweep seeing no new blocking, and the alert
+               would stay lost until the count rose. Put the watermark back to its decayed pre-fire value (the
+               gate's own rule: a watermark above the current count drops to it) and save that, so the retry
+               sees the count above the watermark and fires again. */
+            if (EveryChannelFailed(delivery))
+            {
+                var unannouncedWatermark = Math.Min(blockingWatermark, effectiveBlockingCount);
+                _lastAlertedBlockingCount[key] = unannouncedWatermark;
+                await _stateStore.SaveEdgeTriggerWatermarkAsync(key, BlockingWatermarkMetric, unannouncedWatermark);
+            }
         }
         else if (!blockingDecision.Active && wasBlockingActive)                     /* :185 */
         {
@@ -1443,7 +1462,7 @@ public sealed class AlertEngine
                    which no history-store parser could turn back into a number — the value has to travel
                    as a number or every history row lands at 0, which is the defect #1830 just fixed. */
                 double totalWaitSeconds = current.TotalWaitSeconds;
-                await FireAsync(new AlertOutcome(
+                var delivery = await FireAsync(new AlertOutcome(
                     key, serverName, "Blocking Wait Time",
                     $"{totalWaitSeconds:F0}s across {current.BlockedSessionCount} blocked session(s)",
                     $"{thresholdSeconds}s",
@@ -1451,6 +1470,7 @@ public sealed class AlertEngine
                     NumericCurrentValue: totalWaitSeconds, NumericThresholdValue: thresholdSeconds,
                     Muted: isMuted, Severity: blockingContext.SeverityOverride,
                     ShortMessage: $"{totalWaitSeconds:F0}s total blocked wait across {current.BlockedSessionCount} session(s) (threshold: {thresholdSeconds}s)"), ct);
+                AfterFire("Blocking Wait Time", _lastBlockingWaitAlert, key, now, alertCooldown, delivery);
             }
         }
         else if (outcome == PersistenceOutcome.Resolve)
@@ -1564,7 +1584,7 @@ public sealed class AlertEngine
 
             /* :252-260 — ShortMessage = the toast body of :244. Numerics carried explicitly (#1830):
                the count text happens to parse today, but the stored value must not depend on parse luck. */
-            await FireAsync(new AlertOutcome(
+            var delivery = await FireAsync(new AlertOutcome(
                 key, serverName, "Deadlocks Detected",
                 effectiveDeadlockCount.ToString(),
                 _settings.DeadlockCountThreshold.ToString(),
@@ -1572,6 +1592,17 @@ public sealed class AlertEngine
                 NumericCurrentValue: effectiveDeadlockCount, NumericThresholdValue: _settings.DeadlockCountThreshold,
                 Muted: isMuted, Severity: deadlockContext.SeverityOverride,
                 ShortMessage: $"{effectiveDeadlockCount} deadlock(s) in the last hour"), ct);
+            AfterFire("Deadlocks Detected", _lastDeadlockAlert, key, now, alertCooldown, delivery);
+
+            /* #4752: the blocking twin above explains it — the watermark moved to this count, and was saved,
+               before delivery, so a fire whose every channel failed goes back to the decayed pre-fire value
+               and the retry sweep fires again at the same count. */
+            if (EveryChannelFailed(delivery))
+            {
+                var unannouncedWatermark = Math.Min(deadlockWatermark, effectiveDeadlockCount);
+                _lastAlertedDeadlockCount[key] = unannouncedWatermark;
+                await _stateStore.SaveEdgeTriggerWatermarkAsync(key, DeadlockWatermarkMetric, unannouncedWatermark);
+            }
         }
         else if (!deadlockDecision.Active && wasDeadlockActive)                     /* :262 */
         {
@@ -1693,7 +1724,7 @@ public sealed class AlertEngine
                        accumulated milliseconds against the bar it crossed, also in milliseconds — the unit
                        the history formatter already renders this metric in, and the PostgreSQL twin's
                        exact numeric pair. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Poison Wait",
                         allWaitNames,
                         worst.ThresholdValue,
@@ -1702,6 +1733,15 @@ public sealed class AlertEngine
                         NumericThresholdValue: worst.NumericThresholdValue,
                         Muted: isMuted, Severity: worst.Severity,
                         ShortMessage: worst.ShortMessage), ct);
+                    AfterFire("Poison Wait", _lastPoisonWaitAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: the newest-collection marker was written before delivery too, and the retry
+                       sweep would see the same collection as already reported. A fire nobody received
+                       forgets it, so the retry counts the window as fresh. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        _lastPoisonWaitCollectionTime.TryRemove(key, out _);
+                    }
                     readClock.Restart();
                 }
             }
@@ -1894,7 +1934,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(lrqContext);                       /* :380 */
 
                     /* :382-392. ShortMessage = the toast body of :374. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Long-Running Query",
                         $"{longRunning.Count} query(s), longest {elapsedMinutes}m",
                         $"{_settings.LongRunningQueryThresholdMinutes}m",
@@ -1903,6 +1943,7 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LongRunningQueryThresholdMinutes,
                         Muted: isMuted, Severity: lrqContext?.SeverityOverride,
                         ShortMessage: $"Session #{worst.SessionId} running {elapsedMinutes}m{previewSuffix}"), ct);
+                    AfterFire("Long-Running Query", _lastLongRunningQueryAlert, key, now, alertCooldown, delivery);
                     readClock.Restart();
                 }
             }
@@ -2003,7 +2044,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(tempDbContext); /* :441 */
 
                     /* :443-453. ShortMessage = the toast body of :435. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "tempdb Space",
                         $"{tempDb.ReservedPercent:F0}% reserved ({tempDb.TotalReservedMb:F0} MB)",
                         $"{_settings.TempDbSpaceThresholdPercent}%",
@@ -2012,6 +2053,7 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.TempDbSpaceThresholdPercent,
                         Muted: isMuted, Severity: tempDbContext.SeverityOverride,
                         ShortMessage: $"tempdb {tempDb.ReservedPercent:F0}% reserved"), ct);
+                    AfterFire("tempdb Space", _lastTempDbSpaceAlert, key, now, alertCooldown, delivery);
                     readClock.Restart();
                 }
             }
@@ -2098,7 +2140,7 @@ public sealed class AlertEngine
                     var detailText = AlertContextBuilders.ContextToDetailText(lowDiskContext); /* :523 */
 
                     /* :525-535. ShortMessage = the toast body of :510. */
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Volume Free Space",
                         $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)",
                         AlertContextBuilders.FormatLowDiskThreshold(_settings.LowDiskThresholdPercent, _settings.LowDiskThresholdGb),
@@ -2107,6 +2149,15 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.LowDiskThresholdPercent,
                         Muted: isMuted, Severity: lowDiskContext?.SeverityOverride,
                         ShortMessage: $"{worst.MountPoint} {worst.FreePercent:F0}% free ({worst.FreeGb:F1} GB)"), ct);
+                    AfterFire("Volume Free Space", _lastLowDiskAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: the worsening gate's last-alerted level was written before delivery. A fire
+                       nobody received puts back the level the operator was last told about, so the retry
+                       is still a fresh or worsening breach against it. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        RestoreAlertedLevel(_lastAlertedLowDiskPercent, key, lastLowDiskPercent);
+                    }
                     readClock.Restart();
                 }
             }
@@ -2190,7 +2241,7 @@ public sealed class AlertEngine
                     var pvsContext = AlertContextBuilders.BuildPvsPressureContext(serverName, breached, pvsOccurrences.Decorate);
                     var detailText = AlertContextBuilders.ContextToDetailText(pvsContext);
 
-                    await FireAsync(new AlertOutcome(
+                    var delivery = await FireAsync(new AlertOutcome(
                         key, serverName, "Version Store (PVS)",
                         $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)",
                         AlertContextBuilders.FormatPvsThreshold(_settings.PvsThresholdPercent, _settings.PvsFloorGb),
@@ -2199,6 +2250,14 @@ public sealed class AlertEngine
                         NumericThresholdValue: _settings.PvsThresholdPercent,
                         Muted: isMuted, Severity: null,
                         ShortMessage: $"{worst.DatabaseName} PVS {worst.PvsPercent:F0}% of database ({worst.PvsGb:F1} GB)"), ct);
+                    AfterFire("Version Store (PVS)", _lastPvsAlert, key, now, alertCooldown, delivery);
+
+                    /* #4752: same as the low-disk twin — the last-alerted level goes back to what the
+                       operator was last told, so the retry is still a fresh or worsening breach. */
+                    if (EveryChannelFailed(delivery))
+                    {
+                        RestoreAlertedLevel(_lastAlertedPvsPercent, key, lastPvsPercent);
+                    }
                     readClock.Restart();
                 }
             }
@@ -3082,8 +3141,13 @@ public sealed class AlertEngine
     /// <para>The log happens BEFORE delivery on purpose. Delivery does I/O (SMTP, webhooks, a history-row
     /// write) and swallows its own failures, so logging afterwards would lose the record of an alert whose
     /// delivery hung or failed — and that alert is precisely the one an operator later goes looking for.</para>
+    ///
+    /// <para>Returns what the channels did (#4752): the deliverer's <see cref="IAlertDeliverer.DeliverAndReportAsync"/>
+    /// answer, so a family can tell "every channel failed" from "delivered" and retry the first
+    /// (<see cref="AfterFire"/>). Delivery itself is unchanged. <c>null</c> — Lite's deliverer, a per-event
+    /// split, a throw outside the channels — is "unreported" and reads as delivered.</para>
     /// </summary>
-    private async Task FireAsync(AlertOutcome outcome, CancellationToken ct)
+    private async Task<AlertDelivery?> FireAsync(AlertOutcome outcome, CancellationToken ct)
     {
         _logger?.LogWarning(
             "{Line}",
@@ -3094,7 +3158,81 @@ public sealed class AlertEngine
                 outcome.ShortMessage,
                 outcome.Muted));
 
-        await _deliverer.DeliverAsync(outcome, ct);
+        return await _deliverer.DeliverAndReportAsync(outcome, ct);
+    }
+
+    /// <summary>
+    /// True when the send was attempted and NOTHING reached an operator (#4752): <see cref="AlertDelivery.Sent"/>
+    /// is false and <see cref="AlertDelivery.SendError"/> is set. A failed email records as channel
+    /// <c>email</c> with its send error, and a webhook-only fan-out whose every post failed as
+    /// <see cref="AlertDelivery.ChannelFailed"/>; both have that shape. A PARTIAL failure (one channel
+    /// delivered, another did not) has <c>Sent</c> true and is not retried, because a retry would send the
+    /// alert a second time down the channel that worked. <c>null</c> (unreported) stays "delivered", as do a
+    /// muted fire, a throttled or folded one and one no channel applies to: none of them carries a
+    /// <c>SendError</c>.
+    /// </summary>
+    private static bool EveryChannelFailed(AlertDelivery? delivery) =>
+        delivery is { Sent: false, SendError: not null };
+
+    /// <summary>
+    /// How long to wait before the alert whose <paramref name="consecutiveFailures"/>-th consecutive send
+    /// failed is tried again (#4752): a minute, doubling with each further failure (1, 2, 4, 8 ... minutes),
+    /// never longer than the family's own <paramref name="cooldown"/> — the wait a failed alert used to get
+    /// in every case. The exponent is bounded so a channel that stays down for days cannot overflow the
+    /// arithmetic.
+    /// </summary>
+    public static TimeSpan ChannelFailureRetryDelay(int consecutiveFailures, TimeSpan cooldown)
+    {
+        var exponent = Math.Clamp(consecutiveFailures - 1, 0, 20);
+        var delay = TimeSpan.FromMinutes(1L << exponent);
+        return delay < cooldown ? delay : (cooldown < TimeSpan.Zero ? TimeSpan.Zero : cooldown);
+    }
+
+    /// <summary>
+    /// Runs after a family's fire (#4752). The families stamp their cooldown BEFORE delivery, so an alert
+    /// whose every channel failed (an HTTP 429 or 5xx, a timeout, an unreachable mail server) used to be
+    /// silent for the whole cooldown. When <see cref="EveryChannelFailed"/>, this counts the failure and
+    /// back-dates the stamp so the cooldown opens again after <see cref="ChannelFailureRetryDelay"/>:
+    /// <c>CooldownElapsed</c> is <c>now - last &gt;= cooldown</c>, so <c>last = now - cooldown + delay</c>
+    /// opens exactly <c>delay</c> after this fire. The next sweep that still sees the condition fires it
+    /// again. Any other result — delivered, muted, unreported — ends the failure streak.
+    /// </summary>
+    private void AfterFire<TKey>(
+        string family, ConcurrentDictionary<TKey, DateTime> stamps, TKey key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery)
+        where TKey : notnull
+    {
+        /* Families with a second "already reported" marker (a count watermark, a collection time, a
+           last-alerted level) put it back at their own call site: this method only knows the cooldown. */
+        var streakKey = (family, Convert.ToString(key, CultureInfo.InvariantCulture) ?? string.Empty);
+        if (!EveryChannelFailed(delivery))
+        {
+            _channelFailureStreak.TryRemove(streakKey, out _);
+            return;
+        }
+
+        var failures = _channelFailureStreak.AddOrUpdate(streakKey, 1, (_, n) => n < int.MaxValue ? n + 1 : n);
+        var delay = ChannelFailureRetryDelay(failures, cooldown);
+        stamps[key] = now - cooldown + delay;
+        _logger?.LogInformation(
+            "Every channel failed for {Family} on {Key} (failure {Failures}); trying again in {Delay}",
+            family, streakKey.Item2, failures, delay);
+    }
+
+    /// <summary>
+    /// Puts a worsening gate's last-alerted level back to what it was before a fire (#4752): the prior
+    /// level when there was one, no entry when the failed fire was the first.
+    /// </summary>
+    private static void RestoreAlertedLevel(ConcurrentDictionary<string, double> levels, string key, double? prior)
+    {
+        if (prior is { } level)
+        {
+            levels[key] = level;
+        }
+        else
+        {
+            levels.TryRemove(key, out _);
+        }
     }
 
     /// <summary>

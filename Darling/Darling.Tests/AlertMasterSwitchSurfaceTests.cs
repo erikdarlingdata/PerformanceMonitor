@@ -364,7 +364,7 @@ public sealed class AlertMasterSwitchSurfaceTests
             "#3464 pin: the master-off return is NotEvaluated, so hosts leave badge state untouched");
 
         /* The funnel is private, so the entry gate covers every path to the deliver site. */
-        Assert.Contains("private async Task FireAsync(", stripped, StringComparison.Ordinal);
+        Assert.Contains("private async Task<AlertDelivery?> FireAsync(", stripped, StringComparison.Ordinal);
     }
 
     /// <summary>The PostgreSQL predictors' gate (#3464): before the pass is counted, before anything is
