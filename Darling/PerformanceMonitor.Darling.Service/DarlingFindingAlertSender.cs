@@ -145,11 +145,12 @@ public sealed class DarlingFindingAlertSender : IFindingAlertSender
                 /* #3598: where the posts went, on the finding's context exactly as DarlingAlertDeliverer records it
                    for engine alerts — an "Analysis: …" finding is a performance-family alert and routes like one,
                    so its history row must say so too. A finding always carries a context, so nothing is created
-                   here; null when no channel reached resolution. */
+                   here; null when no channel reached resolution. #4750: the record carries each channel's
+                   outcome too, as DarlingAlertDeliverer explains. */
                 if (result.Route is { } route)
                 {
                     context ??= new AlertContext();
-                    context.Route = route.ToDto();
+                    context.Route = route.ToDto(result.ChannelOutcomes);
                 }
             }
 
