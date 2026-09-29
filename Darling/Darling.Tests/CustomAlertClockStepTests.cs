@@ -8,8 +8,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
@@ -95,7 +93,7 @@ public sealed class CustomAlertClockStepTests
     [Fact]
     public void TheEvaluationPass_DecidesThroughTheClamp_WithTheIntervalItStampsTheNextDueTimeWith()
     {
-        var source = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/CustomAlertEvaluator.cs");
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs");
 
         var interval = "var intervalSeconds = def.EvaluationIntervalSeconds ?? _defaultIntervalSeconds;";
         var check = "CadenceIsWaiting(state.NextDueAt, now, TimeSpan.FromSeconds(intervalSeconds))";
@@ -187,7 +185,7 @@ public sealed class CustomAlertClockStepTests
     [Fact]
     public void TheRetryCheck_IsClampedByTheCapTheWriterUses()
     {
-        var source = ReadRepoFile("Darling/PerformanceMonitor.Darling.Service/CustomAlertEvaluator.cs");
+        var source = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "CustomAlertEvaluator.cs");
 
         Assert.DoesNotContain("now >= retryAtUtc", source, StringComparison.Ordinal);
         Assert.Contains("now >= CollectorCadence.ClampDue(retryAtUtc, now, FailedSendRetryCap)", source, StringComparison.Ordinal);
@@ -257,17 +255,4 @@ public sealed class CustomAlertClockStepTests
             EmailOutcome: AlertChannelOutcome.NotAttempted, SendError: null,
             WebhookOutcome: AlertChannelOutcome.Failed, WebhookSendError: "Slack: 429 Too Many Requests", AnyChannelConfigured: true),
         muted: false, trayChannelPresent: false);
-
-    /* Locate the repo from this file: no build-output copying. */
-    private static string ReadRepoFile(string relative, [CallerFilePath] string thisFile = "")
-    {
-        var dir = Path.GetDirectoryName(thisFile)!;
-        while (dir is not null && !File.Exists(Path.Combine(dir, relative)))
-        {
-            dir = Path.GetDirectoryName(dir);
-        }
-
-        Assert.NotNull(dir);
-        return File.ReadAllText(Path.Combine(dir!, relative));
-    }
 }
