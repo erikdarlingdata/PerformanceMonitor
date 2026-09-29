@@ -19,7 +19,8 @@ namespace Darling.Tests;
 /// <c>DO</c> block: the <c>ALTER ROLE ... PASSWORD</c> lines that follow it then reset the password of the existing
 /// role the guard had just refused, and every grant after them ran as well. The fix is <c>\set ON_ERROR_STOP</c>
 /// around the guard ALONE: a global <c>-v ON_ERROR_STOP=1</c> would also stop an owner who is not a superuser at the
-/// <c>temp_file_limit</c> line, before it had made a single grant.
+/// <c>temp_file_limit</c> line, before it had made a single grant. The script saves the caller's own value before the
+/// guard and puts it back after, so a caller who ran psql with <c>-v ON_ERROR_STOP=1</c> (or set it in psqlrc) keeps it.
 /// </summary>
 public sealed class ProvisionRolesCollisionGuardTests
 {
@@ -27,18 +28,18 @@ public sealed class ProvisionRolesCollisionGuardTests
 
     private static string Script() => RepoFile.ReadRepoFile("Darling", "tools", "provision-roles.sql");
 
-    /// <summary>The stop is switched on before the first guard block and off again after the last one, and both
+    /// <summary>The stop is switched on before the first guard block and put back after the last one, and both
     /// happen before the first <c>ALTER ROLE ... PASSWORD</c> - so a refused role is never re-keyed - and before
     /// the <c>temp_file_limit</c> line, so a failure there still lets the run finish its grants.</summary>
     [Fact]
-    public void OnErrorStop_IsOnForTheCollisionGuardAlone_AndOffBeforeTheFirstPasswordReset()
+    public void OnErrorStop_IsOnForTheCollisionGuardAlone_AndPutBackBeforeTheFirstPasswordReset()
     {
         var sql = Script();
 
         var on = Regex.Match(sql, @"(?m)^\\set ON_ERROR_STOP on[ \t]*\r?$");
-        var off = Regex.Match(sql, @"(?m)^\\set ON_ERROR_STOP off[ \t]*\r?$");
+        var off = Regex.Match(sql, @"(?m)^\\set ON_ERROR_STOP :darling_saved_stop[ \t]*\r?$");
         Assert.True(on.Success, "provision-roles.sql no longer runs '\\set ON_ERROR_STOP on' before the role-collision guard.");
-        Assert.True(off.Success, "provision-roles.sql never puts ON_ERROR_STOP back to off after the role-collision guard.");
+        Assert.True(off.Success, "provision-roles.sql never puts the caller's ON_ERROR_STOP back after the role-collision guard.");
         Assert.Equal(2, Regex.Matches(sql, @"(?m)^\\set ON_ERROR_STOP\b").Count);
 
         var firstRaise = sql.IndexOf(GuardRaise, StringComparison.Ordinal);
@@ -49,12 +50,12 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.True(guardStart >= 0 && guardEnd > guardStart, "could not find the DO block that holds the role-collision guard.");
 
         Assert.True(on.Index < guardStart, "ON_ERROR_STOP must be on BEFORE the first guard DO block, or that block's RAISE fails only itself.");
-        Assert.True(off.Index > guardEnd, "ON_ERROR_STOP must go back to off AFTER the last guard DO block.");
+        Assert.True(off.Index > guardEnd, "the caller's ON_ERROR_STOP must be put back AFTER the last guard DO block.");
 
         var firstPasswordReset = Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN NOSUPERUSER PASSWORD");
         Assert.True(firstPasswordReset.Success, "the ALTER ROLE ... PASSWORD lines are gone or renamed - update this pin with them.");
         Assert.True(on.Index < firstPasswordReset.Index && off.Index < firstPasswordReset.Index,
-            "the stop must be on and off again before the first ALTER ROLE ... PASSWORD, or the guard no longer stops that reset.");
+            "the stop must be on and put back before the first ALTER ROLE ... PASSWORD, or the guard no longer stops that reset.");
 
         /* Only the guard stops the run: step 0's SET (superuser-only once pg_stat_statements is loaded) sits before
            the stop, and the temp_file_limit line (superuser-only) after it, so an owner who is not a superuser
@@ -63,6 +64,36 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.True(stepZero >= 0 && stepZero < on.Index, "step 0's SET must stay outside the stop.");
         var tempFileLimit = sql.IndexOf("ALTER ROLE viewer SET temp_file_limit", StringComparison.Ordinal);
         Assert.True(tempFileLimit > off.Index, "the temp_file_limit lines must stay outside the stop.");
+    }
+
+    /// <summary>The caller's own <c>ON_ERROR_STOP</c> (psql <c>-v ON_ERROR_STOP=1</c>, or psqlrc) survives the guard: the
+    /// script saves it before it switches the stop on, and puts it back right after the last guard block. It never sets
+    /// the variable to off, which would override a caller who asked psql to stop at the first error. psql reads an unset
+    /// <c>ON_ERROR_STOP</c> as off, so the saved value is always on or off.</summary>
+    [Fact]
+    public void TheCallersOnErrorStop_IsSavedBeforeTheGuard_AndPutBackRightAfterIt_NeverForcedOff()
+    {
+        var sql = Script();
+
+        var save = Regex.Match(sql, @"(?m)^\\set darling_saved_stop :ON_ERROR_STOP[ \t]*\r?$");
+        var on = Regex.Match(sql, @"(?m)^\\set ON_ERROR_STOP on[ \t]*\r?$");
+        var restore = Regex.Match(sql, @"(?m)^\\set ON_ERROR_STOP :darling_saved_stop[ \t]*\r?$");
+        Assert.True(save.Success, "provision-roles.sql no longer saves the caller's ON_ERROR_STOP ('\\set darling_saved_stop :ON_ERROR_STOP') before the role-collision guard.");
+        Assert.True(on.Success && restore.Success, "provision-roles.sql no longer switches the stop on for the guard and puts the caller's value back.");
+        Assert.Single(Regex.Matches(sql, @"(?m)^\\set darling_saved_stop\b"));
+        Assert.True(save.Index < on.Index, "the caller's value must be saved BEFORE the stop is switched on, or the script saves its own 'on'.");
+
+        var lastRaise = sql.LastIndexOf(GuardRaise, StringComparison.Ordinal);
+        var guardEnd = lastRaise < 0 ? -1 : sql.IndexOf("END $$;", lastRaise, StringComparison.Ordinal);
+        Assert.True(guardEnd > lastRaise && lastRaise >= 0, "could not find the end of the DO block that holds the role-collision guard.");
+        var afterGuard = guardEnd + "END $$;".Length;
+        Assert.True(restore.Index >= afterGuard, "the caller's ON_ERROR_STOP must be put back AFTER the last guard DO block.");
+        Assert.True(
+            string.IsNullOrWhiteSpace(sql[afterGuard..restore.Index]),
+            "the caller's ON_ERROR_STOP must be put back right after the guard: nothing may run between the guard's END and the restore.");
+
+        Assert.DoesNotMatch(@"(?mi)^\\set\s+ON_ERROR_STOP\s+(off|0|false|no|f|n)\b", sql);
+        Assert.DoesNotContain("\\unset ON_ERROR_STOP", sql, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>The comment above the <c>temp_file_limit</c> lines used to say a failure there stops the script. It
@@ -77,7 +108,7 @@ public sealed class ProvisionRolesCollisionGuardTests
     }
 
     /// <summary>The live script test feeds the file to Npgsql, which cannot run psql's meta-commands, so it drops the
-    /// lines that start with a backslash - the <c>\set</c> pair - and nothing else: comments that mention a
+    /// lines that start with a backslash - the three <c>\set</c> lines - and nothing else: comments that mention a
     /// backslash command further along a line, and lines that only start with white space, stay.</summary>
     [Fact]
     public void TheLiveScriptTest_DropsOnlyTheLinesThatStartWithABackslash()
@@ -87,7 +118,7 @@ public sealed class ProvisionRolesCollisionGuardTests
 
         var before = sql.Split('\n');
         var after = stripped.Split('\n');
-        Assert.Equal(2, before.Length - after.Length);
+        Assert.Equal(3, before.Length - after.Length);
         Assert.Equal(before.Where(line => !line.StartsWith('\\')), after);
         Assert.DoesNotContain(after, line => line.StartsWith('\\'));
 

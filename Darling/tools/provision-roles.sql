@@ -88,6 +88,9 @@ SET pg_stat_statements.track_utility = off;
 --    this script re-asserts the password below, so it doubles as a password rotation. A fresh role
 --    is stamped 'darling-managed'; an unmarked same-named role fails loud (never repurposed).
 -- Stop on an error for this guard alone (#4746): a script-wide stop would end a non-superuser owner before any grant.
+-- The caller's own ON_ERROR_STOP (psql -v ON_ERROR_STOP=1, or psqlrc) is saved first and put back after the guard,
+-- not forced off. psql reads an unset ON_ERROR_STOP as off, so the saved value is always on or off.
+\set darling_saved_stop :ON_ERROR_STOP
 \set ON_ERROR_STOP on
 DO $$
 BEGIN
@@ -110,7 +113,7 @@ BEGIN
       RAISE EXCEPTION 'Role "mcp" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
 END $$;
-\set ON_ERROR_STOP off
+\set ON_ERROR_STOP :darling_saved_stop
 
 ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
 ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
