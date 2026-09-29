@@ -121,7 +121,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        AVG(total_wait_ms / observed_sec) AS mean_ms_per_sec,
        SUM(total_wait_ms)                AS total_wait_ms,
        CAST(count(*) AS integer)         AS sample_count,
-       (array_agg(collection_time ORDER BY (total_wait_ms / observed_sec) DESC))[1] AS peak_time
+       (array_agg(collection_time ORDER BY (total_wait_ms / observed_sec) DESC, collection_time DESC))[1] AS peak_time
 FROM rated
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
