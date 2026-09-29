@@ -873,6 +873,34 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <summary>Prefixes the fleet-level raw-purge-over-horizon alert serverKey so it never parses as a server_id.</summary>
     private const string RawPurgeOverHorizonKeyPrefix = "rawpurgehorizon:";
 
+    /* Notification Channel Failing edge state (#4750). FLEET-level, MULTI-keyed by channel name (Teams, Slack,
+       Generic, PagerDuty). A webhook channel counts its own failures in a row and logs the first few, but
+       nothing else showed it, so a channel could fail for weeks while another one delivered every alert.
+       Unlike Raw Purge Over Horizon this is an EDGE, not a standing condition: it fires once when a
+       channel's count first reaches WebhookAlertService.FailingChannelThreshold, does not repeat while the
+       count stays there or climbs, and writes one resolution when the count is back at 0. The rule itself is
+       WebhookChannelFailurePolicy, shared with Lite's tray notice so the two apps announce the same edges. */
+    private readonly ConcurrentDictionary<string, bool> _activeNotificationChannelFailing = new(StringComparer.Ordinal);
+
+    /// <summary>The #4750 alert metric name — a WEBHOOK AUTOMATION KEY like its siblings, so it must stay
+    /// stable across releases. Its value is the channel's failure count, a whole number.</summary>
+    internal const string NotificationChannelFailingMetric = "Notification Channel Failing";
+
+    /// <summary>The resolution title <see cref="NotificationChannelFailingMetric"/> clears with. Carries the
+    /// recognized "Recovered" suffix so the shared <c>AlertMetricClassifier.IsResolution</c> styles it green.</summary>
+    internal const string NotificationChannelRecoveredMetric = "Notification Channel Recovered";
+
+    /// <summary>Prefixes the fleet-level notification-channel alert serverKey so it never parses as a server_id.</summary>
+    private const string NotificationChannelKeyPrefix = "notificationchannel:";
+
+    /// <summary>
+    /// Where the webhook channels' failures in a row come from (#4750): the worker wires it to the same
+    /// <see cref="WebhookAlertService"/> the deliverer sends through. Counts only, never an error — see
+    /// <see cref="WebhookAlertService.GetChannelFailureCounts"/> for why. Unsupplied reads as no channels, so an
+    /// evaluator built without the seam (every harness that does not care) behaves as it did before.
+    /// </summary>
+    private readonly Func<IReadOnlyList<WebhookChannelFailureCount>> _webhookChannelFailures;
+
     /* -------- the store's own TOAST slack and checkpointer (#3783) -------- */
 
     /* Store TOAST Slack edge state (#3783). FLEET-level (the dimensions are the store's own tables), MULTI-keyed
@@ -1053,7 +1081,8 @@ internal sealed class DarlingSelfAlertEvaluator
         AlertReadFailureCounter? readFailures = null,
         string? storeName = null,
         ISelfAlertDeliveryStampStore? deliveryStamps = null,
-        Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
+        Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
+        Func<IReadOnlyList<WebhookChannelFailureCount>>? webhookChannelFailures = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _deliverer = deliverer ?? throw new ArgumentNullException(nameof(deliverer));
@@ -1096,6 +1125,9 @@ internal sealed class DarlingSelfAlertEvaluator
            waited AlertPassRetryDelaySeconds as a VALUE rather than by spending two real seconds. Production
            gets Task.Delay, which is what the adapter defaults to as well. */
         _retryDelay = retryDelay ?? Task.Delay;
+        /* #4750: unsupplied reads as no channels, the AG-seam discipline — an evaluator built without it
+           judges no channel, byte-identical to every build before the family existed. */
+        _webhookChannelFailures = webhookChannelFailures ?? (() => Array.Empty<WebhookChannelFailureCount>());
     }
 
     /// <summary>
@@ -5686,6 +5718,92 @@ internal sealed class DarlingSelfAlertEvaluator
     /// forever once the trigger itself has stopped running.
     /// </summary>
     internal static readonly TimeSpan RawPurgeRecordStaleAfter = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// The isolating entry point for the #4750 Notification Channel Failing check. The counts are the webhook
+    /// service's own in-memory tallies, so this performs no store read and the worker runs it on every sweep
+    /// tick; failure isolation is the same as the fleet-level siblings (a throw is logged, never propagated)
+    /// and cancellation still propagates.
+    /// </summary>
+    public async Task EvaluateNotificationChannelsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await ApplyNotificationChannelsAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            /* NOT counted by #3013's swallowed-read counter: the counts are read from memory, not the store. */
+            _logger?.LogError("Notification-channel self-alert failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Applies the fleet-level Notification Channel Failing condition (#4750): a webhook channel that has
+    /// failed <see cref="WebhookAlertService.FailingChannelThreshold"/> times in a row. A channel can fail for
+    /// weeks while another channel delivers every alert, and until this the only trace was an Error log line
+    /// for each of its first three failures and every fiftieth after.
+    ///
+    /// <para>Each channel is judged on its own by the shared <see cref="WebhookChannelFailurePolicy"/>: ONE
+    /// alert when the count first reaches the threshold, nothing while it stays there or climbs, and ONE
+    /// <see cref="NotificationChannelRecoveredMetric"/> resolution row when it is back at 0. An edge, not a
+    /// standing condition, so there is no cooldown re-fire: the alert is delivered through the OTHER channels,
+    /// and the channel that broke cannot carry its own notice.</para>
+    ///
+    /// <para><b>The text carries no error.</b> It names the channel and the count and points at the service
+    /// log for the reason. A webhook error can carry the endpoint's URL, and a Slack or Teams webhook URL is
+    /// the credential, so the alert row, the history and every channel it is delivered to must not hold it. The
+    /// seam hands over counts only, so the text cannot include an error even by mistake.</para>
+    ///
+    /// <para>Gated on the master alerts switch. Internal so it pins directly with a recording deliverer.</para>
+    /// </summary>
+    internal async Task ApplyNotificationChannelsAsync(CancellationToken cancellationToken)
+    {
+        if (!_settings.AlertsEnabled)
+        {
+            return;
+        }
+
+        foreach (var channel in _webhookChannelFailures())
+        {
+            var name = channel.Channel;
+            var count = channel.ConsecutiveFailures;
+            var wasFailing = _activeNotificationChannelFailing.TryGetValue(name, out var active) && active;
+
+            switch (WebhookChannelFailurePolicy.Decide(wasFailing, count))
+            {
+                case WebhookChannelNotice.Failing:
+                    _activeNotificationChannelFailing[name] = true;
+                    await FireAsync(
+                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        $"{count} failures in a row", $"{WebhookAlertService.FailingChannelThreshold} failures in a row",
+                        detail: $"The {name} webhook channel has failed {count} times in a row, so alerts sent to " +
+                            $"{name} are not arriving there. The other channels are not affected. The service log's " +
+                            $"'{name.ToUpperInvariant()} WEBHOOK FAILED' lines name the error for each failure. This " +
+                            "is stated once; a 'Notification Channel Recovered' entry follows when the channel " +
+                            "delivers again.",
+                        severity: AlertSeverityLevel.Warning,
+                        shortMessage: $"{name} webhook failed {count} times in a row",
+                        numericCurrentValue: count,
+                        numericThresholdValue: WebhookAlertService.FailingChannelThreshold,
+                        cancellationToken);
+                    break;
+
+                case WebhookChannelNotice.Recovered:
+                    _activeNotificationChannelFailing.TryRemove(name, out _);
+                    await RecordResolutionAsync(new AlertResolution(
+                        StoreKey(NotificationChannelKeyPrefix + name), _storeLabel, NotificationChannelFailingMetric,
+                        NotificationChannelRecoveredMetric,
+                        $"{_storeLabel}: the {name} webhook channel is delivering again (failures in a row back to 0)"),
+                        cancellationToken);
+                    break;
+            }
+        }
+    }
 
     /// <summary>
     /// The isolating entry point for the #3783 Store TOAST Slack check — rides the worker's hourly store

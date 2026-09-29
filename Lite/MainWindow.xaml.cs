@@ -86,6 +86,14 @@ public partial class MainWindow : Window
     private readonly IAlertSettings _alertSettings = new AppAlertSettings();
     private readonly MuteRuleService _muteRuleService;
     private EmailAlertService _emailAlertService;
+
+    /// <summary>The webhook service the email service fans out to, held so the status timer can read each
+    /// channel's failures in a row (#4750) — the counts were otherwise read only by tests.</summary>
+    private readonly WebhookAlertService _webhookAlertService;
+
+    /// <summary>Which webhook channels are currently announced as failing (#4750), by channel name — the edge
+    /// state for <see cref="CheckWebhookChannelsAndNotify"/>, the <see cref="_previousConnectionStates"/> idiom.</summary>
+    private readonly Dictionary<string, bool> _webhookChannelFailing = new(StringComparer.Ordinal);
     /* Held so the engine's edge-trigger watermark seed/persist (#1145, via LiteAlertStateStore)
        shares one store with the webhook cooldown seeding below. */
     private readonly DuckDbAlertHistoryStore _alertHistoryStore;
@@ -101,12 +109,12 @@ public partial class MainWindow : Window
            (Plan E E3c): the shared send core fans out to it. The history store is shared
            by both so the webhook service can seed its cooldown across restart (#1145). */
         _alertHistoryStore = new DuckDbAlertHistoryStore(_databaseInitializer);
-        var webhookAlertService = new WebhookAlertService(
+        _webhookAlertService = new WebhookAlertService(
             _alertSettings, EmailAlertService.Branding, new AppLoggerAdapter<WebhookAlertService>(), _alertHistoryStore);
         _emailAlertService = new EmailAlertService(
             _alertSettings,
             _alertHistoryStore,
-            webhookAlertService,
+            _webhookAlertService,
             new AppLoggerAdapter<EmailAlertService>());
         _muteRuleService = new MuteRuleService(
             new DuckDbMuteRuleStore(_databaseInitializer),
@@ -127,6 +135,7 @@ public partial class MainWindow : Window
             UpdateStatusBar();
             await RefreshOverviewAsync();
             CheckConnectionsAndNotify();
+            CheckWebhookChannelsAndNotify();
 
             /* Auto-refresh alert history if the tab is active */
             if (ServerTabControl.SelectedItem == AlertsTab)
@@ -1916,6 +1925,50 @@ public partial class MainWindow : Window
         if (overviewChanged)
         {
             ApplyOverviewView();
+        }
+    }
+
+    /// <summary>
+    /// The tray notice for a webhook channel that keeps failing (#4750), on the same status timer as
+    /// <see cref="CheckConnectionsAndNotify"/>: one notice when a channel reaches
+    /// <see cref="WebhookAlertService.FailingChannelThreshold"/> failures in a row, one when it delivers again,
+    /// and none in between — an edge like the server-down notice, decided by the same
+    /// <see cref="WebhookChannelFailurePolicy"/> Darling's "Notification Channel Failing" alert uses. A channel
+    /// can fail for weeks while another one delivers every alert, and nothing else told the user.
+    /// The text names the channel and the count and never the error, which can carry the webhook URL.
+    /// The edge state advances whether or not alerts are enabled (the XE-session notice's rule), so switching
+    /// alerts back on does not announce a failure that was already standing.
+    /// </summary>
+    private void CheckWebhookChannelsAndNotify()
+    {
+        try
+        {
+            foreach (var channel in _webhookAlertService.GetChannelFailureCounts())
+            {
+                _webhookChannelFailing.TryGetValue(channel.Channel, out var wasFailing);
+                var notice = WebhookChannelFailurePolicy.Decide(wasFailing, channel.ConsecutiveFailures);
+                if (notice == WebhookChannelNotice.None)
+                {
+                    continue;
+                }
+
+                _webhookChannelFailing[channel.Channel] = notice == WebhookChannelNotice.Failing;
+
+                if (App.AlertsEnabled
+                    && WebhookChannelTrayNotice.For(notice, channel.Channel, channel.ConsecutiveFailures) is { } text)
+                {
+                    _trayService?.ShowNotification(
+                        text.Title,
+                        text.Message,
+                        notice == WebhookChannelNotice.Failing
+                            ? Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Warning
+                            : Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Info);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("ConnectionAlerts", $"Webhook channel check failed: {ex.Message}");
         }
     }
 

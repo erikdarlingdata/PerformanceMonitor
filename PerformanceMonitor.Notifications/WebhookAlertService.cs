@@ -471,6 +471,32 @@ public class WebhookAlertService
     public (int ConsecutiveFailures, string? LastError) GetPagerDutyHealth() =>
         (_consecutivePagerDutyFailures, _lastPagerDutyError);
 
+    /// <summary>
+    /// The failures in a row at which a webhook channel counts as failing (#4750). It is the count the
+    /// channels' own logging already turns on: each channel logs its first this-many failures in a row at
+    /// Error and after that only every 50th, so a channel that reaches it has gone quiet in the log while it
+    /// is still failing. Darling's "Notification Channel Failing" alert and Lite's tray notice both read
+    /// this constant, so the point where the log goes quiet and the point where the signal speaks cannot
+    /// drift apart.
+    /// </summary>
+    public const int FailingChannelThreshold = 3;
+
+    /// <summary>
+    /// Every channel's failures in a row (#4750), for the hosts' "a channel keeps failing" signal: a channel
+    /// can fail for weeks while another one delivers every alert, and until this the counts were read only by
+    /// tests. The COUNT only, deliberately not the last error: a webhook error can carry the endpoint's URL,
+    /// and a Slack or Teams webhook URL is the credential, so nothing built from this can leak it. A channel
+    /// that never failed, or that delivered since its last failure, reads 0. Names are the
+    /// <see cref="NotificationRouter"/> channel names.
+    /// </summary>
+    public IReadOnlyList<WebhookChannelFailureCount> GetChannelFailureCounts() => new[]
+    {
+        new WebhookChannelFailureCount(NotificationRouter.TeamsChannel, _consecutiveTeamsFailures),
+        new WebhookChannelFailureCount(NotificationRouter.SlackChannel, _consecutiveSlackFailures),
+        new WebhookChannelFailureCount(NotificationRouter.GenericChannel, _consecutiveGenericFailures),
+        new WebhookChannelFailureCount(NotificationRouter.PagerDutyChannel, _consecutivePagerDutyFailures),
+    };
+
     #region Teams
 
     /// <summary>Posts to Teams. Returns null when the post succeeded, or the error text when it did not —
@@ -501,7 +527,7 @@ public class WebhookAlertService
                 _consecutiveTeamsFailures++;
                 _lastTeamsError = error;
 
-                if (_consecutiveTeamsFailures <= 3)
+                if (_consecutiveTeamsFailures <= FailingChannelThreshold)
                     _logger.LogError($"TEAMS WEBHOOK FAILED ({_consecutiveTeamsFailures}x): {error}");
                 else if (_consecutiveTeamsFailures % 50 == 0)
                     _logger.LogError($"TEAMS WEBHOOK STILL FAILING: {_consecutiveTeamsFailures} failures. Last: {error}");
@@ -809,7 +835,7 @@ public class WebhookAlertService
                 _consecutiveSlackFailures++;
                 _lastSlackError = error;
 
-                if (_consecutiveSlackFailures <= 3)
+                if (_consecutiveSlackFailures <= FailingChannelThreshold)
                     _logger.LogError($"SLACK WEBHOOK FAILED ({_consecutiveSlackFailures}x): {error}");
                 else if (_consecutiveSlackFailures % 50 == 0)
                     _logger.LogError($"SLACK WEBHOOK STILL FAILING: {_consecutiveSlackFailures} failures. Last: {error}");
@@ -1851,7 +1877,7 @@ public class WebhookAlertService
         _consecutiveGenericFailures++;
         _lastGenericError = error;
 
-        if (_consecutiveGenericFailures <= 3)
+        if (_consecutiveGenericFailures <= FailingChannelThreshold)
             _logger.LogError($"GENERIC WEBHOOK FAILED ({_consecutiveGenericFailures}x): {error}");
         else if (_consecutiveGenericFailures % 50 == 0)
             _logger.LogError($"GENERIC WEBHOOK STILL FAILING: {_consecutiveGenericFailures} failures. Last: {error}");
@@ -2323,7 +2349,7 @@ public class WebhookAlertService
                 _consecutivePagerDutyFailures++;
                 _lastPagerDutyError = error;
 
-                if (_consecutivePagerDutyFailures <= 3)
+                if (_consecutivePagerDutyFailures <= FailingChannelThreshold)
                     _logger.LogError($"PAGERDUTY WEBHOOK FAILED ({_consecutivePagerDutyFailures}x): {error}");
                 else if (_consecutivePagerDutyFailures % 50 == 0)
                     _logger.LogError($"PAGERDUTY WEBHOOK STILL FAILING: {_consecutivePagerDutyFailures} failures. Last: {error}");
