@@ -143,6 +143,24 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         }
     }
 
+    /* One reader of a preserved config table, the way ReadTheView reads: under the read lock. */
+    private static (long Count, string? Error) ReadTheDismissedAlerts(DuckDbInitializer initializer)
+    {
+        try
+        {
+            using var readLock = initializer.AcquireReadLock();
+            using var connection = initializer.CreateConnection();
+            connection.Open();
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM dismissed_archive_alerts";
+            return (Convert.ToInt64(cmd.ExecuteScalar()), null);
+        }
+        catch (Exception ex)
+        {
+            return (-1, ex.Message);
+        }
+    }
+
     /* Whether a reader can take the read lock within the wait, asked from a thread of its own. Not
        Task.Run(...).GetResult(): a pool thread that waits on a task it just queued can run it inline, and the
        thread that holds the write lock is always let past it. */
@@ -547,6 +565,70 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         var (finalCount, finalError) = ReadTheView(initializer);
         Assert.Null(finalError);
         Assert.Equal(TotalRows, finalCount);
+    }
+
+    /// <summary>
+    /// The reset puts the preserved config rows (the mute rules and the dismissed archive alerts) back into the
+    /// tables it just cleared, and a reader between the clearing and the restore finds them empty (#4824): the
+    /// restore ran under a write lock of its own, taken after the reset's lock was released. The restore now
+    /// shares the reset's lock, so at the moment after the reset it is held, a reader on another thread cannot
+    /// take the read lock, and a reader started there is parked until the rows are back and counts both.
+    ///
+    /// <para>The check is made from the seam between the reset and the restore, on the thread that runs them,
+    /// so it does not depend on how fast a competing reader is: it fails whenever the lock is not held there.
+    /// The restore's own log line is checked as well, so a restore moved out of every lock fails too.</para>
+    /// </summary>
+    [Fact]
+    public async Task AResetsRestoreOfThePreservedSettings_SharesTheResetsWriteLock_SoNoReaderSeesThemEmpty()
+    {
+        var log = new CapturingLogger();
+        var (initializer, service) = await SetUpAsync(log);
+        await ExecAsync(@"
+INSERT INTO dismissed_archive_alerts (alert_time, server_id, metric_name)
+VALUES (TIMESTAMP '2026-09-01 00:00:00', 1, 'cpu'), (TIMESTAMP '2026-09-01 00:05:00', 1, 'memory')");
+
+        var heldAfterReset = new List<bool>();
+        var readerGotInAfterReset = new List<bool>();
+        Task<(long Count, string? Error)>? reader = null;
+        service.AfterDatabaseResetForTests = () =>
+        {
+            heldAfterReset.Add(DuckDbInitializer.IsWriteLockHeldForTests);
+            readerGotInAfterReset.Add(ReaderGetsIn(initializer, TimeSpan.FromMilliseconds(150)));
+
+            /* Not disposed here: the parked reader still signals it after this wait times out. */
+            var done = new ManualResetEventSlim();
+            reader = Task.Run(() =>
+            {
+                try { return ReadTheDismissedAlerts(initializer); }
+                finally { done.Set(); }
+            });
+
+            /* With the lock held the reader is parked behind it for the whole wait. Without it the reader is
+               through in milliseconds and has counted the table the reset just emptied. */
+            done.Wait(TimeSpan.FromMilliseconds(500));
+        };
+
+        await service.ArchiveAllAndResetAsync();
+
+        Assert.Single(heldAfterReset);
+        Assert.True(heldAfterReset[0], "the write lock was released between the reset and the restore of the preserved settings");
+        Assert.False(readerGotInAfterReset[0], "a reader was let in between the reset and the restore of the preserved settings");
+
+        var restores = log.Entries
+            .Select((entry, index) => (entry.Message, Held: log.WriteLockHeldAtEntry[index]))
+            .Where(entry => entry.Message.Contains("Restored rows to", StringComparison.Ordinal))
+            .ToList();
+        Assert.NotEmpty(restores);
+        Assert.All(restores, restore => Assert.True(restore.Held, "the preserved settings were restored without the write lock"));
+
+        Assert.NotNull(reader);
+        var (count, error) = await reader;
+        Assert.Null(error);
+        Assert.Equal(2, count);
+
+        var (finalCount, finalError) = ReadTheDismissedAlerts(initializer);
+        Assert.Null(finalError);
+        Assert.Equal(2, finalCount);
     }
 
     /// <summary>

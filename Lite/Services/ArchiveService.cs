@@ -47,6 +47,10 @@ public class ArchiveService
     internal Action<IReadOnlyList<string>>? OnCompactionTempsReadyForTests { get; set; }
     internal Action<string>? BeforeTableExportForTests { get; set; }
     internal Action? BeforeDatabaseResetForTests { get; set; }
+
+    /* Fires after the reset has cleared the tables and before the preserved config rows are put back (#4824): the
+       moment a reader would find those tables empty. */
+    internal Action? AfterDatabaseResetForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
     /* Stand in for a process kill at the two points of the periodic export where one matters (#4720): the first
@@ -1472,6 +1476,7 @@ COPY (
 
             /* Restore preserved config rows into the freshly initialized tables. */
             var allRestoresSucceeded = true;
+            AfterDatabaseResetForTests?.Invoke();
             if (preservedFiles.Count > 0)
             {
                 using (_duckDb.AcquireWriteLock())
