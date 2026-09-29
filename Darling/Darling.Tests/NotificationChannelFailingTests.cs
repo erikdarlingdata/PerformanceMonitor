@@ -51,13 +51,16 @@ public sealed class NotificationChannelFailingTests
             [NotificationRouter.PagerDutyChannel] = 0,
         };
 
+        /// <summary>Channels the seam reports with no destination left (#4750): disabled, or their URL removed.</summary>
+        public HashSet<string> Unconfigured { get; } = new(StringComparer.Ordinal);
+
         public DateTime Now { get; set; } = new(2026, 9, 29, 12, 0, 0, DateTimeKind.Utc);
 
         public DarlingSelfAlertEvaluator Build(bool wireSeam = true) => new(
             Settings, Deliverer, History, _ => false,
             utcNow: () => Now,
             webhookChannelFailures: wireSeam
-                ? () => Counts.Select(kv => new WebhookChannelFailureCount(kv.Key, kv.Value)).ToArray()
+                ? () => Counts.Select(kv => new WebhookChannelFailureCount(kv.Key, kv.Value, !Unconfigured.Contains(kv.Key))).ToArray()
                 : null);
     }
 
@@ -238,6 +241,217 @@ public sealed class NotificationChannelFailingTests
         Assert.Empty(rig.Deliverer.Outcomes);
     }
 
+    private const string TurnedOffTail = ": the Slack webhook channel was turned off (no destination is configured for it)";
+
+    private static int s_serverSequence;
+
+    /// <summary>Fails the Slack channel <paramref name="times"/> times against the endpoint the settings name.
+    /// Every post is from a distinct server, so no per-server cooldown can stand between a failing channel and
+    /// its next post.</summary>
+    private static async Task FailSlackAsync(WebhookAlertService webhooks, int times)
+    {
+        for (var i = 0; i < times; i++)
+        {
+            var server = "SQL" + Interlocked.Increment(ref s_serverSequence);
+            var sent = await webhooks.TrySendWebhookAlertsAsync("High CPU", server, "97%", "90%");
+            Assert.Equal(AlertChannelOutcome.Failed, sent.Outcome);
+        }
+    }
+
+    /// <summary>A real webhook service and an evaluator reading its counts, with a Slack endpoint that fails.
+    /// The settings are the test's to change, which is how an operator turns a channel off.</summary>
+    private sealed class LiveRig : IDisposable
+    {
+        private readonly CapturingWebhookEndpoint _slack = new(statusCode: 500);
+
+        public LiveRig(bool slackViaParentSettings = true)
+        {
+            Slack = new FakeSlackSettings
+            {
+                SlackWebhookEnabled = slackViaParentSettings,
+                SlackWebhookUrl = slackViaParentSettings ? _slack.Url : "",
+            };
+            Webhooks = new WebhookAlertService(Slack, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance);
+            Evaluator = new DarlingSelfAlertEvaluator(
+                Rig.Settings, Rig.Deliverer, Rig.History, _ => false,
+                webhookChannelFailures: Webhooks.GetChannelFailureCounts);
+        }
+
+        public Rig Rig { get; } = new();
+        public FakeSlackSettings Slack { get; }
+        public WebhookAlertService Webhooks { get; }
+        public DarlingSelfAlertEvaluator Evaluator { get; }
+        public string SlackUrl => _slack.Url;
+
+        public void Dispose() => _slack.Dispose();
+    }
+
+    private static NotificationRoute SlackRoute(string url, bool enabled) =>
+        new(RouteId: 1, MetricMatch: "High CPU", TeamsUrl: "", SlackUrl: url, GenericUrl: "", PagerDutyRoutingKey: "",
+            SmtpRecipients: "", Enabled: enabled);
+
+    /// <summary>
+    /// Turning a failing channel off is the expected response to the alert, so it has to close it. A channel
+    /// with no destination can neither fail nor deliver, so its count used to sit at the last value until the
+    /// process restarted and the alert stayed open. Here the operator removes the URL.
+    /// </summary>
+    [Fact]
+    public async Task AFailingChannelWhoseUrlIsRemoved_ResolvesAsTurnedOff_WithTheTurnedOffText()
+    {
+        using var live = new LiveRig();
+        await FailSlackAsync(live.Webhooks, 3);
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Equal(FailingName, Assert.Single(live.Rig.Deliverer.Outcomes).MetricName);
+
+        live.Slack.SlackWebhookUrl = "";
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+
+        var resolved = Assert.Single(live.Rig.History.Records);
+        Assert.Equal(RecoveredName, resolved.MetricName);
+        Assert.EndsWith(TurnedOffTail, resolved.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("delivering again", resolved.DetailText, StringComparison.Ordinal);
+        Assert.Contains("Slack", resolved.ServerId, StringComparison.Ordinal);
+
+        /* Once: the next look finds a channel with no destination and a count of 0, and says nothing. */
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.History.Records);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task AFailingChannelThatIsDisabled_ResolvesTheSameWay()
+    {
+        using var live = new LiveRig();
+        await FailSlackAsync(live.Webhooks, 4);
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+
+        live.Slack.SlackWebhookEnabled = false;
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+
+        var resolved = Assert.Single(live.Rig.History.Records);
+        Assert.Equal(RecoveredName, resolved.MetricName);
+        Assert.EndsWith(TurnedOffTail, resolved.DetailText, StringComparison.Ordinal);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+    }
+
+    /// <summary>The two resolutions say which of the two happened, never a combined phrase.</summary>
+    [Fact]
+    public async Task AChannelThatDeliversAgain_ResolvesWithTheDeliveredText_NotTheTurnedOffText()
+    {
+        var rig = new Rig();
+        rig.Counts[NotificationRouter.SlackChannel] = 3;
+        var e = rig.Build();
+        await e.ApplyNotificationChannelsAsync(Ct);
+
+        rig.Counts[NotificationRouter.SlackChannel] = 0;
+        await e.ApplyNotificationChannelsAsync(Ct);
+
+        var resolved = Assert.Single(rig.History.Records);
+        Assert.Equal(RecoveredName, resolved.MetricName);
+        Assert.EndsWith(": the Slack webhook channel is delivering again (failures in a row back to 0)", resolved.DetailText, StringComparison.Ordinal);
+        Assert.DoesNotContain("turned off", resolved.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>A channel with no destination never raises the alert, however high its count: there is
+    /// nothing for it to have failed at.</summary>
+    [Fact]
+    public async Task AChannelWithNoDestination_NeverRaisesFailing_HoweverHighItsCount()
+    {
+        var rig = new Rig();
+        rig.Unconfigured.Add(NotificationRouter.SlackChannel);
+        rig.Counts[NotificationRouter.SlackChannel] = 40;
+        var e = rig.Build();
+
+        await e.ApplyNotificationChannelsAsync(Ct);
+        await e.ApplyNotificationChannelsAsync(Ct);
+
+        Assert.Empty(rig.Deliverer.Outcomes);
+        Assert.Empty(rig.History.Records);
+    }
+
+    /// <summary>The count reset is what keeps a channel the operator turns back on from raising Failing at
+    /// once on the count it had when it was turned off.</summary>
+    [Fact]
+    public async Task AChannelTurnedBackOn_StartsFromZero_NoFailingUntilThreeNewFailures()
+    {
+        using var live = new LiveRig();
+        await FailSlackAsync(live.Webhooks, 3);
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+
+        live.Slack.SlackWebhookUrl = "";
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.History.Records);
+        Assert.Equal(0, live.Webhooks.GetSlackHealth().ConsecutiveFailures);
+
+        live.Slack.SlackWebhookUrl = live.SlackUrl;
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+
+        await FailSlackAsync(live.Webhooks, 2);
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+
+        await FailSlackAsync(live.Webhooks, 1);
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Equal(2, live.Rig.Deliverer.Outcomes.Count);
+        Assert.Contains("3 times in a row", live.Rig.Deliverer.Outcomes[1].DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>A route can carry a channel the parent settings do not (an only-pages-page setup), so a channel
+    /// whose parent settings are empty but which an enabled route still carries is not turned off. Disabling
+    /// that route is what turns it off.</summary>
+    [Fact]
+    public async Task AChannelWithEmptyParentSettings_ThatAnEnabledRouteCarries_IsNotTurnedOff()
+    {
+        using var live = new LiveRig(slackViaParentSettings: false);
+        live.Slack.NotificationRoutes = new[] { SlackRoute(live.SlackUrl, enabled: true) };
+        await FailSlackAsync(live.Webhooks, 3);
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Single(live.Rig.Deliverer.Outcomes);
+
+        var slack = live.Webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel);
+        Assert.True(slack.Configured);
+        Assert.Equal(3, slack.ConsecutiveFailures);
+
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+        Assert.Empty(live.Rig.History.Records);
+
+        live.Slack.NotificationRoutes = new[] { SlackRoute(live.SlackUrl, enabled: false) };
+        await live.Evaluator.ApplyNotificationChannelsAsync(Ct);
+
+        var resolved = Assert.Single(live.Rig.History.Records);
+        Assert.EndsWith(TurnedOffTail, resolved.DetailText, StringComparison.Ordinal);
+    }
+
+    /// <summary>The service's own read: a channel with no destination comes back with its current count and
+    /// Configured false, and the count is then reset (with the last error, as a delivery would).</summary>
+    [Fact]
+    public async Task TheWebhookService_ReportsWhichChannelsAreConfigured_AndClearsTheCountOfAnUnconfiguredOne()
+    {
+        using var live = new LiveRig();
+        await FailSlackAsync(live.Webhooks, 2);
+
+        var configured = live.Webhooks.GetChannelFailureCounts().ToDictionary(c => c.Channel);
+        Assert.True(configured[NotificationRouter.SlackChannel].Configured);
+        Assert.Equal(2, configured[NotificationRouter.SlackChannel].ConsecutiveFailures);
+        foreach (var other in new[] { NotificationRouter.TeamsChannel, NotificationRouter.GenericChannel, NotificationRouter.PagerDutyChannel })
+        {
+            Assert.False(configured[other].Configured);
+        }
+
+        live.Slack.SlackWebhookEnabled = false;
+        var first = live.Webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel);
+        Assert.False(first.Configured);
+        Assert.Equal(2, first.ConsecutiveFailures);
+
+        var second = live.Webhooks.GetChannelFailureCounts().Single(c => c.Channel == NotificationRouter.SlackChannel);
+        Assert.False(second.Configured);
+        Assert.Equal(0, second.ConsecutiveFailures);
+        Assert.Equal((0, (string?)null), live.Webhooks.GetSlackHealth());
+    }
+
     /// <summary>
     /// The URL rule, end to end. A real <see cref="WebhookAlertService"/> fails three Slack posts against an
     /// endpoint that answers 500 and echoes a webhook URL in its body, which is exactly what lands in the
@@ -372,8 +586,8 @@ public sealed class NotificationChannelFailingTests
         public bool TeamsWebhookEnabled => false;
         public string TeamsWebhookUrl => "";
         public string TeamsProxyAddress => "";
-        public bool SlackWebhookEnabled => !string.IsNullOrWhiteSpace(SlackWebhookUrl);
-        public string SlackWebhookUrl { get; init; } = "";
+        public bool SlackWebhookEnabled { get; set; } = true;
+        public string SlackWebhookUrl { get; set; } = "";
         public string SlackProxyAddress => "";
         public bool GenericWebhookEnabled => false;
         public string GenericWebhookUrl => "";
@@ -388,5 +602,6 @@ public sealed class NotificationChannelFailingTests
         public int AnalysisNotifyCooldownMinutes => 360;
         public int AnalysisPageCap => 5;
         public string TriageBaseUrl => "";
+        public IReadOnlyList<NotificationRoute> NotificationRoutes { get; set; } = Array.Empty<NotificationRoute>();
     }
 }
