@@ -3219,8 +3219,9 @@ public sealed class AlertEngine
     ///
     /// <para>Returns what the channels did (#4752): the deliverer's <see cref="IAlertDeliverer.DeliverAndReportAsync"/>
     /// answer, so a family can tell "every channel failed" from "delivered" and retry the first
-    /// (<see cref="AfterFire"/>). Delivery itself is unchanged. <c>null</c> — Lite's deliverer, a per-event
-    /// split, a throw outside the channels — is "unreported" and reads as delivered.</para>
+    /// (<see cref="AfterFire"/>). Delivery itself is unchanged. A per-event split reports the one delivery
+    /// <see cref="FailedSendBackoff.ReportForSplit"/> picks (#4822). <c>null</c> — a split in which no send was
+    /// attempted, a throw outside the channels — is "unreported" and reads as delivered.</para>
     /// </summary>
     private async Task<AlertDelivery?> FireAsync(AlertOutcome outcome, CancellationToken ct)
     {

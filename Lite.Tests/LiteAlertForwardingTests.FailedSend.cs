@@ -204,17 +204,34 @@ public partial class LiteAlertForwardingTests
     }
 
     [Fact]
-    public async Task Deliverer_DeliverAndReportAsync_ReportsNothing_ForAPerEventSplit()
+    public async Task Deliverer_DeliverAndReportAsync_PerEventSplit_EverySendFailed_ReportsAFailedDelivery()
     {
-        /* N sends, N rows: no single delivery describes them, so the answer is "unreported" (null), which the
-           engine reads as delivered. Darling's deliverer answers the same way. */
+        /* N sends, N rows. When none of them reached a channel the split answers a failed delivery (#4822), so
+           the engine tries the alert again in a minute. It answered null before, which reads as delivered. */
         App.AlertDeliveryMode = AlertNotificationMode.PerEvent;
         var (deliverer, _, sends) = BuildReportingDeliverer(FailedByEmail);
 
         var delivery = await deliverer.DeliverAndReportAsync(Outcome("Blocking Detected", context: TwoBlockedIncidents()));
 
-        Assert.Null(delivery);
-        Assert.True(sends.Count >= 2, "the per-event road sends once per incident");
+        Assert.Equal(2, sends.Count);
+        Assert.True(FailedSendBackoff.EveryChannelFailed(delivery));
+    }
+
+    [Fact]
+    public async Task Deliverer_DeliverAndReportAsync_PerEventSplit_OneSendDelivered_ReportsItDelivered()
+    {
+        /* One incident's send failed and the other's reached the webhook. A retry would page the alert a second
+           time down the channel that worked, so the split answers the delivery. */
+        App.AlertDeliveryMode = AlertNotificationMode.PerEvent;
+        var answers = new Queue<AlertDelivery?>(new[] { FailedByEmail(), DeliveredByWebhook() });
+        var (deliverer, _, sends) = BuildReportingDeliverer(answers.Dequeue);
+
+        var delivery = await deliverer.DeliverAndReportAsync(Outcome("Blocking Detected", context: TwoBlockedIncidents()));
+
+        Assert.Equal(2, sends.Count);
+        Assert.NotNull(delivery);
+        Assert.True(delivery!.Sent);
+        Assert.False(FailedSendBackoff.EveryChannelFailed(delivery));
     }
 
     [Fact]

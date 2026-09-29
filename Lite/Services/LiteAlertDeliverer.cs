@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
@@ -138,10 +139,11 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     /// channel failed" (<see cref="FailedSendBackoff.EveryChannelFailed"/>) from a delivery and try the failed
     /// alert again sooner than its cooldown. With no email or webhook configured that delivery is the tray
     /// toast's, and a muted alert attempts nothing: neither is a failure, and neither is retried. On a Per-event
-    /// split there are N sends and N rows and no single delivery describes them, so the answer is <c>null</c>,
-    /// as Darling's deliverer answers it. <c>null</c> is "unreported", never "failed": the engine reads it as
-    /// delivered, and it is also the answer when the send threw anything but the caller's cancel, or could not
-    /// say what it did.</para>
+    /// split there are N sends and N rows, and the answer is the one <see cref="FailedSendBackoff.ReportForSplit"/>
+    /// picks (#4822), as Darling's deliverer answers it: a delivery that reached a channel, else a failed one so
+    /// the engine tries the alert again, else <c>null</c> when no send was attempted. <c>null</c> is
+    /// "unreported", never "failed": the engine reads it as delivered, and it is also the answer when the send
+    /// threw anything but the caller's cancel, or could not say what it did.</para>
     ///
     /// <para>The caller's own cancel leaves as the <see cref="OperationCanceledException"/> it is, before any
     /// history row is written (see <see cref="EmailAlertService.TrySendAlertEmailAsync"/>).</para>
@@ -229,19 +231,20 @@ public sealed class LiteAlertDeliverer : IAlertDeliverer
     {
         if (deliveryMode == AlertNotificationMode.PerEvent && context?.Incidents is { Count: > 0 })
         {
+            var deliveries = new List<AlertDelivery?>();
             foreach (var msg in PerEventNotification.Split(context, App.AlertPerEventMaxPerCycle))
             {
                 /* Each per-event row stores its OWN numeric (#1830): the overflow message's
                    "+N more incident(s)" text is unparseable, and the history store's text fallback
                    silently recorded 0 for it. The threshold is the outcome's, unchanged. */
-                await _sendAlert(
+                deliveries.Add(await _sendAlert(
                     metricName, serverName, msg.CurrentValue, thresholdValue, serverId,
                     msg.Context, msg.NumericValue, numericThresholdValue, isMuted,
-                    AlertContextBuilders.ContextToDetailText(msg.Context), deliveryMode, cancellationToken);
+                    AlertContextBuilders.ContextToDetailText(msg.Context), deliveryMode, cancellationToken));
             }
 
-            /* N sends, N rows: no single delivery describes them (#4752), so the split reports nothing. */
-            return null;
+            /* N sends, N rows: the split reports the one delivery the engine acts on (#4822). */
+            return FailedSendBackoff.ReportForSplit(deliveries);
         }
 
         return await _sendAlert(
