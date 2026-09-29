@@ -71,6 +71,10 @@ public static partial class PgTargetAdvice
         var syncState = PgTargetScorer.SyncStateName(m.GetValueOrDefault(PgTargetScorer.LagSyncStateKey, PgTargetScorer.SyncStateUnknown));
         var synchronous = syncState is "sync" or "quorum";
         var streaming = m.GetValueOrDefault(PgTargetScorer.LagStandbyStreamingKey) >= 1;
+        /* #4759: a standby whose last row is well before the window's end has left (removed, replaced, or back from a new
+           address). Every "latest" figure on the fact is then the state it was last seen in, so the words are past tense. */
+        var gone = m.GetValueOrDefault(PgTargetScorer.LagStandbyGoneKey) >= 1;
+        var sinceLastSeen = FmtHours(m.GetValueOrDefault(PgTargetScorer.LagMinutesSinceLastSeenKey) / 60.0);
         var drifting = m.GetValueOrDefault(PgTargetScorer.LagDriftingKey) >= 1;
         var driftComputable = m.GetValueOrDefault(PgTargetScorer.LagDriftComputableKey) >= 1;
         var firstHalf = m.GetValueOrDefault(PgTargetScorer.LagFirstHalfMeanBytesKey);
@@ -88,14 +92,26 @@ public static partial class PgTargetAdvice
            fact at severity 0 by design (lane 15), so reading it here never produced the sentence. */
         var walShift = facts.TryGetValue(PgTargetFactKeys.AnomalyWalVolume, out var ws) && ws.Severity > 0;
 
-        var shape = drifting ? "DRIFTING — falling further behind through the window" : "steady — pacing behind at a distance";
+        var shape = gone
+            ? (drifting ? "it was DRIFTING — falling further behind before it left" : "it was steady — pacing behind at a distance")
+            : (drifting ? "DRIFTING — falling further behind through the window" : "steady — pacing behind at a distance");
         var headline = f.Severity > 0
             ? $"{standby} peaked {FmtBytes(peak)} behind the primary at {stage}, {shape}"
-            : $"{standby} is {FmtBytes(latest)} behind the primary at {stage} — {shape}; context, not a finding";
+            : gone
+                ? $"{standby} was {FmtBytes(latest)} behind the primary at {stage} when last seen {sinceLastSeen} before the window ended — {shape}; context, not a finding"
+                : $"{standby} is {FmtBytes(latest)} behind the primary at {stage} — {shape}; context, not a finding";
 
         var inv = new StringBuilder();
-        inv.Append($"Worst of {standbys:0} standby(s) in the window: {standby}, state {(streaming ? "streaming" : "not streaming")}, sync_state {syncState}. ");
-        inv.Append($"Window peak replay gap {FmtBytes(peak)}, latest {FmtBytes(latest)}; the stage furthest behind at the latest sample is {stage} ({FmtBytes(stageBytes)} opened there). ");
+        if (gone)
+        {
+            inv.Append($"Worst of {standbys:0} standby(s) in the window: {standby}, which stopped reporting and was last seen {sinceLastSeen} before the window ended; when last seen its state was {(streaming ? "streaming" : "not streaming")}, sync_state {syncState}. ");
+            inv.Append($"Window peak replay gap {FmtBytes(peak)}, {FmtBytes(latest)} when last seen; the stage furthest behind at that last sample was {stage} ({FmtBytes(stageBytes)} opened there). ");
+        }
+        else
+        {
+            inv.Append($"Worst of {standbys:0} standby(s) in the window: {standby}, state {(streaming ? "streaming" : "not streaming")}, sync_state {syncState}. ");
+            inv.Append($"Window peak replay gap {FmtBytes(peak)}, latest {FmtBytes(latest)}; the stage furthest behind at the latest sample is {stage} ({FmtBytes(stageBytes)} opened there). ");
+        }
         inv.Append(driftComputable
             ? $"First-half mean {FmtBytes(firstHalf)} → second-half mean {FmtBytes(secondHalf)} over a {FmtHours(spanHours)} span: {(drifting ? "more than the drift multiple — the standby is falling behind" : "within the drift multiple — steady")}. "
             : "The drift could not be judged: the window held samples on one side of its midpoint only (one collection, or a standby that connected mid-window). ");
@@ -106,7 +122,9 @@ public static partial class PgTargetAdvice
         if (overBar)
             inv.Append($"The peak is past the slot alert's bar ({FmtBytes(PostgresOutagePredictorThresholds.SlotRetainedWalWarningBytes)}) — unreplayed WAL on the standby is WAL a slotted primary must retain. ");
         if (synchronous)
-            inv.Append("This standby is SYNCHRONOUS: every commit on the primary waits for it, so its lag is the primary's commit latency. ");
+            inv.Append(gone
+                ? "This standby was SYNCHRONOUS when last seen; it has stopped reporting, so it is not holding commits back now. "
+                : "This standby is SYNCHRONOUS: every commit on the primary waits for it, so its lag is the primary's commit latency. ");
         if (slotsObserved <= 0)
             inv.Append("No slot state was observed in this window — either the standby runs without a replication slot (the primary may recycle WAL it still needs: wal_keep_size is then its only protection) or the slot collector did not run; the slot facts are absent, not clear. ");
         if (slot)
@@ -117,17 +135,22 @@ public static partial class PgTargetAdvice
             inv.Append("ANOMALY_PG_WAL_VOLUME co-fired: the primary is writing more WAL than its own hour-of-week baseline — more is being offered than the standby can apply. ");
 
         var rem = new StringBuilder();
-        rem.Append(stage switch
+        if (gone)
+            rem.Append($"This standby stopped reporting {sinceLastSeen} before the window ended (removed, replaced, or reconnected from a new address), so its figures are the state it was last seen in, not a current fault; when last seen its gap opened at {stage.ToUpperInvariant()}. If it was removed on purpose, drop its replication slot (if any) so the primary stops retaining WAL for it; if it should still be running, find out why it disconnected. ");
+        else
         {
-            "replay" => "The gap opens at REPLAY: the standby has the WAL and cannot apply it fast enough. Recovery is single-threaded, so look first for a long query on the standby holding replay (pg_stat_activity there; max_standby_streaming_delay decides whether replay waits or the query is cancelled — the counter-objective is cancelled replica queries), then at the standby's own I/O (a smaller instance than the primary cannot replay what the primary writes). ",
-            "flush" or "write" => $"The gap opens at {stage.ToUpperInvariant()}: the standby received the WAL and its disk is not keeping up. The standby's storage is the bottleneck, not the network; the counter-objective of faster storage is cost. ",
-            _ => "The gap opens at SENT: the WAL has not left the primary. Check the network between the two and the wal_sender process on the primary (pg_stat_replication.state, and whether the sender is throttled by a synchronous standby elsewhere). ",
-        });
-        if (synchronous)
-            rem.Append("Because the standby is synchronous, the primary's commits are waiting on it now; moving it to async (synchronous_standby_names) restores commit latency at the cost of possible data loss on failover — that is the trade, stated. ");
-        rem.Append(drifting
-            ? "Drifting means the standby is not merely behind but losing ground: if the trend continues its slot (if any) retains WAL without bound and a failover loses more each hour. "
-            : "Steady means the standby is pacing at a distance; a large steady distance is failover exposure of that many bytes, not an active failure. ");
+            rem.Append(stage switch
+            {
+                "replay" => "The gap opens at REPLAY: the standby has the WAL and cannot apply it fast enough. Recovery is single-threaded, so look first for a long query on the standby holding replay (pg_stat_activity there; max_standby_streaming_delay decides whether replay waits or the query is cancelled — the counter-objective is cancelled replica queries), then at the standby's own I/O (a smaller instance than the primary cannot replay what the primary writes). ",
+                "flush" or "write" => $"The gap opens at {stage.ToUpperInvariant()}: the standby received the WAL and its disk is not keeping up. The standby's storage is the bottleneck, not the network; the counter-objective of faster storage is cost. ",
+                _ => "The gap opens at SENT: the WAL has not left the primary. Check the network between the two and the wal_sender process on the primary (pg_stat_replication.state, and whether the sender is throttled by a synchronous standby elsewhere). ",
+            });
+            if (synchronous)
+                rem.Append("Because the standby is synchronous, the primary's commits are waiting on it now; moving it to async (synchronous_standby_names) restores commit latency at the cost of possible data loss on failover — that is the trade, stated. ");
+            rem.Append(drifting
+                ? "Drifting means the standby is not merely behind but losing ground: if the trend continues its slot (if any) retains WAL without bound and a failover loses more each hour. "
+                : "Steady means the standby is pacing at a distance; a large steady distance is failover exposure of that many bytes, not an active failure. ");
+        }
         rem.Append("Verify with get_pg_replication_stats (per-standby stages and the worst-in-window values) and get_pg_replication_slots (what the primary retains for it).");
 
         return new AdviceBlock(headline, inv.ToString().TrimEnd(), rem.ToString().TrimEnd());

@@ -92,6 +92,13 @@ public static partial class PgTargetScorer
     /// so the lag advice can say "no slot state was observed" (0: a standby without a slot, or the slot collector
     /// not running) rather than leave the absence of the slot facts ambiguous.</summary>
     public const string LagSlotsObservedKey = "slots_observed_in_window";
+    /// <summary>Metadata key (#4759): 1 when the fact's standby was GONE by the window's end — its last row older than
+    /// twice the replication table's cadence before it (the collector's read decides) — so its state, latest gap and
+    /// sync weighting describe the past, not now; 0 for a standby still reporting.</summary>
+    public const string LagStandbyGoneKey = "standby_gone";
+    /// <summary>Metadata key (#4759): minutes from the fact's standby's LAST row to the window's end — the age of every
+    /// "latest" figure on the fact (<see cref="XminMinutesSinceLastHolderKey"/> is the same measure for the holder).</summary>
+    public const string LagMinutesSinceLastSeenKey = "minutes_since_last_seen";
 
     /// <summary><see cref="LagStageKey"/> codes: the four stages <c>pg_stat_replication</c> reports, in pipeline order.</summary>
     public const int LagStageSent = 0;
@@ -440,7 +447,9 @@ public static partial class PgTargetScorer
             Description = "The standby is SYNCHRONOUS (sync_state sync or quorum) — its lag is commit latency on the primary, not only staleness on the replica",
             /* unmeasured: chosen, not measured — calibrate against the dogfood PostgreSQL fleet before the next release. */
             Boost = 0.3,
+            /* #4759: a standby that already left holds no commit back, so its old sync_state adds nothing. */
             Predicate = facts => facts.TryGetValue(PgTargetFactKeys.ReplicationLag, out var f)
+                && f.Metadata.GetValueOrDefault(LagStandbyGoneKey) < 1
                 && f.Metadata.GetValueOrDefault(LagSyncStateKey, SyncStateUnknown) is SyncStateSync or SyncStateQuorum,
         },
         new()

@@ -35,6 +35,13 @@ public sealed partial class PgTargetFactCollector
     /// <item><description><b>Own coverage</b>: <c>collections_in_window</c> (distinct collection times) and the
     /// standby's own <c>samples</c>, because the replication collector runs every five minutes and the fact must
     /// state its own sample count rather than borrow the one-minute coverage fraction.</description></item>
+    /// <item><description><b>Last seen (#4759)</b>: each standby's own first and last row ride out, and
+    /// <c>standby_gone</c> says its last row is older than twice the table's effective cadence in the window —
+    /// (last capture − first capture) / (collections − 1), floored at two minutes — measured back from the WINDOW's
+    /// end (<c>$3</c>), never from the table's last capture (when the only standby is the one that left, that capture
+    /// is its own row) and never from a clock. A window with one collection has no cadence, so nobody is called
+    /// gone in it. Live standbys rank ahead of gone ones, so a standby that was removed or replaced stops outranking
+    /// the ones still streaming; among the same kind the peak decides, as before.</description></item>
     /// </list>
     /// <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
     /// </summary>
@@ -61,7 +68,9 @@ per_standby AS (
            AVG(b.replay_bytes_behind) FILTER (WHERE b.collection_time >= s.midpoint) AS second_half_mean,
            MAX(b.replay_lag_ms) AS peak_replay_lag_ms,
            COUNT(*) FILTER (WHERE b.replay_lag_ms IS NOT NULL) AS lag_ms_samples,
-           COUNT(*) AS samples
+           COUNT(*) AS samples,
+           MIN(b.collection_time) AS first_seen,
+           MAX(b.collection_time) AS last_seen
     FROM bounded AS b
     CROSS JOIN span AS s
     GROUP BY b.application_name, b.client_addr
@@ -91,13 +100,19 @@ SELECT
     s.collections_in_window,
     s.first_at,
     s.last_at,
-    (SELECT COUNT(*) FROM per_standby) AS standbys_in_window
+    (SELECT COUNT(*) FROM per_standby) AS standbys_in_window,
+    p.first_seen,
+    p.last_seen,
+    CASE WHEN s.collections_in_window > 1
+         THEN $3 - p.last_seen > GREATEST(2 * ((s.last_at - s.first_at) / (s.collections_in_window - 1)), INTERVAL '2 minutes')
+         ELSE FALSE
+    END AS standby_gone
 FROM latest AS l
 JOIN per_standby AS p
   ON  p.application_name IS NOT DISTINCT FROM l.application_name
   AND p.client_addr      IS NOT DISTINCT FROM l.client_addr
 CROSS JOIN span AS s
-ORDER BY p.peak_replay_bytes DESC NULLS LAST, l.application_name
+ORDER BY standby_gone, p.peak_replay_bytes DESC NULLS LAST, l.application_name
 LIMIT 1";
 
     /// <summary>
@@ -239,9 +254,12 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
             var lagMsSamples = reader.IsDBNull(12) ? 0L : ToInt64(reader.GetValue(12));
             var samples = ToInt64(reader.GetValue(13));
             var collections = ToInt64(reader.GetValue(14));
-            var firstAt = reader.GetDateTime(15);
-            var lastAt = reader.GetDateTime(16);
             var standbys = ToInt64(reader.GetValue(17));
+            /* The picked standby's OWN first and last row (#4759): the span the fact reports is its, not the table's, and
+               "gone" is the read's verdict (the last row against the window's end and the table's cadence). */
+            var standbyFirstSeen = reader.GetDateTime(18);
+            var standbyLastSeen = reader.GetDateTime(19);
+            var standbyGone = !reader.IsDBNull(20) && reader.GetBoolean(20);
 
             /* Which stage is furthest behind at the latest sample. The four gaps are cumulative along the pipeline
                (replay ≥ flush ≥ write ≥ sent on a healthy standby), so "the stage behind" is the FIRST stage whose
@@ -278,7 +296,9 @@ ORDER BY l.retained_wal_bytes DESC NULLS LAST, l.slot_name";
                     [PgTargetScorer.LagSamplesKey] = samples,
                     [PgTargetScorer.LagCollectionsKey] = collections,
                     [PgTargetScorer.LagStandbysKey] = standbys,
-                    [PgTargetScorer.LagSpanHoursKey] = (lastAt - firstAt).TotalHours,
+                    [PgTargetScorer.LagSpanHoursKey] = (standbyLastSeen - standbyFirstSeen).TotalHours,
+                    [PgTargetScorer.LagStandbyGoneKey] = standbyGone ? 1 : 0,
+                    [PgTargetScorer.LagMinutesSinceLastSeenKey] = (AsNaive(context.TimeRangeEnd) - standbyLastSeen).TotalMinutes,
                 },
             };
 
