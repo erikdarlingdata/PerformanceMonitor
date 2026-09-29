@@ -305,11 +305,12 @@ if (args.Length > 0 && (DarlingCliCommands.IsEnableCollectorVerb(args[0]) || Dar
 
 /* CLI verb: --drop-xe-sessions <server-name> [--dry-run] [--config <path>] | --print-sql (#4732) — drop the Extended
    Events sessions (the deadlock and blocked-process ring buffers, and the opt-in long-query completions one)
-   Darling created on a server that is no longer monitored. The service never drops them when a server is removed: the names are shared with Lite and any other
+   Darling created on a server this service still monitors (run just before the server is removed; after removal,
+   --print-sql). The service never drops them when a server is removed: the names are shared with Lite and any other
    Darling service that monitors the server, and a server the service cannot reach cannot be cleaned by it, so this is
    the operator's explicit act. The server is resolved from the configuration exactly as --validate-config resolves it
-   and reached through the same connector; credentials come only from the configuration. --print-sql prints guarded
-   DROP statements for a server that is no longer configured and connects to nothing. Same platform posture as
+   and reached through the same connector; credentials come only from the configuration. --print-sql prints guarded DROP
+   statements for a server that is no longer configured and connects to nothing. Same platform posture as
    --enable-collector above: NO Windows guard, because Windows is needed only for a MANAGED store credential or an
    encrypted SQL password (DPAPI), which the paths that read them check themselves. The trailing arguments are parsed
    STRICTLY inside the verb (never guess — #1581's posture), so the grammar pins as a unit. */

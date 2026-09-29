@@ -168,9 +168,10 @@ public static class DarlingCliCommands
         string.Equals(arg, "--disable-collector", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The verb <see cref="DropXeSessionsAsync(string[], TextWriter, TextWriter, CancellationToken)"/> handles — drop the
-    /// Extended Events sessions Darling left on a server that is no longer monitored, or with <c>--print-sql</c> print the
-    /// guarded DROP statements for a server that is no longer configured (#4732). The service never drops them when a server is
-    /// removed: the names are shared with Lite and any other Darling service, and an unreachable server cannot be cleaned.</summary>
+    /// Extended Events sessions Darling created on a server this service still monitors (run it just before the server is
+    /// removed), or with <c>--print-sql</c> print the guarded DROP statements for a server that is no longer configured (#4732).
+    /// The service never drops them when a server is removed: the names are shared with Lite and any other Darling service, and
+    /// an unreachable server cannot be cleaned.</summary>
     public static bool IsDropXeSessionsVerb(string arg) =>
         string.Equals(arg, "--drop-xe-sessions", StringComparison.OrdinalIgnoreCase);
 
@@ -292,7 +293,7 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling left on a server that is no longer monitored (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist; the service never drops them when a server is removed); --dry-run lists them and drops nothing." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling created on a server this service still monitors (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist; run it just before you remove the server, because the service never drops them then); --dry-run lists them and drops nothing." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
@@ -5902,6 +5903,7 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         "      Connect to the named server (resolved from the configuration exactly as --validate-config resolves it) and drop the" + Environment.NewLine +
         $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, server scope, and on" + Environment.NewLine +
         "      Azure SQL Database the database-scoped copies in each monitored database. --dry-run lists them and drops nothing." + Environment.NewLine +
+        "      Run it just before you remove the server (it finds only a server this service still monitors, and stops that server's deadlock and blocked-process capture until this service reconnects); after the removal, use --print-sql." + Environment.NewLine +
         "  --drop-xe-sessions --print-sql" + Environment.NewLine +
         "      Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
         "Credentials come only from the configuration, never from arguments.";
@@ -6019,8 +6021,9 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     }
 
     /// <summary>
-    /// <c>--drop-xe-sessions</c> (#4732): drops the Extended Events sessions Darling left on a server that is no longer
-    /// monitored, or with <c>--print-sql</c> prints the guarded statements to run by hand.
+    /// <c>--drop-xe-sessions</c> (#4732): drops the Extended Events sessions Darling created on a server this service still
+    /// monitors (run it just before the server is removed), or with <c>--print-sql</c> prints the guarded statements to run
+    /// by hand.
     ///
     /// <para><b>Why a verb.</b> The service does not drop these sessions when a server is removed: the names are shared with Lite
     /// and with any other Darling service that monitors the same server, and a server that is unreachable from the service

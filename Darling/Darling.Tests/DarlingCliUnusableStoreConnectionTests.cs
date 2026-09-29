@@ -149,6 +149,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--backfill-rollups")]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
+    [InlineData("--drop-xe-sessions")]
     public async Task ManagedCredentialThatCannotBeRead_ExitsWithOne_InsteadOfThrowing(string verb)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "The managed store credential is DPAPI, so only Windows reads it.");
@@ -193,6 +194,7 @@ public sealed class DarlingCliUnusableStoreConnectionTests
     [InlineData("--backfill-rollups")]
     [InlineData("--enable-collector")]
     [InlineData("--disable-collector")]
+    [InlineData("--drop-xe-sessions")]
     public async Task ManagedCredentialThatDpapiCannotUnprotect_IsDescribedAsDpapi_NotAsARawCryptoError(string verb)
     {
         Assert.SkipUnless(OperatingSystem.IsWindows(), "The managed store credential is DPAPI, so only Windows reads it.");

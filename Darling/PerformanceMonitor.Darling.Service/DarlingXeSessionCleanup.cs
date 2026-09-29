@@ -417,9 +417,70 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
 
     private readonly ServerRuntime _server;
 
-    public SqlServerXeSessionCleanupTarget(ServerRuntime server)
+    private readonly IReadOnlyList<string> _sessionNames;
+
+    /// <param name="server">The connected server.</param>
+    /// <param name="sessionNames">The names to search for and to drop. Every product caller leaves this null, which is
+    /// <see cref="DarlingXeSessionCleanup.SessionNames"/>: the find and drop text is then exactly the constants the plan pins.
+    /// The live test passes a test-only name so the real find and drop run against a real server without ever naming one
+    /// of Darling's own sessions (#4732).</param>
+    public SqlServerXeSessionCleanupTarget(ServerRuntime server, IReadOnlyList<string>? sessionNames = null)
     {
         _server = server ?? throw new ArgumentNullException(nameof(server));
+        _sessionNames = sessionNames ?? DarlingXeSessionCleanup.SessionNames;
+        if (_sessionNames.Count == 0 || _sessionNames.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException("A cleanup target needs at least one session name, and none of them blank.", nameof(sessionNames));
+        }
+    }
+
+    /// <summary>True for every product caller: the target then runs the plan's own constants, not text composed here.</summary>
+    private bool UsesDarlingNames => ReferenceEquals(_sessionNames, DarlingXeSessionCleanup.SessionNames);
+
+    internal string FindServerSql => UsesDarlingNames
+        ? DarlingXeSessionCleanup.FindServerSessionsSql
+        : FindSql("sys.server_event_sessions", "ses", _sessionNames);
+
+    internal string FindDatabaseSql => UsesDarlingNames
+        ? DarlingXeSessionCleanup.FindDatabaseSessionsSql
+        : FindSql("sys.database_event_sessions", "des", _sessionNames);
+
+    /// <summary>The find query for <paramref name="names"/>, shaped as <see cref="DarlingXeSessionCleanup.FindServerSessionsSql"/>
+    /// is. Only a target given names of its own composes it; the names are the caller's constants, never input, and quotes in
+    /// them are doubled all the same.</summary>
+    private static string FindSql(string catalogView, string alias, IReadOnlyList<string> names)
+    {
+        var literals = string.Join(", ", names.Select(n => "N'" + n.Replace("'", "''", StringComparison.Ordinal) + "'"));
+        return $@"
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+SELECT /* PerformanceMonitorDarling */
+    {alias}.name
+FROM {catalogView} AS {alias}
+WHERE {alias}.name IN ({literals});";
+    }
+
+    /// <summary>The DROP for one found session. Darling's own names take the statement the plan built. A name given to the
+    /// constructor takes the same shape, and only when it is one of the names this target was given, spelled exactly.</summary>
+    private string StatementFor(XeSessionDrop drop)
+    {
+        if (UsesDarlingNames)
+        {
+            return drop.Statement;
+        }
+
+        var session = drop.Session;
+        if (!_sessionNames.Contains(session.Name, StringComparer.Ordinal))
+        {
+            throw new ArgumentException("Only the session names this target was given can be dropped by it.", nameof(drop));
+        }
+
+        return session.Scope switch
+        {
+            XeSessionScope.Server => $"DROP EVENT SESSION {DarlingXeSessionCleanup.BracketQuote(session.Name)} ON SERVER;",
+            XeSessionScope.Database => $"DROP EVENT SESSION {DarlingXeSessionCleanup.BracketQuote(session.Name)} ON DATABASE;",
+            _ => throw new ArgumentOutOfRangeException(nameof(drop)),
+        };
     }
 
     public async Task<XeSessionSearch> FindSessionsAsync(CancellationToken cancellationToken)
@@ -431,7 +492,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
         {
             using var connection = new SqlConnection(_server.ConnectionString);
             await connection.OpenAsync(cancellationToken);
-            foreach (var name in await ReadNamesAsync(connection, DarlingXeSessionCleanup.FindServerSessionsSql, cancellationToken))
+            foreach (var name in await ReadNamesAsync(connection, FindServerSql, cancellationToken))
             {
                 found.Add(new ExistingXeSession(name, XeSessionScope.Server));
             }
@@ -451,7 +512,7 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
             {
                 using var connection = new SqlConnection(SqlServerTargetProvider.Instance.WithDatabase(_server.ConnectionString, database));
                 await connection.OpenAsync(cancellationToken);
-                foreach (var name in await ReadNamesAsync(connection, DarlingXeSessionCleanup.FindDatabaseSessionsSql, cancellationToken))
+                foreach (var name in await ReadNamesAsync(connection, FindDatabaseSql, cancellationToken))
                 {
                     found.Add(new ExistingXeSession(name, XeSessionScope.Database, database));
                 }
@@ -469,13 +530,15 @@ internal sealed class SqlServerXeSessionCleanupTarget : IXeSessionCleanupTarget
     {
         ArgumentNullException.ThrowIfNull(drop);
 
+        /* Built before any connection opens, so a name this target may not drop is refused without touching the server. */
+        var statement = StatementFor(drop);
         var connectionString = drop.Session.Scope == XeSessionScope.Database
             ? SqlServerTargetProvider.Instance.WithDatabase(_server.ConnectionString, drop.Session.Database!)
             : _server.ConnectionString;
 
         using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        using var command = new SqlCommand(drop.Statement, connection) { CommandTimeout = CommandTimeoutSeconds };
+        using var command = new SqlCommand(statement, connection) { CommandTimeout = CommandTimeoutSeconds };
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
