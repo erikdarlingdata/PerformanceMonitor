@@ -265,20 +265,20 @@ public partial class PlanViewerControl
                 HorizontalAlignment = HorizontalAlignment.Center
             });
 
-            // Actual rows per execution vs Estimated rows (accuracy %) — red if off by 10x+.
-            // EstimateRows is per-execution, so normalize ActualRows by ActualExecutions before
-            // comparing (otherwise multi-execution operators, e.g. an NL inner side, always look off).
-            // PlanRowAccuracy is the one place that does this, so the edge color (GetLinkColorBrush,
-            // below) can't disagree with this label (#4627).
-            var estRows = node.EstimateRows;
-            var actualRowsPerExec = PlanRowAccuracy.ActualRowsPerExecution(node.ActualRows, node.ActualExecutions);
-            var accuracyRatio = PlanRowAccuracy.Ratio(actualRowsPerExec, estRows);
+            // Actual rows vs EXPECTED rows (accuracy %) — orange if off by 10x+. ActualRows is a total:
+            // across every execution of the operator and, in a parallel zone, across every thread.
+            // EstimateRows is per execution, so the total is set against RowEstimateHelper.GetExpectedRows,
+            // which multiplies the estimate by ActualExecutions only on the inner side of a Nested Loops
+            // join (a real loop count there) and leaves it alone everywhere else (a thread count there,
+            // which would inflate the expectation by the DOP). The brush takes its ratio from the same
+            // RowEstimateHelper, so an accurate operator is never orange at any DOP (#4627).
+            var accuracyRatio = RowEstimateHelper.GetRowAccuracyRatio(node);
             var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock
             {
-                // The text comes from the same shared type as the ratio, so a fraction (a Key Lookup that ran
-                // 117 times for 1 row) reads "0.0085 of 0.0096 (89%)", not "0 of 0 (89%)".
-                Text = PlanRowAccuracy.FormatActualOfEstimate(actualRowsPerExec, estRows),
+                // The totals as "609 of 2,983 (20%)", with just enough decimals that the numbers and the
+                // percentage agree: a Key Lookup that ran 117 times for 1 row reads "1 of 1.128 (89%)".
+                Text = PlanRowAccuracy.FormatActualOfExpected(node.ActualRows, RowEstimateHelper.GetExpectedRows(node)),
                 FontSize = 9,
                 Foreground = rowBrush,
                 TextAlignment = TextAlignment.Center,
@@ -391,13 +391,16 @@ public partial class PlanViewerControl
 
     /// <summary>
     /// Returns the brush for the edge feeding <paramref name="child"/>, colored by how far its actual
-    /// row count diverged from its estimate, on the same per-execution basis as the node label above
-    /// (#4627). Only actual plans get non-default colors. The pure ratio-to-tier logic lives in
-    /// <see cref="PlanEdgeColour"/> so it can be pinned without WPF.
+    /// row count diverged from the rows it was expected to return (#4627). The node is handed to
+    /// <see cref="PlanEdgeColour"/> whole: <see cref="RowEstimateHelper"/> decides from its place in the
+    /// tree whether ActualExecutions is a real loop count (Nested Loops inner side) or a parallel zone's
+    /// thread count, which no caller here can judge from the numbers alone. Only actual plans get
+    /// non-default colors. The pure ratio-to-tier logic lives in <see cref="PlanEdgeColour"/> so it can
+    /// be pinned without WPF.
     /// </summary>
     private SolidColorBrush GetLinkColorBrush(PlanNode child)
     {
-        var key = PlanEdgeColour.ForChild(child.HasActualStats, child.ActualRows, child.ActualExecutions, child.EstimateRows, AccuracyRatioDivergenceLimit);
+        var key = PlanEdgeColour.ForChild(child, AccuracyRatioDivergenceLimit);
         return key switch
         {
             PlanEdgeColourKey.LightOrange => EdgeLightOrangeBrush,
