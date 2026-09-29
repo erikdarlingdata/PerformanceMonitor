@@ -28,20 +28,20 @@ namespace Darling.Tests;
 /// </summary>
 public sealed class SelfAlertFailedSendCensusTests
 {
-    private const string CoveredElsewhere = "covered by the connection and availability group change";
+    private const string RestoreNotice =
+        "a restore notice is not retried: the outage it reports is over, and the next observation is the server staying up";
 
     /// <summary>
     /// The sends that keep no answer, by enclosing method: how many, and why none of them has a retry. Each is
-    /// an edge that fires once on entry with no path that fires it again, a state-machine notice, or is covered
-    /// by the separate change for the connection and availability group arms.
+    /// an edge that fires once on entry with no path that fires it again, or a state-machine or restore notice.
+    /// The connection and availability group down alerts, the failover and the data-movement-suspended edge keep
+    /// their answer and are retried (#4795).
     /// </summary>
     private static readonly IReadOnlyDictionary<string, (int Sites, string Reason)> Allowed =
         new Dictionary<string, (int, string)>(StringComparer.Ordinal)
         {
-            ["ApplyConnectionOutcomeAsync"] = (2, CoveredElsewhere),
-            ["ApplyAgReplicaHealthAsync"] = (3, CoveredElsewhere),
-            ["ApplyAgDatabaseHealthAsync"] =
-                (1, "the data-movement-suspended notice is an edge: it fires once when movement becomes suspended and has no path that fires it again"),
+            ["ApplyConnectionOutcomeAsync"] = (1, RestoreNotice),
+            ["ApplyAgReplicaHealthAsync"] = (1, RestoreNotice),
             ["EvaluateStoreUpgradeAsync"] =
                 (2, "one notice per service start about the start's own upgrade: an event, never re-evaluated, so nothing to fire again"),
             ["EvaluateStoreTimescaleAsync"] =

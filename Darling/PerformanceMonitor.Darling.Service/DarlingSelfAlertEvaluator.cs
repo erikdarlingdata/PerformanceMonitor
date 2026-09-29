@@ -164,6 +164,17 @@ internal sealed class DarlingSelfAlertEvaluator
     /// every streak over, which only ever makes the first retry earlier.</summary>
     private readonly FailedSendBackoff _selfFailedSends = new();
 
+    /// <summary>When a "Server Unreachable" that no channel delivered is due again, per server (#4795). The
+    /// connection edge has nothing else that brings it back with re-fire off. Cleared when the server is seen
+    /// online.</summary>
+    private readonly FailedSendRetryTracker _connectionRetries = new();
+
+    /// <summary>The same for the availability group alerts (#4795), keyed by metric and AG grain: a disconnect
+    /// that reached no channel is due again with re-fire off or on; a failover and a data-movement-suspended
+    /// edge, whose "already reported" markers are put back, are due again after the same delay. Held in a tracker
+    /// rather than back-dated into the re-fire stamp because the stamp means nothing with re-fire off.</summary>
+    private readonly FailedSendRetryTracker _agRetries = new();
+
     /// <summary>Servers on which SQL Agent has been OBSERVED RUNNING at least once — the capability gate for
     /// "Agent Not Running". Memoized only once true, so the store probe behind it stops after the first
     /// positive and a server that genuinely runs Agent costs one extra read, once.</summary>
@@ -3649,6 +3660,11 @@ internal sealed class DarlingSelfAlertEvaluator
         if (online)
         {
             _hasBeenOnline[key] = true;
+
+            /* #4795: an online observation ends the outage, and with it any retry still pending for a down alert
+               that no channel delivered. Cleared here rather than inside the delivery gate below so a restore
+               seen while alerts were off cannot leave the old outage's due time to fire a StillDown in the next. */
+            _connectionRetries.Clear(key);
         }
 
         /* The shared policy (#1659) replaces the inline edge machine: same edge-only semantics by default,
@@ -3666,7 +3682,8 @@ internal sealed class DarlingSelfAlertEvaluator
             _notifyConnectionDownAtStartup(),
             _connectionRefireMinutes() is int refire && refire > 0 ? TimeSpan.FromMinutes(refire) : null,
             _lastConnectionDownAlertUtc.TryGetValue(key, out var lastDown) ? lastDown : null,
-            _utcNow());
+            _utcNow(),
+            _connectionRetries.DueUtc(key));
 
         /* Delivery is gated on the master switch AND the connection-change notify toggle (V20); the state
            machine above already advanced, so toggling either off then back on resumes from the correct
@@ -3708,15 +3725,19 @@ internal sealed class DarlingSelfAlertEvaluator
                    automation (the #1659 reporter's webhook-driven auto-heal loop) matches on it, and a
                    re-fire exists precisely to re-trigger that match. The detail says which flavor. */
                 var reason = string.IsNullOrWhiteSpace(error) ? "Connection failed" : error!;
+                /* #4795: with re-fire off a StillDown can only be the retry of an alert no channel delivered, and
+                   "re-alerting every 0 min" would be false. With re-fire on the text stays as it was. */
                 var detail = decision switch
                 {
                     ConnectionAlertDecision.AlreadyDownAtFirstSight =>
                         $"Already unreachable when monitoring started: {reason}",
+                    ConnectionAlertDecision.StillDown when _connectionRefireMinutes() <= 0 =>
+                        $"Still unreachable (the previous alert reached no channel, so it is sent again): {reason}",
                     ConnectionAlertDecision.StillDown =>
                         $"Still unreachable (re-alerting every {_connectionRefireMinutes()} min): {reason}",
                     _ => reason,
                 };
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Server Unreachable", reason, "Online",
                     detail: detail,
                     severity: AlertSeverityLevel.Critical,
@@ -3727,6 +3748,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
                 _lastConnectionDownAlertUtc[key] = _utcNow();
+                NoteRetrySend(_connectionRetries, key, "Server Unreachable", delivery);
             }
             /* None → steady state or silent baseline. */
         }
@@ -3789,7 +3811,22 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _agReplicaRole.TryGetValue(key, out var previousRole);
                 bool failover = AgAlertPolicy.IsFailover(previousRole, replica.RoleDesc);
-                _agReplicaRole[key] = replica.RoleDesc;
+
+                /* #4795: a failover is an edge, and the role marker moves to the new role before the send. When
+                   every channel failed the marker goes back to the prior role (below), so the next sweep sees the
+                   change again; until the failed-send delay is up the marker is left alone and the edge held back,
+                   so a lasting channel failure is tried at 1, 2, 4 ... minutes rather than on every sweep. */
+                var failoverRetryKey = AgRetryKey(AgFailoverMetric, key);
+                bool failoverHeld = failover && _agRetries.RetryPending(failoverRetryKey, _utcNow());
+                if (!failoverHeld)
+                {
+                    _agReplicaRole[key] = replica.RoleDesc;
+                }
+
+                if (!failover)
+                {
+                    _agRetries.Clear(failoverRetryKey);
+                }
 
                 /* #3653 A5 asked whether this edge should also forget the server's delta baselines
                    (_deltas.ClearServer), and the answer is no, deliberately. Two reasons, both about WHICH
@@ -3804,9 +3841,9 @@ internal sealed class DarlingSelfAlertEvaluator
                    failover, and that pair is what the identity-epoch carrier (CpuUtilizationCollector ->
                    ServerEpoch) compares every minute against the persisted one; the forget happens there, on
                    the server whose counters actually moved, and this edge stays an alert about a role. */
-                if (failover)
+                if (failover && !failoverHeld)
                 {
-                    await FireAsync(
+                    var failoverDelivery = await FireAsync(
                         Key(serverId), serverName, AgFailoverMetric, replica.RoleDesc, previousRole!,
                         detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} changed " +
                             $"role from {previousRole} to {replica.RoleDesc}. A role change is either a failover somebody " +
@@ -3820,6 +3857,11 @@ internal sealed class DarlingSelfAlertEvaluator
                         /* Role descs both sides ("SECONDARY" -> "PRIMARY"). */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    if (NoteRetrySend(_agRetries, failoverRetryKey, AgFailoverMetric, failoverDelivery))
+                    {
+                        /* IsFailover is true only with a known prior role, so this puts back a real value. */
+                        _agReplicaRole[key] = previousRole!;
+                    }
                 }
             }
 
@@ -3840,12 +3882,14 @@ internal sealed class DarlingSelfAlertEvaluator
                    not count as down — are precisely the parts that drift when written twice. What stays
                    here is what is genuinely this app's: the stamp, and the delivery it is stamped on. */
                 int refireMinutes = _agDisconnectRefireMinutes();
+                var disconnectRetryKey = AgRetryKey(AgReplicaDisconnectedMetric, key);
                 var connection = AgAlertPolicy.DecideConnection(
                     previousState,
                     replica.ConnectedStateDesc,
                     refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
                     _lastAgDisconnectAlert.TryGetValue(key, out var lastDown) ? lastDown : (DateTime?)null,
-                    _utcNow());
+                    _utcNow(),
+                    _agRetries.DueUtc(disconnectRetryKey));
                 _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
 
                 bool stillDisconnected = connection == AgConnectionDecision.StillDisconnected;
@@ -3859,13 +3903,18 @@ internal sealed class DarlingSelfAlertEvaluator
                        the "a week-long outage reads like a blip" problem this knob exists to end. The
                        connection re-fire above already bakes it into detail; this is its AG twin, worded to
                        match Lite's so the two SKUs' history rows say the same thing. */
+                    /* #4795: with re-fire off a still-disconnected decision can only be the retry of an alert no
+                       channel delivered, and "re-alerting every 0 min" would be false. */
                     var opening = stillDisconnected
-                        ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
-                            $"DISCONNECTED from the primary (re-alerting every {refireMinutes.ToString(CultureInfo.InvariantCulture)} min)."
+                        ? refireMinutes <= 0
+                            ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                                "DISCONNECTED from the primary (the previous alert reached no channel, so it is sent again)."
+                            : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                                $"DISCONNECTED from the primary (re-alerting every {refireMinutes.ToString(CultureInfo.InvariantCulture)} min)."
                         : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is DISCONNECTED " +
                             "from the primary.";
 
-                    await FireAsync(
+                    var disconnectDelivery = await FireAsync(
                         Key(serverId), serverName, AgReplicaDisconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
                         detail: opening +
                             " A disconnected replica receives no log at all, so it falls " +
@@ -3882,8 +3931,13 @@ internal sealed class DarlingSelfAlertEvaluator
                         cancellationToken);
 
                     /* Stamped on DELIVERY, never on the decision: an alert suppressed by the master switch
-                       must not consume the re-fire window (the #1659 discipline). */
-                    _lastAgDisconnectAlert[key] = _utcNow();
+                       must not consume the re-fire window (the #1659 discipline). #4795: nor one no channel
+                       delivered — that alert is due again after the failed-send delay (the tracker, which also
+                       holds it back until then), and the window opens on the send that gets through. */
+                    if (!NoteRetrySend(_agRetries, disconnectRetryKey, AgReplicaDisconnectedMetric, disconnectDelivery))
+                    {
+                        _lastAgDisconnectAlert[key] = _utcNow();
+                    }
                 }
                 else if (connection == AgConnectionDecision.Reconnected)
                 {
@@ -3899,6 +3953,9 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
                     _lastAgDisconnectAlert.TryRemove(key, out _);
+
+                    /* #4795: the notice is not retried, and the outage it closes has nothing left to retry. */
+                    _agRetries.Clear(disconnectRetryKey);
                 }
             }
         }
@@ -3953,14 +4010,29 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 bool seen = _agDatabaseSuspended.TryGetValue(key, out var wasSuspended);
                 var suspension = AgAlertPolicy.DecideSuspension(seen ? wasSuspended : null, suspended);
-                _agDatabaseSuspended[key] = suspended;
 
-                if (suspension == AgSuspensionDecision.Suspended)
+                /* #4795: the same put-back-and-hold as the failover edge above. The suspended marker moves
+                   before the send; when every channel failed it goes back to the prior value, and until the
+                   failed-send delay is up it is left alone and the edge held back. */
+                var suspendedRetryKey = AgRetryKey(AgDatabaseSuspendedMetric, key);
+                bool suspensionHeld = suspension == AgSuspensionDecision.Suspended
+                    && _agRetries.RetryPending(suspendedRetryKey, now);
+                if (!suspensionHeld)
+                {
+                    _agDatabaseSuspended[key] = suspended;
+                }
+
+                if (suspension != AgSuspensionDecision.Suspended)
+                {
+                    _agRetries.Clear(suspendedRetryKey);
+                }
+
+                if (suspension == AgSuspensionDecision.Suspended && !suspensionHeld)
                 {
                     var suspendReason = string.IsNullOrWhiteSpace(database.SuspendReasonDesc)
                         ? "no reason reported"
                         : database.SuspendReasonDesc!;
-                    await FireAsync(
+                    var suspendedDelivery = await FireAsync(
                         Key(serverId), serverName, AgDatabaseSuspendedMetric, suspendReason, "SYNCHRONIZING",
                         detail: $"Availability Group '{database.AgName}': data movement for database " +
                             $"{database.DatabaseName} on replica {database.ReplicaServerName} is SUSPENDED " +
@@ -3976,6 +4048,10 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken,
                         context: AgDatabaseContext(database, ("Suspend Reason", suspendReason)));
+                    if (NoteRetrySend(_agRetries, suspendedRetryKey, AgDatabaseSuspendedMetric, suspendedDelivery))
+                    {
+                        RestoreMarker(_agDatabaseSuspended, key, seen ? wasSuspended : (bool?)null);
+                    }
                 }
                 else if (suspension == AgSuspensionDecision.Resumed)
                 {
@@ -7339,6 +7415,30 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         TimeSpan cooldown, AlertDelivery? delivery) =>
         DarlingWorker.AfterPgFireCore(
             _selfFailedSends, _logger ?? NullLogger.Instance, family, stamps, key, now, cooldown, delivery);
+
+    /// <summary>
+    /// Records what a connection or availability group send reported (#4795) in <paramref name="tracker"/>: when
+    /// every channel failed the alert is due again after the failed-send delay (a minute, doubling, never more
+    /// than the shared cooldown), any other answer clears it. Returns true when every channel failed, so an arm
+    /// that advanced an "already reported" marker before it sent puts the marker back.
+    /// </summary>
+    private bool NoteRetrySend(
+        FailedSendRetryTracker tracker, string retryKey, string metric, AlertDelivery? delivery)
+    {
+        var failed = tracker.Record(retryKey, delivery, _utcNow(), SharedCooldown, out var delay, out var failures);
+        if (failed)
+        {
+            _logger?.LogInformation(
+                "Every channel failed for {Metric} on {Key} (failure {Failures}); trying again in {Delay}",
+                metric, retryKey, failures, delay);
+        }
+
+        return failed;
+    }
+
+    /// <summary>The key an availability group alert is tracked under in <c>_agRetries</c>: the metric and the AG
+    /// grain, so a failover and a disconnect on the same replica wait independently.</summary>
+    private static string AgRetryKey(string metric, string grainKey) => metric + "|" + grainKey;
 
     /// <summary>
     /// Puts an "already reported" marker back to what it was before a fire (#4795): the prior value when there

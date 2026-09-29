@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Notifications;
 
@@ -31,6 +32,10 @@ namespace PerformanceMonitorLite.Services;
 /// sending, which is what keeps the window stamped on delivery rather than on the decision: Lite evaluates
 /// even while a server is acknowledged or silenced and simply does not send, and a suppressed alert must not
 /// consume a window it was never announced in.</param>
+/// <param name="RetryKey">Opaque token (#4795), non-null on an alert that is tried again when no channel delivered
+/// it. The caller hands the send's answer back through <see cref="AgAlertEvaluator.NoteSent"/>, which records it
+/// under this key, puts the alert's "already reported" marker back on a failure, and holds the alert back until
+/// the retry is due. Null on resolution notices, which are not retried.</param>
 public readonly record struct AgAlert(
     string MetricName,
     string CurrentValue,
@@ -38,7 +43,8 @@ public readonly record struct AgAlert(
     string DetailText,
     bool IsResolution,
     AlertContext? Context = null,
-    string? RefireStampKey = null);
+    string? RefireStampKey = null,
+    string? RetryKey = null);
 
 /// <summary>
 /// Lite's Availability Group alert state machine (#1696) — the twin of Darling's
@@ -66,6 +72,14 @@ public sealed class AgAlertEvaluator
     private readonly Dictionary<string, DateTime> _lastSyncBehindAlert = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> _lastDisconnectAlert = new(StringComparer.Ordinal);
     private readonly HashSet<string> _activeSyncBehind = new(StringComparer.Ordinal);
+
+    /// <summary>When an alert that no channel delivered is due again (#4795), by <see cref="AgAlert.RetryKey"/>.</summary>
+    private readonly FailedSendRetryTracker _retries = new();
+
+    /// <summary>How to put an alert's "already reported" marker back if its send reaches no channel (#4795): the
+    /// prior value, or no entry when there was none. Registered when the alert is decided, run or dropped by
+    /// <see cref="NoteSent"/>.</summary>
+    private readonly Dictionary<string, Action> _putBack = new(StringComparer.Ordinal);
 
     private readonly Func<DateTime> _utcNow;
 
@@ -97,7 +111,21 @@ public sealed class AgAlertEvaluator
             {
                 _replicaRole.TryGetValue(key, out var previousRole);
                 bool failover = AgAlertPolicy.IsFailover(previousRole, replica.RoleDesc);
-                _replicaRole[key] = replica.RoleDesc!;
+
+                /* #4795: the role marker moves to the new role when the alert is decided. If the send then
+                   reaches no channel, NoteSent puts it back to the prior role so the next sweep sees the change
+                   again; until the failed-send delay is up the marker stays put and the alert is held back. */
+                var failoverRetryKey = RetryKeyFor(key, AgAlertPolicy.FailoverMetric);
+                bool failoverHeld = failover && _retries.RetryPending(failoverRetryKey, _utcNow());
+                if (!failoverHeld)
+                {
+                    _replicaRole[key] = replica.RoleDesc!;
+                }
+
+                if (!failover)
+                {
+                    _retries.Clear(failoverRetryKey);
+                }
 
                 /* #3653 A5 asked whether this edge should also forget the server's delta baselines, and the
                    answer is no, deliberately — the same answer as Darling's twin. A role change is a fact about
@@ -111,8 +139,9 @@ public sealed class AgAlertEvaluator
                    (CpuUtilizationCollector -> ServerEpoch) compares every minute: the forget happens there,
                    named for the mechanism that actually moved the counters, and this edge stays what it is
                    — an alert about a role. */
-                if (failover)
+                if (failover && !failoverHeld)
                 {
+                    _putBack[failoverRetryKey] = () => _replicaRole[key] = previousRole!;
                     alerts.Add(new AgAlert(
                         AgAlertPolicy.FailoverMetric,
                         replica.RoleDesc!,
@@ -123,19 +152,22 @@ public sealed class AgAlertEvaluator
                         "the previous primary had a problem worth finding. Confirm the new primary is the node you want " +
                         "serving the workload, check the WSFC cluster log for the failover reason, and verify that " +
                         "backups, index maintenance and integrity checks run against the new primary.",
-                        IsResolution: false));
+                        IsResolution: false,
+                        RetryKey: failoverRetryKey));
                 }
             }
 
             if (!string.IsNullOrEmpty(replica.ConnectedStateDesc))
             {
                 _replicaConnectedState.TryGetValue(key, out var previousState);
+                var disconnectRetryKey = RetryKeyFor(key, AgAlertPolicy.ReplicaDisconnectedMetric);
                 var decision = AgAlertPolicy.DecideConnection(
                     previousState,
                     replica.ConnectedStateDesc,
                     disconnectRefireInterval,
                     _lastDisconnectAlert.TryGetValue(key, out var lastDisconnect) ? lastDisconnect : null,
-                    _utcNow());
+                    _utcNow(),
+                    _retries.DueUtc(disconnectRetryKey));
                 _replicaConnectedState[key] = replica.ConnectedStateDesc!;
 
                 if (decision is AgConnectionDecision.Disconnected or AgConnectionDecision.StillDisconnected)
@@ -144,10 +176,15 @@ public sealed class AgAlertEvaluator
                        keyed on it is what the re-fire exists to re-trigger — and differs only in saying so,
                        because an operator reading the alert history has no other way to tell a fresh outage
                        from the sixth hour of one. The wording matches the connection re-fire's. */
+                    /* #4795: with re-fire off a still-disconnected decision can only be the retry of an alert no
+                       channel delivered, and "re-alerting every 0 min" would be false. */
                     var opening = decision == AgConnectionDecision.StillDisconnected
-                        ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
-                          $"DISCONNECTED from the primary (re-alerting every " +
-                          $"{((int)disconnectRefireInterval!.Value.TotalMinutes).ToString(CultureInfo.InvariantCulture)} min)."
+                        ? disconnectRefireInterval is TimeSpan every && every > TimeSpan.Zero
+                            ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                              $"DISCONNECTED from the primary (re-alerting every " +
+                              $"{((int)every.TotalMinutes).ToString(CultureInfo.InvariantCulture)} min)."
+                            : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                              "DISCONNECTED from the primary (the previous alert reached no channel, so it is sent again)."
                         : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is DISCONNECTED " +
                           "from the primary.";
 
@@ -162,7 +199,8 @@ public sealed class AgAlertEvaluator
                         "partner. Check the replica's SQL Server service, the availability endpoint (TCP 5022 by " +
                         "default) and its firewall rule, the WSFC quorum, and the network between the nodes.",
                         IsResolution: false,
-                        RefireStampKey: key));
+                        RefireStampKey: key,
+                        RetryKey: disconnectRetryKey));
                 }
                 else if (decision == AgConnectionDecision.Reconnected)
                 {
@@ -171,6 +209,7 @@ public sealed class AgAlertEvaluator
                        surviving a suppressed reconnect notice could only mis-date the NEXT outage — which
                        announces on its own edge regardless. */
                     _lastDisconnectAlert.Remove(key);
+                    _retries.Clear(disconnectRetryKey);
                     alerts.Add(new AgAlert(
                         AgAlertPolicy.ReplicaReconnectedMetric,
                         replica.ConnectedStateDesc!,
@@ -222,10 +261,35 @@ public sealed class AgAlertEvaluator
             {
                 bool seen = _databaseSuspended.TryGetValue(key, out var wasSuspended);
                 var decision = AgAlertPolicy.DecideSuspension(seen ? wasSuspended : null, suspended);
-                _databaseSuspended[key] = suspended;
 
-                if (decision == AgSuspensionDecision.Suspended)
+                /* #4795: the same put-back-and-hold as the failover marker. */
+                var suspendedRetryKey = RetryKeyFor(key, AgAlertPolicy.DatabaseSuspendedMetric);
+                bool suspensionHeld = decision == AgSuspensionDecision.Suspended
+                    && _retries.RetryPending(suspendedRetryKey, now);
+                if (!suspensionHeld)
                 {
+                    _databaseSuspended[key] = suspended;
+                }
+
+                if (decision != AgSuspensionDecision.Suspended)
+                {
+                    _retries.Clear(suspendedRetryKey);
+                }
+
+                if (decision == AgSuspensionDecision.Suspended && !suspensionHeld)
+                {
+                    _putBack[suspendedRetryKey] = () =>
+                    {
+                        if (seen)
+                        {
+                            _databaseSuspended[key] = wasSuspended;
+                        }
+                        else
+                        {
+                            _databaseSuspended.Remove(key);
+                        }
+                    };
+
                     var suspendReason = string.IsNullOrWhiteSpace(database.SuspendReasonDesc)
                         ? "no reason reported"
                         : database.SuspendReasonDesc!;
@@ -242,7 +306,8 @@ public sealed class AgAlertEvaluator
                         IsResolution: false,
                         Context: AgAlertContexts.ForDatabase(
                             database.DatabaseName, database.AgName, database.ReplicaServerName,
-                            ("Suspend Reason", suspendReason))));
+                            ("Suspend Reason", suspendReason)),
+                        RetryKey: suspendedRetryKey));
                 }
                 else if (decision == AgSuspensionDecision.Resumed)
                 {
@@ -264,9 +329,26 @@ public sealed class AgAlertEvaluator
             else if (judgement == AgSyncJudgement.Behind)
             {
                 _activeSyncBehind.Add(key);
-                if (!_lastSyncBehindAlert.TryGetValue(key, out var last) || now - last >= cooldown)
+                var syncRetryKey = RetryKeyFor(key, AgAlertPolicy.SyncFellBehindMetric);
+                var hadStamp = _lastSyncBehindAlert.TryGetValue(key, out var last);
+                if (!_retries.RetryPending(syncRetryKey, now) && (!hadStamp || now - last >= cooldown))
                 {
                     _lastSyncBehindAlert[key] = now;
+
+                    /* #4795: the cooldown stamp is taken at the decision. A send that reaches no channel puts
+                       it back (the prior stamp, or none), so the retry after the failed-send delay is not made
+                       to wait out the whole cooldown. */
+                    _putBack[syncRetryKey] = () =>
+                    {
+                        if (hadStamp)
+                        {
+                            _lastSyncBehindAlert[key] = last;
+                        }
+                        else
+                        {
+                            _lastSyncBehindAlert.Remove(key);
+                        }
+                    };
                     alerts.Add(new AgAlert(
                         AgAlertPolicy.SyncFellBehindMetric,
                         behindReason,
@@ -281,7 +363,8 @@ public sealed class AgAlertEvaluator
                         "nothing has been written recently.",
                         IsResolution: false,
                         Context: AgAlertContexts.ForDatabase(
-                            database.DatabaseName, database.AgName, database.ReplicaServerName)));
+                            database.DatabaseName, database.AgName, database.ReplicaServerName),
+                        RetryKey: syncRetryKey));
                 }
             }
         }
@@ -289,6 +372,7 @@ public sealed class AgAlertEvaluator
         foreach (var key in measuredCaughtUp)
         {
             _lastSyncBehindAlert.Remove(key);
+            _retries.Clear(RetryKeyFor(key, AgAlertPolicy.SyncFellBehindMetric));
             if (_activeSyncBehind.Remove(key))
             {
                 alerts.Add(new AgAlert(
@@ -323,13 +407,37 @@ public sealed class AgAlertEvaluator
         }
     }
 
-    /// <summary>Stand-in: opens the window whatever the send did.</summary>
-    public void NoteSent(AgAlert alert, PerformanceMonitor.Notifications.AlertDelivery? delivery, TimeSpan cap)
+    /// <summary>
+    /// What the sweep calls after it sends an alert (#4795), in place of calling <see cref="NoteDelivered"/> on every
+    /// alert whatever the send did. When every channel failed
+    /// (<see cref="FailedSendBackoff.EveryChannelFailed"/>) the alert's re-fire window is NOT opened, its "already
+    /// reported" marker is put back to what it was before it was decided, and the alert is held back until the
+    /// failed-send delay is up (a minute, doubling, never more than <paramref name="cap"/>, the alert cooldown), so
+    /// a lasting channel failure is tried at 1, 2, 4 ... minutes rather than on every sweep. Any other answer
+    /// (delivered, partly delivered, muted, throttled, unreported) ends the retry and does what
+    /// <see cref="NoteDelivered"/> always did. Resolution notices carry no retry key and are not retried.
+    /// </summary>
+    public void NoteSent(AgAlert alert, AlertDelivery? delivery, TimeSpan cap)
     {
-        _ = delivery;
-        _ = cap;
+        if (alert.RetryKey is string retryKey)
+        {
+            if (_retries.Record(retryKey, delivery, _utcNow(), cap))
+            {
+                if (_putBack.Remove(retryKey, out var putBack))
+                {
+                    putBack();
+                }
+
+                return;
+            }
+
+            _putBack.Remove(retryKey);
+        }
+
         NoteDelivered(alert);
     }
+
+    private static string RetryKeyFor(string grainKey, string metric) => grainKey + KeySeparator + metric;
 
     /// <summary>Drops all AG state for a server removed from the monitored list, so a later re-add starts at a
     /// fresh baseline rather than inheriting a stale role and paging a phantom failover.</summary>

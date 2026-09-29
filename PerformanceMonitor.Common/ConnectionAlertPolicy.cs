@@ -62,6 +62,13 @@ public static class ConnectionAlertPolicy
     /// Null while the server is down means the outage has never been announced (a restart lost the state, or
     /// the original edge fired before re-fire was enabled) — the re-fire path treats that as due now.</param>
     /// <param name="nowUtc">The caller's clock, injected so the decision pins under test.</param>
+    /// <param name="retryDueUtc">#4795: when a down alert that reached no channel is due again, or null when
+    /// none is pending. Callers record it from the delivery report (<c>FailedSendRetryTracker</c>) and clear it
+    /// on <see cref="ConnectionAlertDecision.Restored"/>. A standing outage at or past this time is
+    /// <see cref="ConnectionAlertDecision.StillDown"/> WHATEVER the re-fire setting says: with re-fire off (the
+    /// shipped default) a "Server Unreachable" that no channel delivered has nothing else to bring it back.
+    /// Null, or a time still ahead, leaves every rule above exactly as it was — a delivered alert is never
+    /// repeated by this.</param>
     public static ConnectionAlertDecision Decide(
         bool? previousOnline,
         bool online,
@@ -71,7 +78,6 @@ public static class ConnectionAlertPolicy
         DateTime nowUtc,
         DateTime? retryDueUtc = null)
     {
-        _ = retryDueUtc;
         if (previousOnline is null)
         {
             return !online && alertWhenAlreadyDownAtFirstSight
@@ -93,7 +99,8 @@ public static class ConnectionAlertPolicy
            AG re-fire needs the identical "non-positive is off, no stamp is due now" rules, and a second
            hand-written copy of them is how the two would eventually disagree. */
         if (previousOnline == false && !online
-            && AlertRefireWindow.IsDue(refireInterval, lastDownAlertUtc, nowUtc))
+            && (AlertRefireWindow.IsDue(refireInterval, lastDownAlertUtc, nowUtc)
+                || (retryDueUtc is DateTime due && nowUtc >= due)))
         {
             return ConnectionAlertDecision.StillDown;
         }

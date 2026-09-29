@@ -7,32 +7,72 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using PerformanceMonitor.Notifications;
 
 namespace PerformanceMonitor.Alerting;
 
-/// <summary>Stand-in so the tests compile; the real bookkeeping follows.</summary>
+/// <summary>
+/// When an alert that no channel delivered is due again (#4795), per alert key. A connection or availability group
+/// alert is an edge, and its own state machine has nothing that brings it back once the edge has been taken, so
+/// the app records here what its send reported and asks here when to try again.
+///
+/// <para><see cref="Record"/> takes the send's <see cref="AlertDelivery"/>. When every channel failed
+/// (<see cref="FailedSendBackoff.EveryChannelFailed"/>) the key is due again after
+/// <see cref="AlertEngine.ChannelFailureRetryDelay"/> of the failures in a row: a minute, doubling, never more than
+/// the cap the caller passes (the alert cooldown). Any other answer (delivered, partly delivered, muted,
+/// throttled, folded, unreported) clears the key and its streak, because a retry of a partly delivered alert would
+/// send it a second time down the channel that worked. <see cref="Clear"/> ends a key without a send, for the
+/// outage that came back on its own.</para>
+///
+/// <para>In memory only, and safe to call from several threads (Lite records from the continuation of a send
+/// task). A restart forgets every pending retry, which is the same state a restart leaves the edge itself in.</para>
+/// </summary>
 public sealed class FailedSendRetryTracker
 {
+    /// <summary>The one family every key of this tracker is counted under in the shared streak bookkeeping.</summary>
+    private const string Family = "retry";
+
+    private readonly FailedSendBackoff _streaks = new();
+    private readonly ConcurrentDictionary<string, DateTime> _due = new(StringComparer.Ordinal);
+
+    /// <inheritdoc cref="Record(string, AlertDelivery?, DateTime, TimeSpan, out TimeSpan, out int)"/>
     public bool Record(string key, AlertDelivery? delivery, DateTime nowUtc, TimeSpan cap) =>
         Record(key, delivery, nowUtc, cap, out _, out _);
 
-    public bool Record(string key, AlertDelivery? delivery, DateTime nowUtc, TimeSpan cap, out TimeSpan delay, out int failures)
+    /// <summary>
+    /// Records one send's answer for <paramref name="key"/> and returns true when every channel failed, in which
+    /// case the key is due again <paramref name="delay"/> after <paramref name="nowUtc"/> and
+    /// <paramref name="failures"/> is its place in the streak. Returns false, with the key cleared, for any other
+    /// answer.
+    /// </summary>
+    public bool Record(
+        string key, AlertDelivery? delivery, DateTime nowUtc, TimeSpan cap, out TimeSpan delay, out int failures)
     {
-        _ = key;
-        _ = delivery;
-        _ = nowUtc;
-        _ = cap;
-        delay = TimeSpan.Zero;
-        failures = 0;
-        return false;
+        if (!FailedSendBackoff.EveryChannelFailed(delivery))
+        {
+            Clear(key);
+            delay = TimeSpan.Zero;
+            failures = 0;
+            return false;
+        }
+
+        delay = _streaks.RecordFailure(Family, key, nowUtc, cap, out failures);
+        _due[key] = nowUtc + delay;
+        return true;
     }
 
-    public DateTime? DueUtc(string key) => null;
+    /// <summary>When the key is due again, or null when nothing is pending for it.</summary>
+    public DateTime? DueUtc(string key) => _due.TryGetValue(key, out var due) ? due : null;
 
-    public bool RetryPending(string key, DateTime nowUtc) => false;
+    /// <summary>True from a send that reached no channel until its retry is due: the alert is waiting, and whatever
+    /// state it would be judged on should be left as it was.</summary>
+    public bool RetryPending(string key, DateTime nowUtc) => _due.TryGetValue(key, out var due) && nowUtc < due;
 
+    /// <summary>Ends the key: nothing is pending, and the next failure starts at a minute again.</summary>
     public void Clear(string key)
     {
+        _streaks.RecordDelivered(Family, key);
+        _due.TryRemove(key, out _);
     }
 }

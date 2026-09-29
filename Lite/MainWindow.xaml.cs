@@ -29,6 +29,7 @@ using PerformanceMonitor.Ui;
 /* Type alias (not a namespace import) so PerformanceMonitor.Alerting's CpuAlertMode enum can never
    collide with this app's own CpuAlertMode. */
 using AlertEngine = PerformanceMonitor.Alerting.AlertEngine;
+using FailedSendRetryTracker = PerformanceMonitor.Alerting.FailedSendRetryTracker;
 using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCounter;
 
 namespace PerformanceMonitorLite;
@@ -61,6 +62,11 @@ public partial class MainWindow : Window
     /// the re-fire clock for <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy"/> (#1659).
     /// Stamped on every down alert delivered, cleared on Restored.</summary>
     private readonly Dictionary<string, DateTime> _lastConnectionDownAlertUtc = new();
+
+    /// <summary>When a "Server Unreachable" that no channel delivered is due again, per server (#4795). Passed
+    /// to <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy.Decide"/>, recorded from the send's answer,
+    /// and cleared on a restore.</summary>
+    private readonly FailedSendRetryTracker _connectionAlertRetries = new();
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, bool> _previousXeSessionFailureStates = new();
     private readonly DispatcherTimer _statusTimer;
@@ -2004,7 +2010,15 @@ public partial class MainWindow : Window
                     App.NotifyConnectionDownAtStartup,
                     App.ConnectionRefireMinutes > 0 ? TimeSpan.FromMinutes(App.ConnectionRefireMinutes) : null,
                     _lastConnectionDownAlertUtc.TryGetValue(server.Id, out var lastDown) ? lastDown : null,
-                    DateTime.UtcNow);
+                    DateTime.UtcNow,
+                    _connectionAlertRetries.DueUtc(server.Id));
+
+                /* #4795: a restore ends the outage and any retry still pending for it, whether or not the
+                   notify toggles below let the notice out. */
+                if (connectionDecision == ConnectionAlertDecision.Restored)
+                {
+                    _connectionAlertRetries.Clear(server.Id);
+                }
 
                 if (App.AlertsEnabled && App.NotifyConnectionChanges)
                 {
@@ -2024,6 +2038,10 @@ public partial class MainWindow : Window
                         {
                             ConnectionAlertDecision.AlreadyDownAtFirstSight =>
                                 $"Already unreachable when monitoring started: {reason}",
+                            /* #4795: with re-fire off a StillDown can only be the retry of an alert no channel
+                               delivered. With re-fire on the text stays as it was. */
+                            ConnectionAlertDecision.StillDown when App.ConnectionRefireMinutes <= 0 =>
+                                $"Still unreachable (the previous alert reached no channel, so it is sent again): {reason}",
                             ConnectionAlertDecision.StillDown =>
                                 $"Still unreachable (re-alerting every {App.ConnectionRefireMinutes} min): {reason}",
                             _ => reason
@@ -2034,8 +2052,9 @@ public partial class MainWindow : Window
                             $"{server.DisplayNameWithIntent} is unreachable: {reason}",
                             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
 
-                        SendConnectionAlert(server, "Server Unreachable", reason, detail);
+                        var send = SendConnectionAlert(server, "Server Unreachable", reason, detail);
                         _lastConnectionDownAlertUtc[server.Id] = DateTime.UtcNow;
+                        _ = NoteConnectionAlertSentAsync(server.Id, send);
                     }
                     else if (connectionDecision == ConnectionAlertDecision.Restored)
                     {

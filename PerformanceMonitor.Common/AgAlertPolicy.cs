@@ -273,6 +273,12 @@ public static class AgAlertPolicy
     /// decision, or an alert a master switch suppressed would consume a window it was never announced in —
     /// and clear it on Reconnected so a later outage starts a fresh episode instead of re-firing late.</param>
     /// <param name="nowUtc">The caller's clock, injected so the decision pins under test.</param>
+    /// <param name="retryDueUtc">#4795: when a disconnect alert that reached no channel is due again, or null
+    /// when none is pending. While one is pending it governs a still-disconnected replica: due (at or past
+    /// this time) is <see cref="AgConnectionDecision.StillDisconnected"/> WHATEVER the re-fire setting says,
+    /// and not yet due is <see cref="AgConnectionDecision.None"/> even when the re-fire window is open, so a
+    /// lasting channel failure is tried at the failed-send delays rather than on every sweep. Null leaves the
+    /// re-fire rules exactly as they were.</param>
     public static AgConnectionDecision DecideConnection(
         string? previousStateDesc,
         string? currentStateDesc,
@@ -281,7 +287,6 @@ public static class AgAlertPolicy
         DateTime nowUtc,
         DateTime? retryDueUtc = null)
     {
-        _ = retryDueUtc;
         var edge = DecideConnection(previousStateDesc, currentStateDesc);
 
         /* A real transition wins outright: the Disconnected edge already announces, and a Reconnected one
@@ -290,6 +295,11 @@ public static class AgAlertPolicy
         if (edge != AgConnectionDecision.None || !IsDisconnected(currentStateDesc))
         {
             return edge;
+        }
+
+        if (retryDueUtc is DateTime due)
+        {
+            return nowUtc >= due ? AgConnectionDecision.StillDisconnected : AgConnectionDecision.None;
         }
 
         return AlertRefireWindow.IsDue(refireInterval, lastDisconnectAlertUtc, nowUtc)

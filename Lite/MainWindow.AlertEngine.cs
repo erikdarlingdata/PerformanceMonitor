@@ -164,7 +164,8 @@ public partial class MainWindow : Window
     /// connection edge too" rule the Dashboard applies. Never throws: the send is fire-and-forget (SMTP/HTTP
     /// off a UI-timer tick) and <c>TrySendAlertEmailAsync</c> absorbs its own failures.</para>
     /// </summary>
-    private void SendConnectionAlert(ServerConnection server, string metricName, string currentValue, string detailText)
+    private Task<PerformanceMonitor.Notifications.AlertDelivery?> SendConnectionAlert(
+        ServerConnection server, string metricName, string currentValue, string detailText)
     {
         try
         {
@@ -180,7 +181,7 @@ public partial class MainWindow : Window
                alone — it never consulted this, and this change must not regress it. */
             if (!_alertStateService.ShouldShowAlerts(serverId.ToString()))
             {
-                return;
+                return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
             }
 
             bool isMuted = _muteRuleService.IsAlertMuted(new AlertMuteContext
@@ -201,7 +202,7 @@ public partial class MainWindow : Window
                be the one family on this store still costing one post per affected server. Read straight off
                the ServerConnection in hand rather than through ServerManager's scan, which exists for the
                callers that only have the hashed id. */
-            _ = _emailAlertService.TrySendAlertEmailAsync(
+            return _emailAlertService.TrySendAlertEmailAsync(
                 metricName,
                 serverName,
                 currentValue,
@@ -216,6 +217,39 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AppLogger.Error("ConnectionAlerts", $"Connection alert delivery failed for {metricName}: {ex.Message}");
+            return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
+        }
+    }
+
+    /// <summary>
+    /// Records what a "Server Unreachable" send reported (#4795), off the connection loop: the loop never waits on
+    /// SMTP or a webhook. When every channel failed the alert is due again after the failed-send delay (a minute,
+    /// doubling, never more than the alert cooldown) while the server stays down, with re-fire off or on; any other
+    /// answer clears it. The step runs on the UI thread, after the loop has stored this poll's state, and does
+    /// nothing if the server came back while the send was in flight: the outage it would retry is over.
+    /// </summary>
+    private async Task NoteConnectionAlertSentAsync(string serverId, Task<PerformanceMonitor.Notifications.AlertDelivery?> send)
+    {
+        try
+        {
+            await Task.Yield();
+            var delivery = await send;
+            if (!_previousConnectionStates.TryGetValue(serverId, out var onlineNow) || onlineNow)
+            {
+                return;
+            }
+
+            if (_connectionAlertRetries.Record(
+                    serverId, delivery, DateTime.UtcNow, TimeSpan.FromMinutes(App.AlertCooldownMinutes),
+                    out var delay, out var failures))
+            {
+                AppLogger.Info("ConnectionAlerts",
+                    $"Every channel failed for the Server Unreachable alert (failure {failures}); trying again in {delay}");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("ConnectionAlerts", $"Recording the Server Unreachable delivery failed: {ex.Message}");
         }
     }
 
@@ -381,13 +415,15 @@ public partial class MainWindow : Window
 
             foreach (var alert in alerts)
             {
-                SendAgAlert(serverId, serverName, alert);
+                var delivery = await SendAgAlert(serverId, serverName, alert);
 
                 /* #2426: the re-fire window opens on DELIVERY, which is what the suppressed return above
                    makes necessary — an acknowledged or silenced server still evaluates every sweep and
                    sends nothing, and windows consumed by alerts nobody received would turn the re-fire back
-                   into the silence it exists to end. */
-                _agAlertEvaluator.NoteDelivered(alert);
+                   into the silence it exists to end. #4795: an alert whose every channel failed is not a
+                   delivery either: NoteSent leaves its window closed, puts its marker back and holds it until
+                   the failed-send delay is up. */
+                _agAlertEvaluator.NoteSent(alert, delivery, TimeSpan.FromMinutes(App.AlertCooldownMinutes));
             }
 
             bool IsFresh(DateTime? snapshotUtc) =>
@@ -406,7 +442,7 @@ public partial class MainWindow : Window
     /// <see cref="PerformanceMonitor.Common.AgAlertPolicy"/> consts, so a webhook keyed on "AG Failover"
     /// matches whether the alert came from Lite or from Darling.
     /// </summary>
-    private void SendAgAlert(int serverId, string serverName, AgAlert alert)
+    private Task<PerformanceMonitor.Notifications.AlertDelivery?> SendAgAlert(int serverId, string serverName, AgAlert alert)
     {
         try
         {
@@ -433,7 +469,7 @@ public partial class MainWindow : Window
                replicas on one availability group flap together, so this family fans out across servers the
                same way. Through ServerManager's scan because this path carries the hashed id, not the
                ServerConnection. */
-            _ = _emailAlertService.TrySendAlertEmailAsync(
+            return _emailAlertService.TrySendAlertEmailAsync(
                 alert.MetricName,
                 serverName,
                 alert.CurrentValue,
@@ -448,6 +484,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AppLogger.Error("AgAlerts", $"AG alert delivery failed for {alert.MetricName}: {ex.Message}");
+            return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
         }
     }
 
