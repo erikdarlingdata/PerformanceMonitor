@@ -426,6 +426,89 @@ public sealed class TopQueriesHourlyRoutingLiveTests
     }
 
 
+    [Fact]
+    public async Task HourlyRouted_StitchedWindow_CoverageProbeSplitsAtTheFloor()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string (with TimescaleDB installed) to run the live #4231 stage-3a routing test.");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+
+        var timescaleEnabled = await TimescaleSupport.TryEnableAsync(connection, null, ct);
+        Assert.SkipWhen(!timescaleEnabled, "The live #4231 stage-3a routing test needs TimescaleDB.");
+        await TimescaleSupport.ConvertToHypertablesAsync(connection, null, ct);
+        Assert.True(await TimescaleSupport.EnsureCollectionLogHypertableAsync(connection, null, ct));
+
+        await using (var stop = new NpgsqlCommand("SELECT _timescaledb_functions.stop_background_workers()", connection))
+        {
+            await stop.ExecuteNonQueryAsync(ct);
+        }
+
+        await DarlingMcpTestData.RegisterServerAsync(connection, ServerId, ServerName, ct);
+        await TimescaleSupport.EnsureContinuousAggregatesAsync(connection, null, ct);
+
+        var windowEnd = WindowStart.AddDays(1);
+        var bodySucceeded = false;
+        try
+        {
+            /* A stitched window: the legacy hourly holds the whole window, the successor only from +8h. Server A
+               has a legacy bucket at +1h AND a successor-era bucket at +10h, so its first bucket (the least of the
+               two probe halves) is the legacy one. Server B has rows only in the successor's era (+12h), so
+               its first bucket is the successor half's. */
+            const int successorOnlyServerId = ServerId + 1;
+            await DarlingMcpTestData.RegisterServerAsync(connection, successorOnlyServerId, ServerName + "-successor", ct);
+            await PlantAsync(connection, ct, WindowStart.AddHours(1), "0xTOPQ1", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
+            await PlantAsync(connection, ct, WindowStart.AddHours(10), "0xTOPQ2", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2);
+            await PlantAsync(connection, ct, WindowStart.AddHours(12), "0xTOPQ3", "usp_HostA", 500_000L, 400_000L, 10L, 3600, maxDop: 2, serverId: successorOnlyServerId, serverName: ServerName + "-successor");
+            var hoursBack = (int)Math.Ceiling((windowEnd - WindowStart).TotalHours);
+            var asOf = windowEnd.ToString("o");
+
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsHourlyView, WindowStart, windowEnd.AddHours(1), ct);
+            await RefreshAsync(connection, TimescaleSupport.QueryStatsIntervalHourlyView, WindowStart.AddHours(8), windowEnd.AddHours(1), ct);
+            await using (var purge = new NpgsqlCommand("DELETE FROM collect.query_stats WHERE collection_time >= $1 AND collection_time < $2", connection))
+            {
+                purge.Parameters.AddWithValue(WindowStart);
+                purge.Parameters.AddWithValue(windowEnd);
+                await purge.ExecuteNonQueryAsync(ct);
+            }
+
+            await using var hourlyDataSource = NpgsqlDataSource.Create(scratch.ConnectionString);
+            var rollups = await TimescaleSupport.DetectRollupsAsync(hourlyDataSource, ct);
+            var coverage = await TimescaleSupport.DetectRollupCoverageAsync(hourlyDataSource, rollups, ct);
+            Assert.NotNull(coverage.StitchFloor(TimescaleSupport.QueryStatsHourlyView, RollupCoverage.StitchTier.Hourly, WindowStart));
+
+            using var both = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName, hours_back: hoursBack, top: 10, as_of: asOf));
+            Assert.Equal("hourly", both.RootElement.GetProperty("tier_used").GetString());
+            Assert.Equal(WindowStart.AddHours(1).ToString("o"), both.RootElement.GetProperty("effective_start").GetString());
+
+            using var successorOnly = System.Text.Json.JsonDocument.Parse(await DarlingMcpDataTools.GetTopQueriesByCpu(
+                hourlyDataSource, ServerName + "-successor", hours_back: hoursBack, top: 10, as_of: asOf));
+            Assert.Equal("hourly", successorOnly.RootElement.GetProperty("tier_used").GetString());
+            Assert.Equal(WindowStart.AddHours(12).ToString("o"), successorOnly.RootElement.GetProperty("effective_start").GetString());
+
+            bodySucceeded = true;
+        }
+        finally
+        {
+            await LiveStoreCleanup.RunAsync(scratch.ConnectionString, bodySucceeded, async (cleanup, cleanupCt) =>
+            {
+                await using var probe = new NpgsqlCommand(
+                    "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname = pg_catalog.current_database() " +
+                    "AND backend_type LIKE 'TimescaleDB Background Worker Scheduler%'", cleanup);
+                var schedulers = Convert.ToInt64(await probe.ExecuteScalarAsync(cleanupCt));
+                Assert.Equal(0L, schedulers);
+            });
+        }
+    }
+
+
     private static Dictionary<string, (long CpuUs, long Executions)> RollUpByHash(IEnumerable<DarlingDataReader.TopQueryRow> rows)
     {
         var totals = new Dictionary<string, (long CpuUs, long Executions)>(StringComparer.Ordinal);

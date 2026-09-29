@@ -1263,25 +1263,67 @@ internal static class DarlingDataReader
         """;
 
     /// <summary>
-    /// The hourly tier's per-server coverage probe: the first bucket the ranked read's window actually holds
-    /// for this server, over the SAME stitched relation the ranked read used (<c>$FROM$</c> is replaced with that
-    /// exact string). <c>ORDER BY … LIMIT 1</c> stops at the first bucket rather than reading the window. The
-    /// predicate matches the ranked read's, so the answer is "the first bucket this read served". Null when the
-    /// server has no bucket in the window. $1 server_id, $2/$3 window (naive UTC).
+    /// The hourly tier's per-server coverage probe when the read is stitched: the first bucket the ranked read's
+    /// window actually holds for this server. A stitched <c>UNION ALL</c> cannot give an ordered first row (the
+    /// planner cannot merge-append it in order, so <c>ORDER BY … LIMIT 1</c> over it sorts every row the server
+    /// has), so the probe splits at the stitch floor F, the same F <see cref="RollupCoverage.StitchedRelationSql"/>
+    /// uses (<see cref="RollupCoverage.StitchFloor"/> is documented to agree with it exactly). The legacy relation
+    /// only holds rows below F, so the first bucket of the stitch is <c>least()</c> of the legacy relation's first
+    /// bucket below F and the successor's first bucket from F; <c>least()</c> ignores a null half. Each half is an
+    /// ordered <c>LIMIT 1</c> over one relation. $1 server_id, $2/$3 window (naive UTC), $4 F (naive UTC).
+    /// Null when the server has no bucket in the window. <c>$LEGACY$</c> and <c>$SUCCESSOR$</c> are relation names.
     /// </summary>
     public const string HourlyFirstBucketSql =
+        "SELECT least(" +
+        "(SELECT f.bucket FROM collect.$LEGACY$ AS f WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket < $4 AND f.bucket <= $3 ORDER BY f.bucket LIMIT 1), " +
+        "(SELECT f.bucket FROM collect.$SUCCESSOR$ AS f WHERE f.server_id = $1 AND f.bucket >= $4 AND f.bucket >= $2 AND f.bucket <= $3 ORDER BY f.bucket LIMIT 1))";
+
+    /// <summary>
+    /// The coverage probe when <see cref="RollupCoverage.StitchFloor"/> answers null: the window is served by ONE
+    /// relation, and <c>$FROM$</c> is replaced with the exact single-relation splice
+    /// <see cref="RollupCoverage.StitchedRelationSql"/> returns. <c>ORDER BY … LIMIT 1</c> stops at the first
+    /// bucket. Never used over a stitch (a <c>UNION ALL</c> cannot be read in order; see
+    /// <see cref="HourlyFirstBucketSql"/>). $1 server_id, $2/$3 window (naive UTC).
+    /// </summary>
+    public const string HourlyFirstBucketSingleRelationSql =
         "SELECT f.bucket FROM $FROM$ WHERE f.server_id = $1 AND f.bucket >= $2 AND f.bucket <= $3 ORDER BY f.bucket LIMIT 1";
 
-    /// <summary>Runs <see cref="HourlyFirstBucketSql"/> against the given stitched FROM clause. The single seam a
+    /// <summary>Runs the coverage probe for <paramref name="legacy"/>'s hourly tier: two ordered first-row probes
+    /// split at the stitch floor when the read is stitched (<see cref="HourlyFirstBucketSql"/>), one probe when a
+    /// single relation serves the window (<see cref="HourlyFirstBucketSingleRelationSql"/>). The single seam a
     /// cache can wrap.</summary>
     private static async Task<DateTime?> GetHourlyFirstBucketAsync(
-        NpgsqlDataSource postgres, string fromClause, int serverId, DateTime startUtc, DateTime endUtc,
+        NpgsqlDataSource postgres, RollupCoverage coverage, string legacy, int serverId, DateTime startUtc, DateTime endUtc,
         CancellationToken cancellationToken)
     {
-        var sql = HourlyFirstBucketSql.Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal);
+        var floor = coverage.StitchFloor(legacy, RollupCoverage.StitchTier.Hourly, startUtc);
+        string sql;
+        if (floor is null)
+        {
+            var splice = coverage.StitchedRelationSql(legacy, "f", startUtc, RollupCoverage.StitchTier.Hourly);
+            if (splice.Contains("UNION", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "The hourly coverage probe found a stitched relation where StitchFloor answered a single one.");
+            }
+
+            sql = HourlyFirstBucketSingleRelationSql.Replace(TopQueriesHourlyFromPlaceholder, splice, StringComparison.Ordinal);
+        }
+        else
+        {
+            sql = HourlyFirstBucketSql
+                .Replace("$LEGACY$", legacy, StringComparison.Ordinal)
+                .Replace("$SUCCESSOR$", TimescaleSupport.SuccessorOf(legacy)!, StringComparison.Ordinal);
+        }
+
         await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;
         AddWindow(command, serverId, startUtc, endUtc);
+        if (floor is not null)
+        {
+            AddTimestamp(command, floor.Value);
+        }
+
         var value = await command.ExecuteScalarAsync(cancellationToken);
         return value is DateTime bucket ? bucket : null;
     }
@@ -1412,7 +1454,7 @@ internal static class DarlingDataReader
             TimescaleSupport.QueryStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
         var sql = TopQueriesHourlySql.Replace(TopQueriesHourlyFromPlaceholder, fromClause, StringComparison.Ordinal);
 
-        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, fromClause, serverId, startUtc, endUtc, cancellationToken);
+        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView, serverId, startUtc, endUtc, cancellationToken);
         var rows = new List<TopQueryRow>();
         await using (var command = postgres.CreateCommand(sql))
         {
@@ -1622,7 +1664,7 @@ internal static class DarlingDataReader
             TimescaleSupport.ProcedureStatsHourlyView, "f", startUtc, RollupCoverage.StitchTier.Hourly);
         var sql = TopProceduresHourlySql.Replace(TopProceduresHourlyFromPlaceholder, fromClause, StringComparison.Ordinal);
 
-        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, fromClause, serverId, startUtc, endUtc, cancellationToken);
+        var firstBucketTask = GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView, serverId, startUtc, endUtc, cancellationToken);
         var rows = new List<TopProcedureRow>();
         await using var command = postgres.CreateCommand(sql);
         command.CommandTimeout = McpCommandDeadlines.ReadSeconds;

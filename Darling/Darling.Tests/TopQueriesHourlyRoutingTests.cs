@@ -97,14 +97,45 @@ public sealed class TopQueriesHourlyRoutingTests
         Assert.Contains("tier = RetentionTier.Raw;", body, StringComparison.Ordinal);
     }
 
-    /// <summary>The coverage probe is built over the same stitched FROM clause and is ordered with LIMIT 1.</summary>
+    /// <summary>The stitched coverage probe is two ordered first-row probes split at the stitch floor, with no
+    /// UNION; the single-relation probe reads the spliced relation.</summary>
     [Fact]
-    public void HourlyFirstBucketSql_ReadsThePlaceholderRelation_OrderedWithLimitOne()
+    public void HourlyFirstBucketSql_IsLeastOfTwoOrderedFirstRowProbes_WithNoUnion()
     {
         var sql = DarlingDataReader.HourlyFirstBucketSql;
+        Assert.Contains("least(", sql, StringComparison.Ordinal);
+        Assert.Contains("$LEGACY$", sql, StringComparison.Ordinal);
+        Assert.Contains("$SUCCESSOR$", sql, StringComparison.Ordinal);
+        Assert.Contains("$4", sql, StringComparison.Ordinal);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(sql, "ORDER BY f.bucket LIMIT 1").Count);
+        Assert.DoesNotContain("UNION", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("query_stats_interval_hourly", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HourlyFirstBucketSingleRelationSql_ReadsThePlaceholderRelation_OrderedWithLimitOne()
+    {
+        var sql = DarlingDataReader.HourlyFirstBucketSingleRelationSql;
         Assert.Contains(DarlingDataReader.TopQueriesHourlyFromPlaceholder, sql, StringComparison.Ordinal);
         Assert.Contains("ORDER BY f.bucket LIMIT 1", sql, StringComparison.Ordinal);
-        Assert.DoesNotContain("query_stats_interval_hourly", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("UNION", sql, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The seam splits at the same floor the stitch uses, and both hourly readers go through it.</summary>
+    [Fact]
+    public void GetHourlyFirstBucketAsync_SplitsAtStitchFloor_AndBothReadersUseIt()
+    {
+        var source = File.ReadAllText(FindReaderSourcePath());
+        var start = source.IndexOf("private static async Task<DateTime?> GetHourlyFirstBucketAsync(", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var end = source.IndexOf("return value is DateTime bucket", start, StringComparison.Ordinal);
+        var body = source[start..end];
+        Assert.Contains(".StitchFloor(", body, StringComparison.Ordinal);
+        Assert.Contains("SuccessorOf(", body, StringComparison.Ordinal);
+        Assert.Contains("HourlyFirstBucketSingleRelationSql", body, StringComparison.Ordinal);
+        Assert.Contains("\"UNION\"", body, StringComparison.Ordinal);
+        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.QueryStatsHourlyView,", source, StringComparison.Ordinal);
+        Assert.Contains("GetHourlyFirstBucketAsync(postgres, coverage, TimescaleSupport.ProcedureStatsHourlyView,", source, StringComparison.Ordinal);
     }
 
     private static string FindReaderSourcePath()
