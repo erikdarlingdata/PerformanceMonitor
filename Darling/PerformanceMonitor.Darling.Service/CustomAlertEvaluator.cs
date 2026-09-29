@@ -353,15 +353,31 @@ public sealed class CustomAlertEvaluator
         // firing-eligible and must never be flagged as never-firing.
         _noDataSinceUtc.TryRemove(row.Id, out _);
 
-        var breaching = def.IsBreaching(value.Value);
+        var newState = await ApplyValueAsync(
+            row, def, serverId, displayName, now, nextDue, value.Value, state, cancellationToken);
+
+        await _stateStore.SaveAsync(row.Id, serverId, newState, cancellationToken);
+    }
+
+    /// <summary>
+    /// The decision half of one (rule, server) evaluation, split out of <see cref="EvaluateRuleForServerAsync"/> so a
+    /// test can drive it without a store: given the loaded <paramref name="state"/> and one observed
+    /// <paramref name="value"/>, it runs the persistence gate, sends the fire, the severity change or the resolve
+    /// the gate calls for, and returns the state to save. The caller does the loading and the saving.
+    /// </summary>
+    internal async Task<CustomAlertRuleState> ApplyValueAsync(
+        CustomAlertRule row, CustomAlertRuleDefinition def, int serverId, string displayName,
+        DateTime now, DateTime nextDue, double value, CustomAlertRuleState state, CancellationToken cancellationToken)
+    {
+        var breaching = def.IsBreaching(value);
         var evaluation = AlertPersistenceGate.Evaluate(state.Persistence, breaching, def.BreachSamples, def.ClearSamples);
         var newState = state with { Persistence = evaluation.State, LastEvaluatedAt = now, NextDueAt = nextDue };
 
         switch (evaluation.Outcome)
         {
             case PersistenceOutcome.Fire:
-                var severity = def.SeverityFor(value.Value);
-                await DeliverFireAsync(row, def, serverId, displayName, value.Value, severity, cancellationToken);
+                var severity = def.SeverityFor(value);
+                await DeliverFireAsync(row, def, serverId, displayName, value, severity, cancellationToken);
                 newState = newState with { FiredSeverity = severity.ToString() };
                 break;
 
@@ -369,7 +385,7 @@ public sealed class CustomAlertEvaluator
                 // Only deliver a resolve for an incident that was actually delivered.
                 if (state.FiredSeverity is not null)
                 {
-                    await DeliverResolveAsync(row, serverId, displayName, value.Value);
+                    await DeliverResolveAsync(row, serverId, displayName, value);
                 }
 
                 newState = newState with { FiredSeverity = null };
@@ -385,17 +401,17 @@ public sealed class CustomAlertEvaluator
                 // at a band boundary could re-deliver — low in practice (windowed aggregate, 60s cadence, tier
                 // gap), tracked as a possible follow-up.
                 if (ClassifySeverityChange(
-                        newState.Persistence.Firing, breaching, def.SeverityFor(value.Value), state.FiredSeverity)
+                        newState.Persistence.Firing, breaching, def.SeverityFor(value), state.FiredSeverity)
                     is { } changedSeverity)
                 {
-                    await DeliverFireAsync(row, def, serverId, displayName, value.Value, changedSeverity, cancellationToken);
+                    await DeliverFireAsync(row, def, serverId, displayName, value, changedSeverity, cancellationToken);
                     newState = newState with { FiredSeverity = changedSeverity.ToString() };
                 }
 
                 break;
         }
 
-        await _stateStore.SaveAsync(row.Id, serverId, newState, cancellationToken);
+        return newState;
     }
 
     private Task<double?> RunScalarAsync(
