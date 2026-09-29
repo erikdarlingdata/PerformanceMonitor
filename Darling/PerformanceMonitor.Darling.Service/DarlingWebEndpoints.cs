@@ -16,6 +16,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -84,8 +85,20 @@ public static class DarlingWebEndpoints
     /// real <see cref="PostgresException"/> with SqlState 57014 travels through the SAME dispatch loop
     /// every other route uses, rather than a hand-called <c>Record</c> standing in for the wiring. <c>internal</c>
     /// and set ONLY from <c>Darling.Tests</c> (grep proves no production caller ever assigns it); null in every
-    /// production run, so <see cref="BuildReadDispatch"/> adds nothing extra unless a test opted in.</summary>
-    internal static (string Name, ReadToolHandler Handler)? s_testOnlyExtraDispatchEntry;
+    /// production run, so <see cref="BuildReadDispatch"/> adds nothing extra unless a test opted in.
+    /// #4782: held per async flow, not process-wide. Only the async flow that set the entry (and what that flow
+    /// starts or awaits) sees it, so a test class running at the same time in another flow builds its own
+    /// dispatch without the extra route. A plain static was seen by all of them, and a test that compares the
+    /// dispatch keys with the Custom Views catalog failed on the route it did not expect.</summary>
+    private static readonly AsyncLocal<(string Name, ReadToolHandler Handler)?> s_testOnlyExtraDispatchEntry = new();
+
+    /// <summary>The test-only extra dispatch entry (#4442, #4782). Reads and writes the current async flow's
+    /// value only; see the note on the backing field.</summary>
+    internal static (string Name, ReadToolHandler Handler)? TestOnlyExtraDispatchEntry
+    {
+        get => s_testOnlyExtraDispatchEntry.Value;
+        set => s_testOnlyExtraDispatchEntry.Value = value;
+    }
 
     /// <summary>The tool names deliberately absent from the <c>/api/read/*</c> 1:1 read surface. <c>analyze_server</c>
     /// makes a live monitored-server connection; <c>mute_analysis_finding</c> writes; the <c>analyze_*_plan</c> family
@@ -3547,8 +3560,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
         };
 
         /* #4442: the test-only extra entry, added ONLY when a test set it -- never in a production
-           run, since s_testOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. */
-        if (s_testOnlyExtraDispatchEntry is { } extra)
+           run, since TestOnlyExtraDispatchEntry stays null unless Darling.Tests assigns it. #4782: it is
+           per async flow, so only the flow that set it gets the extra key; a test running at the same time
+           in another flow builds its dispatch without it. */
+        if (TestOnlyExtraDispatchEntry is { } extra)
         {
             dispatch[extra.Name] = extra.Handler;
         }

@@ -13,6 +13,8 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Service;
@@ -70,6 +72,51 @@ public sealed class DarlingWebEndpointsTests
 
         Assert.True(missing.Length == 0, "read-only tools with no /api/read endpoint: " + string.Join(", ", missing));
         Assert.True(extra.Length == 0, "/api/read endpoints with no matching read-only tool: " + string.Join(", ", extra));
+    }
+
+    /// <summary>#4782: the test-only extra dispatch entry belongs to the async flow that set it. It is not a
+    /// process-wide switch: <c>ReadLatencyWebRecordingTests</c> sets one route while other test classes, outside
+    /// its collection, run at the same time and call <see cref="DarlingWebEndpoints.BuildReadDispatch"/>. With a
+    /// plain static, any of them could see that route, and <c>DarlingCustomViewsTests</c> failed on it (it
+    /// compares the dispatch keys with the Custom Views catalog). The same flow still sees the route (the
+    /// recording test builds its server there), and a flow that does not inherit the caller's context does not.</summary>
+    [Fact]
+    public async Task TheTestOnlyExtraDispatchEntry_IsSeenBySameFlow_AndNotByAFlowThatDoesNotInheritIt()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var routeName = "__test_flow_local_" + Guid.NewGuid().ToString("N");
+
+        try
+        {
+            DarlingWebEndpoints.TestOnlyExtraDispatchEntry = (routeName, (_, _, _) => Task.FromResult("{}"));
+
+            Assert.True(
+                DarlingWebEndpoints.BuildReadDispatch().ContainsKey(routeName),
+                "the flow that set the entry must see it in its own BuildReadDispatch (the recording test builds its server there)");
+
+            var seenByOtherFlow = await ReadDispatchContainsInAFlowThatDoesNotInherit(routeName, ct);
+            Assert.False(
+                seenByOtherFlow,
+                "a flow that does not inherit the setter's context must not see the entry: a test class running at the same time would otherwise get an extra read route");
+        }
+        finally
+        {
+            DarlingWebEndpoints.TestOnlyExtraDispatchEntry = null;
+        }
+
+        Assert.False(DarlingWebEndpoints.BuildReadDispatch().ContainsKey(routeName), "the entry is cleared once the fact is done");
+    }
+
+    /// <summary>Starts the dispatch build on a task whose <see cref="ExecutionContext"/> is NOT the caller's --
+    /// the same position a test class running beside another one is in. Kept in its own synchronous method so
+    /// the <see cref="ExecutionContext.SuppressFlow"/> scope opens and closes on one thread, which the API
+    /// requires (an <c>await</c> inside the <c>using</c> would break that).</summary>
+    private static Task<bool> ReadDispatchContainsInAFlowThatDoesNotInherit(string routeName, CancellationToken ct)
+    {
+        using (ExecutionContext.SuppressFlow())
+        {
+            return Task.Run(() => DarlingWebEndpoints.BuildReadDispatch().ContainsKey(routeName), ct);
+        }
     }
 
     [Fact]
