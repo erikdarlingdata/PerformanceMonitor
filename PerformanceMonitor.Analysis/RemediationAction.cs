@@ -299,5 +299,6 @@ public sealed record ForcePlanTarget(
        Null when BestPlanLastSeenUtc is null or the finding carries no window end. Display only: never an
        execution input and never a blocker (age narrows only the unattended bot, which reads
        BestPlanLastSeenUtc against its own clock). Appended with a default for the same wire-compatibility
-       reasons. */
+       reasons. Mirrored, with BestPlanLastSeenUtc, on ForcePlanTargetDto (PerformanceMonitor.Notifications),
+       so a persisted action reads back with both. */
     double? BestPlanAgeDays = null);

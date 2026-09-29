@@ -500,6 +500,11 @@ public record RcsiInactionFiguresDto(
 /// copy-paste command from the DESERIALIZED action, so a flag dropped by this DTO never reaches the
 /// pasted surface at all, and the future auto-force bot reading persisted actions would see false
 /// for every flagged target (review catch on #2140).
+/// <see cref="BestPlanLastSeenUtc"/> (#3953) and <see cref="BestPlanAgeDays"/> (#4736) are appended the same
+/// way and mirrored for the same reason: the MCP findings read reports each target's best plan age from the
+/// DESERIALIZED action, so a member missing here reads back null for every persisted target. A row written
+/// before they existed has neither property and reads back null, the same as a drill-down row that had no
+/// best_plan_last_seen.
 /// </summary>
 public record ForcePlanTargetDto(
     string Database,
@@ -511,7 +516,9 @@ public record ForcePlanTargetDto(
     double BestCpuPerExecUs,
     double RegressionFactor,
     string? ReplicaRole = null,
-    bool ParameterSensitivityCoFired = false);
+    bool ParameterSensitivityCoFired = false,
+    DateTime? BestPlanLastSeenUtc = null,
+    double? BestPlanAgeDays = null);
 
 /// <summary>
 /// JSON mirror of <see cref="DbConfigTarget"/>. <see cref="Setting"/> is persisted
@@ -964,7 +971,9 @@ public static class AlertContextSerializer
                 t.BestCpuPerExecUs,
                 t.RegressionFactor,
                 t.ReplicaRole,
-                t.ParameterSensitivityCoFired));
+                t.ParameterSensitivityCoFired,
+                t.BestPlanLastSeenUtc,
+                t.BestPlanAgeDays));
         }
 
         List<DbConfigTargetDto>? dbConfigTargets = null;
@@ -1069,7 +1078,9 @@ public static class AlertContextSerializer
                     t.BestCpuPerExecUs,
                     t.RegressionFactor,
                     t.ReplicaRole,
-                    t.ParameterSensitivityCoFired));
+                    t.ParameterSensitivityCoFired,
+                    t.BestPlanLastSeenUtc,
+                    t.BestPlanAgeDays));
             }
         }
 
