@@ -468,6 +468,27 @@ public sealed class ConfigChangeAttributionTests
     }
 
     /// <summary>
+    /// An after half of a few seconds rounds to zero minutes. The card must not say "covers only 0 minutes", which
+    /// reads as no data at all: it says the half covers under a minute.
+    /// </summary>
+    [Fact]
+    public void Compose_AnAfterHalfUnderAMinute_SaysUnderAMinute_NeverZeroMinutes()
+    {
+        var (before, after) = Scored([Cpu(50), Wait("WRITELOG", 0.30)], [Cpu(51)]);
+        var compare = ComparisonBanding.Compare(before, after, NoDispersion, coverageCaveat: false);
+
+        var afterSpan = TimeSpan.FromSeconds(20);
+        var fact = ConfigChangeAttribution.BuildFact(1, MaxdopEvent(T0, T0.AddHours(-23)), 0,
+            ConfigChangeAttribution.WindowsFor(T0, T0 + afterSpan), compare, FullCoverage(), FullCoverage(afterSpan.TotalMilliseconds));
+        Assert.Equal(1, fact.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
+
+        var advice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!;
+        Assert.Contains("1 metric appeared in or vanished from the compare, but the after half covers under a minute, under the 1 h the compare needs", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain(" 0 minutes", advice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("covers only", advice.Investigation, StringComparison.Ordinal);
+    }
+
+    /// <summary>
     /// The same missing metric with an after half at the floor, and past it: unchanged. The floor is
     /// inclusive, so exactly one hour of "after" still reads the row as the resolved metric it always did.
     /// </summary>
