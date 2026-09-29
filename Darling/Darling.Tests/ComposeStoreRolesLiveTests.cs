@@ -961,6 +961,252 @@ public sealed class ComposeStoreRolesLiveTests
         }
     }
 
+    /// <summary>
+    /// A superuser does the first run, then the owner (a login with <c>CREATEROLE</c> that is not a superuser and owns the
+    /// store) runs the script with new passwords. From PostgreSQL 16 the owner holds no ADMIN OPTION on roles a superuser
+    /// made, so each <c>ALTER ROLE ... PASSWORD</c> line failed, the server wrote the failed statement with its password to
+    /// its log, no password changed, and psql exited 0. The guard now stops the run first: exit 3, the roles and the GRANT
+    /// statements named in the message, no password sent and none in the server log. The statements the message prints
+    /// (run by a superuser) let the same run through, and it changes the passwords. An owner that re-runs the script over
+    /// roles it created itself holds ADMIN OPTION on them and is not stopped.
+    /// </summary>
+    [Fact]
+    public async Task ANonSuperuserOwner_OverRolesASuperuserMade_StopsAtTheGuard_LogsNoPassword_AndPassesWithAdminOption_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-s7-admin-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            Assert.SkipUnless(await OwnerScalarAsync<int>(owner, "SELECT current_setting('server_version_num')::int", ct) >= 160000,
+                "A CREATEROLE login holds ADMIN OPTION only on the roles it creates, and needs it to change another role, from PostgreSQL 16.");
+            await ExecAsync(owner, "ALTER SYSTEM SET log_min_error_statement = 'error'", ct);
+            await ExecAsync(owner, "SELECT pg_reload_conf()", ct);
+            const string HashSql = "SELECT coalesce(rolpassword, '') FROM pg_catalog.pg_authid WHERE rolname = 'viewer'";
+
+            /* 1. A superuser's first run makes the roles, and the store then belongs to the non-superuser owner. */
+            var first = new[] { "AdminPwNoAdminS7a", "ViewerPwNoAdminS7a", "McpPwNoAdminS7a" };
+            var superuserRun = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, first, ct);
+            Assert.True(superuserRun.ExitCode == 0, $"psql exited {superuserRun.ExitCode} for the superuser's first run.{Environment.NewLine}{superuserRun.Error}");
+            var firstHash = await OwnerScalarAsync<string>(owner, HashSql, ct);
+            Assert.NotEqual(string.Empty, firstHash);
+            var byo = await MakeNonSuperuserOwnerAsync(owner, ct);
+            await ExecAsync(owner, "ALTER ROLE byo SET pg_stat_statements.track_utility = off", ct);
+            Assert.False(await OwnerScalarAsync<bool>(owner,
+                "SELECT pg_catalog.pg_has_role('byo', 'viewer', 'MEMBER WITH ADMIN OPTION')", ct),
+                "the owner already holds ADMIN OPTION on a role a superuser made, so the scenario proves nothing.");
+
+            /* 2. The owner's run with new passwords stops at the guard, sends no password and logs none. */
+            var second = new[] { "AdminPwNoAdminS7b", "ViewerPwNoAdminS7b", "McpPwNoAdminS7b" };
+            var stopped = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, second, ct);
+            Assert.True(stopped.ExitCode == 3, $"psql exited {stopped.ExitCode}, not 3: the owner's run got past the guard.{Environment.NewLine}{stopped.Error}");
+            Assert.Contains("does not hold ADMIN OPTION on these roles: admin, mcp, viewer", stopped.Error, StringComparison.Ordinal);
+            Assert.DoesNotContain("permission denied to alter role", stopped.Error, StringComparison.Ordinal);
+            Assert.Equal(firstHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
+            Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", first[1]), ct));
+
+            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, "SELECT 'LogControlNoAdminS7' FROM no_such_table_s7", ct));
+            var log = await WaitForServerLogAsync(dataDirectory, new[] { "LogControlNoAdminS7", "does not hold ADMIN OPTION on these roles" }, ct);
+            foreach (var password in second)
+            {
+                Assert.DoesNotContain(password, log, StringComparison.Ordinal);
+            }
+
+            /* 3. The statements the message prints, run by a superuser, are the remedy. */
+            var grants = System.Text.RegularExpressions.Regex.Match(stopped.Error, @"run this script again: (?<sql>GRANT [^\r\n]*)");
+            Assert.True(grants.Success, $"the stop does not print the GRANT statements.{Environment.NewLine}{stopped.Error}");
+            Assert.Contains("GRANT viewer TO byo WITH ADMIN OPTION;", grants.Groups["sql"].Value, StringComparison.Ordinal);
+            await ExecAsync(owner, grants.Groups["sql"].Value, ct);
+            var granted = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, second, ct);
+            Assert.True(granted.ExitCode == 0, $"psql exited {granted.ExitCode} after the superuser granted ADMIN OPTION.{Environment.NewLine}{granted.Error}");
+            Assert.NotEqual(firstHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
+            Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", second[1]), ct));
+            await Assert.ThrowsAsync<PostgresException>(() => CurrentUserAsync(Login(owner, "viewer", first[1]), ct));
+
+            /* 4. Roles the owner made itself: it holds ADMIN OPTION on them, so its re-run is not stopped and rotates them. */
+            await ExecAsync(owner, "DROP OWNED BY admin, viewer, mcp CASCADE; DROP ROLE admin, viewer, mcp;", ct);
+            var third = new[] { "AdminPwNoAdminS7c", "ViewerPwNoAdminS7c", "McpPwNoAdminS7c" };
+            var created = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, third, ct);
+            Assert.True(created.ExitCode == 0, $"psql exited {created.ExitCode} for the owner's own first run.{Environment.NewLine}{created.Error}");
+            var thirdHash = await OwnerScalarAsync<string>(owner, HashSql, ct);
+            Assert.NotEqual(string.Empty, thirdHash);
+            Assert.True(await OwnerScalarAsync<bool>(owner, "SELECT pg_catalog.pg_has_role('byo', 'viewer', 'MEMBER WITH ADMIN OPTION')", ct),
+                "the owner does not hold ADMIN OPTION on the role it created.");
+            var fourth = new[] { "AdminPwNoAdminS7d", "ViewerPwNoAdminS7d", "McpPwNoAdminS7d" };
+            var rerun = await RunFilledScriptAsync(runtimeRoot, root.FullName, byo, null, fourth, ct);
+            Assert.True(rerun.ExitCode == 0, $"the owner's re-run over roles it created was stopped (exit {rerun.ExitCode}).{Environment.NewLine}{rerun.Error}");
+            Assert.DoesNotContain("ADMIN OPTION on these roles", rerun.Error, StringComparison.Ordinal);
+            Assert.NotEqual(thirdHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
+            Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", fourth[1]), ct));
+            Assert.Equal("mcp", await CurrentUserAsync(Login(owner, "mcp", fourth[2]), ct));
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The other reasons a role that is not a superuser cannot change the roles, on any PostgreSQL version: it has no
+    /// <c>CREATEROLE</c>, or one of the three roles is a superuser. Each used to fail at the <c>ALTER ROLE ... PASSWORD</c>
+    /// lines and write the passwords to the server log while psql exited 0. Each now stops at the guard (exit 3), changes
+    /// nothing and logs no password. Before PostgreSQL 16 a role that has REPLICATION stops the run the same way.
+    /// </summary>
+    [Fact]
+    public async Task ARunnerThatCannotChangeTheRoles_StopsAtTheGuard_AndLogsNoPassword_ForEachReason_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-s7-cannot-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            var version = await OwnerScalarAsync<int>(owner, "SELECT current_setting('server_version_num')::int", ct);
+            await ExecAsync(owner, "ALTER SYSTEM SET log_min_error_statement = 'error'", ct);
+            await ExecAsync(owner, "SELECT pg_reload_conf()", ct);
+            const string HashSql = "SELECT coalesce(rolpassword, '') FROM pg_catalog.pg_authid WHERE rolname = 'viewer'";
+
+            var first = new[] { "AdminPwCannotS7a", "ViewerPwCannotS7a", "McpPwCannotS7a" };
+            var superuserRun = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, first, ct);
+            Assert.True(superuserRun.ExitCode == 0, $"psql exited {superuserRun.ExitCode} for the superuser's first run.{Environment.NewLine}{superuserRun.Error}");
+            var firstHash = await OwnerScalarAsync<string>(owner, HashSql, ct);
+            var byo = await MakeNonSuperuserOwnerAsync(owner, ct);
+            var database = new NpgsqlConnectionStringBuilder(owner).Database!;
+            await ExecAsync(owner,
+                "ALTER ROLE byo SET pg_stat_statements.track_utility = off;"
+                + " CREATE ROLE plain_s7 LOGIN NOSUPERUSER PASSWORD 'PlainPwS7';"
+                + " ALTER ROLE plain_s7 SET pg_stat_statements.track_utility = off;"
+                + $" GRANT CONNECT ON DATABASE \"{database}\" TO plain_s7;", ct);
+            var plain = Login(owner, "plain_s7", "PlainPwS7");
+            var passwords = new List<string>();
+
+            async Task AssertStopAsync(string login, string reason, string expected, string tag)
+            {
+                var words = new[] { $"AdminPw{tag}S7", $"ViewerPw{tag}S7", $"McpPw{tag}S7" };
+                passwords.AddRange(words);
+                var run = await RunFilledScriptAsync(runtimeRoot, root.FullName, login, null, words, ct);
+                Assert.True(run.ExitCode == 3, $"psql exited {run.ExitCode}, not 3, for {reason}.{Environment.NewLine}{run.Error}");
+                Assert.Contains(expected, run.Error, StringComparison.Ordinal);
+                Assert.DoesNotContain("permission denied to alter role", run.Error, StringComparison.Ordinal);
+                Assert.Equal(firstHash, await OwnerScalarAsync<string>(owner, HashSql, ct));
+            }
+
+            /* 1. No CREATEROLE. (Held over roles the owner has no ADMIN OPTION on, so no other check answers first.) */
+            await AssertStopAsync(plain, "a role without CREATEROLE",
+                "is not a superuser and does not have CREATEROLE", "NoCreate");
+
+            /* 2. A role that is a superuser. The owner has CREATEROLE, so the superuser check is the one that stops it. */
+            await ExecAsync(owner, "ALTER ROLE viewer SUPERUSER", ct);
+            await AssertStopAsync(byo, "a role that is a superuser", "These roles are superusers: viewer", "Super");
+            await ExecAsync(owner, "ALTER ROLE viewer NOSUPERUSER", ct);
+
+            /* 3. Before PostgreSQL 16, a role that has REPLICATION. From 16 the owner may change it (with ADMIN OPTION). */
+            if (version < 160000)
+            {
+                await ExecAsync(owner, "ALTER ROLE mcp REPLICATION", ct);
+                await AssertStopAsync(byo, "a role that has REPLICATION before PostgreSQL 16", "These roles have the REPLICATION attribute: mcp", "Repl");
+                await ExecAsync(owner, "ALTER ROLE mcp NOREPLICATION", ct);
+            }
+
+            await Assert.ThrowsAsync<PostgresException>(() => ExecAsync(owner, "SELECT 'LogControlCannotS7' FROM no_such_table_s7", ct));
+            var log = await WaitForServerLogAsync(dataDirectory,
+                new[] { "LogControlCannotS7", "is not a superuser and does not have CREATEROLE", "These roles are superusers: viewer" }, ct);
+            foreach (var password in passwords)
+            {
+                Assert.DoesNotContain(password, log, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// A password literal reaches the server log on a run that succeeds, too, when a logging setting records statement text.
+    /// For a superuser, step 0 turns each of them off for the session, so the log holds no password. Each setting is put on the
+    /// login as its default, so it applies from the session's start (no reload to wait for). The control for each is a
+    /// statement from a session of its own that the same setting logs, with its literal: it shows the log would have held a
+    /// password too.
+    /// </summary>
+    [Fact]
+    public async Task ASuperuserRun_WithStatementLoggingOn_LeavesNoPasswordInTheServerLog_Gated()
+    {
+        var runtimeRoot = RequireRuntime();
+        var root = Directory.CreateTempSubdirectory("darling-s7-logging-");
+        var dataDirectory = Path.Combine(root.FullName, "pg");
+        var cluster = new DarlingManagedPostgres(
+            new PostgresConfig { Managed = true, Port = DarlingManagedPostgresTests.FindFreeTcpPort(), DataDirectory = dataDirectory },
+            NullLogger.Instance, runtimeRoot);
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var ct = timeout.Token;
+            var owner = await BootMigratedAsync(cluster, ct);
+            var superuser = new NpgsqlConnectionStringBuilder(owner).Username!;
+            var login = $"\"{superuser.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
+            var phases = new[]
+            {
+                (Tag: "Ddl", Settings: "SET log_statement = 'ddl'", Control: "CREATE ROLE control_ddl_s7 NOLOGIN PASSWORD 'LogControlDdlS7'", Logged: "LogControlDdlS7"),
+                (Tag: "Dur", Settings: "SET log_min_duration_statement = 0", Control: "SELECT 'LogControlDurS7'", Logged: "LogControlDurS7"),
+                (Tag: "Smp", Settings: "SET log_min_duration_sample = 0", Control: "SELECT 'LogControlSmpS7'", Logged: "LogControlSmpS7"),
+                (Tag: "Trn", Settings: "SET log_transaction_sample_rate = 1", Control: "SELECT 'LogControlTrnS7'", Logged: "LogControlTrnS7"),
+            };
+            var passwords = new List<string>();
+            var expected = new List<string>();
+            foreach (var phase in phases)
+            {
+                await ExecAsync(owner, $"ALTER ROLE {login} RESET ALL", ct);
+                await ExecAsync(owner, $"ALTER ROLE {login} {phase.Settings}", ct);
+                if (phase.Tag == "Smp")
+                {
+                    await ExecAsync(owner, $"ALTER ROLE {login} SET log_statement_sample_rate = 1", ct);
+                }
+
+                var controlPath = Path.Combine(root.FullName, $"control-{phase.Tag}.sql");
+                File.WriteAllText(controlPath, phase.Control + ";" + Environment.NewLine);
+                var control = await RunPsqlScriptAsync(runtimeRoot, owner, null, controlPath, ct);
+                Assert.True(control.ExitCode == 0, $"the {phase.Tag} control statement failed.{Environment.NewLine}{control.Error}");
+                expected.Add(phase.Logged);
+
+                var words = new[] { $"AdminPwLog{phase.Tag}S7", $"ViewerPwLog{phase.Tag}S7", $"McpPwLog{phase.Tag}S7" };
+                passwords.AddRange(words);
+                var run = await RunFilledScriptAsync(runtimeRoot, root.FullName, owner, null, words, ct);
+                Assert.True(run.ExitCode == 0, $"psql exited {run.ExitCode} in the {phase.Tag} run.{Environment.NewLine}{run.Error}");
+                Assert.Equal("viewer", await CurrentUserAsync(Login(owner, "viewer", words[1]), ct));
+                await ExecAsync(owner, $"ALTER ROLE {login} RESET ALL", ct);
+            }
+
+            var log = await WaitForServerLogAsync(dataDirectory, expected.ToArray(), ct);
+            foreach (var password in passwords)
+            {
+                Assert.DoesNotContain(password, log, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            DarlingStoreLogins.ResetComposeStoreVerdictForTests();
+            await cluster.StopIfStartedByThisProcessAsync();
+            DarlingManagedPostgresTests.TryDeleteRecursive(root.FullName);
+        }
+    }
+
     /// <summary>Writes the shipped script with its three password placeholders replaced (in a file under
     /// <paramref name="directory"/>) and runs it with the runtime's own psql.</summary>
     private static async Task<(int ExitCode, string Output, string Error)> RunFilledScriptAsync(

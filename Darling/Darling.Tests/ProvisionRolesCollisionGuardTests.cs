@@ -358,4 +358,211 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.Contains("GRANT SET ON PARAMETER", sql, StringComparison.Ordinal);
         Assert.Contains("AN OWNER WHO IS NOT A SUPERUSER", sql, StringComparison.Ordinal);
     }
+
+    private const string NonSuperuserBranch = "IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN";
+
+    /// <summary>The part of the guard that only a role that is not a superuser reaches, from its opening <c>IF</c> to
+    /// the end of the guard.</summary>
+    private static string NonSuperuserChecks(string sql)
+    {
+        var guard = GuardBlock(sql);
+        Assert.Single(Regex.Matches(guard, Regex.Escape(NonSuperuserBranch)));
+        return guard[guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal)..];
+    }
+
+    /// <summary>The <c>RAISE EXCEPTION</c> line of <paramref name="checks"/> whose text starts with
+    /// <paramref name="start"/>.</summary>
+    private static string RaiseLine(string checks, string start)
+    {
+        var line = checks.Split('\n').Select(l => l.Trim()).SingleOrDefault(l => l.StartsWith($"RAISE EXCEPTION '{start}", StringComparison.Ordinal));
+        Assert.True(line is not null, $"the guard has no RAISE EXCEPTION that starts '{start}'.");
+        return line!;
+    }
+
+    /// <summary>Every stop the guard adds for a role that is not a superuser says what happened, that nothing was
+    /// changed, and why it stopped before the password lines, and it never holds a password.</summary>
+    private static void AssertStopExplainsItself(string line)
+    {
+        Assert.Contains("The script created and changed nothing.", line, StringComparison.Ordinal);
+        Assert.Contains("a failed ALTER ROLE line does not write a password to the server log", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("CHANGE_ME_", line, StringComparison.Ordinal);
+        Assert.DoesNotMatch(@"(?i)\bPASSWORD\s+'", line);
+        Assert.Contains("as a superuser", line, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>A role that is not a superuser and has no <c>CREATEROLE</c> cannot change another role at all, so each
+    /// <c>ALTER ROLE ... LOGIN PASSWORD</c> line would fail, and the server would write the statement, password included,
+    /// to its log. The guard stops such a run first. The branch is one that a superuser never enters, it comes after the
+    /// marker and ADMIN OPTION checks, and it looks at the running role's own attribute, as PostgreSQL does.</summary>
+    [Fact]
+    public void TheGuard_StopsARunnerWithoutCreaterole_BeforeAnyPasswordIsSent()
+    {
+        var sql = Script();
+        var guard = GuardBlock(sql);
+        var checks = NonSuperuserChecks(sql);
+
+        Assert.True(guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) > guard.IndexOf("membership.admin_option", StringComparison.Ordinal),
+            "the checks for a role that is not a superuser must come after the check for another login that administers a role.");
+        Assert.True(guard.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) > guard.LastIndexOf("IS DISTINCT FROM 'darling-managed'", StringComparison.Ordinal),
+            "the checks for a role that is not a superuser must come after the marker checks, so an unrelated role is never offered a GRANT.");
+
+        Assert.StartsWith("IF NOT (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) THEN", checks[(NonSuperuserBranch.Length)..].TrimStart(), StringComparison.Ordinal);
+
+        var line = RaiseLine(checks, "The role running this script, %, is not a superuser and does not have CREATEROLE");
+        AssertStopExplainsItself(line);
+        Assert.Contains("Run this script again as a superuser, or as a role that has CREATEROLE.", line, StringComparison.Ordinal);
+        Assert.True(sql.IndexOf(NonSuperuserBranch, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index,
+            "the stop must come before the first ALTER ROLE ... PASSWORD.");
+    }
+
+    /// <summary>Only a superuser can change a superuser role, on every version, so a marked role that has
+    /// <c>SUPERUSER</c> stops the run for a role that is not a superuser. The message names the roles.</summary>
+    [Fact]
+    public void TheGuard_StopsARunnerThatIsNotASuperuser_WhenOneOfTheRolesIsASuperuser()
+    {
+        var checks = NonSuperuserChecks(Script());
+
+        Assert.Matches(@"(?s)SELECT string_agg\(quote_ident\(rolname\), ', ' ORDER BY rolname\) INTO unchangeable\s+FROM pg_roles\s+WHERE rolname IN \('admin', 'viewer', 'mcp'\) AND rolsuper;", checks);
+
+        var line = RaiseLine(checks, "These roles are superusers: %");
+        AssertStopExplainsItself(line);
+        Assert.Contains("is not a superuser, so it cannot change them", line, StringComparison.Ordinal);
+        Assert.True(checks.IndexOf("AND rolsuper;", StringComparison.Ordinal) < checks.IndexOf("server_version_num", StringComparison.Ordinal),
+            "the superuser check applies to every version, so it comes before the version branch.");
+    }
+
+    /// <summary>From PostgreSQL 16 a role needs ADMIN OPTION on a role to change its password. A role that a superuser
+    /// made carries none for the owner, so the owner's <c>ALTER ROLE</c> lines failed and logged the passwords. The guard
+    /// asks <c>pg_has_role</c>, which calls the function <c>ALTER ROLE</c> uses, and names the remedy: the GRANT
+    /// statements for a superuser to run, or a superuser's own run. A role this run created passes, because its creator
+    /// holds the option.</summary>
+    [Fact]
+    public void TheGuard_FromPostgres16_StopsARunnerThatLacksAdminOption_AndNamesTheGrant()
+    {
+        var checks = NonSuperuserChecks(Script());
+
+        var branch = checks[checks.IndexOf("IF current_setting('server_version_num')::int >= 160000 THEN", StringComparison.Ordinal)..];
+        Assert.StartsWith("IF current_setting('server_version_num')::int >= 160000 THEN", branch, StringComparison.Ordinal);
+        Assert.Contains("WHERE rolname IN ('admin', 'viewer', 'mcp') AND NOT pg_has_role(current_user, oid, 'MEMBER WITH ADMIN OPTION');", branch, StringComparison.Ordinal);
+        Assert.Contains("string_agg(format('GRANT %I TO %I WITH ADMIN OPTION;', rolname, current_user), ' ' ORDER BY rolname)", branch, StringComparison.Ordinal);
+
+        var line = RaiseLine(checks, "The role running this script, %, does not hold ADMIN OPTION on these roles: %");
+        AssertStopExplainsItself(line);
+        Assert.Contains("Run this script as a superuser. Or, as a superuser, run these statements and then run this script again: %", line, StringComparison.Ordinal);
+        Assert.Contains("From PostgreSQL 16", line, StringComparison.Ordinal);
+        var newer = checks.IndexOf("IF current_setting('server_version_num')::int >= 160000 THEN", StringComparison.Ordinal);
+        var older = checks.IndexOf("ELSE", newer, StringComparison.Ordinal);
+        var stop = checks.IndexOf(line, StringComparison.Ordinal);
+        Assert.True(newer >= 0 && stop > newer && stop < older, "the ADMIN OPTION stop belongs to the PostgreSQL 16 and later branch.");
+    }
+
+    /// <summary>Before PostgreSQL 16 a role with <c>CREATEROLE</c> cannot change a role that has <c>REPLICATION</c> (the
+    /// PostgreSQL 15 ALTER ROLE page: only for non-superuser and non-replication roles), so the guard stops on it. From 16
+    /// the same runner can, so the check belongs to the older branch alone.</summary>
+    [Fact]
+    public void TheGuard_Before16_StopsARunnerThatIsNotASuperuser_WhenOneOfTheRolesHasReplication()
+    {
+        var checks = NonSuperuserChecks(Script());
+
+        var older = checks[checks.IndexOf("ELSE", StringComparison.Ordinal)..];
+        Assert.Matches(@"(?s)^ELSE\s+SELECT string_agg\(quote_ident\(rolname\), ', ' ORDER BY rolname\) INTO unchangeable\s+FROM pg_roles\s+WHERE rolname IN \('admin', 'viewer', 'mcp'\) AND rolreplication;", older);
+        Assert.DoesNotContain("rolreplication", checks[..checks.IndexOf("ELSE", StringComparison.Ordinal)], StringComparison.Ordinal);
+
+        var line = RaiseLine(checks, "These roles have the REPLICATION attribute: %");
+        AssertStopExplainsItself(line);
+        Assert.Contains("Before PostgreSQL 16 only a superuser can change a role that has it", line, StringComparison.Ordinal);
+    }
+
+    /// <summary>The ADMIN OPTION refusal (a marked role that another login administers) names the step that destroys
+    /// nothing: run the script as that login, which the check leaves out. It also says that only a superuser can revoke
+    /// the option from a login that created the role, since PostgreSQL records that grant as made by the bootstrap
+    /// superuser.</summary>
+    [Fact]
+    public void TheAdminOptionRefusal_NamesRunningTheScriptAsThatLogin_BeforeRevokingOrDropping()
+    {
+        var sql = Script();
+        var line = Regex.Match(GuardBlock(sql), @"(?m)^\s*RAISE EXCEPTION 'Role ""%"" carries the .*$").Value;
+        Assert.NotEmpty(line);
+
+        Assert.Contains("To go on, run this script as that login, which this check leaves out", line, StringComparison.Ordinal);
+        Assert.Contains("Or, as a superuser, revoke that ADMIN OPTION (a login that created the role cannot revoke it itself), or drop the role.", line, StringComparison.Ordinal);
+        Assert.True(line.IndexOf("run this script as that login", StringComparison.Ordinal) < line.IndexOf("revoke that ADMIN OPTION", StringComparison.Ordinal));
+
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        Assert.Contains("To continue, run the script as that login, which the check leaves out.", readme, StringComparison.Ordinal);
+        Assert.Contains("A login that created the role cannot revoke the option itself", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("To continue, revoke that option or drop the role", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("Revoke that option or drop the role, then", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>"Owner can switch off REPLICATION or BYPASSRLS itself" is true from PostgreSQL 16 only: before 16 only a
+    /// superuser can change either. The script's WARNING, its header and the README all carry that qualifier.</summary>
+    [Fact]
+    public void TheReplicationAndBypassrlsClaims_CarryThePostgres16Qualifier_InTheWarningTheHeaderAndTheReadme()
+    {
+        var sql = Script();
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+
+        Assert.Contains("switching it off needs a superuser, or, from PostgreSQL 16, an owner that holds % itself.", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("needs a superuser, or an owner that holds % itself", sql, StringComparison.Ordinal);
+        Assert.Contains("nor is REPLICATION, BYPASSRLS or CREATEDB unless the owner", sql, StringComparison.Ordinal);
+        Assert.Contains("(PostgreSQL 16 and later; before 16 only a superuser can change REPLICATION or", sql, StringComparison.Ordinal);
+
+        Assert.Contains("From PostgreSQL 16, it can switch off `REPLICATION`, `BYPASSRLS` and `CREATEDB` only if it holds that attribute itself", readme, StringComparison.Ordinal);
+        Assert.Contains("Before PostgreSQL 16, only a superuser can switch off `REPLICATION` or `BYPASSRLS`.", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("The owner cannot switch off `SUPERUSER`. It can switch off `REPLICATION`", readme, StringComparison.Ordinal);
+    }
+
+    /// <summary>A password literal reaches the server log on a successful run too, when <c>log_statement</c> is
+    /// <c>ddl</c> or <c>all</c> or <c>log_min_duration_statement</c> is 0 or more (the sampling settings do the same). Step 0
+    /// turns them off for the session, in a block that catches the refusal for a role that may not (and the error for a
+    /// setting an older server does not have), so a run by an owner that is not a superuser prints nothing. It is
+    /// session-level (<c>is_local</c> false), and it comes before the guard and every password line. The README names both
+    /// settings, and the script's header names the second one.</summary>
+    [Fact]
+    public void StepZero_TurnsOffStatementLoggingForTheSession_QuietlyForARoleThatMayNot()
+    {
+        var sql = Script();
+
+        var utilityOff = sql.IndexOf("\nSET pg_stat_statements.track_utility = off;", StringComparison.Ordinal);
+        Assert.True(utilityOff >= 0);
+        var block = sql[sql.IndexOf("DO $$", utilityOff, StringComparison.Ordinal)..];
+        block = block[..(block.IndexOf("END $$;", StringComparison.Ordinal) + "END $$;".Length)];
+
+        foreach (var (name, value) in new[] { ("log_statement", "none"), ("log_min_duration_statement", "-1"), ("log_min_duration_sample", "-1"), ("log_transaction_sample_rate", "0") })
+        {
+            Assert.Contains($"('{name}', '{value}')", block, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("PERFORM set_config(log_setting.name, log_setting.value, false);", block, StringComparison.Ordinal);
+        Assert.Contains("EXCEPTION WHEN insufficient_privilege OR undefined_object THEN", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("RAISE", block, StringComparison.Ordinal);
+        Assert.DoesNotContain("password", block, StringComparison.OrdinalIgnoreCase);
+
+        var guardStart = sql.IndexOf(GuardBlock(sql), StringComparison.Ordinal);
+        Assert.True(sql.IndexOf(block, StringComparison.Ordinal) < guardStart, "step 0's logging block must come before the guard.");
+        Assert.True(sql.IndexOf(block, StringComparison.Ordinal) < Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD").Index);
+
+        var header = sql[..sql.IndexOf("-- 0. Keep this script's own role DDL", StringComparison.Ordinal)];
+        Assert.Contains("log_min_duration_statement set to 0 or more", header, StringComparison.Ordinal);
+        Assert.Contains("log_statement set to ddl or all", header, StringComparison.Ordinal);
+
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        Assert.Contains("If `log_statement` is `ddl` or `all`, or `log_min_duration_statement` is `0` or more, the server writes each `ALTER ROLE ... PASSWORD` line to its log with the password, even when the run succeeds.", readme, StringComparison.Ordinal);
+        Assert.Contains("Step 0 turns those settings off for the session.", readme, StringComparison.Ordinal);
+        Assert.Contains("GRANT SET ON PARAMETER <setting> TO <owner>", readme, StringComparison.Ordinal);
+        Assert.Contains("A run that succeeds also writes all three passwords to the log when `log_statement` is `ddl` or `all`, or when `log_min_duration_statement` is `0` or more.", readme, StringComparison.Ordinal);
+    }
+
+    /// <summary>The README describes the new stops in the list of what an owner that is not a superuser can do.</summary>
+    [Fact]
+    public void TheReadme_SaysTheGuardStopsAnOwnerThatCannotChangeTheRoles_AndNamesTheGrant()
+    {
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+
+        Assert.Contains("The guard checks this before it sends a password.", readme, StringComparison.Ordinal);
+        Assert.Contains("If the owner cannot change one of the three roles, the run stops at the guard with exit code 3, and the message names the roles and the `GRANT` statements to run.", readme, StringComparison.Ordinal);
+        Assert.Contains("The same stop happens when one of the roles is a superuser, and, before PostgreSQL 16, when one of the roles has `REPLICATION`", readme, StringComparison.Ordinal);
+        Assert.Contains("A superuser is never stopped by these checks.", readme, StringComparison.Ordinal);
+    }
 }
