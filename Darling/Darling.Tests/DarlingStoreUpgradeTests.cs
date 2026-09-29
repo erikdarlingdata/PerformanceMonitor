@@ -14,6 +14,8 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -350,6 +352,116 @@ public sealed class DarlingStoreUpgradeTests
 
         var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"));
         Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadVolumeSpace(missing));
+    }
+
+    /// <summary>The space is asked of the mount point the first step found, never of the directory itself and
+    /// never of its drive letter: a volume mounted at a folder is read at its own mount point, and the
+    /// caller's access to the directory does not come into it.</summary>
+    [Fact]
+    public void ReadVolumeSpaceVia_AsksTheMountPointItResolved_NotTheDirectory()
+    {
+        const long oneGb = 1024L * 1024 * 1024;
+        var resolved = new List<string>();
+        var asked = new List<string>();
+
+        var (free, total) = DarlingStoreUpgrade.ReadVolumeSpaceVia(
+            @"C:\Mnt\Data\pgdata",
+            directory =>
+            {
+                resolved.Add(directory);
+                return @"C:\Mnt\Data\";
+            },
+            mountPoint =>
+            {
+                asked.Add(mountPoint);
+                return (64 * oneGb, 120 * oneGb);
+            });
+
+        Assert.Equal(64 * oneGb, free);
+        Assert.Equal(120 * oneGb, total);
+        Assert.Equal(new[] { @"C:\Mnt\Data\pgdata" }, resolved);
+        Assert.Equal(new[] { @"C:\Mnt\Data\" }, asked);
+    }
+
+    /// <summary>A folder on the system drive is on that drive's own volume, so its mount point is the drive
+    /// root: finding the mount point changes nothing for the ordinary case, where the drive-root read was
+    /// already right.</summary>
+    [Fact]
+    public void ResolveVolumeMountPoint_FolderOnTheSystemDrive_IsTheDriveRoot()
+    {
+        var folder = Environment.SystemDirectory;
+
+        var mountPoint = DarlingStoreUpgrade.ResolveVolumeMountPoint(folder);
+
+        Assert.Equal(Path.GetPathRoot(folder), mountPoint, ignoreCase: true);
+    }
+
+    /// <summary>A directory that is not there is refused, not answered with the volume above it. The Win32
+    /// call answers for any path under a folder that exists, and a data directory below a volume mounted at a
+    /// folder that is offline would then be judged by the drive letter's free space.</summary>
+    [Fact]
+    public void ResolveVolumeMountPoint_DirectoryThatIsNotThere_IsRefused_NotAnsweredWithTheVolumeAbove()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"), "data");
+
+        Assert.Throws<IOException>(() => DarlingStoreUpgrade.ResolveVolumeMountPoint(missing));
+    }
+
+    /// <summary>A folder the current account is shut out of still reads its volume's numbers. A volume's size
+    /// and free space do not depend on the caller's access to one folder on it, and the read that opened the
+    /// folder itself was turned away with "access denied" here: a command prompt that is not elevated, or the
+    /// viewer's own profile, asking about a data directory only the service account can open. With the folder
+    /// above it shut as well, the caller cannot even read the folder's attributes, and it is still on a
+    /// volume: only a folder that is not there is refused.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReadVolumeSpace_FolderTheCallerIsShutOutOf_StillReadsItsVolume(bool folderAboveIsShutToo)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var above = Directory.CreateTempSubdirectory("pm-volume-shut-");
+        var folder = above.CreateSubdirectory("data");
+        var deny = new FileSystemAccessRule(
+            WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl, AccessControlType.Deny);
+        var folderSecurity = folder.GetAccessControl();
+        var aboveSecurity = above.GetAccessControl();
+        try
+        {
+            folderSecurity.AddAccessRule(deny);
+            folder.SetAccessControl(folderSecurity);
+            if (folderAboveIsShutToo)
+            {
+                aboveSecurity.AddAccessRule(deny);
+                above.SetAccessControl(aboveSecurity);
+            }
+
+            var shut = false;
+            try
+            {
+                _ = Directory.GetFileSystemEntries(folder.FullName);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                shut = true;
+            }
+
+            Assert.SkipUnless(shut, "The folder is still open to this account, so it cannot stand in for one the caller is shut out of.");
+
+            var (free, total) = DarlingStoreUpgrade.ReadVolumeSpace(folder.FullName);
+
+            Assert.Equal(new DriveInfo(Path.GetPathRoot(folder.FullName)!).TotalSize, total);
+            Assert.InRange(free, 0L, total);
+        }
+        finally
+        {
+            aboveSecurity.RemoveAccessRule(deny);
+            above.SetAccessControl(aboveSecurity);
+            folderSecurity.RemoveAccessRule(deny);
+            folder.SetAccessControl(folderSecurity);
+            folder.Delete();
+            above.Delete();
+        }
     }
 
     /// <summary>Hard-link mode: a carry that throws after the swap still takes the retained pre-upgrade

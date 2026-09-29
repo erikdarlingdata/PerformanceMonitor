@@ -4092,9 +4092,9 @@ public sealed class DarlingManagedPostgres
     }
 
     /// <summary>
-    /// The AUTHORITATIVE free/total read of the volume holding <paramref name="dataDirectory"/> (#3802), asked of
-    /// the directory itself through <see cref="DarlingStoreUpgrade.ReadVolumeSpace"/>, the call the store
-    /// upgrade's headroom check makes. A data directory on a volume mounted at a folder is sized from that
+    /// The AUTHORITATIVE free/total read of the volume holding <paramref name="dataDirectory"/> (#3802), made
+    /// for the directory's own volume through <see cref="DarlingStoreUpgrade.ReadVolumeSpace"/>, the call the
+    /// store upgrade's headroom check makes. A data directory on a volume mounted at a folder is sized from that
     /// volume, not from the one behind its drive letter. The free figure is the one available to the caller
     /// rather than the volume's total free space: it honours a quota on the service account, and the WAL is
     /// written by the postmaster running AS that account, so it is the figure that bounds what the server can

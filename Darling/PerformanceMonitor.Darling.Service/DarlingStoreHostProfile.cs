@@ -345,7 +345,7 @@ internal static class DarlingStoreHostProfile
     }
 
     /// <summary>The volume holding <paramref name="anchorPath"/>, plus <c>DriveFormat</c> for the filesystem
-    /// name the profile also carries. On Windows the sizes are asked of the path itself
+    /// name the profile also carries. On Windows the sizes are read for the volume that holds the path
     /// (<see cref="DarlingStoreUpgrade.ReadVolumeSpace"/>), so an anchor on a volume mounted at a folder reports
     /// that volume's size and free space, not those of the volume behind its drive letter. The readiness check
     /// and the filesystem name still come from the drive letter's <c>DriveInfo</c>, which has no per-path form.

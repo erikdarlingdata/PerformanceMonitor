@@ -6103,9 +6103,9 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
 
     /// <summary>
     /// <see cref="ResolveStoreFreeSpaceAsync"/> once the data directory is known. On Windows the free space is
-    /// asked of the directory itself, so a data directory on a volume mounted at a folder is judged by its own
-    /// volume and not by the one behind its drive letter, which is the number that decides whether a
-    /// materialization or a rewrite has room. Elsewhere the free-space call does not exist and the read is the
+    /// read for the volume that holds the directory, so a data directory on a volume mounted at a folder is
+    /// judged by its own volume and not by the one behind its drive letter, which is the number that decides
+    /// whether a materialization or a rewrite has room. Elsewhere the free-space call does not exist and the read is the
     /// path root's. <paramref name="readAvailableFreeBytes"/> replaces the read, so a test can say what the
     /// volume holds and what a failed read looks like.
     /// </summary>
