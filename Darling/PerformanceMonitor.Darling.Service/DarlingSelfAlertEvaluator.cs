@@ -17,6 +17,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Collectors;
@@ -157,6 +158,22 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, DateTime> _lastCaptureDownAlert = new();
     private readonly ConcurrentDictionary<string, bool> _activeAgentDown = new();
     private readonly ConcurrentDictionary<string, DateTime> _lastAgentDownAlert = new();
+
+    /// <summary>The failed-send streaks behind <see cref="AfterSelfFire"/> (#4795): per (alert metric, key), how
+    /// many sends in a row reached no channel. In memory only, like the stamps it back-dates; a restart starts
+    /// every streak over, which only ever makes the first retry earlier.</summary>
+    private readonly FailedSendBackoff _selfFailedSends = new();
+
+    /// <summary>When a "Server Unreachable" that no channel delivered is due again, per server (#4795). The
+    /// connection edge has nothing else that brings it back with re-fire off. Cleared when the server is seen
+    /// online.</summary>
+    private readonly FailedSendRetryTracker _connectionRetries = new();
+
+    /// <summary>The same for the availability group alerts (#4795), keyed by metric and AG grain: a disconnect
+    /// that reached no channel is due again with re-fire off or on; a failover and a data-movement-suspended
+    /// edge, whose "already reported" markers are put back, are due again after the same delay. Held in a tracker
+    /// rather than back-dated into the re-fire stamp because the stamp means nothing with re-fire off.</summary>
+    private readonly FailedSendRetryTracker _agRetries = new();
 
     /// <summary>Servers on which SQL Agent has been OBSERVED RUNNING at least once — the capability gate for
     /// "Agent Not Running". Memoized only once true, so the store probe behind it stops after the first
@@ -768,6 +785,10 @@ internal sealed class DarlingSelfAlertEvaluator
        number this process had in its hand an hour ago, and it would still be a non-measurement on the first
        pass after a restart. */
     private readonly ConcurrentDictionary<string, long> _policyJobFailureBaseline = new(StringComparer.Ordinal);
+
+    /// <summary>Jobs whose last Policy Job Failing alert reached no channel (#4795): the retry is pending until
+    /// the back-dated cooldown stamp opens, and the failure baseline is left alone until then.</summary>
+    private readonly ConcurrentDictionary<string, bool> _policyJobRetryPending = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobFailureAlert = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -1035,6 +1056,13 @@ internal sealed class DarlingSelfAlertEvaluator
     private readonly ConcurrentDictionary<string, (int ServerId, AgVantage Vantage)> _agAuthority =
         new(StringComparer.Ordinal);
 
+    /// <summary>How many times each server has been forgotten (#4795); a server never forgotten has no entry and
+    /// reads as 0. The store-alert sweep captures it before its first read and hands it to each of its five
+    /// judgments (<see cref="GenerationOf"/>), which is how a sweep that was reading when its server was removed is
+    /// told from one for the server as it is now: the first would act for a server that is gone, claiming an AG's
+    /// authority or sending and stamping state for a later add of the same server to inherit.</summary>
+    private readonly ConcurrentDictionary<int, int> _generations = new();
+
     /// <summary>When "AG Replica Disconnected" last DELIVERED per ag+replica — the #1659 re-fire clock
     /// (V37). Stamped on delivery only, so a decision suppressed by the master switch cannot consume the
     /// window; cleared on reconnect.</summary>
@@ -1254,6 +1282,15 @@ internal sealed class DarlingSelfAlertEvaluator
            pass that never looked at the store is not in the denominator. */
         _readFailures?.RecordPass(Key(serverId));
 
+        /* #4795: the server's generation, read before the first await and handed to all five judgments below
+           (collection stopped, capture down, agent not running and the two AG evaluations). A removal lands on
+           another thread while a read is pending, and a judgment that resumed after it would act for a server
+           that is gone: the AG pair would claim the group's authority, which no surviving node with the same
+           view could then take back, and the other three would send for it and leave the standing-alert flags
+           and cooldown stamps Forget just dropped, for a later add of the same server to inherit (its
+           server_id is a hash of its storage name, so it comes back under the same id). */
+        var generation = GenerationOf(serverId);
+
         /* Collection-stopped is judged on every pass, whether or not the service has seen this server online
            this run (#4757): JudgeCollectionStopped measures staleness from the later of the last success and
            the moment the service began watching, so pre-restart / pre-re-add rows cannot false-alarm before
@@ -1267,7 +1304,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 await ReadCollectionSignalsAsync(postgres, serverId, _settings.CollectionFailureThreshold, cancellationToken);
             collectionReadClock.Restart();
             bool stopped = JudgeCollectionStopped(serverId, lastSuccess, recentRuns, recentSuccess, out var reason);
-            await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken);
+            await ApplyCollectionStoppedAsync(serverId, serverName, stopped, reason, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1289,7 +1326,7 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             var missing = await ReadMissingCaptureSessionsAsync(postgres, serverId, cancellationToken);
             captureReadClock.Restart();
-            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken);
+            await ApplyCaptureDownAsync(serverId, serverName, missing, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1334,7 +1371,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 }
             }
 
-            await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken);
+            await ApplyAgentNotRunningAsync(serverId, serverName, freshRunning, everRan, cancellationToken, sweepGeneration: generation);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1364,7 +1401,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 agReadClock.Restart();
                 if (IsFresh(replicaTimeUtc))
                 {
-                    await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken);
+                    await ApplyAgReplicaHealthAsync(serverId, serverName, replicas, cancellationToken, sweepGeneration: generation);
                     agReadClock.Restart();
                 }
 
@@ -1373,7 +1410,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 agReadClock.Restart();
                 if (IsFresh(databaseTimeUtc))
                 {
-                    await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken);
+                    await ApplyAgDatabaseHealthAsync(serverId, serverName, databases, cancellationToken, sweepGeneration: generation);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1489,9 +1526,20 @@ internal sealed class DarlingSelfAlertEvaluator
     /// only after the alert cooldown while it persists, and write ONE "Collection Resumed" history row on
     /// recovery. Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started
+    /// reading. When it is given and the server has been forgotten since, the reading belongs to a server that is
+    /// gone, so this judges nothing: it sends nothing and leaves no standing-alert flag or cooldown stamp for a
+    /// later add of the same server to inherit. Null (the default) evaluates whatever it is handed.</param>
     internal async Task ApplyCollectionStoppedAsync(
-        int serverId, string serverName, bool stopped, string reason, CancellationToken cancellationToken)
+        int serverId, string serverName, bool stopped, string reason, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send; see the parameter. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         var key = Key(serverId);
         var now = _utcNow();
 
@@ -1501,7 +1549,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (CooldownElapsed(_lastCollectionStoppedAlert, key, now))
             {
                 _lastCollectionStoppedAlert[key] = now;
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Collection Stopped", reason, "collecting",
                     detail: reason + " A headless service has no dashboard to watch, so this is the primary " +
                         "signal that a server's data has gone stale. Check the service log and the server's " +
@@ -1512,6 +1560,7 @@ internal sealed class DarlingSelfAlertEvaluator
                        with different units (a run count, or minutes). See AlertMetricClassifier.IsStateOnly. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Collection Stopped", _lastCollectionStoppedAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCollectionStopped.TryRemove(key, out var was) && was)
@@ -1528,9 +1577,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// they need to know when the data feeding them stops existing). Fire once on entry, re-fire only after
     /// the cooldown, write ONE "Capture Restored" row on recovery.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
+    /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyCaptureDownAsync(
-        int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken)
+        int serverId, string serverName, IReadOnlyList<string> missing, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         if (!_settings.BlockingEnabled && !_settings.DeadlockEnabled)
         {
             return;
@@ -1546,7 +1604,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastCaptureDownAlert[key] = now;
                 var list = string.Join(" and ", missing);
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Capture Down", list, "session running",
                     detail: $"The {list} Extended Events session(s) are missing and could not be created. " +
                         "Blocking/deadlock data is NOT being captured, so those alerts can never fire. Check the " +
@@ -1557,6 +1615,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* Which capture is missing ("Blocking and Deadlock") against "session running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Capture Down", _lastCaptureDownAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCaptureDown.TryRemove(key, out var was) && was)
@@ -1705,8 +1764,8 @@ internal sealed class DarlingSelfAlertEvaluator
                into LatestMs — a cooldown-elapsed re-ask against a hourly flush that hasn't landed a new row
                yet must wait for that row rather than re-fire on a total it already reported. Same shape as
                #2704's collection-time gate on Poison Wait. */
-            bool hasFreshDataPoint = !_lastCostRegressionDataPoint.TryGetValue(key, out var lastDataPoint)
-                || regression.LatestMetricTime > lastDataPoint;
+            bool hadPriorDataPoint = _lastCostRegressionDataPoint.TryGetValue(key, out var lastDataPoint);
+            bool hasFreshDataPoint = !hadPriorDataPoint || regression.LatestMetricTime > lastDataPoint;
 
             if (hasFreshDataPoint && CooldownElapsed(_lastCostRegressionAlert, key, now))
             {
@@ -1716,7 +1775,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     ? regression.LatestMsPerRun / regression.BaselineMsPerRun
                     : 0;
                 var threshold = regression.ThresholdMsPerRun(CostRegressionFactor);
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, regression.ServerName, "Collector Cost Regression",
                     currentValue: $"{regression.LatestMsPerRun:N1} ms/run",
                     /* #3441's rule extended by #3462: the reported threshold is the one that actually selected
@@ -1749,6 +1808,12 @@ internal sealed class DarlingSelfAlertEvaluator
                        so the notebook template can scope its collection-log/cost/stall-probe reads to it
                        instead of showing every collector's log. */
                     context: new AlertContext { CollectorName = regression.CollectorName });
+                if (AfterSelfFire("Collector Cost Regression", _lastCostRegressionAlert, key, now, SharedCooldown, delivery))
+                {
+                    /* #4795: the data point was marked reported before the send. Put it back to what it was (or to
+                       nothing, when this was the first report), so the retry is not read as already reported. */
+                    RestoreMarker(_lastCostRegressionDataPoint, key, hadPriorDataPoint ? lastDataPoint : (DateTime?)null);
+                }
             }
         }
 
@@ -3558,9 +3623,18 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="HasAgentEverBeenSeenRunningAsync"/>) — a restart must not un-learn that a real server runs
     /// Agent, or a genuinely stopped Agent would go quiet exactly when it matters.</para>
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyCollectionStoppedAsync"/>: given and out of date,
+    /// this judges nothing, sends nothing and leaves no standing-alert flag or cooldown stamp behind.</param>
     internal async Task ApplyAgentNotRunningAsync(
-        int serverId, string serverName, bool? agentRunningFresh, bool agentEverSeenRunning, CancellationToken cancellationToken)
+        int serverId, string serverName, bool? agentRunningFresh, bool agentEverSeenRunning, CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
+        /* #4795: before any state is read or written and before any send. */
+        if (IsStaleSweep(serverId, sweepGeneration))
+        {
+            return;
+        }
+
         if (!_settings.AlertsEnabled)
         {
             return;
@@ -3589,7 +3663,7 @@ internal sealed class DarlingSelfAlertEvaluator
             if (CooldownElapsed(_lastAgentDownAlert, key, now))
             {
                 _lastAgentDownAlert[key] = now;
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Agent Not Running", "Stopped", "Running",
                     detail: "The SQL Server Agent service on this server is stopped. Scheduled jobs — backups, " +
                         "index and statistics maintenance, integrity checks, log shipping — will NOT run until it " +
@@ -3600,6 +3674,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* "Stopped" against "Running". */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire("Agent Not Running", _lastAgentDownAlert, key, now, SharedCooldown, delivery);
             }
         }
         else if (_activeAgentDown.TryRemove(key, out var was) && was)
@@ -3628,6 +3703,13 @@ internal sealed class DarlingSelfAlertEvaluator
     public async Task ApplyConnectionOutcomeAsync(
         int serverId, string serverName, bool online, string? error, CancellationToken cancellationToken)
     {
+        /* #4795: the server's generation, read before anything else. A send to a dead mail host can take 30
+           seconds to fail, and a removal lands on another thread while it does. The state advanced below went with
+           the removal, and whatever the send's answer would write when it returns (the down stamp, the retry due
+           time) would land on the registration that takes the server's place, which has the same id: it is a hash
+           of the storage name. Both delivery branches check the generation after their send. Removal and add both
+           bump it, so a send that spans either is stale. */
+        var generation = GenerationOf(serverId);
         var key = Key(serverId);
         var previous = _connectionState.TryGetValue(key, out var s) ? s : ConnectionState.Unknown;
         _connectionState[key] = online ? ConnectionState.Online : ConnectionState.Offline;
@@ -3638,6 +3720,11 @@ internal sealed class DarlingSelfAlertEvaluator
         if (online)
         {
             _hasBeenOnline[key] = true;
+
+            /* #4795: an online observation ends the outage, and with it any retry still pending for a down alert
+               that no channel delivered. Cleared here rather than inside the delivery gate below so a restore
+               seen while alerts were off cannot leave the old outage's due time to fire a StillDown in the next. */
+            _connectionRetries.Clear(key);
         }
 
         /* The shared policy (#1659) replaces the inline edge machine: same edge-only semantics by default,
@@ -3655,7 +3742,8 @@ internal sealed class DarlingSelfAlertEvaluator
             _notifyConnectionDownAtStartup(),
             _connectionRefireMinutes() is int refire && refire > 0 ? TimeSpan.FromMinutes(refire) : null,
             _lastConnectionDownAlertUtc.TryGetValue(key, out var lastDown) ? lastDown : null,
-            _utcNow());
+            _utcNow(),
+            _connectionRetries.DueUtc(key));
 
         /* Delivery is gated on the master switch AND the connection-change notify toggle (V20); the state
            machine above already advanced, so toggling either off then back on resumes from the correct
@@ -3687,6 +3775,13 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* "Online" both sides. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                /* #4795: the removal already dropped this server's down stamp. Clearing it now would clear the
+                   stamp of a registration that took its place and went down while this notice was sending. */
+                if (IsStaleSweep(serverId, generation))
+                {
+                    return;
+                }
+
                 _lastConnectionDownAlertUtc.TryRemove(key, out _);
             }
             else if (decision is ConnectionAlertDecision.Lost
@@ -3697,15 +3792,19 @@ internal sealed class DarlingSelfAlertEvaluator
                    automation (the #1659 reporter's webhook-driven auto-heal loop) matches on it, and a
                    re-fire exists precisely to re-trigger that match. The detail says which flavor. */
                 var reason = string.IsNullOrWhiteSpace(error) ? "Connection failed" : error!;
+                /* #4795: with re-fire off a StillDown can only be the retry of an alert no channel delivered, and
+                   "re-alerting every 0 min" would be false. With re-fire on the text stays as it was. */
                 var detail = decision switch
                 {
                     ConnectionAlertDecision.AlreadyDownAtFirstSight =>
                         $"Already unreachable when monitoring started: {reason}",
+                    ConnectionAlertDecision.StillDown when _connectionRefireMinutes() <= 0 =>
+                        $"Still unreachable (the previous alert reached no channel, so it is sent again): {reason}",
                     ConnectionAlertDecision.StillDown =>
                         $"Still unreachable (re-alerting every {_connectionRefireMinutes()} min): {reason}",
                     _ => reason,
                 };
-                await FireAsync(
+                var delivery = await FireAsync(
                     key, serverName, "Server Unreachable", reason, "Online",
                     detail: detail,
                     severity: AlertSeverityLevel.Critical,
@@ -3715,7 +3814,18 @@ internal sealed class DarlingSelfAlertEvaluator
                        was never a measurement of this server's reachability. */
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                /* #4795: the server was removed (or removed and added again) while this was sending. What the
+                   answer would record, the down stamp and a retry due time, belongs to the registration that was
+                   forgotten, and Forget has cleared both already. Written now, they would make the next
+                   registration's still-down pass send "the previous alert reached no channel" for an alert it
+                   never had, or hold back the announcement its re-fire is about to make. */
+                if (IsStaleSweep(serverId, generation))
+                {
+                    return;
+                }
+
                 _lastConnectionDownAlertUtc[key] = _utcNow();
+                NoteRetrySend(_connectionRetries, key, "Server Unreachable", delivery);
             }
             /* None → steady state or silent baseline. */
         }
@@ -3750,8 +3860,15 @@ internal sealed class DarlingSelfAlertEvaluator
     /// <see cref="ApplyCaptureDownAsync"/> uses for its blocking/deadlock opt-in. Testable directly with a
     /// recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: the <see cref="GenerationOf"/> the sweep captured before it started
+    /// reading. When it is given and the server has been forgotten since, the reading belongs to a server that is
+    /// gone, so this claims no group and delivers nothing. Null (the default) evaluates whatever it is handed.</param>
     internal async Task ApplyAgReplicaHealthAsync(
-        int serverId, string serverName, IReadOnlyList<AgReplicaReading> replicas, CancellationToken cancellationToken)
+        int serverId,
+        string serverName,
+        IReadOnlyList<AgReplicaReading> replicas,
+        CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
         if (!_settings.AlertsEnabled || !_notifyAgHealth())
         {
@@ -3760,6 +3877,13 @@ internal sealed class DarlingSelfAlertEvaluator
 
         foreach (var replica in replicas)
         {
+            /* #4795: checked per replica, not once, because the loop waits on each delivery and the removal can
+               land in between; the next replica would otherwise claim the group for a server that is gone. */
+            if (IsStaleSweep(serverId, sweepGeneration))
+            {
+                return;
+            }
+
             /* #1696 fleet-side de-dup: one monitored server judges each AG, so a fully-monitored 3-node AG
                reports a failover ONCE instead of once per node that can see it. A server with a strictly
                better vantage takes over — a secondary yielding to the primary, whose view is the only
@@ -3778,7 +3902,22 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _agReplicaRole.TryGetValue(key, out var previousRole);
                 bool failover = AgAlertPolicy.IsFailover(previousRole, replica.RoleDesc);
-                _agReplicaRole[key] = replica.RoleDesc;
+
+                /* #4795: a failover is an edge, and the role marker moves to the new role before the send. When
+                   every channel failed the marker goes back to the prior role (below), so the next sweep sees the
+                   change again; until the failed-send delay is up the marker is left alone and the edge held back,
+                   so a lasting channel failure is tried at 1, 2, 4 ... minutes rather than on every sweep. */
+                var failoverRetryKey = AgRetryKey(AgFailoverMetric, key);
+                bool failoverHeld = failover && _agRetries.RetryPending(failoverRetryKey, _utcNow());
+                if (!failoverHeld)
+                {
+                    _agReplicaRole[key] = replica.RoleDesc;
+                }
+
+                if (!failover)
+                {
+                    _agRetries.Clear(failoverRetryKey);
+                }
 
                 /* #3653 A5 asked whether this edge should also forget the server's delta baselines
                    (_deltas.ClearServer), and the answer is no, deliberately. Two reasons, both about WHICH
@@ -3793,9 +3932,9 @@ internal sealed class DarlingSelfAlertEvaluator
                    failover, and that pair is what the identity-epoch carrier (CpuUtilizationCollector ->
                    ServerEpoch) compares every minute against the persisted one; the forget happens there, on
                    the server whose counters actually moved, and this edge stays an alert about a role. */
-                if (failover)
+                if (failover && !failoverHeld)
                 {
-                    await FireAsync(
+                    var failoverDelivery = await FireAsync(
                         Key(serverId), serverName, AgFailoverMetric, replica.RoleDesc, previousRole!,
                         detail: $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} changed " +
                             $"role from {previousRole} to {replica.RoleDesc}. A role change is either a failover somebody " +
@@ -3809,6 +3948,11 @@ internal sealed class DarlingSelfAlertEvaluator
                         /* Role descs both sides ("SECONDARY" -> "PRIMARY"). */
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    if (NoteRetrySend(_agRetries, failoverRetryKey, AgFailoverMetric, failoverDelivery))
+                    {
+                        /* IsFailover is true only with a known prior role, so this puts back a real value. */
+                        _agReplicaRole[key] = previousRole!;
+                    }
                 }
             }
 
@@ -3829,12 +3973,14 @@ internal sealed class DarlingSelfAlertEvaluator
                    not count as down — are precisely the parts that drift when written twice. What stays
                    here is what is genuinely this app's: the stamp, and the delivery it is stamped on. */
                 int refireMinutes = _agDisconnectRefireMinutes();
+                var disconnectRetryKey = AgRetryKey(AgReplicaDisconnectedMetric, key);
                 var connection = AgAlertPolicy.DecideConnection(
                     previousState,
                     replica.ConnectedStateDesc,
                     refireMinutes > 0 ? TimeSpan.FromMinutes(refireMinutes) : null,
                     _lastAgDisconnectAlert.TryGetValue(key, out var lastDown) ? lastDown : (DateTime?)null,
-                    _utcNow());
+                    _utcNow(),
+                    _agRetries.DueUtc(disconnectRetryKey));
                 _agReplicaConnectedState[key] = replica.ConnectedStateDesc;
 
                 bool stillDisconnected = connection == AgConnectionDecision.StillDisconnected;
@@ -3848,13 +3994,18 @@ internal sealed class DarlingSelfAlertEvaluator
                        the "a week-long outage reads like a blip" problem this knob exists to end. The
                        connection re-fire above already bakes it into detail; this is its AG twin, worded to
                        match Lite's so the two SKUs' history rows say the same thing. */
+                    /* #4795: with re-fire off a still-disconnected decision can only be the retry of an alert no
+                       channel delivered, and "re-alerting every 0 min" would be false. */
                     var opening = stillDisconnected
-                        ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
-                            $"DISCONNECTED from the primary (re-alerting every {refireMinutes.ToString(CultureInfo.InvariantCulture)} min)."
+                        ? refireMinutes <= 0
+                            ? $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                                "DISCONNECTED from the primary (the previous alert reached no channel, so it is sent again)."
+                            : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is STILL " +
+                                $"DISCONNECTED from the primary (re-alerting every {refireMinutes.ToString(CultureInfo.InvariantCulture)} min)."
                         : $"Availability Group '{replica.AgName}': replica {replica.ReplicaServerName} is DISCONNECTED " +
                             "from the primary.";
 
-                    await FireAsync(
+                    var disconnectDelivery = await FireAsync(
                         Key(serverId), serverName, AgReplicaDisconnectedMetric, replica.ConnectedStateDesc, "CONNECTED",
                         detail: opening +
                             " A disconnected replica receives no log at all, so it falls " +
@@ -3871,8 +4022,13 @@ internal sealed class DarlingSelfAlertEvaluator
                         cancellationToken);
 
                     /* Stamped on DELIVERY, never on the decision: an alert suppressed by the master switch
-                       must not consume the re-fire window (the #1659 discipline). */
-                    _lastAgDisconnectAlert[key] = _utcNow();
+                       must not consume the re-fire window (the #1659 discipline). #4795: nor one no channel
+                       delivered — that alert is due again after the failed-send delay (the tracker, which also
+                       holds it back until then), and the window opens on the send that gets through. */
+                    if (!NoteRetrySend(_agRetries, disconnectRetryKey, AgReplicaDisconnectedMetric, disconnectDelivery))
+                    {
+                        _lastAgDisconnectAlert[key] = _utcNow();
+                    }
                 }
                 else if (connection == AgConnectionDecision.Reconnected)
                 {
@@ -3888,6 +4044,9 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
                     _lastAgDisconnectAlert.TryRemove(key, out _);
+
+                    /* #4795: the notice is not retried, and the outage it closes has nothing left to retry. */
+                    _agRetries.Clear(disconnectRetryKey);
                 }
             }
         }
@@ -3913,8 +4072,14 @@ internal sealed class DarlingSelfAlertEvaluator
     /// and <see cref="Forget"/> clears everything when the server leaves the monitored set.</para>
     /// Testable directly with a recording deliverer + a controllable clock.
     /// </summary>
+    /// <param name="sweepGeneration">#4795: as on <see cref="ApplyAgReplicaHealthAsync"/>: given and out of date,
+    /// this claims no group and delivers nothing.</param>
     internal async Task ApplyAgDatabaseHealthAsync(
-        int serverId, string serverName, IReadOnlyList<AgDatabaseReading> databases, CancellationToken cancellationToken)
+        int serverId,
+        string serverName,
+        IReadOnlyList<AgDatabaseReading> databases,
+        CancellationToken cancellationToken,
+        int? sweepGeneration = null)
     {
         if (!_settings.AlertsEnabled || !_notifyAgHealth())
         {
@@ -3928,6 +4093,12 @@ internal sealed class DarlingSelfAlertEvaluator
 
         foreach (var database in databases)
         {
+            /* #4795: checked per database, for the same reason as the replica grain's loop. */
+            if (IsStaleSweep(serverId, sweepGeneration))
+            {
+                return;
+            }
+
             /* Same #1696 de-dup as the replica grain: without it a fully-monitored 3-node AG reports the
                same database's lag once per node. */
             if (!IsAuthoritativeFor(serverId, database.AgName))
@@ -3942,14 +4113,29 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 bool seen = _agDatabaseSuspended.TryGetValue(key, out var wasSuspended);
                 var suspension = AgAlertPolicy.DecideSuspension(seen ? wasSuspended : null, suspended);
-                _agDatabaseSuspended[key] = suspended;
 
-                if (suspension == AgSuspensionDecision.Suspended)
+                /* #4795: the same put-back-and-hold as the failover edge above. The suspended marker moves
+                   before the send; when every channel failed it goes back to the prior value, and until the
+                   failed-send delay is up it is left alone and the edge held back. */
+                var suspendedRetryKey = AgRetryKey(AgDatabaseSuspendedMetric, key);
+                bool suspensionHeld = suspension == AgSuspensionDecision.Suspended
+                    && _agRetries.RetryPending(suspendedRetryKey, now);
+                if (!suspensionHeld)
+                {
+                    _agDatabaseSuspended[key] = suspended;
+                }
+
+                if (suspension != AgSuspensionDecision.Suspended)
+                {
+                    _agRetries.Clear(suspendedRetryKey);
+                }
+
+                if (suspension == AgSuspensionDecision.Suspended && !suspensionHeld)
                 {
                     var suspendReason = string.IsNullOrWhiteSpace(database.SuspendReasonDesc)
                         ? "no reason reported"
                         : database.SuspendReasonDesc!;
-                    await FireAsync(
+                    var suspendedDelivery = await FireAsync(
                         Key(serverId), serverName, AgDatabaseSuspendedMetric, suspendReason, "SYNCHRONIZING",
                         detail: $"Availability Group '{database.AgName}': data movement for database " +
                             $"{database.DatabaseName} on replica {database.ReplicaServerName} is SUSPENDED " +
@@ -3965,6 +4151,10 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken,
                         context: AgDatabaseContext(database, ("Suspend Reason", suspendReason)));
+                    if (NoteRetrySend(_agRetries, suspendedRetryKey, AgDatabaseSuspendedMetric, suspendedDelivery))
+                    {
+                        RestoreMarker(_agDatabaseSuspended, key, seen ? wasSuspended : (bool?)null);
+                    }
                 }
                 else if (suspension == AgSuspensionDecision.Resumed)
                 {
@@ -3988,7 +4178,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 if (CooldownElapsed(_lastAgSyncBehindAlert, key, now))
                 {
                     _lastAgSyncBehindAlert[key] = now;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         Key(serverId), serverName, AgSyncFellBehindMetric, behindReason, "caught up",
                         detail: behindReason + " A secondary that trails the primary is a data-loss window: an " +
                             "automatic failover cannot complete until it catches up, and a forced failover throws away " +
@@ -4011,6 +4201,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken,
                         context: AgDatabaseContext(database));
+                    AfterSelfFire(AgSyncFellBehindMetric, _lastAgSyncBehindAlert, key, now, SharedCooldown, delivery);
                 }
             }
         }
@@ -4232,7 +4423,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 var storeText = storeSizeBytes is long size
                     ? $" The store measured {FormatGb(size)} at its last self-metrics sample."
                     : "";
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(DiskKey), _storeLabel, DiskPressureMetric, reason,
                     /* #3528: the threshold string names BOTH gates when the floor is active, so the history
                        row's threshold column states the condition that actually fired. */
@@ -4254,6 +4445,12 @@ internal sealed class DarlingSelfAlertEvaluator
                        bound too, which is what separates this metric from every sibling above. */
                     numericCurrentValue: percentFree, numericThresholdValue: warnPercent,
                     cancellationToken);
+                if (AfterSelfFire(DiskPressureMetric, _lastDiskPressureAlert, DiskKey, now, SharedCooldown, delivery))
+                {
+                    /* #4795: the worsening gate's last-alerted level was advanced before the send. Put it back, so the
+                       retry still sees this level as worse than the last one that was reported. */
+                    RestoreMarker(_lastAlertedDiskPressurePercent, DiskKey, lastAlertedPercent);
+                }
             }
         }
         else if (_activeDiskPressure.TryRemove(DiskKey, out var was) && was)
@@ -4322,7 +4519,7 @@ internal sealed class DarlingSelfAlertEvaluator
             {
                 _lastCustomRuleHealthAlert[CustomRuleHealthKey] = now;
                 var (shortMessage, detail) = RenderCustomRuleHealth(report);
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(CustomRuleHealthKey), _storeLabel, CustomRuleHealthMetric,
                     currentValue: report.TotalIssues.ToString(CultureInfo.InvariantCulture),
                     thresholdValue: "0",
@@ -4334,6 +4531,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     numericCurrentValue: report.TotalIssues,
                     numericThresholdValue: 0,
                     cancellationToken);
+                AfterSelfFire(CustomRuleHealthMetric, _lastCustomRuleHealthAlert, CustomRuleHealthKey, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCustomRuleHealth.TryRemove(CustomRuleHealthKey, out var was) && was)
@@ -4517,7 +4715,7 @@ internal sealed class DarlingSelfAlertEvaluator
         bool blanket = stale.Exists(static r => r.MatchesEveryAlert);
         var (shortMessage, detail) = RenderStaleMuteRules(stale, now, blanket);
 
-        await FireAsync(
+        var delivery = await FireAsync(
             StoreKey(StaleMuteKey), _storeLabel, StaleMuteMetric,
             currentValue: stale.Count.ToString(CultureInfo.InvariantCulture),
             thresholdValue: "0",
@@ -4534,6 +4732,7 @@ internal sealed class DarlingSelfAlertEvaluator
                seam returns a single boolean over every rule and cannot say which rule answered — see
                FindExplicitMute. Always non-null, so the seam is never consulted for this metric. */
             muted: FindExplicitMute(rules, now) is not null);
+        AfterSelfFire(StaleMuteMetric, _lastStaleMuteAlert, StaleMuteKey, now, StaleMuteRefire, delivery);
     }
 
     /// <summary>
@@ -4862,7 +5061,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var detail = string.Join(". ", reasons) + ". Run --check-settings for the full picture.";
         var shortMessage = FormattableString.Invariant($"{reasons.Count} managed-store setting condition(s) need attention");
 
-        await FireAsync(
+        var delivery = await FireAsync(
             StoreKey(StoreSettingsKey), _storeLabel, StoreSettingsMetric,
             currentValue: reasons.Count.ToString(CultureInfo.InvariantCulture),
             thresholdValue: "0",
@@ -4874,6 +5073,7 @@ internal sealed class DarlingSelfAlertEvaluator
             numericCurrentValue: reasons.Count,
             numericThresholdValue: 0,
             cancellationToken);
+        AfterSelfFire(StoreSettingsMetric, _lastStoreSettingsAlert, StoreSettingsKey, now, StoreSettingsRefire, delivery);
     }
 
     /* ---------------- compression-job self-heal (fleet-level, polled — #1581) ---------------- */
@@ -5247,7 +5447,7 @@ internal sealed class DarlingSelfAlertEvaluator
         var expired = report.NotAfterUtc.UtcDateTime <= now;
         var (shortMessage, detail, currentValue) = RenderWebTlsCert(report, now, expired, refusedNotYetValid);
 
-        await FireAsync(
+        var delivery = await FireAsync(
             StoreKey(WebTlsCertKey), _storeLabel, WebTlsCertExpiryMetric,
             currentValue: currentValue,
             /* The not-yet-valid arm has no window to name — the bar it failed is "valid now". */
@@ -5261,6 +5461,7 @@ internal sealed class DarlingSelfAlertEvaluator
             /* State-only: an expiry is a date, not a quantity — see WebTlsCertExpiryMetric. */
             numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
             cancellationToken);
+        AfterSelfFire(WebTlsCertExpiryMetric, _lastWebTlsCertAlert, WebTlsCertKey, now, WebTlsCertRefire, delivery);
     }
 
     /// <summary>Renders the (shortMessage, detail, currentValue) for the web TLS certificate alert. The
@@ -5436,7 +5637,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastJobOverCadenceAlert[key] = now;
                     bool critical = percent >= 100.0;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(JobCadenceKeyPrefix + key), _storeLabel, JobCadenceMetric,
                         $"{percent:F0}% of schedule interval", $"{warnPercent}%",
                         detail: $"Store background {label} last ran for {durationMs / 1000.0:F0}s against a " +
@@ -5463,6 +5664,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: Math.Round(percent, 1),
                         numericThresholdValue: critical ? 100 : warnPercent,
                         cancellationToken);
+                    AfterSelfFire(JobCadenceMetric, _lastJobOverCadenceAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else if (_activeJobOverCadence.TryRemove(key, out var was) && was)
@@ -5586,7 +5788,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastRetentionHoldAlert[key] = now;
                     bool critical = ratio >= criticalRatio;
                     double spanDays = (policy.SpanSeconds ?? 0) / 86400.0;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(RetentionHoldKeyPrefix + key), _storeLabel, RetentionHoldMetric,
                         $"{ratio:F1}x its {policy.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is HELD PAUSED by the rollup-coverage gate, and the tier now " +
@@ -5614,6 +5816,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: Math.Round(ratio, 2),
                         numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
+                    AfterSelfFire(RetentionHoldMetric, _lastRetentionHoldAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else
@@ -5743,7 +5946,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     var reasonText = recordStale
                         ? $"the purge trigger has not recorded a pass since {reading.LastPurge!.At:yyyy-MM-dd HH:mm} UTC"
                         : RawPurgeOutcomeReasonText(reading.LastPurge);
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(RawPurgeOverHorizonKeyPrefix + key), _storeLabel, RawPurgeOverHorizonMetric,
                         $"{ratioValue:F1}x its {reading.DropAfter} horizon", $"{warnRatio:F1}x",
                         detail: $"Store {label} is {ratioValue:F1}x its configured {reading.DropAfter} horizon, " +
@@ -5761,6 +5964,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: Math.Round(ratioValue, 2),
                         numericThresholdValue: critical ? criticalRatio : warnRatio,
                         cancellationToken);
+                    AfterSelfFire(RawPurgeOverHorizonMetric, _lastRawPurgeOverHorizonAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else if (_activeRawPurgeOverHorizon.TryRemove(key, out var was) && was)
@@ -5991,7 +6195,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     _lastToastSlackAlert[key] = now;
                     var live = facts.ToastLiveBytes ?? 0;
                     var slack = Math.Max(file - live, 0);
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(ToastSlackKeyPrefix + key), _storeLabel, ToastSlackMetric,
                         $"{pct.ToString("0.0", CultureInfo.InvariantCulture)}% of {FormatGb(file)} TOAST file live",
                         $"{ToastSlackUtilisationBarPercent.ToString("0", CultureInfo.InvariantCulture)}% over {FormatGb(ToastSlackFileFloorBytes)}",
@@ -6014,6 +6218,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         numericCurrentValue: pct,
                         numericThresholdValue: ToastSlackUtilisationBarPercent,
                         cancellationToken);
+                    AfterSelfFire(ToastSlackMetric, _lastToastSlackAlert, key, now, ToastSlackRefire, delivery);
                 }
             }
             else if (_activeToastSlack.TryRemove(key, out var was) && was)
@@ -6195,7 +6400,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     currentValue = peak.SyncMs;
                 }
 
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(CheckpointerKey), _storeLabel, CheckpointerPressureMetric,
                     $"{arms} over {checkpointCount} checkpoint(s) in {intervalMinutes} min",
                     thresholdText,
@@ -6228,6 +6433,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     numericCurrentValue: currentValue,
                     numericThresholdValue: CheckpointSyncBarMs,
                     cancellationToken);
+                AfterSelfFire(CheckpointerPressureMetric, _lastCheckpointerPressureAlert, CheckpointerKey, now, SharedCooldown, delivery);
             }
         }
         else if (_activeCheckpointerPressure.TryRemove(CheckpointerKey, out var was) && was)
@@ -6454,7 +6660,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     /* The re-arm failed — usually the store login does not own the job. Treat as escalated so we
                        never loop alter_job on it, and page: a human must re-arm it (or grant ownership). */
                     _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} is stuck ({job.Reason}) and the service could NOT re-arm it — " +
@@ -6465,6 +6671,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         shortMessage: $"{label} stuck — auto-re-arm FAILED",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
                 }
             }
             else if (episode.State == PolicyJobHealth.AwaitingSchedulerRetry)
@@ -6476,7 +6683,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
                 _lastPolicyJobAlert[key] = now;
                 fired++;
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} has sat in the scheduler's crash backoff ({job.Reason}) since at least the previous " +
@@ -6490,6 +6697,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     shortMessage: $"{label} still in crash backoff an hour on — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
             }
             else if (episode.State == PolicyJobHealth.ReArmed)
             {
@@ -6498,7 +6706,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 _policyJobState[key] = new PolicyJobEpisode(PolicyJobHealth.Escalated, job.Family);
                 _lastPolicyJobAlert[key] = now;
                 fired++;
-                await FireAsync(
+                var delivery = await FireAsync(
                     StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                     job.Reason, "running on schedule",
                     detail: $"TimescaleDB {label} is STILL stuck ({job.Reason}) after an automatic re-arm last cycle — it " +
@@ -6509,6 +6717,7 @@ internal sealed class DarlingSelfAlertEvaluator
                     shortMessage: $"{label} re-hung after self-heal — escalated",
                     numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                     cancellationToken);
+                AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
             }
             else
             {
@@ -6517,7 +6726,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 {
                     _lastPolicyJobAlert[key] = now;
                     fired++;
-                    await FireAsync(
+                    var delivery = await FireAsync(
                         StoreKey(band.KeyPrefix + key), _storeLabel, band.Metric,
                         job.Reason, "running on schedule",
                         detail: $"TimescaleDB {label} remains stuck ({job.Reason}) after escalation. {band.Stalled} " +
@@ -6526,6 +6735,7 @@ internal sealed class DarlingSelfAlertEvaluator
                         shortMessage: $"{label} still stuck after escalation",
                         numericCurrentValue: StateOnlyValue, numericThresholdValue: StateOnlyValue,
                         cancellationToken);
+                    AfterSelfFire(band.Metric, _lastPolicyJobAlert, key, now, SharedCooldown, delivery);
                 }
             }
         }
@@ -6615,7 +6825,17 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             var key = job.JobId.ToString(CultureInfo.InvariantCulture);
             var hadBaseline = _policyJobFailureBaseline.TryGetValue(key, out var previous);
-            _policyJobFailureBaseline[key] = job.TotalFailures;
+
+            /* #4795: while this job's last alert reached no channel and its retry is not due yet, the baseline
+               stays where the failed send put it back. A sweep that lands inside a retry delay longer than the
+               hourly check would otherwise advance it, and the retry would find no new failures to report. A
+               delivered alert (no pending retry) advances it exactly as before. */
+            var retryWaiting = _policyJobRetryPending.ContainsKey(key)
+                && !CooldownElapsed(_lastPolicyJobFailureAlert, key, now);
+            if (!retryWaiting)
+            {
+                _policyJobFailureBaseline[key] = job.TotalFailures;
+            }
 
             if (job.Held
                 || !hadBaseline
@@ -6642,7 +6862,7 @@ internal sealed class DarlingSelfAlertEvaluator
                 : $"{band.Noun} {key} on {job.RelationName}";
             var grew = job.TotalFailures - previous;
 
-            await FireAsync(
+            var delivery = await FireAsync(
                 StoreKey(PolicyJobFailingKeyPrefix + key), _storeLabel, PolicyJobFailingMetric,
                 $"{grew} new failure(s), {job.TotalFailures} total", "at least one new failure",
                 detail: $"TimescaleDB {label} recorded {grew} more failed run(s) since the previous hourly sample " +
@@ -6661,6 +6881,18 @@ internal sealed class DarlingSelfAlertEvaluator
                 numericCurrentValue: grew,
                 numericThresholdValue: 1,
                 cancellationToken);
+            if (AfterSelfFire(PolicyJobFailingMetric, _lastPolicyJobFailureAlert, key, now, SharedCooldown, delivery))
+            {
+                /* #4795: the failure count was taken as the baseline before the send. Put it back, so the retry
+                   still sees these failures as new, and mark the retry pending so a sweep before it is due
+                   leaves the baseline alone (above). */
+                _policyJobFailureBaseline[key] = previous;
+                _policyJobRetryPending[key] = true;
+            }
+            else
+            {
+                _policyJobRetryPending.TryRemove(key, out _);
+            }
         }
     }
 
@@ -6821,6 +7053,11 @@ internal sealed class DarlingSelfAlertEvaluator
     /// out of the set.</summary>
     public void Forget(int serverId)
     {
+        /* #4795: first, so a store-alert sweep that was reading for this server and resumes from here on finds
+           itself out of date before it can claim a group's authority again, or send and stamp the state dropped
+           below. */
+        _generations.AddOrUpdate(serverId, 1, (_, generation) => generation + 1);
+
         var key = Key(serverId);
         _activeCollectionStopped.TryRemove(key, out _);
         _lastCollectionStoppedAlert.TryRemove(key, out _);
@@ -6832,10 +7069,21 @@ internal sealed class DarlingSelfAlertEvaluator
         _hasBeenOnline.TryRemove(key, out _);
         _collectionWatchStart[key] = Unstamped;
 
+        /* #4795: the pending retry of a "Server Unreachable" that no channel delivered belongs to the connection
+           state dropped above. Left behind, a re-add that is still down would pass its silent first pass and then
+           be paged on the second, as "the previous alert reached no channel", for an outage the removed server had. */
+        _connectionRetries.Clear(key);
+
+        /* #4795: and so does its re-fire clock, the stamp of the last down alert delivered. Left behind, a re-add
+           that is still down would find a down alert on record for an outage the removed server had, and the clock
+           would hold back the announcement re-fire makes when it finds none. */
+        _lastConnectionDownAlertUtc.TryRemove(key, out _);
+
         /* AG state is keyed by the AG GRAIN, not by server (#1696), so there is deliberately nothing here to
            drop: an Availability Group outlives any one of its monitored nodes, and another node may still be
            watching it. Dropping the edge state on removal would re-baseline a group that is still monitored
-           and silently swallow the next failover.
+           and silently swallow the next failover. The same goes for the AG retries (#4795): they are keyed by
+           metric and grain, so they are part of that state and stay with it.
 
            What DOES belong to the departing server is its claim to judge an AG. Releasing it lets a
            surviving node take over on its next sweep; the edge state it inherits is the same state, so the
@@ -6849,6 +7097,18 @@ internal sealed class DarlingSelfAlertEvaluator
             }
         }
     }
+
+    /// <summary>How many times the server has been forgotten (#4795). The store-alert sweep captures it before its
+    /// first read and passes it to <see cref="ApplyCollectionStoppedAsync"/>, <see cref="ApplyCaptureDownAsync"/>,
+    /// <see cref="ApplyAgentNotRunningAsync"/>, <see cref="ApplyAgReplicaHealthAsync"/> and
+    /// <see cref="ApplyAgDatabaseHealthAsync"/>, so a sweep that was reading when its server was removed neither
+    /// claims a group nor delivers for it, and leaves no state behind for a later add of the same server.</summary>
+    public int GenerationOf(int serverId) => _generations.TryGetValue(serverId, out var generation) ? generation : 0;
+
+    /// <summary>True when the sweep was started for an earlier generation of this server than the current one
+    /// (#4795). No generation given means no sweep to tell apart, which is every caller before this existed.</summary>
+    private bool IsStaleSweep(int serverId, int? sweepGeneration) =>
+        sweepGeneration.HasValue && sweepGeneration.Value != GenerationOf(serverId);
 
     /* ---------------- store reads ---------------- */
 
@@ -7294,8 +7554,10 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
     /// verdict in here instead (#3348). Nothing else may pass this: a caller that hands in a decision it did
     /// not derive from an explicit naming has re-introduced the self-suppression the seam cannot see.</para></param>
     /// <returns>What the deliverer reported the channels did (#3580), or <c>null</c> when it reported
-    /// nothing — read by the two daily documents' stamps and ignored by every condition-class caller,
-    /// whose lifecycle is edge-driven and owes nothing to a failed send. See
+    /// nothing. The daily documents read it for their stamps. A condition arm that keeps it hands it to
+    /// <see cref="AfterSelfFire"/> or <see cref="NoteRetrySend"/> (#4795), which make the alert due again
+    /// when every channel failed. The arms that still discard it are edges with no path that fires again,
+    /// listed with their reasons in <c>SelfAlertFailedSendCensusTests</c>. See
     /// <see cref="IAlertDeliverer.DeliverAndReportAsync"/> for why the report rides a second method.</returns>
     /* The optional context TRAILS the cancellation token so the dozens of existing positional call
        sites stay untouched — only the callers that have discrete facts to carry (#2109: the AG
@@ -7356,9 +7618,78 @@ ORDER BY ag_name, database_name, replica_server_name", connection) { CommandTime
         }
     }
 
+    /// <summary>The shared alert cooldown (<c>CooldownMinutes</c>), read live. <see cref="CooldownElapsed"/>
+    /// compares against it and the arms that report a send's answer to <see cref="AfterSelfFire"/> pass it, so the
+    /// gate and the back-dated stamp cannot disagree about how long the cooldown is.</summary>
+    private TimeSpan SharedCooldown => TimeSpan.FromMinutes(_settings.CooldownMinutes);
+
     private bool CooldownElapsed(ConcurrentDictionary<string, DateTime> lastFired, string key, DateTime now) =>
         !lastFired.TryGetValue(key, out var last)
-        || now - last >= TimeSpan.FromMinutes(_settings.CooldownMinutes);
+        || now - last >= SharedCooldown;
+
+    /// <summary>
+    /// Runs after a self-alert's fire (#4795), the twin of <c>DarlingWorker.AfterPgFire</c> for the PostgreSQL
+    /// families and <c>AlertEngine.AfterFire</c> (#4752) for the SQL Server ones. The arms stamp their cooldown
+    /// BEFORE they send, so a self-alert whose every channel failed used to be silent for the whole cooldown.
+    /// When it did, this counts the failure in <c>_selfFailedSends</c> and back-dates the stamp so the arm's own
+    /// gate (<c>now - last &gt;= cooldown</c>) opens again after the streak's delay: a minute, doubling, never
+    /// more than <paramref name="cooldown"/>. The next sweep that still sees the condition fires it again. Any
+    /// other result (delivered, partly delivered, muted, throttled, folded, unreported) ends the streak and
+    /// leaves the stamp alone.
+    /// <para><paramref name="cooldown"/> is the interval the arm's gate compares against: the shared cooldown
+    /// for most arms, the arm's own refire interval for the ones that keep one.</para>
+    /// <para>Returns true when every channel failed. An arm that also advanced an "already reported" marker
+    /// before it sent puts the marker back at its own call site on true; this method only knows the stamp.</para>
+    /// </summary>
+    private bool AfterSelfFire(
+        string family, ConcurrentDictionary<string, DateTime> stamps, string key, DateTime now,
+        TimeSpan cooldown, AlertDelivery? delivery) =>
+        DarlingWorker.AfterPgFireCore(
+            _selfFailedSends, _logger ?? NullLogger.Instance, family, stamps, key, now, cooldown, delivery);
+
+    /// <summary>
+    /// Records what a connection or availability group send reported (#4795) in <paramref name="tracker"/>: when
+    /// every channel failed the alert is due again after the failed-send delay (a minute, doubling, never more
+    /// than the shared cooldown), any other answer clears it. Returns true when every channel failed, so an arm
+    /// that advanced an "already reported" marker before it sent puts the marker back.
+    /// </summary>
+    private bool NoteRetrySend(
+        FailedSendRetryTracker tracker, string retryKey, string metric, AlertDelivery? delivery)
+    {
+        var failed = tracker.Record(retryKey, delivery, _utcNow(), SharedCooldown, out var delay, out var failures);
+        if (failed)
+        {
+            _logger?.LogInformation(
+                "Every channel failed for {Metric} on {Key} (failure {Failures}); trying again in {Delay}",
+                metric, retryKey, failures, delay);
+        }
+
+        return failed;
+    }
+
+    /// <summary>The key an availability group alert is tracked under in <c>_agRetries</c>: the metric and the AG
+    /// grain, so a failover and a disconnect on the same replica wait independently.</summary>
+    private static string AgRetryKey(string metric, string grainKey) => metric + "|" + grainKey;
+
+    /// <summary>
+    /// Puts an "already reported" marker back to what it was before a fire (#4795): the prior value when there
+    /// was one, no entry when the failed fire was the first. An arm that advanced the marker before its send calls
+    /// this when <see cref="AfterSelfFire"/> says every channel failed, because the retry sweep would otherwise
+    /// read the same reading as reported and never fire on it. The same prior-or-remove shape as
+    /// <c>DarlingWorker.RestorePgPoisonCollectionTime</c>, for any value type.
+    /// </summary>
+    private static void RestoreMarker<T>(ConcurrentDictionary<string, T> markers, string key, T? prior)
+        where T : struct
+    {
+        if (prior is { } value)
+        {
+            markers[key] = value;
+        }
+        else
+        {
+            markers.TryRemove(key, out _);
+        }
+    }
 
     private static string Key(int serverId) => serverId.ToString(CultureInfo.InvariantCulture);
 
