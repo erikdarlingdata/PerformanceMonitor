@@ -766,7 +766,7 @@ public sealed class PgTargetMemoryTests
                 Assert.Equal(0.4, sum.GetProperty("base_severity").GetDouble(), precision: 6);
                 Assert.Equal(worst / (16.0 * GiB), sum.GetProperty("value").GetDouble(), precision: 6);
                 Assert.Equal(1, sum.GetProperty("metadata").GetProperty(PgTargetScorer.MemoryOvercommitCriticalBandKey).GetDouble());
-                Assert.Equal(0, sum.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());
+                Assert.Equal(1, sum.GetProperty("metadata").GetProperty("threshold_lineage").GetDouble());  // the measured 2x band participated
                 Assert.True(sum.GetProperty("severity").GetDouble() >= 0.6, "both co-fires plus the band");
                 var pressure = facts.Single(f => f.GetProperty("key").GetString() == PgTargetFactKeys.HostMemoryPressure);
                 Assert.Equal(0.05, pressure.GetProperty("metadata").GetProperty(PgTargetScorer.HostMemorySustainedMinReclaimableShareKey).GetDouble(), precision: 3);
