@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
 using NpgsqlTypes;
@@ -330,8 +331,9 @@ latest AS
     -- #3902: the base table, not v_query_stats. The view resolves statement text for EVERY row it returns
     -- by joining query_text_dim -- the whole fleet's text dimension -- and the window sort below then
     -- carries each row's text, so this read paid for the window's worth of text to print five. The row
-    -- keeps the two halves the view would have COALESCEd (the inline legacy text and the digest) and the
-    -- final SELECT resolves them for the output rows only, with the view's own expression.
+    -- keeps the two halves the view would have COALESCEd (the inline legacy text and the digest). This
+    -- read resolves neither against the dimension: the reader keeps the first five plans that pass its
+    -- exact test, and ParameterSensitiveTextSql then resolves the digests of those plans only.
     SELECT
         database_name,
         query_hash,
@@ -371,7 +373,9 @@ offenders AS
         CASE WHEN max_spills > 0 AND min_spills = 0 THEN 1 ELSE 0 END AS spill_divergence,
         creation_time,
         query_text,
-        query_text_digest
+        query_text_digest,
+        svr.offset_minutes,
+        svr.time_zone_id
     FROM latest, svr
     -- The creation_time predicate is a rough filter only (#4821): the newest offset, an hour wider than the bound.
     -- The reader makes the exact compiled-before-the-window test on the converted time and keeps the first five,
@@ -393,25 +397,74 @@ SELECT
     o.worker_ratio,
     o.grant_ratio,
     o.spill_divergence,
-    -- v_query_stats' own text expression, applied to the five rows that print. One dimension row per
-    -- digest by primary key, so the LEFT JOIN cannot fan out and a digest with no dimension row yet still
-    -- reports its offender, exactly as the view did.
-    LEFT(COALESCE(o.query_text, qtd.query_text), 500) AS query_text,
+    -- The inline legacy text only, NULL for a row that carries just a digest. This read runs before the
+    -- reader's cap, so it comes back with every plan that passes the rough filter, and a join to the text
+    -- dimension here would resolve text for all of them to print five (#3902). The text of the plans that
+    -- print is resolved by a second read, by digest, for those plans only (ParameterSensitiveTextSql); the
+    -- reader takes this inline text first and that read's text otherwise, as the view's COALESCE did.
+    LEFT(o.query_text, 500) AS query_text,
     -- Appended after the older columns so their ordinals are untouched (#4821): the plan's local creation time
-    -- and the newest snapshot's offset and zone, for the reader's conversion.
+    -- and the newest snapshot's offset and zone, for the reader's conversion, then the text digest for the
+    -- second read.
     o.creation_time AS creation_time_local,
-    svr.offset_minutes,
-    svr.time_zone_id
+    o.offset_minutes,
+    o.time_zone_id,
+    o.query_text_digest
 FROM offenders AS o
-CROSS JOIN svr
-LEFT JOIN query_text_dim AS qtd
-  ON qtd.digest = o.query_text_digest
 ORDER BY o.worker_ratio DESC";
 
-    public const string ParameterSensitiveTextSql = "";
+    /// <summary>
+    /// The statement text of the parameter-sensitive plans the reader keeps, by digest (#3902, #4821): one
+    /// dimension row per digest by primary key, so the read touches the digests it is given and nothing else.
+    /// <see cref="ParameterSensitiveSql"/> runs before the reader's cap and so cannot resolve text itself
+    /// without resolving it for every plan that passes its rough filter. <c>$1</c> is ONE <c>bytea[]</c> (the
+    /// dimension's digest type): the digests <see cref="DigestsToResolve"/> picks. The cut to 500 characters stays
+    /// in SQL, so it is still PostgreSQL's character count, and <c>LEFT(COALESCE(a, b), 500)</c> is
+    /// <c>COALESCE(LEFT(a, 500), LEFT(b, 500))</c>: the reader takes the inline text when the row has it and
+    /// this read's text otherwise, as the view's own <c>COALESCE</c> did.
+    /// </summary>
+    public const string ParameterSensitiveTextSql = @"
+SELECT digest, LEFT(query_text, 500)
+FROM query_text_dim
+WHERE digest = ANY($1)";
 
-    internal static IReadOnlyList<byte[]> DigestsToResolve(IEnumerable<(string? InlineText, byte[]? Digest)> keptRows) =>
-        throw new NotImplementedException();
+    /// <summary>
+    /// The digests <see cref="ParameterSensitiveTextSql"/> is asked for (#4821): those of the kept rows whose inline
+    /// text is NULL, each once. Inline text wins over the dimension's when it is not NULL, even when it is empty,
+    /// exactly as the view's <c>COALESCE</c> did, so a row that has it needs no lookup; a row with neither inline
+    /// text nor a digest has nothing to look up and reads as empty text. Two plans of one statement share a digest, and
+    /// the reader hands over a new array for every row, so digests are compared by content.
+    /// </summary>
+    internal static IReadOnlyList<byte[]> DigestsToResolve(IEnumerable<(string? InlineText, byte[]? Digest)> keptRows)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var digests = new List<byte[]>();
+        foreach (var (inlineText, digest) in keptRows)
+        {
+            if (inlineText is null && digest is not null && seen.Add(Convert.ToHexString(digest)))
+                digests.Add(digest);
+        }
+
+        return digests;
+    }
+
+    /// <summary>
+    /// A parameter-sensitive plan the reader kept, before its statement text is settled (#4821): the columns of
+    /// <see cref="ParameterSensitiveSql"/> the drill-down prints, plus the inline legacy text and the digest that
+    /// <see cref="ParameterSensitiveTextSql"/> resolves for a row with no inline text.
+    /// </summary>
+    private sealed record ParameterSensitivePlan(
+        string Database,
+        string QueryHash,
+        string QueryPlanHash,
+        long ExecutionCount,
+        long MinWorkerTimeUs,
+        long MaxWorkerTimeUs,
+        double WorkerRatio,
+        double GrantRatio,
+        bool SpillsOnSomeInputs,
+        string? InlineText,
+        byte[]? TextDigest);
 
     /// <summary>
     /// Top parameter-sensitive plans behind a PARAMETER_SENSITIVITY finding.
@@ -421,45 +474,104 @@ ORDER BY o.worker_ratio DESC";
     {
         await using var connection = await _postgres.OpenConnectionAsync(context.CancellationToken);
 
+        var windowStart = AsNaive(context.TimeRangeStart);
         using var cmd = new NpgsqlCommand(ParameterSensitiveSql, connection);
         cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
         cmd.Parameters.AddWithValue(context.ServerId);
-        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+        cmd.Parameters.AddWithValue(windowStart);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
-        var windowStart = AsNaive(context.TimeRangeStart);
         ServerClock? clock = null;
-        var items = new List<object>();
-        using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);
-        while (await reader.ReadAsync(context.CancellationToken))
+        var kept = new List<ParameterSensitivePlan>();
+        /* Closed before the text read below: a connection runs one reader at a time. */
+        await using (var reader = await cmd.ExecuteReaderAsync(context.CancellationToken))
         {
-            /* #4821: the compiled-before-the-window test on each plan's own converted creation time, then the cap.
-               Every row carries the same newest-snapshot zone and offset, so the clock is built once. */
-            clock ??= ServerLocalTimes.ClockFrom(
-                reader.IsDBNull(12) ? null : reader.GetString(12),
-                reader.IsDBNull(11) ? null : reader.GetInt32(11));
-            if (!ServerLocalTimes.CreatedByWindowStart(clock, reader.IsDBNull(10) ? null : reader.GetDateTime(10), windowStart))
-                continue;
-
-            items.Add(new
+            while (await reader.ReadAsync(context.CancellationToken))
             {
-                database = reader.IsDBNull(0) ? "" : reader.GetString(0),
-                query_hash = reader.IsDBNull(1) ? "" : reader.GetString(1),
-                query_plan_hash = reader.IsDBNull(2) ? "" : reader.GetString(2),
-                execution_count = reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
-                min_worker_time_us = reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
-                max_worker_time_us = reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
-                worker_ratio = reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6)),
-                grant_ratio = reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
-                spills_on_some_inputs = !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1,
-                query_text = reader.IsDBNull(9) ? "" : reader.GetString(9)
-            });
-            if (items.Count >= ParameterSensitiveMaxOffenders)
-                break;
+                /* #4821: the compiled-before-the-window test on each plan's own converted creation time, then the cap.
+                   Every row carries the same newest-snapshot zone and offset, so the clock is built once. */
+                clock ??= ServerLocalTimes.ClockFrom(
+                    reader.IsDBNull(12) ? null : reader.GetString(12),
+                    reader.IsDBNull(11) ? null : reader.GetInt32(11));
+                if (!ServerLocalTimes.CreatedByWindowStart(clock, reader.IsDBNull(10) ? null : reader.GetDateTime(10), windowStart))
+                    continue;
+
+                kept.Add(new ParameterSensitivePlan(
+                    Database: reader.IsDBNull(0) ? "" : reader.GetString(0),
+                    QueryHash: reader.IsDBNull(1) ? "" : reader.GetString(1),
+                    QueryPlanHash: reader.IsDBNull(2) ? "" : reader.GetString(2),
+                    ExecutionCount: reader.IsDBNull(3) ? 0L : Convert.ToInt64(reader.GetValue(3)),
+                    MinWorkerTimeUs: reader.IsDBNull(4) ? 0L : Convert.ToInt64(reader.GetValue(4)),
+                    MaxWorkerTimeUs: reader.IsDBNull(5) ? 0L : Convert.ToInt64(reader.GetValue(5)),
+                    WorkerRatio: reader.IsDBNull(6) ? 0.0 : Convert.ToDouble(reader.GetValue(6)),
+                    GrantRatio: reader.IsDBNull(7) ? 0.0 : Convert.ToDouble(reader.GetValue(7)),
+                    SpillsOnSomeInputs: !reader.IsDBNull(8) && Convert.ToInt32(reader.GetValue(8)) == 1,
+                    InlineText: reader.IsDBNull(9) ? null : reader.GetString(9),
+                    TextDigest: reader.IsDBNull(13) ? null : reader.GetFieldValue<byte[]>(13)));
+                if (kept.Count >= ParameterSensitiveMaxOffenders)
+                    break;
+            }
         }
 
-        if (items.Count > 0)
-            finding.DrillDown!["parameter_sensitive_queries"] = items;
+        if (kept.Count == 0)
+            return;
+
+        /* #3902, #4821: statement text for the plans that print, not for every plan the read above returned. One
+           read by digest, only when a kept row has a digest and no inline text, on the same connection. */
+        var digests = DigestsToResolve(kept.Select(p => (InlineText: p.InlineText, Digest: p.TextDigest)));
+        var dimensionText = digests.Count == 0
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : await ReadParameterSensitiveTextAsync(connection, digests, context.CancellationToken);
+
+        finding.DrillDown!["parameter_sensitive_queries"] = kept.Select(p => (object)new
+        {
+            database = p.Database,
+            query_hash = p.QueryHash,
+            query_plan_hash = p.QueryPlanHash,
+            execution_count = p.ExecutionCount,
+            min_worker_time_us = p.MinWorkerTimeUs,
+            max_worker_time_us = p.MaxWorkerTimeUs,
+            worker_ratio = p.WorkerRatio,
+            grant_ratio = p.GrantRatio,
+            spills_on_some_inputs = p.SpillsOnSomeInputs,
+            query_text = SettledQueryText(p, dimensionText)
+        }).ToList();
+    }
+
+    /// <summary>
+    /// The text the drill-down prints for <paramref name="plan"/>: the view's own <c>COALESCE</c>. Inline text wins
+    /// when it is not NULL, even when empty; otherwise the dimension's text for the plan's digest; a digest with no
+    /// dimension row yet, or no digest at all, reads as empty text rather than dropping the offender.
+    /// </summary>
+    private static string SettledQueryText(ParameterSensitivePlan plan, Dictionary<string, string> dimensionText) =>
+        plan.InlineText
+        ?? (plan.TextDigest is not null && dimensionText.TryGetValue(Convert.ToHexString(plan.TextDigest), out var text) ? text : "");
+
+    /// <summary>
+    /// Runs <see cref="ParameterSensitiveTextSql"/> once for <paramref name="digests"/>, on the connection the plans
+    /// were read on (#4821), and returns each digest's text keyed by its hex form. The digests travel as ONE
+    /// <c>bytea[]</c> parameter, however many plans print.
+    /// </summary>
+    private static async Task<Dictionary<string, string>> ReadParameterSensitiveTextAsync(
+        NpgsqlConnection connection, IReadOnlyList<byte[]> digests, CancellationToken cancellationToken)
+    {
+        using var cmd = new NpgsqlCommand(ParameterSensitiveTextSql, connection);
+        cmd.CommandTimeout = DrillDownCommandTimeoutSeconds;
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
+            Value = digests.ToArray()
+        });
+
+        var text = new Dictionary<string, string>(StringComparer.Ordinal);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(1))
+                text[Convert.ToHexString(reader.GetFieldValue<byte[]>(0))] = reader.GetString(1);
+        }
+
+        return text;
     }
 
     public const string RegressedQueriesSql = RegressedQueriesHead + RegressedQueriesRawMiddle + RegressedQueriesTail;
@@ -792,15 +904,16 @@ LIMIT 5";
         cmd.Parameters.AddWithValue(windowStart);
         /* $3/$4: the STANDARD analysis window for the psp_signature CTE — deliberately not the 14-day
            comparison window above, so the flag matches what the PARAMETER_SENSITIVITY detector itself
-           would report for this run. */
-        cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
+           would report for this run. The start is also the bound of the reader's exact compiled-before-the-window
+           test on each row (#4821). */
+        var pspWindowStart = AsNaive(context.TimeRangeStart);
+        cmd.Parameters.AddWithValue(pspWindowStart);
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
 
         /* $5/$6 (#3902): the fact's offenders, or NULL when it did not run, failed, or reported none — typed
            explicitly, because a NULL carries no array type for the server to infer. An empty list is read as
            unrestricted rather than as "nothing": a pass whose fact found no regression raises no
            PLAN_REGRESSION finding to drill into, so a caller that drills anyway is not following a fact. */
-        var pspWindowStart = AsNaive(context.TimeRangeStart);
         var offenders = context.PlanRegressionOffenders is { Count: > 0 } reported ? reported : null;
         cmd.Parameters.Add(new NpgsqlParameter
         {

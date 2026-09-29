@@ -104,6 +104,7 @@ public sealed partial class PgDrillDownCollector : IDrillDownCollector
         TopCpuQueriesSql,
         TopSpillingQueriesSql,
         ParameterSensitiveSql,
+        ParameterSensitiveTextSql,
         RegressedQueriesSql,
         RegressedQueriesTableSql,
         BadActorDetailSql,

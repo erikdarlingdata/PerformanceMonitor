@@ -16,6 +16,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Npgsql;
+using NpgsqlTypes;
 using PerformanceMonitor.Analysis;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
@@ -30,17 +31,23 @@ namespace Darling.Tests;
 /// <para>The read used to window over <c>v_query_stats</c>, whose <c>query_text</c> column is
 /// <c>COALESCE(f.query_text, qtd.query_text)</c> over a LEFT JOIN to <c>query_text_dim</c> — the whole
 /// fleet's text dimension. Selecting that column made the planner resolve text for every row in the
-/// window and carry it through the <c>ROW_NUMBER</c> sort, to print five. On DARLING01 the plan was a
-/// sequential scan of the dimension hashed against the window; on a fleet-sized dimension (seeded at
-/// 400,000 texts) it was one index probe per window row.</para>
+/// window and carry it through the <c>ROW_NUMBER</c> sort, to print five. On a production-sized store the
+/// plan was a sequential scan of the dimension hashed against the window; on a fleet-sized dimension
+/// (seeded at 400,000 texts) it was one index probe per window row.</para>
 ///
-/// <para>Two halves, both live. The shipped read must return EXACTLY what the old one returned — every
-/// column, every row, in order, including the three text cases the view's COALESCE decides (inline legacy
-/// text wins over the digest; a digest with no dimension row yet reads as empty; long text truncates at
-/// 500). The oracle is the old SQL verbatim. And it must touch the dimension for the output rows only,
-/// measured from the plan's own row counts — with the oracle run through the same measurement as the
-/// positive control, so a measurement that could not see a dimension read would fail there instead of
-/// passing here.</para>
+/// <para>#4821 moved the cap of five and the exact compiled-before-the-window test out of the SQL and into
+/// the reader, so the main read now returns every plan that passes its rough filter and cannot resolve text
+/// itself without resolving it for all of them. The reader resolves text in a second read, by digest, for
+/// the plans it kept: <see cref="PgDrillDownCollector.ParameterSensitiveTextSql"/>.</para>
+///
+/// <para>Two halves, both live. The shipped drill-down must return EXACTLY what the old read returned —
+/// every column, every row, in order, including the three text cases the view's COALESCE decides (inline
+/// legacy text wins over the digest; a digest with no dimension row yet reads as empty; long text truncates
+/// at 500). The oracle is the old SQL verbatim. And its two statements together must touch the dimension for
+/// the printed rows only: the main read resolves none, and the text read fetches the dimension rows of the
+/// plans that print, each measured from its own executed plan — with the oracle run through the same
+/// measurement as the positive control, so a measurement that could not see a dimension read would fail
+/// there instead of passing here.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ParameterSensitiveDrillDownTextLiveTests
@@ -49,8 +56,14 @@ public sealed class ParameterSensitiveDrillDownTextLiveTests
     private const int TestServerId = -390201;
     private const string TestServerName = "PspTextSrv";
 
-    /// <summary>The drill-down's own output cap (the SQL's <c>LIMIT 5</c>).</summary>
+    /// <summary>The drill-down's own output cap (the reader's <c>ParameterSensitiveMaxOffenders</c>, once the SQL's <c>LIMIT 5</c>).</summary>
     private const int OutputRows = 5;
+
+    /// <summary>
+    /// The printed plans whose latest digest has a dimension row: all but plan 1, whose digest is not in the
+    /// dimension yet. What the text read must fetch when asked for the digests of every printed plan.
+    /// </summary>
+    private const int PrintedPlansWithADimensionRow = OutputRows - 1;
 
     /// <summary>Qualifying plans: more than the cap, so the LIMIT has something to cut.</summary>
     private const int QualifyingPlans = 12;
@@ -209,19 +222,36 @@ LIMIT 5";
             Assert.Equal(DimText(2, latest: true)[..500], shipped[2].GetProperty("query_text").GetString());
             Assert.Equal(DimText(3, latest: true), shipped[3].GetProperty("query_text").GetString());
 
-            /* The read shape: how many rows the plan resolves against the text dimension. The shipped read
-               resolves the rows it prints; the old one resolved every window row. */
+            /* The read shape: how many rows the drill-down's two statements resolve against the text dimension. The
+               main read joins no dimension, so it resolves none; the text read is asked for the digests of the plans
+               that print and fetches those dimension rows by key. The old read resolved every window row. */
             await using (var connection = await OpenWithSearchPathAsync(connectionString!, ct))
             {
-                var shippedResolved = await RowsResolvedAgainstTheDimensionAsync(
+                var mainReadResolved = await RowsResolvedAgainstTheDimensionAsync(
                     connection, PgDrillDownCollector.ParameterSensitiveSql, windowStart, windowEnd, ct);
+                var printedDigests = Enumerable.Range(0, OutputRows).Select(plan => Digest(plan, latest: true)).ToArray();
+                var textReadResolved = await RowsFetchedFromTheDimensionAsync(
+                    connection, PgDrillDownCollector.ParameterSensitiveTextSql, printedDigests, ct);
                 var oracleResolved = await RowsResolvedAgainstTheDimensionAsync(
                     connection, OracleSql, windowStart, windowEnd, ct);
 
+                var shippedResolved = mainReadResolved + textReadResolved;
                 Assert.True(
                     shippedResolved <= OutputRows,
-                    $"the drill-down resolved text for {shippedResolved} row(s) to print {OutputRows}: text is being "
-                    + "resolved for window rows that never print (#3902).");
+                    $"the drill-down resolved text for {shippedResolved} row(s) to print {OutputRows} (main read "
+                    + $"{mainReadResolved}, text read {textReadResolved}): the cap and the exact test are the reader's "
+                    + "since #4821, so the main read returns every plan that passes its rough filter and only the text "
+                    + "read, run for the printed plans, may touch the dimension. Text is being resolved for window "
+                    + "rows that never print (#3902).");
+                Assert.True(
+                    mainReadResolved == 0,
+                    $"the main read resolved text for {mainReadResolved} row(s) against the dimension: it joins no "
+                    + "dimension, so any it resolves is text for plans the reader's cap has not cut yet (#4821).");
+                Assert.True(
+                    textReadResolved == PrintedPlansWithADimensionRow,
+                    $"positive control: the text read fetched {textReadResolved} dimension row(s) for the {OutputRows} "
+                    + $"printed digests, not the {PrintedPlansWithADimensionRow} that have one, so this measurement "
+                    + "cannot see the text read.");
                 Assert.True(
                     oracleResolved >= (QualifyingPlans + QuietPlans) * SnapshotsPerPlan,
                     $"positive control: the old read resolved text for only {oracleResolved} row(s), so this "
@@ -249,6 +279,27 @@ LIMIT 5";
         AddWindowParameters(cmd, windowStart, windowEnd);
 
         return ExplainJoinProbe.RowsResolvedAgainst((string)(await cmd.ExecuteScalarAsync(ct))!, PayloadDimensions.QueryTextDimTable);
+    }
+
+    /// <summary>
+    /// The rows the text read fetches from <c>query_text_dim</c> for <paramref name="digests"/>, from the executed
+    /// plan (<see cref="ExplainJoinProbe.RowsFetchedFrom"/>). That read joins nothing, so the join probe would read
+    /// 0 for it whatever it fetched.
+    /// </summary>
+    private static async Task<double> RowsFetchedFromTheDimensionAsync(
+        NpgsqlConnection connection, string sql, IReadOnlyList<byte[]> digests, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("EXPLAIN (ANALYZE, FORMAT JSON) " + sql, connection)
+        {
+            CommandTimeout = LiveTimeoutSeconds
+        };
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bytea,
+            Value = digests.ToArray()
+        });
+
+        return ExplainJoinProbe.RowsFetchedFrom((string)(await cmd.ExecuteScalarAsync(ct))!, PayloadDimensions.QueryTextDimTable);
     }
 
     private static async Task<List<JsonElement>> DrillDownRowsAsync(NpgsqlDataSource postgres, AnalysisContext context)
