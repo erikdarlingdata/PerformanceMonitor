@@ -65,8 +65,15 @@ public partial class MainWindow : Window
            conditions are judged off the COLLECTED ag_* snapshots, not the engine's live per-server snapshot
            (the same reason Darling keeps them in its self-alert evaluator). Fire-and-forget so a DuckDB read
            can never stall the UI-timer sweep, and gated on the master AG switch so a fleet with no AGs pays
-           only a dictionary lookup. */
-        if (App.NotifyAgHealth)
+           only a dictionary lookup.
+
+           #4795: and on the live registry lookup above. A summary can outlive its server: the timer copies the
+           registry, awaits, then calls this for each copy, and a server removed during those awaits has no entry
+           now. The sweep reads its generation on its first line, after the removal's Forget, so it would count as
+           current and write AG state and retries for a server that is gone, for a later add of the same server to
+           inherit (Lite forgets on removal only). Nothing is awaited between the lookup and this launch, so a server
+           found above is still registered when the sweep reads its generation. */
+        if (App.NotifyAgHealth && badgeServer != null)
         {
             _ = EvaluateAvailabilityGroupAlertsAsync(summary.ServerId, summary.DisplayName, suppressPopups);
         }
@@ -156,7 +163,9 @@ public partial class MainWindow : Window
     /// <para><b>Fires once per edge.</b> The caller's <c>_previousConnectionStates</c> dictionary is the edge
     /// trigger: a server that stays offline is offline→offline and does not re-enter this method, so an
     /// 8-hour outage produces ONE "Server Unreachable", not one per poll. There is deliberately no cooldown
-    /// re-fire here — an edge is a single event.</para>
+    /// re-fire here — an edge is a single event. The only ways back in for a standing outage are the opt-in
+    /// re-fire (#1659) and, since #4795, the retry of a "Server Unreachable" that no channel delivered. The method
+    /// returns the send's task so the caller can record what the channels did without waiting on them.</para>
     ///
     /// <para>Suppression matches Lite's other alerts: a mute rule flags the row muted and skips the channels
     /// (<see cref="EmailAlertService.TrySendAlertEmailAsync"/>'s own contract — the history row is still
@@ -164,7 +173,8 @@ public partial class MainWindow : Window
     /// connection edge too" rule the Dashboard applies. Never throws: the send is fire-and-forget (SMTP/HTTP
     /// off a UI-timer tick) and <c>TrySendAlertEmailAsync</c> absorbs its own failures.</para>
     /// </summary>
-    private void SendConnectionAlert(ServerConnection server, string metricName, string currentValue, string detailText)
+    private Task<PerformanceMonitor.Notifications.AlertDelivery?> SendConnectionAlert(
+        ServerConnection server, string metricName, string currentValue, string detailText)
     {
         try
         {
@@ -180,7 +190,7 @@ public partial class MainWindow : Window
                alone — it never consulted this, and this change must not regress it. */
             if (!_alertStateService.ShouldShowAlerts(serverId.ToString()))
             {
-                return;
+                return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
             }
 
             bool isMuted = _muteRuleService.IsAlertMuted(new AlertMuteContext
@@ -201,7 +211,7 @@ public partial class MainWindow : Window
                be the one family on this store still costing one post per affected server. Read straight off
                the ServerConnection in hand rather than through ServerManager's scan, which exists for the
                callers that only have the hashed id. */
-            _ = _emailAlertService.TrySendAlertEmailAsync(
+            return _emailAlertService.TrySendAlertEmailAsync(
                 metricName,
                 serverName,
                 currentValue,
@@ -216,6 +226,46 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AppLogger.Error("ConnectionAlerts", $"Connection alert delivery failed for {metricName}: {ex.Message}");
+            return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
+        }
+    }
+
+    /// <summary>
+    /// Records what a "Server Unreachable" send reported (#4795), off the connection loop: the loop never waits on
+    /// SMTP or a webhook. When every channel failed the alert is due again after the failed-send delay (a minute,
+    /// doubling, never more than the alert cooldown) while the server stays down, with re-fire off or on; any other
+    /// answer clears it. The step runs on the UI thread, after the loop has stored this poll's state, and does
+    /// nothing if the server came back while the send was in flight: the outage it would retry is over.
+    /// The loop marked the server in <c>_connectionAlertSends</c> before it handed the send over, so no tick offers
+    /// the retry while the send runs; this step lifts the mark once the answer is recorded (or the step gave up),
+    /// in a <c>finally</c>, so no exit leaves the server held back.
+    /// </summary>
+    private async Task NoteConnectionAlertSentAsync(string serverId, Task<PerformanceMonitor.Notifications.AlertDelivery?> send)
+    {
+        try
+        {
+            await Task.Yield();
+            var delivery = await send;
+            if (!_previousConnectionStates.TryGetValue(serverId, out var onlineNow) || onlineNow)
+            {
+                return;
+            }
+
+            if (_connectionAlertRetries.Record(
+                    serverId, delivery, DateTime.UtcNow, TimeSpan.FromMinutes(App.AlertCooldownMinutes),
+                    out var delay, out var failures))
+            {
+                AppLogger.Info("ConnectionAlerts",
+                    $"Every channel failed for the Server Unreachable alert (failure {failures}); trying again in {delay}");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("ConnectionAlerts", $"Recording the Server Unreachable delivery failed: {ex.Message}");
+        }
+        finally
+        {
+            _connectionAlertSends.End(serverId);
         }
     }
 
@@ -347,10 +397,21 @@ public partial class MainWindow : Window
             return;
         }
 
+        /* #4795: the sweep now waits for each send's answer before it records it, so a second sweep for the same
+           server that starts meanwhile would decide the same alert again. One evaluation per server at a time; the
+           skipped one is harmless, the AG snapshots only change with the collectors. UI thread only. The server's
+           generation is read before the first read is awaited and handed to both evaluations, so a sweep that was
+           reading when its server was removed records nothing for it. */
+        if (!_agSweepsRunning.Add(serverId))
+        {
+            return;
+        }
+
         try
         {
             var alerts = new List<AgAlert>();
             var now = DateTime.UtcNow;
+            var generation = _agAlertEvaluator.GenerationOf(serverId);
 
             var (replicaTimeUtc, replicas) = await data.GetLatestAgReplicaStatesAsync(serverId);
             if (IsFresh(replicaTimeUtc))
@@ -360,7 +421,8 @@ public partial class MainWindow : Window
                     replicas,
                     App.AgDisconnectRefireMinutes > 0
                         ? TimeSpan.FromMinutes(App.AgDisconnectRefireMinutes)
-                        : null));
+                        : null,
+                    sweepGeneration: generation));
             }
 
             var (databaseTimeUtc, databases) = await data.GetLatestAgDatabaseReplicaStatesAsync(serverId);
@@ -371,7 +433,8 @@ public partial class MainWindow : Window
                     databases,
                     App.AgLagAlertSeconds,
                     App.AgRedoQueueAlertKb,
-                    TimeSpan.FromMinutes(App.AlertCooldownMinutes)));
+                    TimeSpan.FromMinutes(App.AlertCooldownMinutes),
+                    sweepGeneration: generation));
             }
 
             if (alerts.Count == 0 || suppressed)
@@ -381,13 +444,15 @@ public partial class MainWindow : Window
 
             foreach (var alert in alerts)
             {
-                SendAgAlert(serverId, serverName, alert);
+                var delivery = await SendAgAlert(serverId, serverName, alert);
 
                 /* #2426: the re-fire window opens on DELIVERY, which is what the suppressed return above
                    makes necessary — an acknowledged or silenced server still evaluates every sweep and
                    sends nothing, and windows consumed by alerts nobody received would turn the re-fire back
-                   into the silence it exists to end. */
-                _agAlertEvaluator.NoteDelivered(alert);
+                   into the silence it exists to end. #4795: an alert whose every channel failed is not a
+                   delivery either: NoteSent leaves its window closed, puts its marker back and holds it until
+                   the failed-send delay is up. */
+                _agAlertEvaluator.NoteSent(alert, delivery, TimeSpan.FromMinutes(App.AlertCooldownMinutes));
             }
 
             bool IsFresh(DateTime? snapshotUtc) =>
@@ -397,7 +462,15 @@ public partial class MainWindow : Window
         {
             AppLogger.Error("AgAlerts", $"Availability Group alert evaluation failed for {serverName}: {ex.Message}");
         }
+        finally
+        {
+            _agSweepsRunning.Remove(serverId);
+        }
     }
+
+    /// <summary>Servers whose Availability Group evaluation is running (#4795), so a slow send cannot overlap the
+    /// next sweep's decision for the same server.</summary>
+    private readonly HashSet<int> _agSweepsRunning = new();
 
     /// <summary>
     /// Delivers one AG alert through the SAME path every other Lite alert uses — mute check, then
@@ -406,7 +479,7 @@ public partial class MainWindow : Window
     /// <see cref="PerformanceMonitor.Common.AgAlertPolicy"/> consts, so a webhook keyed on "AG Failover"
     /// matches whether the alert came from Lite or from Darling.
     /// </summary>
-    private void SendAgAlert(int serverId, string serverName, AgAlert alert)
+    private Task<PerformanceMonitor.Notifications.AlertDelivery?> SendAgAlert(int serverId, string serverName, AgAlert alert)
     {
         try
         {
@@ -433,7 +506,7 @@ public partial class MainWindow : Window
                replicas on one availability group flap together, so this family fans out across servers the
                same way. Through ServerManager's scan because this path carries the hashed id, not the
                ServerConnection. */
-            _ = _emailAlertService.TrySendAlertEmailAsync(
+            return _emailAlertService.TrySendAlertEmailAsync(
                 alert.MetricName,
                 serverName,
                 alert.CurrentValue,
@@ -448,6 +521,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AppLogger.Error("AgAlerts", $"AG alert delivery failed for {alert.MetricName}: {ex.Message}");
+            return Task.FromResult<PerformanceMonitor.Notifications.AlertDelivery?>(null);
         }
     }
 

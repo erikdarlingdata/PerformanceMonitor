@@ -29,6 +29,7 @@ using PerformanceMonitor.Ui;
 /* Type alias (not a namespace import) so PerformanceMonitor.Alerting's CpuAlertMode enum can never
    collide with this app's own CpuAlertMode. */
 using AlertEngine = PerformanceMonitor.Alerting.AlertEngine;
+using FailedSendRetryTracker = PerformanceMonitor.Alerting.FailedSendRetryTracker;
 using AlertReadFailureCounter = PerformanceMonitor.Alerting.AlertReadFailureCounter;
 
 namespace PerformanceMonitorLite;
@@ -59,8 +60,20 @@ public partial class MainWindow : Window
 
     /// <summary>When the last down alert (Lost / AlreadyDownAtFirstSight / StillDown) fired per server —
     /// the re-fire clock for <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy"/> (#1659).
-    /// Stamped on every down alert delivered, cleared on Restored.</summary>
+    /// Stamped when a down alert is sent, whatever the send then reports, and cleared on Restored.</summary>
     private readonly Dictionary<string, DateTime> _lastConnectionDownAlertUtc = new();
+
+    /// <summary>When a "Server Unreachable" that no channel delivered is due again, per server (#4795). Passed
+    /// to <see cref="PerformanceMonitor.Common.ConnectionAlertPolicy.Decide"/> through
+    /// <see cref="_connectionAlertSends"/>, recorded from the send's answer, and cleared on a restore or when the
+    /// server is removed.</summary>
+    private readonly FailedSendRetryTracker _connectionAlertRetries = new();
+
+    /// <summary>The servers whose "Server Unreachable" send has not answered yet (#4795). While a server is in
+    /// here its retry is not offered to the policy, so a slow send is not followed by a second copy of itself on the
+    /// next tick. Added right before the send is handed to <see cref="NoteConnectionAlertSentAsync"/>, removed in
+    /// that step's <c>finally</c>.</summary>
+    private readonly ConnectionAlertSendsInFlight _connectionAlertSends = new();
     private readonly Dictionary<string, bool> _previousCollectorErrorStates = new();
     private readonly Dictionary<string, bool> _previousXeSessionFailureStates = new();
     private readonly DispatcherTimer _statusTimer;
@@ -1456,10 +1469,10 @@ public partial class MainWindow : Window
 
     private void ManageServersButton_Click(object sender, RoutedEventArgs e)
     {
-        /* #2033: hand this door the SAME per-server deep cleanup the sidebar Remove runs (health, AG edge
-           state, tag assignments), so the two delete paths cannot drift. The ClearHealthExcept sweep below
-           stays as the belt for anything else that changed while the dialog was open. */
-        var window = new ManageServersWindow(_serverManager, _profileManager, ForgetServerRuntimeStateAsync) { Owner = this };
+        /* #2033: hand this door the SAME removal the sidebar Remove runs (health, AG edge state, tag
+           assignments, then the registry entry), so the two delete paths cannot drift. The ClearHealthExcept
+           sweep below stays as the belt for anything else that changed while the dialog was open. */
+        var window = new ManageServersWindow(_serverManager, _profileManager, RemoveServerAsync) { Owner = this };
         window.ShowDialog();
 
         if (window.ServersChanged)
@@ -1819,32 +1832,28 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes)
         {
             CloseServerTab(server.Id);
-            await ForgetServerRuntimeStateAsync(server);
-            _serverManager.DeleteServer(server.Id);
+            await RemoveServerAsync(server);
             RefreshServerList();
             StatusText.Text = $"Removed server: {server.DisplayNameWithIntent}";
         }
     }
 
     /// <summary>
-    /// The ONE deep-cleanup for a server leaving monitoring (#2033) — every piece of per-server runtime
+    /// The ONE removal of a server from monitoring (#2033) — every piece of per-server runtime
     /// state keyed on the deterministic storage-name hash, which a removed-then-re-added server gets BACK:
     /// collection health, AG edge state (#1696 — stale role state pages a phantom failover on re-add), and
-    /// tag assignments (#2020 — stale rows silently resurrect the old tags). Both delete doors call this —
-    /// the sidebar context menu's Remove and Manage Servers' Delete — so the two paths cannot drift again;
-    /// before this, Manage Servers deleted the registry entry and left all three behind.
+    /// tag assignments (#2020 — stale rows silently resurrect the old tags) — and then the registry entry
+    /// itself (#4795). Both doors call this — the sidebar context menu's Remove and Manage Servers' Delete —
+    /// so the two paths cannot drift again; before this, Manage Servers deleted the registry entry and left
+    /// all three behind.
     /// </summary>
-    private async Task ForgetServerRuntimeStateAsync(ServerConnection server)
+    private async Task RemoveServerAsync(ServerConnection server)
     {
         var removedServerId = RemoteCollectorService.GetDeterministicHashCode(
             RemoteCollectorService.GetServerNameForStorage(server));
-        _collectorService?.ClearHealthForServer(removedServerId);
-        _agAlertEvaluator.Forget(removedServerId);
-        /* #3540 A4: the delta baselines and pass window too. The tab-close path already drops them, but a
-           server deleted from Manage Servers with no tab open kept its cached counters, and a re-add inside
-           the gap policy's hour subtracted the new server's counters from the old one's — a fabricated
-           delta against a different identity. Same deterministic id, same one deep-cleanup. */
-        _collectorService?.DeltaCalculator?.ClearServer(removedServerId);
+
+        /* The tag clear is the removal's only await, so it runs first, while the server is still whole: nothing
+           has been dropped yet for a timer tick to see half-done. */
         if (_dataService != null)
         {
             try
@@ -1856,6 +1865,30 @@ public partial class MainWindow : Window
                 AppLogger.Info("Tags", $"Failed to clear tags for removed server: {ex.Message}");
             }
         }
+
+        /* #4795: from the first drop to the delete nothing is awaited, so this runs on the UI thread without a
+           timer tick in between. The state used to be dropped, then the tag clear awaited, then the registry entry
+           deleted by the caller: a tick during that await still found the server registered and re-created the
+           state that had just been dropped. */
+        _collectorService?.ClearHealthForServer(removedServerId);
+        _agAlertEvaluator.Forget(removedServerId);
+        /* #4795: the connection alert keeps its own per-server state, keyed by the connection's id rather than the
+           storage-name hash. The pending retry goes with the server, and so do the two marks a send still in
+           flight would read when its answer arrives: without the previous-state mark, that answer would find the
+           server down and record a retry for a server that is gone, which nothing would ever clear. The tick's
+           collector-error and XE-session marks are keyed the same way and go too, so a re-add starts from no mark
+           rather than comparing its first readings against the removed server's. */
+        _connectionAlertRetries.Clear(server.Id);
+        _previousConnectionStates.Remove(server.Id);
+        _lastConnectionDownAlertUtc.Remove(server.Id);
+        _previousCollectorErrorStates.Remove(server.Id);
+        _previousXeSessionFailureStates.Remove(server.Id);
+        /* #3540 A4: the delta baselines and pass window too. The tab-close path already drops them, but a
+           server deleted from Manage Servers with no tab open kept its cached counters, and a re-add inside
+           the gap policy's hour subtracted the new server's counters from the old one's — a fabricated
+           delta against a different identity. Same deterministic id, same one deep-cleanup. */
+        _collectorService?.DeltaCalculator?.ClearServer(removedServerId);
+        _serverManager.DeleteServer(server.Id);
     }
 
     private bool _sidebarCollapsed;
@@ -2004,7 +2037,18 @@ public partial class MainWindow : Window
                     App.NotifyConnectionDownAtStartup,
                     App.ConnectionRefireMinutes > 0 ? TimeSpan.FromMinutes(App.ConnectionRefireMinutes) : null,
                     _lastConnectionDownAlertUtc.TryGetValue(server.Id, out var lastDown) ? lastDown : null,
-                    DateTime.UtcNow);
+                    DateTime.UtcNow,
+                    /* #4795: none while this server's last send is still running. The due time only moves when the
+                       send's answer is recorded, which can be a whole SMTP timeout after the send began, and until
+                       then every tick would find the retry due and send it again. */
+                    _connectionAlertSends.RetryDueUtc(server.Id, _connectionAlertRetries));
+
+                /* #4795: a restore ends the outage and any retry still pending for it, whether or not the
+                   notify toggles below let the notice out. */
+                if (connectionDecision == ConnectionAlertDecision.Restored)
+                {
+                    _connectionAlertRetries.Clear(server.Id);
+                }
 
                 if (App.AlertsEnabled && App.NotifyConnectionChanges)
                 {
@@ -2024,6 +2068,10 @@ public partial class MainWindow : Window
                         {
                             ConnectionAlertDecision.AlreadyDownAtFirstSight =>
                                 $"Already unreachable when monitoring started: {reason}",
+                            /* #4795: with re-fire off a StillDown can only be the retry of an alert no channel
+                               delivered. With re-fire on the text stays as it was. */
+                            ConnectionAlertDecision.StillDown when App.ConnectionRefireMinutes <= 0 =>
+                                $"Still unreachable (the previous alert reached no channel, so it is sent again): {reason}",
                             ConnectionAlertDecision.StillDown =>
                                 $"Still unreachable (re-alerting every {App.ConnectionRefireMinutes} min): {reason}",
                             _ => reason
@@ -2034,8 +2082,13 @@ public partial class MainWindow : Window
                             $"{server.DisplayNameWithIntent} is unreachable: {reason}",
                             Hardcodet.Wpf.TaskbarNotification.BalloonIcon.Error);
 
-                        SendConnectionAlert(server, "Server Unreachable", reason, detail);
+                        var send = SendConnectionAlert(server, "Server Unreachable", reason, detail);
                         _lastConnectionDownAlertUtc[server.Id] = DateTime.UtcNow;
+                        /* #4795: marked running here and unmarked in the note's finally. The retry tracker is NOT
+                           cleared at dispatch: that would end the failed-send streak, and a lasting failure would
+                           be retried at a minute every time instead of doubling. */
+                        _connectionAlertSends.Begin(server.Id);
+                        _ = NoteConnectionAlertSentAsync(server.Id, send);
                     }
                     else if (connectionDecision == ConnectionAlertDecision.Restored)
                     {
