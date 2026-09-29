@@ -1096,7 +1096,7 @@ jobs:
             "logging_collector = on",
             "log_destination = 'stderr'",
             "log_timezone = 'UTC'",
-            "log_line_prefix = '%m [%p] '",
+            "log_line_prefix = '%m [%p] %Q '",
             "log_lock_waits = on"
           )
           Start-LogFormatCluster "$env:RUNNER_TEMP\darling-pgdata-rotate-csvlog" "$env:RUNNER_TEMP\darling-pg-rotate-csvlog.log" 5547 @(
