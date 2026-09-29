@@ -260,6 +260,30 @@ public sealed class ForcePlanTargetStateTests : IClassFixture<SharedDuckDbFixtur
     }
 
     [Fact]
+    public void ActiveRecommendationNamingTheProposedPlanAsRegressed_SaysSo_AndTheAdvisoryVerdictStaysOpen()
+    {
+        /* #4736: the fixture's regressed plan is 7, so a target on plan 7 is the plan the engine calls the
+           worse one. The guidance says so instead of only "two candidate plans"; the bot (not this
+           surface) carries the blocker. */
+        var projected = Project(Target(planId: 7), State(apcState: "Active", apcLastGood: 101, flgp: "OFF"));
+
+        Assert.True(projected.Eligible);
+        Assert.Contains("names plan 7", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("the plan proposed here", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("worse", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Reverted")]
+    [InlineData("Expired")]
+    public void WithdrawnRecommendationNamingTheProposedPlanAsRegressed_SaysNothing(string apcState)
+    {
+        var projected = Project(Target(planId: 7), State(apcState: apcState, apcLastGood: 101, flgp: "OFF"));
+
+        Assert.Null(projected.Guidance);
+    }
+
+    [Fact]
     public void TheTwoOriginalBlockers_StackWithTheNewOnes_AndCarryEvidenceToo()
     {
         var projected = Project(Target(psp: true, replica: "Secondary"), State(planForced: true, forcingType: "AUTO"));

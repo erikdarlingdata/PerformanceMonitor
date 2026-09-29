@@ -9,6 +9,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using PerformanceMonitor.Analysis;
 using Xunit;
 
@@ -279,6 +280,120 @@ public sealed class ForcePlanBotPolicyTests
         Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), Clean(flgp: spelling), stateUnavailableReason: null));
     }
 
+    /* ---------------- #4736: the engine names the proposed plan as the worse one ---------------- */
+
+    /// <summary>The newest correction row for the query: <paramref name="apcState"/>, naming
+    /// <paramref name="regressed"/> as the worse plan and <paramref name="lastGood"/> as the better one, on a
+    /// database where the automatic setting is off (so the recommendation is only on offer).</summary>
+    private static ForcePlanTargetState Recommendation(string apcState, long? regressed, long? lastGood) => Clean(flgp: "OFF") with
+    {
+        ApcState = apcState,
+        ApcStateReason = "AutomaticTuningOptionNotEnabled",
+        ApcRegressedPlanId = regressed,
+        ApcLastGoodPlanId = lastGood,
+        ApcObservedAtUtc = Observed,
+    };
+
+    [Fact]
+    public void Blockers_AnActiveRecommendationThatNamesTheTargetAsRegressed_BlocksTheBot_QuotingBothPlanIdsAndTheSnapshot()
+    {
+        /* The target is plan 7. The engine's own open recommendation says 7 is the WORSE plan and 9 the
+           better one: the bot must not force the plan the engine wants replaced. */
+        var state = Recommendation("Active", regressed: 7, lastGood: 9);
+
+        var blockers = ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null);
+
+        var only = Assert.Single(blockers);
+        Assert.Equal("apc_names_this_plan_as_regressed", only.Name);
+        Assert.Contains("regressed_plan_id = 7", only.Evidence, StringComparison.Ordinal);
+        Assert.Contains("last_good_plan_id = 9", only.Evidence, StringComparison.Ordinal);
+        Assert.Contains("2026-09-18T12:00:00Z", only.Evidence, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Blockers_TheAdvisoryGateStaysOpen_ForTheSameCase_SoAHumanDecidesOnThePageNotTheBot()
+    {
+        /* The shared gate, which structured_remediation's eligible/blockers come from, does not block an
+           Active recommendation: the operator gets the guidance and decides on purpose. Only the bot,
+           which has no one to hand the decision to, stands down. */
+        var state = Recommendation("Active", regressed: 7, lastGood: 9);
+
+        Assert.Empty(FactRemediation.ForcePlanBlockers(Target(), state));
+    }
+
+    [Theory]
+    [InlineData("Reverted")]
+    [InlineData("Expired")]
+    public void Blockers_ARevertedOrExpiredRecommendation_DoesNotBlock_EvenWhenItNamesTheTargetAsRegressed(string apcState)
+    {
+        /* The engine withdrew the recommendation, or reverted it for no significant gain: there is no
+           open claim that the target is the worse plan. */
+        var state = Recommendation(apcState, regressed: 7, lastGood: 9);
+
+        Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null));
+    }
+
+    [Fact]
+    public void Blockers_AnActiveRecommendationThatNamesAnotherPlanAsRegressed_DoesNotBlock()
+    {
+        var state = Recommendation("Active", regressed: 8, lastGood: 9);
+
+        Assert.Empty(ForcePlanBotPolicy.Blockers(Target(), state, stateUnavailableReason: null));
+    }
+
+    [Fact]
+    public void Evaluate_AnActiveRecommendationThatNamesTheTargetAsRegressed_IsBlocked_EvenWithEveryGateOpen()
+    {
+        var blockers = ForcePlanBotPolicy.Blockers(
+            Target(), Recommendation("Active", regressed: 7, lastGood: 9), stateUnavailableReason: null);
+
+        var decision = ForcePlanBotPolicy.Evaluate(
+            Target(), ForcePlanBotPolicy.Names(blockers), serverOptedIn: true, Enabled(dryRun: false),
+            ForcePlanBotHistory.Empty, Now);
+
+        Assert.Equal(ForcePlanBotDecisionKind.Blocked, decision.Kind);
+        Assert.Equal(new[] { "apc_names_this_plan_as_regressed" }, decision.Reasons);
+    }
+
+    private static StructuredForcePlanTarget Project(ForcePlanTarget target, ForcePlanTargetState state) =>
+        Assert.Single(FactRemediation.BuildStructuredRemediation(
+            new RemediationAction("PLAN_REGRESSION", "force", new[] { target }),
+            new Dictionary<ForcePlanTargetKey, ForcePlanTargetState>(ForcePlanTargetKey.Comparer) { [ForcePlanTargetKey.Of(target)] = state })!.ForcePlanTargets);
+
+    [Fact]
+    public void TheGuidance_SaysTheEngineNamesTheProposedPlanAsTheWorseOne_WhenAnActiveRecommendationDoes()
+    {
+        var projected = Project(Target(), Recommendation("Active", regressed: 7, lastGood: 9));
+
+        Assert.NotNull(projected.Guidance);
+        Assert.Contains("names plan 7", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("the plan proposed here", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("worse", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("2026-09-18T12:00:00Z", projected.Guidance, StringComparison.Ordinal);
+        /* The advisory verdict is still the operator's: nothing blocks the page. */
+        Assert.True(projected.Eligible);
+    }
+
+    [Fact]
+    public void TheGuidance_SaysTheSameThing_WhenTheRecommendationNamesNoBetterPlan()
+    {
+        var projected = Project(Target(), Recommendation("Active", regressed: 7, lastGood: null));
+
+        Assert.NotNull(projected.Guidance);
+        Assert.Contains("names plan 7", projected.Guidance, StringComparison.Ordinal);
+        Assert.Contains("worse", projected.Guidance, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Reverted")]
+    [InlineData("Expired")]
+    public void TheGuidance_DoesNotAccuseTheProposedPlan_WhenTheEngineWithdrewTheRecommendation(string apcState)
+    {
+        var projected = Project(Target(), Recommendation(apcState, regressed: 7, lastGood: 9));
+
+        Assert.Null(projected.Guidance);
+    }
+
     [Fact]
     public void Blockers_NullState_IsUnavailable_QuotingTheReadersReason()
     {
@@ -510,5 +625,96 @@ public sealed class ForcePlanBotPolicyTests
             FactAdvice.Compose("PLAN_REGRESSION", Facts(0.4))!.Investigation, StringComparison.Ordinal);
         Assert.Contains("the faster plan on record, so",
             FactAdvice.Compose("PLAN_REGRESSION", Facts(null))!.Investigation, StringComparison.Ordinal);
+    }
+
+    /* ---------------- #4736: every target shows its own best plan's age ---------------- */
+
+    private static AnalysisFinding TwoTargetFinding() => new()
+    {
+        FindingId = 1,
+        AnalysisTime = Now,
+        ServerId = 42,
+        ServerName = "SQL01",
+        DatabaseName = "orders",
+        TimeRangeStart = Now.AddHours(-4),
+        TimeRangeEnd = Now,
+        Severity = 1.6,
+        Confidence = 1.0,
+        Category = "queries",
+        StoryPath = "PLAN_REGRESSION",
+        StoryPathHash = "hash_PLAN_REGRESSION",
+        StoryText = "story",
+        RootFactKey = "PLAN_REGRESSION",
+        DrillDown = new Dictionary<string, object>
+        {
+            ["regressed_queries"] = new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["database"] = "orders", ["query_id"] = 42L, ["best_plan_id"] = 7L, ["regression_factor"] = 10.0,
+                    ["best_plan_last_seen"] = new DateTime(2026, 8, 22, 9, 0, 0, DateTimeKind.Unspecified),
+                },
+                new Dictionary<string, object?>
+                {
+                    ["database"] = "orders", ["query_id"] = 43L, ["best_plan_id"] = 8L, ["regression_factor"] = 5.0,
+                    ["best_plan_last_seen"] = new DateTime(2026, 8, 31, 7, 0, 0, DateTimeKind.Unspecified),
+                },
+                new Dictionary<string, object?>
+                {
+                    ["database"] = "orders", ["query_id"] = 44L, ["best_plan_id"] = 9L, ["regression_factor"] = 3.0,
+                },
+            },
+        },
+    };
+
+    [Fact]
+    public void TheScript_ShowsEachTargetsBestPlanAge_InThatTargetsOwnComment()
+    {
+        var script = FactRemediation.GenerateForFinding(TwoTargetFinding());
+
+        Assert.NotNull(script);
+        var first = script!.IndexOf("-- query_id = 42, forcing plan_id = 7", StringComparison.Ordinal);
+        var second = script.IndexOf("-- query_id = 43, forcing plan_id = 8", StringComparison.Ordinal);
+        var third = script.IndexOf("-- query_id = 44, forcing plan_id = 9", StringComparison.Ordinal);
+        Assert.InRange(first, 0, second - 1);
+        Assert.InRange(second, first + 1, third - 1);
+
+        var nineDays = script.IndexOf("best plan last ran 9 days ago (2026-08-22T09:00:00Z)", StringComparison.Ordinal);
+        var withinDay = script.IndexOf("best plan last ran within the past day (2026-08-31T07:00:00Z)", StringComparison.Ordinal);
+        Assert.InRange(nineDays, first, second - 1);
+        Assert.InRange(withinDay, second, third - 1);
+
+        /* A target whose drill-down row has no best_plan_last_seen says nothing about age. */
+        Assert.DoesNotContain("last ran", script[third..], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheStructuredEvidence_CarriesEachTargetsBestPlanAge()
+    {
+        var structured = FactRemediation.BuildStructuredRemediation(FactRemediation.BuildAction(TwoTargetFinding()));
+
+        Assert.NotNull(structured);
+        var targets = structured!.ForcePlanTargets;
+        Assert.Equal(3, targets.Count);
+
+        using var first = JsonDocument.Parse(JsonSerializer.Serialize(targets[0].Evidence));
+        Assert.Equal(9.125, first.RootElement.GetProperty("best_plan_age_days").GetDouble(), 6);
+        Assert.Equal("2026-08-22T09:00:00Z", first.RootElement.GetProperty("best_plan_last_seen_utc").GetString());
+
+        using var second = JsonDocument.Parse(JsonSerializer.Serialize(targets[1].Evidence));
+        Assert.Equal(5.0 / 24.0, second.RootElement.GetProperty("best_plan_age_days").GetDouble(), 6);
+        Assert.Equal("2026-08-31T07:00:00Z", second.RootElement.GetProperty("best_plan_last_seen_utc").GetString());
+
+        using var third = JsonDocument.Parse(JsonSerializer.Serialize(targets[2].Evidence));
+        Assert.True(!third.RootElement.TryGetProperty("best_plan_age_days", out var noAge) || noAge.ValueKind == JsonValueKind.Null);
+        Assert.True(!third.RootElement.TryGetProperty("best_plan_last_seen_utc", out var noSeen) || noSeen.ValueKind == JsonValueKind.Null);
+    }
+
+    [Fact]
+    public void TheAge_IsNotABlocker_AnOldBestPlanStaysEligibleOnTheAdvisorySurface()
+    {
+        var structured = FactRemediation.BuildStructuredRemediation(FactRemediation.BuildAction(TwoTargetFinding()));
+
+        Assert.All(structured!.ForcePlanTargets, t => Assert.Empty(t.Blockers));
     }
 }
