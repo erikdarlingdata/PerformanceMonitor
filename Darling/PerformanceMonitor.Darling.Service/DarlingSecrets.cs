@@ -53,9 +53,10 @@ public static class DarlingSecrets
     /// documented single-box limitation of the Viewer's write path, not a permissions problem on the service
     /// account. The remedies are therefore all "encrypt it on this host", which is what the message says.</para>
     ///
-    /// <para>Kept as a function rather than a literal at each throw site so the three surfaces that can hit
-    /// this — a monitored server's password, the store credential, a network token — cannot drift into
-    /// explaining the same failure three different ways.</para>
+    /// <para>Kept as a function rather than a literal at each throw site so the surfaces that can hit
+    /// this — a monitored server's password, a network token — cannot drift into explaining the same failure
+    /// different ways. It is written for a monitored server's saved password, so its remedies do not fit the
+    /// store's own credential file: that one has <see cref="DescribeStoreCredentialDecryptFailure"/> (#4744).</para>
     /// </summary>
     internal static string DescribeDecryptFailure(string what) =>
         $"Could not DPAPI-decrypt {what}. This is a Windows Data Protection failure on THIS host, not SQL Server " +
@@ -66,6 +67,23 @@ public static class DarlingSecrets
         "Fix it on this host, any one of: re-add the server from a Viewer running on this machine; run " +
         "'--add-server' here; run '--encrypt-password' here and paste the blob; or store the password as an " +
         "'env:' / 'file:' reference, which is not machine-bound.";
+
+    /// <summary>
+    /// What a DPAPI decrypt failure means for the MANAGED STORE's own credential file, in the operator's terms
+    /// (#4744). <see cref="DescribeDecryptFailure"/> is written for a monitored server's saved password, and its
+    /// remedies (re-add the server, <c>--add-server</c>, <c>--encrypt-password</c>, an <c>env:</c>/<c>file:</c>
+    /// reference) do nothing for the store: the file (<c>pg-credential.dpapi</c>, beside the data directory) holds
+    /// the store owner's generated password, which cannot be regenerated. The cause an operator can act on is that
+    /// the store was copied here from the machine that created it, so the remedy is to run the command back on that
+    /// machine.
+    /// </summary>
+    /// <param name="credentialFileName">The credential file's name, so the message names the file the operator is
+    /// looking at; <see cref="DarlingManagedPostgres.CredentialFileName"/> for the store owner's credential.</param>
+    internal static string DescribeStoreCredentialDecryptFailure(string credentialFileName) =>
+        "Could not DPAPI-decrypt the store credential. This is a Windows Data Protection failure on THIS machine, " +
+        "not PostgreSQL rejecting a login. The store's credential file (" + credentialFileName + ", beside the " +
+        "data directory) is encrypted with LocalMachine scope, so only the machine that wrote it can read it. If " +
+        "the store was copied here from another machine, run this command on the machine that created it.";
 
     public static string Unprotect(string base64Blob)
     {
@@ -149,7 +167,7 @@ public static class DarlingSecrets
     /// way to arm an install with no DPAPI (the #2087 reasoning).</para>
     ///
     /// <para>A DPAPI failure DOES throw, through the same <see cref="DescribeDecryptFailure"/> text the
-    /// other three surfaces use: an armed server whose blob will not decrypt is a real fault, and it is
+    /// other monitored-server surfaces use: an armed server whose blob will not decrypt is a real fault, and it is
     /// exactly the one a viewer-on-a-different-PC produces.</para>
     /// </summary>
     public static string? ResolveRemediationPassword(MonitoredServer server)

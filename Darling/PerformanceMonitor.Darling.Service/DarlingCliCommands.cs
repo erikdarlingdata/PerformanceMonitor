@@ -487,7 +487,7 @@ public static class DarlingCliCommands
             connectionString = null;
 
             /* A managed store has no connection string setting to blame: what failed is its stored credential (#4744),
-               and a DPAPI failure gets the same explanation every other DPAPI failure gets instead of the raw
+               and a DPAPI failure gets the store credential's own explanation instead of the raw
                CryptographicException text. The IsWindows call repeats what readingCredential already implies, for the
                platform analyzer, which cannot follow a bool. */
             unusable = readingCredential && OperatingSystem.IsWindows()
@@ -499,15 +499,16 @@ public static class DarlingCliCommands
 
     /// <summary>
     /// Why a managed store's stored credential could not be read, in the operator's terms (#4744): a Windows Data
-    /// Protection failure is <see cref="DarlingSecrets.DescribeDecryptFailure"/>'s explanation (the one text every
-    /// DPAPI failure gets, so it cannot drift), not <c>CryptographicException</c>'s "Key not valid for use in
-    /// specified state", which reads as the store rejecting a login. Anything else — a file that is not a credential,
-    /// a permission error — keeps its own message, which already says what it is.
+    /// Protection failure is <see cref="DarlingSecrets.DescribeStoreCredentialDecryptFailure"/>'s explanation, not
+    /// <c>CryptographicException</c>'s "Key not valid for use in specified state", which reads as the store rejecting
+    /// a login, and not <see cref="DarlingSecrets.DescribeDecryptFailure"/>'s, whose remedies are for a monitored
+    /// server's saved password and do nothing for the store's own credential. Anything else — a file that is not a
+    /// credential, a permission error — keeps its own message, which already says what it is.
     /// </summary>
     [SupportedOSPlatform("windows")]
     private static string StoreCredentialFailureDetail(Exception ex) =>
         ex is CryptographicException
-            ? DarlingSecrets.DescribeDecryptFailure("the store credential")
+            ? DarlingSecrets.DescribeStoreCredentialDecryptFailure(DarlingManagedPostgres.CredentialFileName)
             : ex.Message;
 
     /// <summary>Exit codes <see cref="CheckSettingsAsync"/> returns — separate codes for a config problem, an
