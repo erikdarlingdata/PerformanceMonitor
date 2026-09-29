@@ -14,6 +14,7 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
+using PerformanceMonitor.Alerting;
 using PerformanceMonitor.Darling.Service;
 using PerformanceMonitor.Notifications;
 using Xunit;
@@ -76,35 +77,34 @@ public sealed class WebhookPostTimeoutTests
     }
 
     /// <summary>
-    /// The deliverer contract is that the fan-out never throws. A token that is already cancelled reaches
-    /// every channel's post, and each ends as that channel's recorded failure, so the service stop that
-    /// cancelled it gets a result back rather than an exception out of the fan-out.
+    /// A caller's cancel is a stop request, not a failed delivery. A token that is already cancelled reaches
+    /// the channel's post, and the cancellation comes back out of the fan-out as the cancellation it is:
+    /// there is no result that could record the channel as failed, and the channel's failure count does not
+    /// move, because the endpoint was never at fault.
     /// </summary>
     [Fact]
-    public async Task AnAlreadyCancelledToken_ReturnsPromptly_WithTheChannelRecordedFailed()
+    public async Task AnAlreadyCancelledToken_ThrowsTheCancellation_WithTheChannelsFailureCountUnchanged()
     {
         using var endpoint = new CapturingWebhookEndpoint();
         var webhooks = GenericOnlyService(endpoint.Url);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        var result = await webhooks
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => webhooks
             .TrySendWebhookAlertsAsync("High CPU", "SQL01", "97%", "90%", cancellationToken: cts.Token)
-            .WaitAsync(PromptBound);
+            .WaitAsync(PromptBound));
 
-        Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
-        Assert.NotNull(result.ChannelOutcomes);
-        Assert.Equal(AlertChannelOutcome.Failed, result.ChannelOutcomes![NotificationRouter.GenericChannel]);
-        Assert.NotNull(result.SendError);
+        Assert.Equal((0, (string?)null), webhooks.GetGenericHealth());
         Assert.Empty(endpoint.Bodies);
     }
 
     /// <summary>
-    /// The same contract for a cancel that arrives while the post is in flight, which is a service stopping
-    /// in the middle of a delivery.
+    /// The same for a cancel that arrives while the post is in flight, which is a service stopping in the
+    /// middle of a delivery: the cancellation reaches the caller promptly, and the channel's failure count
+    /// and last error stay as they were.
     /// </summary>
     [Fact]
-    public async Task ACancelDuringAPost_ReturnsPromptly_WithTheChannelRecordedFailed()
+    public async Task ACancelDuringAPost_ThrowsTheCancellation_WithTheChannelsFailureCountUnchanged()
     {
         using var endpoint = new HungWebhookEndpoint();
         var webhooks = GenericOnlyService(endpoint.Url);
@@ -117,10 +117,45 @@ public sealed class WebhookPostTimeoutTests
         Assert.False(fanout.IsCompleted);
         cts.Cancel();
 
-        var result = await fanout.WaitAsync(PromptBound);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fanout.WaitAsync(PromptBound));
 
-        Assert.Equal(AlertChannelOutcome.Failed, result.Outcome);
-        Assert.Equal(AlertChannelOutcome.Failed, result.ChannelOutcomes![NotificationRouter.GenericChannel]);
+        Assert.Equal((0, (string?)null), webhooks.GetGenericHealth());
+    }
+
+    /// <summary>
+    /// The deliverer's shutdown path, reached through a real post. <see cref="DarlingAlertDeliverer.DeliverAndReportAsync"/>
+    /// lets the caller's own cancellation through and writes no history row for it, because a delivery the
+    /// service abandoned is not a delivery that failed. The channel's send used to swallow the cancel into a
+    /// Failed outcome, so the deliverer never saw it and wrote a "failed" row for a stop.
+    /// </summary>
+    [Fact]
+    public async Task ACancelInTheMiddleOfAPost_LeavesTheDelivererWithTheCancellation_AndWritesNoHistoryRow()
+    {
+        using var endpoint = new HungWebhookEndpoint();
+        var config = new DarlingConfig();
+        config.Webhooks.GenericUrl = endpoint.Url;
+        var settings = new DarlingAlertSettings(config);
+        var history = new CapturingHistoryStore();
+        var webhooks = new WebhookAlertService(
+            settings, DarlingAlertDeliverer.Branding, NullLogger<WebhookAlertService>.Instance, history);
+        var deliverer = new DarlingAlertDeliverer(settings, history, webhooks, NullLogger.Instance);
+        using var cts = new CancellationTokenSource();
+
+        var delivery = deliverer.DeliverAndReportAsync(
+            new AlertOutcome(
+                "sql01", "SQL01", "High CPU", "97%", "90%",
+                Context: null, DetailText: null, NumericCurrentValue: 97, NumericThresholdValue: 90,
+                Muted: false, Severity: AlertSeverityLevel.Warning),
+            cts.Token);
+
+        await endpoint.Connected.WaitAsync(PromptBound);
+        Assert.False(delivery.IsCompleted);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => delivery.WaitAsync(PromptBound));
+
+        Assert.Empty(history.Records);
+        Assert.Equal((0, (string?)null), webhooks.GetGenericHealth());
     }
 
     /// <summary>
