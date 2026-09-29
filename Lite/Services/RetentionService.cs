@@ -9,7 +9,9 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using PerformanceMonitorLite.Database;
 
 namespace PerformanceMonitorLite.Services;
 
@@ -66,21 +68,32 @@ public class RetentionService
     ///   - Timestamped: "20260221_1328_wait_stats.parquet" (yyyyMMdd prefix)
     ///   - Consolidated daily: "20260221_wait_stats.parquet" (yyyyMMdd prefix)
     ///   - Legacy monthly: "2026-02_wait_stats.parquet" (yyyy-MM prefix)
+    ///   - Any of the above copied from a previous install: "imported_202602_wait_stats.parquet"
     /// </summary>
-    public void CleanupOldArchives(int retentionMonths = ArchiveRetentionMonths)
+    public int CleanupOldArchives(int retentionMonths = ArchiveRetentionMonths)
     {
         if (!Directory.Exists(_archivePath))
         {
-            return;
+            return 0;
         }
 
         var cutoffDate = DateTime.UtcNow.AddMonths(-retentionMonths);
+        var deleted = 0;
 
         foreach (var file in Directory.GetFiles(_archivePath, "*.parquet"))
         {
             try
             {
                 var fileName = Path.GetFileNameWithoutExtension(file);
+
+                /* A file copied in from a previous install carries an imported_ prefix in front of one of the
+                   date forms below. Unstripped, none of the parses matched and such files never expired;
+                   imported query_snapshots, the largest table, stayed on disk for good. */
+                if (fileName.StartsWith("imported_", StringComparison.OrdinalIgnoreCase))
+                {
+                    fileName = fileName["imported_".Length..];
+                }
+
                 DateTime? fileDate = null;
 
                 /* Monthly compacted format: "202602_wait_stats" -> "202602" */
@@ -121,6 +134,7 @@ public class RetentionService
                 if (fileDate.HasValue && fileDate.Value < cutoffDate)
                 {
                     File.Delete(file);
+                    deleted++;
                     _logger?.LogInformation("Deleted expired archive: {File}", file);
                 }
             }
@@ -128,6 +142,32 @@ public class RetentionService
             {
                 _logger?.LogError(ex, "Failed to evaluate/delete archive file: {File}", file);
             }
+        }
+
+        return deleted;
+    }
+
+    /// <summary>
+    /// <see cref="CleanupOldArchives"/>, then a rebuild of the archive views when it deleted anything. A view
+    /// reads each table's files through globs baked in when the view was built, and DuckDB fails the whole read
+    /// at bind when one of them matches nothing. So deleting the last file behind a glob (a table's last
+    /// multi-part month, or its last single-file month while part files remain) left every read of that table's
+    /// <c>v_</c> view failing until the next archival refresh, up to an hour later. Both steps run under the
+    /// write lock, so a reader that respects it never sees the gap between the delete and the rebuild.
+    /// Returns the number of files deleted.
+    /// </summary>
+    public async Task<int> CleanupOldArchivesAndRefreshViewsAsync(DuckDbInitializer duckDb, int retentionMonths = ArchiveRetentionMonths)
+    {
+        using (duckDb.AcquireWriteLock())
+        {
+            var deleted = CleanupOldArchives(retentionMonths);
+            if (deleted > 0)
+            {
+                /* Core, not CreateArchiveViewsAsync: this thread holds the write lock, and the lock does not nest. */
+                await duckDb.CreateArchiveViewsCoreAsync();
+            }
+
+            return deleted;
         }
     }
 }
