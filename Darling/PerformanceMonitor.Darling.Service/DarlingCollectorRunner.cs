@@ -6391,7 +6391,7 @@ RETURNING s.state_key";
             return false;
         }
 
-        if (DateTime.UtcNow - deniedAt < AzureMasterRecheckInterval)
+        if (!CollectorCadence.IntervalElapsed(deniedAt, DateTime.UtcNow, AzureMasterRecheckInterval))
         {
             return true;
         }

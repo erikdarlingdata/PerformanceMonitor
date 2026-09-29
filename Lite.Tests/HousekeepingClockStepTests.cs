@@ -115,7 +115,19 @@ public sealed class HousekeepingClockStepTests
         Assert.Equal(1, CountOf(source, "!HousekeepingIsDue(_lastAnalysisTime, TimeSpan.FromMinutes(App.AnalysisIntervalMinutes), DateTime.UtcNow)"));
 
         /* One function, and it is the same rule the collector schedule applies to lastRun + interval. */
-        Assert.Contains("CollectorCadence.ClampDue(lastRunUtc + interval, nowUtc, interval) <= nowUtc", source, StringComparison.Ordinal);
+        Assert.Contains("CollectorCadence.IntervalElapsed(lastRunUtc, nowUtc, interval)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheRetryAndRecheckThrottles_DecideThroughTheSameRule()
+    {
+        var remote = ReadRepoFile("Lite/Services/RemoteCollectorService.cs");
+        Assert.DoesNotContain("DateTime.UtcNow - deniedAt <", remote, StringComparison.Ordinal);
+        Assert.Contains("!CollectorCadence.IntervalElapsed(deniedAt, DateTime.UtcNow, AzureMasterRecheckInterval)", remote, StringComparison.Ordinal);
+
+        var blockedProcess = ReadRepoFile("Lite/Services/RemoteCollectorService.BlockedProcessReport.cs");
+        Assert.DoesNotContain("DateTime.UtcNow - gaveUpAtUtc <", blockedProcess, StringComparison.Ordinal);
+        Assert.Contains("!CollectorCadence.IntervalElapsed(gaveUpAtUtc, DateTime.UtcNow, XeSessionRecreateRetryCooldown)", blockedProcess, StringComparison.Ordinal);
     }
 
     private static int CountOf(string text, string needle) =>

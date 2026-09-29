@@ -55,4 +55,13 @@ public static class CollectorCadence
     /// unchanged. The same clamp <c>RecomputeNextDueAsync</c> applies on a schedule reload.</summary>
     public static DateTime ClampDue(DateTime due, DateTime now, TimeSpan interval) =>
         due - now > interval ? now : due;
+
+    /// <summary>#4732: whether <paramref name="interval"/> has passed since <paramref name="lastUtc"/>, for the work that
+    /// decides from the time elapsed since its last run (a job's cadence, a retry backoff, a re-check throttle) instead of from a
+    /// stored due time. The elapsed time is negative when the wall clock stepped backwards after the stamp was taken, and the work
+    /// then waited out the step. A stamp ahead of the clock can only be that step (a stamp is taken from the clock at the time),
+    /// so it counts as elapsed: this is <see cref="ClampDue"/> applied to <c>lastUtc + interval</c>. A stamp at or before now
+    /// decides exactly as <c>nowUtc - lastUtc &gt;= interval</c> does.</summary>
+    public static bool IntervalElapsed(DateTime lastUtc, DateTime nowUtc, TimeSpan interval) =>
+        ClampDue(lastUtc + interval, nowUtc, interval) <= nowUtc;
 }

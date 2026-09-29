@@ -94,6 +94,42 @@ public sealed class CollectorCadenceSkippedSlotsTests
         Assert.True(DarlingWorker.StampIsDue(T0.AddMinutes(-5), Minute, T0));
         Assert.True(DarlingWorker.StampIsDue(DateTime.MinValue, Minute, T0));
     }
+
+    [Fact]
+    public void IntervalElapsed_DecidesAsTheElapsedTimeDid_ExceptThatALastRunAheadOfTheClockCountsAsElapsed()
+    {
+        Assert.False(CollectorCadence.IntervalElapsed(T0, T0, Minute));
+        Assert.False(CollectorCadence.IntervalElapsed(T0.AddSeconds(-30), T0, Minute));
+        Assert.True(CollectorCadence.IntervalElapsed(T0.AddMinutes(-1), T0, Minute));
+        Assert.True(CollectorCadence.IntervalElapsed(DateTime.MinValue, T0, Minute));
+        Assert.True(CollectorCadence.IntervalElapsed(T0.AddSeconds(1), T0, Minute));
+        Assert.True(CollectorCadence.IntervalElapsed(T0.AddMinutes(10), T0, Minute));
+
+        for (var seconds = 0; seconds <= 180; seconds += 5)
+        {
+            var last = T0.AddSeconds(-seconds);
+            Assert.Equal(T0 - last >= Minute, CollectorCadence.IntervalElapsed(last, T0, Minute));
+        }
+    }
+
+    [Fact]
+    public void TheServiceRetryAndRecheckThrottles_DecideThroughIntervalElapsed_NotFromTheRawElapsedTime()
+    {
+        foreach (var host in new[] { "DarlingMcpHostService.cs", "DarlingWebHostService.cs" })
+        {
+            var code = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Mcp", host);
+            Assert.DoesNotContain("DateTime.UtcNow - lastFailedStartUtc", code, StringComparison.Ordinal);
+            Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(code, System.Text.RegularExpressions.Regex.Escape("CollectorCadence.IntervalElapsed(lastFailedStartUtc, DateTime.UtcNow, FailedStartBackoff)")).Count);
+        }
+
+        var runner = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "DarlingCollectorRunner.cs");
+        Assert.DoesNotContain("DateTime.UtcNow - deniedAt <", runner, StringComparison.Ordinal);
+        Assert.Contains("!CollectorCadence.IntervalElapsed(deniedAt, DateTime.UtcNow, AzureMasterRecheckInterval)", runner, StringComparison.Ordinal);
+
+        var compose = RepoFile.ReadRepoFile("Darling", "PerformanceMonitor.Darling.Service", "Compose", "ComposeStoreAvailability.cs");
+        Assert.DoesNotContain("DateTime.UtcNow - entry.ProbedAtUtc <", compose, StringComparison.Ordinal);
+        Assert.Contains("!CollectorCadence.IntervalElapsed(entry.ProbedAtUtc, DateTime.UtcNow, ReprobeInterval)", compose, StringComparison.Ordinal);
+    }
 }
 
 /// <summary>#4732: the per-minute buckets behind the fleet-gate signal.</summary>

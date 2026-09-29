@@ -307,7 +307,7 @@ public class CollectionBackgroundService : BackgroundService
     /// every job, with the clock passed in, so a test drives it without waiting.
     /// </summary>
     internal static bool HousekeepingIsDue(DateTime lastRunUtc, TimeSpan interval, DateTime nowUtc) =>
-        CollectorCadence.ClampDue(lastRunUtc + interval, nowUtc, interval) <= nowUtc;
+        CollectorCadence.IntervalElapsed(lastRunUtc, nowUtc, interval);
 
     /// <summary>#2058: fills the Query Store history the live path never takes — the 60-minute
     /// first-contact tail and clamp-bounded outage holes — newest-first, strictly behind the live
