@@ -187,6 +187,23 @@ public sealed class AddServerVerbTests
         Assert.Equal(1, exit);
     }
 
+    /// <summary>
+    /// #4789: a collided server was NOT added, so a batch that holds one is not a clean run whatever else landed.
+    /// The exit code keyed off <c>failed</c> and off "nothing landed" alone, so one server added beside one
+    /// collided (or one already registered beside one collided) exited 0 and a deployment script read the run as
+    /// complete, with a server that is not monitored. It exits 1 now, the same as a failed server beside a success.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"requested":2,"added":1,"skipped":0,"collided":1,"failed":0,"results":[{"server":"good","status":"added","detail":"ok"},{"server":"other","status":"collides","detail":"its id is held by good"}]}""")]
+    [InlineData("""{"requested":2,"added":0,"skipped":1,"collided":1,"failed":0,"results":[{"server":"good","status":"duplicate","detail":"already registered"},{"server":"other","status":"collides","detail":"its id is held by good"}]}""")]
+    public void ACollidedServer_BesideOneThatLanded_ExitsNonZero(string json)
+    {
+        var (lines, exit) = DarlingCliCommands.FormatAddServerOutcome(json);
+
+        Assert.Equal(1, exit);
+        Assert.Contains(lines, l => l.Contains("[COLLIDES] other", StringComparison.Ordinal));
+    }
+
     /// <summary>Nothing landed at all — an empty array, or every entry rejected — must not report success to a
     /// script. A verb that changed nothing and exits 0 is the failure mode this policy exists for.</summary>
     [Theory]

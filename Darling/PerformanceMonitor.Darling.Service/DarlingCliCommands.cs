@@ -5039,9 +5039,11 @@ public static class DarlingCliCommands
     /// Renders the <c>add_servers</c> result JSON as operator lines plus an exit code. PURE, so the formatting and
     /// the exit-code policy pin without a store — the same split <see cref="FormatProbeLine"/> uses.
     ///
-    /// <para>Exit 0 requires that something landed and nothing failed. A batch of pure duplicates exits 0: re-running
-    /// the same file is idempotent, not an error. Nothing at all landed (an empty array, or every entry rejected)
-    /// exits 1, because a verb that changed nothing must not report success to a deployment script.</para>
+    /// <para>Exit 0 requires that something landed and that nothing failed and nothing collided. A batch of pure
+    /// duplicates exits 0: re-running the same file is idempotent, not an error. A collided server (#4789) was not
+    /// added and cannot be by retrying, so it exits 1 exactly as a failed one does, even beside servers that
+    /// landed. Nothing at all landed (an empty array, or every entry rejected) exits 1, because a verb that changed
+    /// nothing must not report success to a deployment script.</para>
     /// </summary>
     internal static (IReadOnlyList<string> Lines, int ExitCode) FormatAddServerOutcome(string resultJson)
     {
@@ -5104,7 +5106,7 @@ public static class DarlingCliCommands
                 lines.Add("The running service picks these up on its next config poll; no restart is needed.");
             }
 
-            return (lines, failed > 0 || (added == 0 && skipped == 0) ? 1 : 0);
+            return (lines, failed > 0 || collided > 0 || (added == 0 && skipped == 0) ? 1 : 0);
         }
         catch (JsonException)
         {
