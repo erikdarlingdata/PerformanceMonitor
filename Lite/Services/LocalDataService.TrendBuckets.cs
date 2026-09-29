@@ -85,7 +85,7 @@ ranked AS (
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"WITH{FileIoRankedCte}
 SELECT database_name, file_type, file_name, files, stall_ms, ops, series_rank
@@ -127,7 +127,7 @@ ORDER BY series_rank";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"WITH{FileIoRankedCte},
 labelled AS (
@@ -258,7 +258,7 @@ rated AS
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"WITH{LockWaitRatedCtes}
 SELECT
@@ -299,7 +299,7 @@ ORDER BY wait_type";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"WITH{LockWaitRatedCtes},
 per_collection AS
@@ -361,7 +361,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 WITH raw AS
@@ -441,7 +441,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 WITH raw AS
@@ -517,7 +517,7 @@ ORDER BY 1";
            it against the UTC bounds; a pre-v63 row with none is compared on its server-local sample_time against
            the same window in the server's clock, each bound at its own instant, so neither arm applies one offset
            to the whole window (#4766). */
-        var (startUtc, endUtc) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock);
+        var (startUtc, endUtc) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, null, null, asOfUtc, serverClock);
 
         command.CommandText = $@"
@@ -575,7 +575,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 SELECT
@@ -632,7 +632,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 SELECT
@@ -678,7 +678,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = $@"
 WITH grants AS
@@ -742,7 +742,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         var isArtifact = "COALESCE((" + WaitStatisticsArtifact.ArtifactPredicateSql(
             "cntr_type", "object_name", "prev_value", "cntr_value", "next_value") + "), false)";

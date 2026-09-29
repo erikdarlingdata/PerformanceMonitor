@@ -81,20 +81,15 @@ public sealed class QueriesTabWindowRoundTripTests
         var pickedFrom = Utc(from);
         var pickedTo = Utc(to);
 
-        var fromServer = ServerTimeHelper.DisplayTimeToServerTime(pickedFrom, TimeDisplayMode.UTC, clock);
-        var toServer = ServerTimeHelper.DisplayTimeToServerTime(pickedTo, TimeDisplayMode.UTC, clock);
-        var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, fromServer, toServer, clock);
+        var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, pickedFrom, pickedTo);
 
         Assert.Equal(Range(pickedFrom, pickedTo), Range(start, end));
     }
 
     /// <summary>
-    /// The same round trip in every display mode: start from the instant, render it the way the toolbar does
-    /// (<see cref="ServerTimeHelper.ConvertForDisplay(DateTime, TimeDisplayMode, ServerClock)"/>), take that
-    /// picker value back through the picker's conversion, and read the window. Server-time mode is the identity
-    /// on the picker side and the window's own conversion does the work; UTC and Local time cancel against it.
-    /// All three end at the instant the user meant, for every instant but the second 01:30 of the fall-back day
-    /// (its own case below).
+    /// The same range in every display mode (#4766): the tab holds the instants, the pickers show them in the
+    /// mode's zone (<see cref="PerformanceMonitorLite.Controls.ServerTab.PickerZone"/>), and the window the read gets
+    /// is the held pair whichever zone is showing. There is no conversion left to cancel.
     /// </summary>
     [Theory]
     [InlineData(TimeDisplayMode.UTC)]
@@ -109,39 +104,31 @@ public sealed class QueriesTabWindowRoundTripTests
             var fromInstant = Utc(from);
             var toInstant = Utc(to);
 
-            var fromPicker = ServerTimeHelper.ConvertForDisplay(clock.ToServerLocal(fromInstant), mode, clock);
-            var toPicker = ServerTimeHelper.ConvertForDisplay(clock.ToServerLocal(toInstant), mode, clock);
-            var fromServer = ServerTimeHelper.DisplayTimeToServerTime(fromPicker, mode, clock);
-            var toServer = ServerTimeHelper.DisplayTimeToServerTime(toPicker, mode, clock);
-            var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, fromServer, toServer, clock);
+            var zone = PerformanceMonitorLite.Controls.ServerTab.PickerZone(mode, clock);
+            var held = new PerformanceMonitor.Ui.CustomRangeState();
+            held.Set(fromInstant, toInstant);
+            Assert.NotNull(held.Render(zone));
+            var (_, heldFrom, heldTo) = PerformanceMonitorLite.Controls.ServerTab.CurrentWindowUtc(24, true, held);
+            var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, heldFrom, heldTo);
 
             Assert.Equal(Range(fromInstant, toInstant), Range(start, end));
         }
     }
 
     /// <summary>
-    /// The exception to the round trips above: a range that starts at the second 01:30 of the fall-back day (06:30
-    /// UTC). The server-local time the window is read from is 01:30, and it cannot say which 01:30 it was, so the
-    /// window starts at the first (05:30 UTC) in every display mode. This test records what happens today; it is not
-    /// a fix.
+    /// The case the server-local round trip could not read (#4766): a range that starts at the second 01:30 of the
+    /// fall-back day (06:30 UTC). The window is the held instants, so it starts at 06:30 UTC in every display mode
+    /// and no longer at the first 01:30 (05:30 UTC).
     /// </summary>
-    [Theory]
-    [InlineData(TimeDisplayMode.UTC)]
-    [InlineData(TimeDisplayMode.LocalTime)]
-    [InlineData(TimeDisplayMode.ServerTime)]
-    public void ARangeStartingInTheRepeatedAutumnHour_StartsAtTheFirstOccurrence_KnownLimit(TimeDisplayMode mode)
+    [Fact]
+    public void ARangeStartingInTheRepeatedAutumnHour_StartsAtTheSecondOccurrence()
     {
         var clock = Eastern();
         var fromInstant = Utc(RepeatedHourRange.From);
         var toInstant = Utc(RepeatedHourRange.To);
 
-        var fromPicker = ServerTimeHelper.ConvertForDisplay(clock.ToServerLocal(fromInstant), mode, clock);
-        var toPicker = ServerTimeHelper.ConvertForDisplay(clock.ToServerLocal(toInstant), mode, clock);
-        var fromServer = ServerTimeHelper.DisplayTimeToServerTime(fromPicker, mode, clock);
-        var toServer = ServerTimeHelper.DisplayTimeToServerTime(toPicker, mode, clock);
-        var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, fromServer, toServer, clock);
+        var (start, end) = LocalDataService.GetQueriesTabWindowUtc(24, fromInstant, toInstant);
 
-        // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
-        Assert.Equal(Range(Utc("2026-11-01 05:30"), toInstant), Range(start, end));
+        Assert.Equal(Range(Utc("2026-11-01 06:30"), toInstant), Range(start, end));
     }
 }

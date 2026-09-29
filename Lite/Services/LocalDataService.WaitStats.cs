@@ -45,7 +45,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -123,7 +123,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var exclude = IgnoredWaitTypes.BuildExclusionClause(_ignoredWaitTypes.Value);
         command.CommandText = $@"
@@ -164,7 +164,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
     /// </summary>
     public async Task<List<string>> GetDistinctWaitTypesForPickerAsync(int serverId, int hoursBack = 24, DateTime? fromDate = null, DateTime? toDate = null, DateTime? asOfUtc = null, DateTime? nowUtc = null)
     {
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var effectiveNow = nowUtc ?? DateTime.UtcNow;
         var windowLength = endTime - startTime;
@@ -187,7 +187,7 @@ ORDER BY SUM(delta_wait_time_ms) DESC";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         command.CommandText = @"
 WITH raw AS
@@ -327,7 +327,7 @@ ORDER BY wait_type, 2";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         var windowMinutes = Math.Max(1, (int)Math.Ceiling((endTime - startTime).TotalMinutes));
         var bucketMinutes = TrendBuckets.AutoMinutes(windowMinutes, 1, TrendBudget.Chart.AutoPoints);
@@ -400,7 +400,7 @@ ORDER BY wait_type, 2";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         /* #4234: bucketed to TrendBudget.Chart's point budget — this is the Overview lane's single aggregated
            wait line. seriesCount is always 1. */
@@ -571,7 +571,7 @@ ORDER BY accumulated_wait_ms DESC";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH blocked_counts AS (
@@ -695,7 +695,7 @@ LIMIT 500";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
 
         command.CommandText = @"
 WITH blocked_counts AS (

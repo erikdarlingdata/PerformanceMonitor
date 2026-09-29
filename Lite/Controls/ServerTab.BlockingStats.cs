@@ -319,7 +319,7 @@ public partial class ServerTab : UserControl
     private (DateTime rangeStart, DateTime rangeEnd) StatsChartRange(int hoursBack, DateTime? fromDate, DateTime? toDate)
     {
         if (fromDate.HasValue && toDate.HasValue)
-            return (fromDate.Value, toDate.Value);
+            return (ToServerLocal(fromDate.Value), ToServerLocal(toDate.Value));
 
         return GetChartWindow(hoursBack, null, null);
     }

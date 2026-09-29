@@ -76,15 +76,8 @@ public partial class ServerTab : UserControl
 
     private (DateTime? fromDate, DateTime? toDate) GetCurrentViewDates()
     {
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-                return (ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode),
-                        ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode));
-        }
-        return (null, null);
+        var (_, fromUtc, toUtc) = GetCurrentWindowUtc();
+        return (fromUtc, toUtc);
     }
 
     /// <summary>

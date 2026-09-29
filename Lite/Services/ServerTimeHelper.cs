@@ -51,22 +51,6 @@ public static class ServerTimeHelper
     public static DateTime ToServerTime(DateTime utcTime, ServerClock clock) => clock.ToServerLocal(utcTime);
 
     /// <summary>
-    /// The naive-UTC instant of a wall-clock time on the active server's clock. Never throws: a skipped local
-    /// time moves forward by the gap and a repeated one takes its first occurrence (<see cref="ServerClock.ToUtc"/>).
-    /// </summary>
-    public static DateTime ServerTimeToUtc(DateTime serverTime) => _serverClock.ToUtc(serverTime);
-
-    /// <summary>
-    /// Converts a local DateTime (from date picker) to server time.
-    /// Use when the user picks dates in their local timezone but the database stores server time.
-    /// </summary>
-    private static DateTime LocalToServerTime(DateTime localTime, ServerClock clock)
-    {
-        var utcTime = localTime.ToUniversalTime();
-        return clock.ToServerLocal(utcTime);
-    }
-
-    /// <summary>
     /// Converts a server DateTime to local time.
     /// Use this when displaying server timestamps to the user in the UI.
     /// </summary>
@@ -99,37 +83,6 @@ public static class ServerTimeHelper
         TimeDisplayMode.LocalTime => ToLocalTime(serverTime, clock),
         TimeDisplayMode.UTC => clock.ToUtc(serverTime),
         _ => serverTime
-    };
-
-    /// <summary>
-    /// Converts a display-mode DateTime back to server time. Reverse of ConvertForDisplay.
-    /// </summary>
-    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode) =>
-        DisplayTimeToServerTime(displayTime, mode, _serverClock);
-
-    /// <summary>
-    /// Converts a display-mode DateTime back to the local time of a NAMED server, rather than of whichever
-    /// server the desktop currently has selected: the pure core, for an explicit server clock. A picker value
-    /// is the user's wall clock in the display mode, so under UTC and Local the answer is the server's wall
-    /// clock at that instant (<see cref="ServerClock.ToServerLocal"/>). Server mode is the identity here, and
-    /// the read that windows on the result converts it to UTC with <see cref="ServerClock.ToUtc"/>, which
-    /// resolves a skipped or repeated server hour without throwing.
-    ///
-    /// <para>For a caller that then hands the result to a read windowing on that same server: the read
-    /// converts server time back out to UTC through the server's clock, so the clock behind this conversion
-    /// has to be the read's. Under <c>TimeDisplayMode.UTC</c> and <c>LocalTime</c> this conversion and the
-    /// read's cancel each other and the window survives unchanged; under <c>ServerTime</c>, the default, this
-    /// conversion is the identity and only the read's applies. Two different servers' clocks across the pair
-    /// therefore skew the window in every mode, not just the default. A fixed-offset clock
-    /// (<see cref="ServerClock.FixedOffset"/>) is right only for a server that reported no time zone id; a
-    /// server that follows a time zone needs its own clock here, or a range across a daylight saving change
-    /// comes back an hour off at one bound.</para>
-    /// </summary>
-    public static DateTime DisplayTimeToServerTime(DateTime displayTime, TimeDisplayMode mode, ServerClock clock) => mode switch
-    {
-        TimeDisplayMode.LocalTime => LocalToServerTime(displayTime, clock),
-        TimeDisplayMode.UTC => clock.ToServerLocal(displayTime),
-        _ => displayTime
     };
 
     /// <summary>

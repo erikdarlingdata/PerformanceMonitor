@@ -72,7 +72,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
         var metricExpr = GetMetricColumn(metric);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var bucketIndex = 4 + dbValues.Count;
@@ -169,7 +169,7 @@ LIMIT ${limitIndex}";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = @"
 SELECT

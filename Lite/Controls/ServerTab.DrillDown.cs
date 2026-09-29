@@ -21,14 +21,13 @@ public partial class ServerTab : UserControl
 {
     /// <summary>
     /// The window a drill opens around a clicked instant: <paramref name="minutesBefore"/> and
-    /// <paramref name="minutesAfter"/> real minutes either side of <paramref name="centerUtc"/> (naive UTC), each end
-    /// then read on the server's wall clock. Adding the minutes to the wall clock instead puts an end inside the
-    /// skipped hour of a spring-forward day, where it converts to the same instant as the other end (#4766).
+    /// <paramref name="minutesAfter"/> real minutes either side of <paramref name="centerUtc"/> (naive UTC), as a UTC
+    /// pair like every other window (#4766). Arithmetic on the instant, so a drill in the repeated hour opens the
+    /// sixty real minutes around the point clicked instead of collapsing to one instant.
     /// </summary>
     internal static (DateTime From, DateTime To) GetDrillWindow(
-        DateTime centerUtc, int minutesBefore, int minutesAfter, ServerClock serverClock)
-        => (serverClock.ToServerLocal(centerUtc.AddMinutes(-minutesBefore)),
-            serverClock.ToServerLocal(centerUtc.AddMinutes(minutesAfter)));
+        DateTime centerUtc, int minutesBefore, int minutesAfter)
+        => TimeWindows.Drill(centerUtc, minutesBefore, minutesAfter);
 
     private void AddWaitDrillDownMenuItem(ScottPlot.WPF.WpfPlot chart, ContextMenu contextMenu)
     {
@@ -62,8 +61,8 @@ public partial class ServerTab : UserControl
         if (sender is not MenuItem menuItem) return;
         if (menuItem.Tag is not (string waitType, DateTime time)) return;
 
-        // ±30 minute window around the clicked point (already in server local time from chart)
-        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30, _serverClock);
+        // ±30 minute window around the clicked point (the chart still plots server local time, so the point goes to UTC first)
+        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30);
 
         var window = new Windows.WaitDrillDownWindow(
             _dataService, _serverId, waitType, 1, fromDate, toDate,
@@ -131,19 +130,19 @@ public partial class ServerTab : UserControl
     /// </summary>
     private async void OnActiveQueriesDrillDown(DateTime time)
     {
-        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30, _serverClock);
+        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         SelectActiveQueriesForDrillDown();
         var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate));
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(ToUtcFromServerLocal(fromDate), "HH:mm")} → {ServerTimeHelper.FormatServerTime(ToUtcFromServerLocal(toDate), "HH:mm")}";
+        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} → {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
         _ = LoadActiveQueriesSlicerAsync();
     }
 
     private async void OnBlockingDrillDown(DateTime time)
     {
-        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30, _serverClock);
+        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 8; // Blocking
@@ -154,7 +153,7 @@ public partial class ServerTab : UserControl
 
     private async void OnDeadlockDrillDown(DateTime time)
     {
-        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30, _serverClock);
+        var (fromDate, toDate) = GetDrillWindow(ToUtcFromServerLocal(time), 30, 30);
         SetDrillDownTimeRange(fromDate, toDate);
 
         MainTabControl.SelectedIndex = 8; // Blocking
@@ -166,7 +165,7 @@ public partial class ServerTab : UserControl
     private async void OnHeatmapDrillDown(DateTime bucketTimeUtc)
     {
         var serverTime = ToServerLocal(bucketTimeUtc);
-        var (fromDate, toDate) = GetDrillWindow(bucketTimeUtc, 5, 10, _serverClock);
+        var (fromDate, toDate) = GetDrillWindow(bucketTimeUtc, 5, 10);
 
         AppLogger.Info("DrillDown", $"OnHeatmapDrillDown: bucketTimeUtc={bucketTimeUtc:O}, OffsetMinutesAtBucket={_serverClock.OffsetMinutesAt(bucketTimeUtc)}, serverTime={serverTime:O}, fromDate={fromDate:O}, toDate={toDate:O}");
 
@@ -179,7 +178,7 @@ public partial class ServerTab : UserControl
         AppLogger.Info("DrillDown", $"Got {snapshots.Count} snapshots");
 
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LiveSnapshotIndicator.Text = $"Drill-down: {fromDate:HH:mm} → {toDate:HH:mm} (server time)";
+        LiveSnapshotIndicator.Text = $"Drill-down: {ToServerLocal(fromDate):HH:mm} → {ToServerLocal(toDate):HH:mm} (server time)";
         _ = LoadActiveQueriesSlicerAsync();
     }
 
@@ -187,24 +186,17 @@ public partial class ServerTab : UserControl
     /// Sets the time range combo to Custom and populates the date/time pickers
     /// so the user can navigate other tabs at the same time window.
     /// </summary>
-    private void SetDrillDownTimeRange(DateTime fromServer, DateTime toServer)
+    private void SetDrillDownTimeRange(DateTime fromUtc, DateTime toUtc)
     {
-        // Pickers store time in the current display mode. Downstream reads use
-        // DisplayTimeToServerTime() to convert back.
-        var fromDisplay = ServerTimeHelper.ConvertForDisplay(fromServer, ServerTimeHelper.CurrentDisplayMode);
-        var toDisplay = ServerTimeHelper.ConvertForDisplay(toServer, ServerTimeHelper.CurrentDisplayMode);
+        /* The drill's window is held as the instants it names (#4766) and the pickers show it in the display zone. */
+        _customRange.Set(fromUtc, toUtc);
 
         // Switch to Custom without triggering a refresh
         _isRefreshing = true;
         try
         {
             TimeRangeCombo.SelectedIndex = 5; // Custom
-            FromDatePicker.SelectedDate = fromDisplay.Date;
-            FromHourCombo.SelectedIndex = fromDisplay.Hour;
-            FromMinuteCombo.SelectedIndex = fromDisplay.Minute / 15;
-            ToDatePicker.SelectedDate = toDisplay.Date;
-            ToHourCombo.SelectedIndex = toDisplay.Hour;
-            ToMinuteCombo.SelectedIndex = toDisplay.Minute / 15;
+            RenderCustomRange();
 
             // Make pickers visible
             var visibility = Visibility.Visible;

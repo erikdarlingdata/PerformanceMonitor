@@ -21,18 +21,7 @@ public partial class ServerTab : UserControl
     {
         if (!IsLoaded || _isRefreshing) return;
 
-        var hoursBack = GetHoursBack();
-        DateTime? fromDate = null, toDate = null;
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-            {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-            }
-        }
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
         await RefreshOverviewAsync(hoursBack, fromDate, toDate);
 
@@ -44,7 +33,7 @@ public partial class ServerTab : UserControl
                of their own -- the SAME UTC window the Top Queries/Top Procedures/Query Store grid reads get via
                LocalDataService.GetQueriesTabWindowUtc, computed once here and handed to all three so the
                current window matches the grid on any server not on UTC. */
-            var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
+            var (currentStart, currentEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
             await RefreshQueryStatsComparisonAsync(currentStart, currentEnd);
             await RefreshProcStatsComparisonAsync(currentStart, currentEnd);
             await RefreshQueryStoreComparisonAsync(currentStart, currentEnd);
@@ -82,9 +71,8 @@ public partial class ServerTab : UserControl
     /// baseline by the server's UTC offset, which is what #4284 fixed. Returns null if "None" is selected.
     ///
     /// <para>Not used by <c>RefreshOverviewAsync</c>'s correlated-lanes comparison (ServerTab.Refresh.cs):
-    /// that caller's underlying reads (GetCpuUtilizationAsync, GetTotalWaitTrendAsync) take server-local
-    /// fromDate/toDate, not UTC, so it derives its own range with <see cref="ShiftComparisonRange"/> in that
-    /// basis instead of calling through here.</para>
+    /// that caller plots the server's wall clock, so it derives its own range with <see cref="ShiftComparisonRange"/>
+    /// in that basis (the lanes hand their reads the UTC of it) instead of calling through here.</para>
     /// </summary>
     private (DateTime From, DateTime To)? GetComparisonRange(DateTime currentStartUtc, DateTime currentEndUtc)
         => CompareToCombo == null ? null : ShiftComparisonRange(CompareToCombo.SelectedIndex, currentStartUtc, currentEndUtc);

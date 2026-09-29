@@ -34,7 +34,7 @@ public partial class LocalDataService
     {
         using var connection = await OpenConnectionAsync();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         var rows = new List<BaselineDiscontinuities.MarkerRow>();
         using (var command = connection.CreateCommand())

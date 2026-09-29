@@ -43,13 +43,13 @@ public sealed class ServerTabDrillWindowTests
     public void AClickJustAfterTheSpringForward_KeepsSixtyRealMinutes()
     {
         var clock = Eastern();
-        var center = clock.ToUtc(At(2026, 3, 8, 3, 10));
+        var center = clock.ToUtc(At(2026, 3, 8, 3, 10));   /* 07:10 UTC */
 
-        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30, clock);
+        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30);
 
-        Assert.Equal(At(2026, 3, 8, 1, 40), from);
-        Assert.Equal(At(2026, 3, 8, 3, 40), to);
-        Assert.Equal(TimeSpan.FromMinutes(60), clock.ToUtc(to) - clock.ToUtc(from));
+        Assert.Equal(At(2026, 3, 8, 6, 40), from);
+        Assert.Equal(At(2026, 3, 8, 7, 40), to);
+        Assert.Equal(TimeSpan.FromMinutes(60), to - from);
     }
 
     /// <summary>
@@ -74,12 +74,12 @@ public sealed class ServerTabDrillWindowTests
     public void AnOrdinaryClick_GivesHalfAnHourEitherSide()
     {
         var clock = Eastern();
-        var center = clock.ToUtc(At(2026, 6, 15, 12, 0));
+        var center = clock.ToUtc(At(2026, 6, 15, 12, 0));   /* 16:00 UTC */
 
-        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30, clock);
+        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30);
 
-        Assert.Equal(At(2026, 6, 15, 11, 30), from);
-        Assert.Equal(At(2026, 6, 15, 12, 30), to);
+        Assert.Equal(At(2026, 6, 15, 15, 30), from);
+        Assert.Equal(At(2026, 6, 15, 16, 30), to);
     }
 
     /// <summary>
@@ -94,12 +94,10 @@ public sealed class ServerTabDrillWindowTests
     public void AHeatmapBucketAtTheSpringForward_KeepsItsFiveBeforeAndTenAfter(
         int bucketHour, int bucketMinute, int fromHour, int fromMinute, int toHour, int toMinute)
     {
-        var clock = Eastern();
+        var (from, to) = ServerTab.GetDrillWindow(At(2026, 3, 8, bucketHour, bucketMinute), 5, 10);
 
-        var (from, to) = ServerTab.GetDrillWindow(At(2026, 3, 8, bucketHour, bucketMinute), 5, 10, clock);
-
-        Assert.Equal(At(2026, 3, 8, fromHour, fromMinute), clock.ToUtc(from));
-        Assert.Equal(At(2026, 3, 8, toHour, toMinute), clock.ToUtc(to));
+        Assert.Equal(At(2026, 3, 8, fromHour, fromMinute), from);
+        Assert.Equal(At(2026, 3, 8, toHour, toMinute), to);
     }
 
     /// <summary>
@@ -109,22 +107,22 @@ public sealed class ServerTabDrillWindowTests
     /// is the same instant. This test records what happens today; it is not a fix.
     /// </summary>
     [Fact]
-    public void AClickInTheRepeatedAutumnHour_ResolvesAroundTheFirstOccurrence_KnownLimit()
+    public void AClickInTheRepeatedAutumnHour_OpensSixtyRealMinutes()
     {
-        var clock = Eastern();
+        /* The point clicked is a UTC instant (#4766), so a click in either occurrence of the repeated hour opens the
+           sixty real minutes around it: 05:30 UTC (01:30 EDT) opens 05:00 to 06:00, and 06:30 UTC (01:30 EST) opens
+           06:00 to 07:00. The server-local drill used to resolve both to the first occurrence and, for the second,
+           opened a window that collapsed to one instant. */
+        var (from, to) = ServerTab.GetDrillWindow(At(2026, 11, 1, 5, 30), 30, 30);
 
-        // Known limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence.
-        var center = clock.ToUtc(At(2026, 11, 1, 1, 30));
+        Assert.Equal(At(2026, 11, 1, 5, 0), from);
+        Assert.Equal(At(2026, 11, 1, 6, 0), to);
 
-        Assert.Equal(At(2026, 11, 1, 5, 30), center);
+        var (secondFrom, secondTo) = ServerTab.GetDrillWindow(At(2026, 11, 1, 6, 30), 30, 30);
 
-        var (from, to) = ServerTab.GetDrillWindow(center, 30, 30, clock);
-
-        Assert.Equal(clock.ToServerLocal(At(2026, 11, 1, 5, 0)), from);
-        Assert.Equal(clock.ToServerLocal(At(2026, 11, 1, 6, 0)), to);
-        Assert.Equal(At(2026, 11, 1, 1, 0), from);
-        Assert.Equal(from, to);
-        Assert.Equal(clock.ToUtc(from), clock.ToUtc(to));
+        Assert.Equal(At(2026, 11, 1, 6, 0), secondFrom);
+        Assert.Equal(At(2026, 11, 1, 7, 0), secondTo);
+        Assert.Equal(TimeSpan.FromMinutes(60), secondTo - secondFrom);
     }
 
     /// <summary>
@@ -133,11 +131,11 @@ public sealed class ServerTabDrillWindowTests
     /// stripped first, so a sentence that names the old shape cannot fail the pin.
     /// </summary>
     [Theory]
-    [InlineData("private void ShowQueriesForWaitType_Click(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnActiveQueriesDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnBlockingDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnDeadlockDrillDown(", "ToUtcFromServerLocal(time), 30, 30, _serverClock")]
-    [InlineData("private async void OnHeatmapDrillDown(", "bucketTimeUtc, 5, 10, _serverClock")]
+    [InlineData("private void ShowQueriesForWaitType_Click(", "ToUtcFromServerLocal(time), 30, 30")]
+    [InlineData("private async void OnActiveQueriesDrillDown(", "ToUtcFromServerLocal(time), 30, 30")]
+    [InlineData("private async void OnBlockingDrillDown(", "ToUtcFromServerLocal(time), 30, 30")]
+    [InlineData("private async void OnDeadlockDrillDown(", "ToUtcFromServerLocal(time), 30, 30")]
+    [InlineData("private async void OnHeatmapDrillDown(", "bucketTimeUtc, 5, 10")]
     public void EveryDrillSite_BuildsItsWindowThroughGetDrillWindow(string signature, string arguments)
     {
         var body = MethodBody(CodeOnly(ReadDrillDownSource()), signature);
@@ -161,8 +159,7 @@ public sealed class ServerTabDrillWindowTests
         var definition = source[start..(end + 1)];
         var rest = source.Remove(start, definition.Length);
 
-        Assert.Contains("centerUtc.AddMinutes(-minutesBefore)", definition, StringComparison.Ordinal);
-        Assert.Contains("centerUtc.AddMinutes(minutesAfter)", definition, StringComparison.Ordinal);
+        Assert.Contains("TimeWindows.Drill(centerUtc, minutesBefore, minutesAfter)", definition, StringComparison.Ordinal);
         Assert.DoesNotContain("AddMinutes(", rest, StringComparison.Ordinal);
         Assert.Equal(5, Regex.Matches(rest, @"\bGetDrillWindow\(").Count);
     }

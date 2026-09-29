@@ -54,38 +54,21 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// The current toolbar window as (hoursBack, fromDate, toDate) in server time — the single derivation
-    /// shared by the data refresh and the per-chart Revert / double-click axis re-pin, so both read the same
-    /// window. A preset leaves from/to null (charts fall back to now − hoursBack); a valid custom range
-    /// converts the local picker dates/times to server time.
+    /// The current toolbar window as (hoursBack, fromUtc, toUtc) -- the single derivation shared by the data refresh and
+    /// the per-chart Revert / double-click axis re-pin, so both read the same window. A preset leaves from/to null
+    /// (charts fall back to now - hoursBack); a custom range is the pair of naive-UTC instants the tab holds
+    /// (#4766), handed to every read as it is: no clock takes part, so the read, the slicer and the alert badge all
+    /// see the same two instants whichever display zone the pickers show.
     /// </summary>
-    /// <param name="clock">
-    /// Whose server time the returned bounds are in. Every read given this window converts the bounds back
-    /// out to UTC using a clock of its own, and the two have to be the same server's or the pair stops
-    /// cancelling — so this argument is chosen to match the read being fed, not chosen once for the tab.
-    /// <c>ServerTimeHelper.ActiveServerClock</c> for the sub-tab reads, which take their clock from the
-    /// selected tab; this tab's own clock for the badge read, which takes its clock from the server it
-    /// names. The picker value converts through the clock (#4766), so a time on either side of a daylight-saving
-    /// change lands on the server's wall clock at that instant.
-    /// </param>
-    private (int hoursBack, DateTime? fromDate, DateTime? toDate) GetCurrentWindow(ServerClock clock)
+    private (int hoursBack, DateTime? fromUtc, DateTime? toUtc) GetCurrentWindowUtc()
     {
-        var hoursBack = GetHoursBack();
-
-        DateTime? fromDate = null;
-        DateTime? toDate = null;
-        if (IsCustomRange)
+        /* A range the pickers show but the tab has not yet held (their defaults, filled before any edit) is taken from them once. */
+        if (IsCustomRange && !_customRange.IsCustom)
         {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-            {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode, clock);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode, clock);
-            }
+            CaptureCustomRangeEdit(null);
         }
 
-        return (hoursBack, fromDate, toDate);
+        return CurrentWindowUtc(GetHoursBack(), IsCustomRange, _customRange);
     }
 
     /// <summary>
@@ -121,13 +104,16 @@ public partial class ServerTab : UserControl
         if (_isRefreshing) return;
         _isRefreshing = true;
 
-        /* Read the clock again first: every conversion below (the picker window, the chart X values) goes
+        /* Read the clock again first: every conversion below (the pickers' rendering, the chart X values) goes
            through it, and it is never cached for the life of the tab (#4766). Never throws. */
         await RefreshServerClockAsync();
 
-        /* The selected tab's clock, because the sub-tab reads below convert back out to UTC through that
-           same clock and the two applications have to name one server's clock to cancel. */
-        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.ActiveServerClock);
+        /* The server's zone can change under the held range (its clock was just read again, or another tab switched
+           the display mode), so the pickers are shown again from the held instants before the window is read. */
+        RenderCustomRange();
+
+        /* The window is the held range as UTC instants (#4766): every read below takes the same two instants. */
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
         try
         {
@@ -212,8 +198,8 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var (hoursBack, fromDate, toDate) = GetCurrentWindow(_serverClock);
-            var (blockingCount, deadlockCount, latestEventTime) = await Task.Run(() => _dataService.GetAlertCountsAsync(_serverId, hoursBack, fromDate, toDate, ServerClock));
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
+            var (blockingCount, deadlockCount, latestEventTime) = await Task.Run(() => _dataService.GetAlertCountsAsync(_serverId, hoursBack, fromDate, toDate));
             AlertCountsChanged?.Invoke(blockingCount, deadlockCount, latestEventTime);
         }
         catch (Exception ex)
@@ -297,7 +283,7 @@ public partial class ServerTab : UserControl
                             /* #4284: the comparison and the banner both read UTC collection_time, so they
                                share the SAME UTC window GetTopQueriesByCpuAsync just read
                                (LocalDataService.GetQueriesTabWindowUtc) -- computed once and handed to both. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                             await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
                         }
@@ -310,7 +296,7 @@ public partial class ServerTab : UserControl
                         {
                             /* #4284: UTC comparison and banner window, computed once -- see the twin comment
                                on the Top Queries case above. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                             await RefreshProcStatsComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart, windowEnd);
                         }
@@ -323,7 +309,7 @@ public partial class ServerTab : UserControl
                         {
                             /* #4284: UTC comparison and banner window, computed once -- see the twin comment
                                on the Top Queries case above. */
-                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
+                            var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                             await RefreshQueryStoreComparisonAsync(windowStart, windowEnd);
                             await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, windowStart, windowEnd);
                         }
@@ -377,7 +363,7 @@ public partial class ServerTab : UserControl
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
+                var (windowStart, windowEnd) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                 await RefreshQueryStatsComparisonAsync(windowStart, windowEnd);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStats, QueryStatsWindowTruncatedBanner, windowStart, windowEnd);
             }
@@ -387,7 +373,7 @@ public partial class ServerTab : UserControl
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart2, windowEnd2) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
+                var (windowStart2, windowEnd2) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                 await RefreshProcStatsComparisonAsync(windowStart2, windowEnd2);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.ProcedureStats, ProcStatsWindowTruncatedBanner, windowStart2, windowEnd2);
             }
@@ -397,7 +383,7 @@ public partial class ServerTab : UserControl
             {
                 /* #4284: UTC comparison and banner window, computed once -- see the twin comment on the
                    sub-tab-switch case above. */
-                var (windowStart3, windowEnd3) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate, ServerTimeHelper.ActiveServerClock);
+                var (windowStart3, windowEnd3) = LocalDataService.GetQueriesTabWindowUtc(hoursBack, fromDate, toDate);
                 await RefreshQueryStoreComparisonAsync(windowStart3, windowEnd3);
                 await RefreshWindowTruncatedBannerAsync(QueryWindowRelation.QueryStoreStats, QueryStoreWindowTruncatedBanner, windowStart3, windowEnd3);
             }
@@ -460,9 +446,8 @@ public partial class ServerTab : UserControl
         try
         {
             /* #4284 derived this method's comparison range with ShiftComparisonRange, in the correlated
-               lanes' own server-local basis (GetCpuUtilizationAsync, GetTotalWaitTrendAsync, etc. take a
-               supplied fromDate/toDate as server-local, unlike the Queries tab's three comparison reads,
-               which are UTC-only) -- byte-identical to this method's pre-#4284 derivation under a custom
+               lanes' own server-local plotting basis (the lanes still plot the server's wall clock; the reads
+               take the UTC of that window, #4766) -- byte-identical to this method's pre-#4284 derivation under a custom
                range, but still a raw DateTime.UtcNow under a preset one, which #4296 tracks as a separate,
                pre-existing mismatch. #4296: GetOverviewComparisonRange (CorrelatedTimelineLanesControl.xaml.cs)
                replaces that derivation with one that falls back to the server's own local now under a preset
@@ -719,23 +704,12 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null, toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
             var data = await Task.Run(() => _dataService.GetBlockingSlicerDataAsync(_serverId, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
             _blockingSlicerData = data;
             _blockingSlicerMetric = "Events";
-            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
             if (data.Count > 0)
                 BlockingSlicer.LoadData(data, "Blocking Events", slicerStart, slicerEnd);
         }
@@ -753,22 +727,11 @@ public partial class ServerTab : UserControl
     {
         try
         {
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null, toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
             var data = await Task.Run(() => _dataService.GetDeadlockSlicerDataAsync(_serverId, hoursBack, fromDate, toDate));
             _deadlockSlicerData = data;
-            var (slicerStart, slicerEnd) = GetSlicerTimeRange(hoursBack, fromDate, toDate);
+            var (slicerStart, slicerEnd) = PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
             if (data.Count > 0)
                 DeadlockSlicer.LoadData(data, "Deadlocks", slicerStart, slicerEnd);
         }

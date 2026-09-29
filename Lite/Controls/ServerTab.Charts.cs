@@ -748,8 +748,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value;
-            rangeEnd = toDate.Value;
+            rangeStart = ToServerLocal(fromDate.Value);
+            rangeEnd = ToServerLocal(toDate.Value);
         }
         else
         {
@@ -811,8 +811,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value;
-            rangeEnd = toDate.Value;
+            rangeStart = ToServerLocal(fromDate.Value);
+            rangeEnd = ToServerLocal(toDate.Value);
         }
         else
         {
@@ -889,8 +889,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value;
-            rangeEnd = toDate.Value;
+            rangeStart = ToServerLocal(fromDate.Value);
+            rangeEnd = ToServerLocal(toDate.Value);
         }
         else
         {
@@ -968,8 +968,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value;
-            rangeEnd = toDate.Value;
+            rangeStart = ToServerLocal(fromDate.Value);
+            rangeEnd = ToServerLocal(toDate.Value);
         }
         else
         {
@@ -1031,8 +1031,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value;
-            rangeEnd = toDate.Value;
+            rangeStart = ToServerLocal(fromDate.Value);
+            rangeEnd = ToServerLocal(toDate.Value);
         }
         else
         {
@@ -1415,18 +1415,7 @@ public partial class ServerTab : UserControl
         if (!IsLoaded) return;
         try
         {
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null, toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             var metric = (HeatmapMetric)HeatmapMetricCombo.SelectedIndex;
             var result = await System.Threading.Tasks.Task.Run(() => _dataService.GetQueryHeatmapAsync(_serverId, metric, hoursBack, fromDate, toDate, SelectedDatabaseFilter));
             UpdateQueryHeatmapChart(result);
@@ -1509,7 +1498,7 @@ public partial class ServerTab : UserControl
         /* Re-pins the axes onto the window the plotted data was read over, so it takes the same clock
            those reads take — the selected tab's. This runs from a chart on the visible tab, where that
            is this tab. */
-        var (hoursBack, fromDate, toDate) = GetCurrentWindow(ServerTimeHelper.ActiveServerClock);
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
         var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
         chart.Plot.Axes.SetLimitsX(rangeStart.ToOADate(), rangeEnd.ToOADate());
         chart.Plot.Axes.AutoScaleY();

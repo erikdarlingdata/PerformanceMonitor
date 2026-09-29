@@ -159,19 +159,7 @@ public partial class ServerTab : UserControl
             bool useAvgPerWait = WaitStatsMetricCombo?.SelectedIndex == 1;
             if (_waitStatsHover != null) _waitStatsHover.Unit = useAvgPerWait ? "ms/wait" : "ms/sec";
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;
 
             // Batched fetch: one query for all selected wait types (was an N+1 query-per-type loop).
@@ -200,8 +188,8 @@ public partial class ServerTab : UserControl
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
-                rangeStart = fromDate.Value;
-                rangeEnd = toDate.Value;
+                rangeStart = ToServerLocal(fromDate.Value);
+                rangeEnd = ToServerLocal(toDate.Value);
             }
             else
             {
@@ -307,19 +295,7 @@ public partial class ServerTab : UserControl
             ApplyTheme(MemoryClerksChart);
             _memoryClerksHover?.Clear();
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             var (rangeStart, rangeEnd) = GetChartWindow(hoursBack, fromDate, toDate);
             double xMin = rangeStart.ToOADate();
             double xMax = rangeEnd.ToOADate();
@@ -557,19 +533,7 @@ public partial class ServerTab : UserControl
 
             if (selected.Count == 0) { PerfmonChart.Refresh(); return; }
 
-            var hoursBack = GetHoursBack();
-            DateTime? fromDate = null;
-            DateTime? toDate = null;
-            if (IsCustomRange)
-            {
-                var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromLocal.HasValue && toLocal.HasValue)
-                {
-                    fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                    toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                }
-            }
+            var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
             double globalMax = 0;
             var plottedBases = new List<DeltaBasis>();
 
@@ -607,8 +571,8 @@ public partial class ServerTab : UserControl
             DateTime rangeStart, rangeEnd;
             if (IsCustomRange && fromDate.HasValue && toDate.HasValue)
             {
-                rangeStart = fromDate.Value;
-                rangeEnd = toDate.Value;
+                rangeStart = ToServerLocal(fromDate.Value);
+                rangeEnd = ToServerLocal(toDate.Value);
             }
             else
             {

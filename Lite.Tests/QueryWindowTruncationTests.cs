@@ -414,17 +414,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     /// direction) fails loudly rather than only on a server that happens to run UTC.
     /// </summary>
     [Fact]
-    public void GetQueriesTabWindowUtc_CustomRange_ConvertsServerLocalPickersBackToUtc()
+    public void GetQueriesTabWindowUtc_CustomRange_IsTheHeldUtcPairUnchanged()
     {
-        const int utcOffsetMinutes = -240; // UTC-4: server-local clock reads 4 hours BEHIND UTC.
-        var fromDate = new DateTime(2026, 1, 15, 8, 0, 0, DateTimeKind.Unspecified);
-        var toDate = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
+        var fromDate = new DateTime(2026, 1, 15, 12, 0, 0, DateTimeKind.Unspecified);
+        var toDate = new DateTime(2026, 1, 15, 14, 0, 0, DateTimeKind.Unspecified);
 
-        var (startUtc, endUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromDate, toDate, ServerClock.FixedOffset(utcOffsetMinutes));
+        var (startUtc, endUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromDate, toDate);
 
-        // Server-local is 4 hours behind UTC, so converting back to UTC ADDS 4 hours.
-        Assert.Equal(fromDate.AddMinutes(240), startUtc);
-        Assert.Equal(toDate.AddMinutes(240), endUtc);
+        Assert.Equal(fromDate, startUtc);
+        Assert.Equal(toDate, endUtc);
     }
 
     /// <summary>
@@ -439,14 +437,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
     [Fact]
     public void SlicerBannerWindow_MatchesTheGridsUtcWindow_ForANonUtcServer()
     {
-        const int utcOffsetMinutes = -240;
         var startUtc = new DateTime(2026, 1, 15, 8, 0, 0, DateTimeKind.Unspecified);
         var endUtc = new DateTime(2026, 1, 15, 10, 0, 0, DateTimeKind.Unspecified);
 
-        var fromServer = startUtc.AddMinutes(utcOffsetMinutes); // ServerTimeHelper.ToServerTime's formula
-        var toServer = endUtc.AddMinutes(utcOffsetMinutes);
-
-        var (gridStartUtc, gridEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, fromServer, toServer, ServerClock.FixedOffset(utcOffsetMinutes));
+        /* The slicer hands e.StartUtc/e.EndUtc to the grid read as they are (#4766): no conversion either way. */
+        var (gridStartUtc, gridEndUtc) = LocalDataService.GetQueriesTabWindowUtc(24, startUtc, endUtc);
 
         Assert.Equal(startUtc, gridStartUtc);
         Assert.Equal(endUtc, gridEndUtc);

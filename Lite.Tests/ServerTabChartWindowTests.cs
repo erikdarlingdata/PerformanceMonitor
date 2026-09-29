@@ -134,15 +134,15 @@ public sealed class ServerTabChartWindowTests
 
     /// <summary>A custom range is already server-local: both bounds come through as given.</summary>
     [Fact]
-    public void ACustomRange_PassesBothBoundsThroughAsGiven()
+    public void ACustomUtcRange_IsShownOnTheServersClockAtEachBound()
     {
         var from = new DateTime(2026, 3, 7, 9, 0, 0, DateTimeKind.Unspecified);
         var to = new DateTime(2026, 3, 8, 14, 30, 0, DateTimeKind.Unspecified);
 
         var (start, end) = ServerTab.GetChartWindow(24, from, to, Utc(2026, 9, 29, 12, 0), Eastern());
 
-        Assert.Equal(from, start);
-        Assert.Equal(to, end);
+        Assert.Equal(new DateTime(2026, 3, 7, 4, 0, 0, DateTimeKind.Unspecified), start);    /* 09:00 UTC is 04:00 EST */
+        Assert.Equal(new DateTime(2026, 3, 8, 10, 30, 0, DateTimeKind.Unspecified), end);    /* 14:30 UTC is 10:30 EDT */
     }
 
     /// <summary>
