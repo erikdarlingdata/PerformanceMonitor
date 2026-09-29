@@ -9,6 +9,7 @@
 using System;
 using System.Linq;
 using System.Text.RegularExpressions;
+using PerformanceMonitor.Darling.Service;
 using Xunit;
 
 namespace Darling.Tests;
@@ -52,7 +53,7 @@ public sealed class ProvisionRolesCollisionGuardTests
         Assert.True(on.Index < guardStart, "ON_ERROR_STOP must be on BEFORE the first guard DO block, or that block's RAISE fails only itself.");
         Assert.True(off.Index > guardEnd, "the caller's ON_ERROR_STOP must be put back AFTER the last guard DO block.");
 
-        var firstPasswordReset = Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN NOSUPERUSER PASSWORD");
+        var firstPasswordReset = Regex.Match(sql, @"(?m)^ALTER ROLE \w+\s+LOGIN PASSWORD");
         Assert.True(firstPasswordReset.Success, "the ALTER ROLE ... PASSWORD lines are gone or renamed - update this pin with them.");
         Assert.True(on.Index < firstPasswordReset.Index && off.Index < firstPasswordReset.Index,
             "the stop must be on and put back before the first ALTER ROLE ... PASSWORD, or the guard no longer stops that reset.");
@@ -178,5 +179,183 @@ public sealed class ProvisionRolesCollisionGuardTests
         var commandLine = Regex.Match(readme, @"(?m)^psql .*provision-roles\.sql.*$");
         Assert.True(commandLine.Success, "the README no longer shows the psql command line that runs provision-roles.sql.");
         Assert.DoesNotContain("ON_ERROR_STOP", commandLine.Value, StringComparison.Ordinal);
+    }
+
+    /// <summary>The DO block that holds the role-collision guard: from the <c>DO $$</c> before its first role
+    /// <c>RAISE</c> to the <c>END $$;</c> after its last one.</summary>
+    private static string GuardBlock(string sql)
+    {
+        var firstRaise = sql.IndexOf(GuardRaise, StringComparison.Ordinal);
+        var lastRaise = sql.LastIndexOf(GuardRaise, StringComparison.Ordinal);
+        Assert.True(firstRaise >= 0 && lastRaise >= firstRaise, "the role-collision guard's RAISE EXCEPTION lines moved or were renamed - update this pin with them.");
+        var start = sql.LastIndexOf("DO $$", firstRaise, StringComparison.Ordinal);
+        var end = sql.IndexOf("END $$;", lastRaise, StringComparison.Ordinal);
+        Assert.True(start >= 0 && end > start, "could not find the DO block that holds the role-collision guard.");
+        return sql[start..(end + "END $$;".Length)];
+    }
+
+    /// <summary>The script's lines that are not <c>--</c> comments, so a placeholder or a keyword quoted in prose is
+    /// never counted as SQL.</summary>
+    private static string[] CodeLines(string sql) =>
+        sql.Split('\n').Where(line => !line.TrimStart().StartsWith("--", StringComparison.Ordinal)).ToArray();
+
+    /// <summary>The guard creates each role WITHOUT a password. When it stops the run, the server writes the failed
+    /// statement, its whole text, to the log (<c>log_min_error_statement</c> defaults to error), so a guard that carried
+    /// the three new passwords put all of them in the log, and the documented remedy re-runs with the same ones. The
+    /// three <c>ALTER ROLE</c> lines after the guard set the passwords, so each placeholder is in exactly one
+    /// statement, after the guard.</summary>
+    [Fact]
+    public void TheGuard_CreatesTheRolesWithoutAPassword_SoAGuardThatStopsTheRunLogsNone()
+    {
+        var sql = Script();
+        var guard = GuardBlock(sql);
+
+        foreach (var role in new[] { "admin", "viewer", "mcp" })
+        {
+            Assert.Contains($"CREATE ROLE {role} LOGIN NOSUPERUSER;", guard, StringComparison.Ordinal);
+            Assert.Contains($"COMMENT ON ROLE {role} IS 'darling-managed';", guard, StringComparison.Ordinal);
+        }
+
+        Assert.DoesNotMatch(@"(?i)\bPASSWORD\s+'", guard);
+        Assert.DoesNotContain("CHANGE_ME_", guard, StringComparison.Ordinal);
+
+        var code = CodeLines(sql);
+        var guardEnd = sql.IndexOf(guard, StringComparison.Ordinal) + guard.Length;
+        foreach (var (role, placeholder) in new[] { ("admin", "CHANGE_ME_ADMIN_PASSWORD"), ("viewer", "CHANGE_ME_VIEWER_PASSWORD"), ("mcp", "CHANGE_ME_MCP_PASSWORD") })
+        {
+            Assert.Single(code, line => line.Contains(placeholder, StringComparison.Ordinal));
+            var statement = Regex.Match(sql, $@"(?m)^ALTER ROLE {role}\s+LOGIN PASSWORD '{placeholder}';");
+            Assert.True(statement.Success && statement.Index > guardEnd, $"the {role} password must be set by an ALTER ROLE that comes after the guard.");
+        }
+    }
+
+    /// <summary>The guard's FIRST statement stops the run while <c>pg_stat_statements.track_utility</c> is on. Step 0
+    /// turns it off for the session, but the SET is superuser-only once the module is loaded, so for an owner without
+    /// a superuser or a SET grant it fails, and the module would then record every password statement verbatim, where
+    /// any <c>pg_read_all_stats</c> member reads it. The guard runs with the stop on, so this ends the run before any
+    /// role is created or any password is sent. The message names the three ways out.</summary>
+    [Fact]
+    public void TheGuard_StopsFirst_WhileUtilityTrackingIsOn_AndNamesTheThreeWaysOut()
+    {
+        var sql = Script();
+        var guard = GuardBlock(sql);
+
+        var statements = guard[(guard.IndexOf("BEGIN", StringComparison.Ordinal) + "BEGIN".Length)..]
+            .Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0 && !line.StartsWith("--", StringComparison.Ordinal)).ToArray();
+        Assert.Equal("IF current_setting('pg_stat_statements.track_utility', true) = 'on' THEN", statements[0]);
+        Assert.StartsWith("RAISE EXCEPTION 'pg_stat_statements.track_utility is on", statements[1], StringComparison.Ordinal);
+        Assert.Equal("END IF;", statements[2]);
+
+        var message = statements[1];
+        Assert.Contains("GRANT SET ON PARAMETER pg_stat_statements.track_utility TO <owner>", message, StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL 15", message, StringComparison.Ordinal);
+        Assert.Contains("postgresql.conf", message, StringComparison.Ordinal);
+        Assert.Contains("superuser", message, StringComparison.Ordinal);
+
+        Assert.True(guard.IndexOf("current_setting('pg_stat_statements.track_utility'", StringComparison.Ordinal) < guard.IndexOf("CREATE ROLE", StringComparison.Ordinal),
+            "the utility-tracking check must come before the guard creates any role.");
+    }
+
+    /// <summary>The password lines name <c>LOGIN</c> and the password only. <c>NOSUPERUSER</c> in an <c>ALTER ROLE</c>
+    /// needs a superuser on every PostgreSQL version, so with it every one of the three lines failed for an owner
+    /// without one: a re-run never rotated a password, and psql still exited 0. <c>NOSUPERUSER</c> is re-asserted
+    /// in a block that runs only when the role running the script is a superuser.</summary>
+    [Fact]
+    public void ThePasswordLines_NameNoSuperuserAttribute_AndNosuperuserIsReassertedOnlyForASuperuser()
+    {
+        var sql = Script();
+
+        var passwordLines = Regex.Matches(sql, @"(?m)^ALTER ROLE (?<role>\w+)\s+(?<rest>.*\bPASSWORD\b.*)$");
+        Assert.Equal(3, passwordLines.Count);
+        Assert.All(passwordLines.Cast<Match>(), line =>
+            Assert.Matches(@"^LOGIN PASSWORD '[^']+';\s*$", line.Groups["rest"].Value));
+        Assert.DoesNotMatch(@"(?m)^ALTER ROLE \w+\s+.*NOSUPERUSER", sql);
+
+        var reassert = sql.IndexOf("ALTER ROLE %I NOSUPERUSER", StringComparison.Ordinal);
+        Assert.True(reassert >= 0, "the superuser re-assertion of NOSUPERUSER is gone.");
+        var branch = sql.LastIndexOf("IF as_superuser THEN", reassert, StringComparison.Ordinal);
+        Assert.True(branch >= 0 && reassert - branch < 200, "NOSUPERUSER must be re-asserted only under 'IF as_superuser THEN'.");
+        Assert.Single(Regex.Matches(sql, @"ALTER ROLE %I NOSUPERUSER"));
+        Assert.Contains("as_superuser boolean := (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>The marker is a public string, so it does not show who made a role. From PostgreSQL 16 a role with
+    /// CREATEROLE holds ADMIN OPTION on every role it creates: one that pre-creates <c>viewer</c> with the marker
+    /// passed the guard, kept the option after the operator's run re-keyed and granted the role, and could reset its
+    /// password. The guard now also refuses a marked role while a role that is not a superuser, not the role running
+    /// the script and not the database owner holds ADMIN OPTION on it. A plain membership does not count.</summary>
+    [Fact]
+    public void TheGuard_RefusesAMarkedRole_ThatAnotherNonSuperuserHoldsAdminOptionOn()
+    {
+        var guard = GuardBlock(Script());
+
+        Assert.Contains("FROM pg_auth_members AS membership", guard, StringComparison.Ordinal);
+        Assert.Contains("granted.rolname IN ('admin', 'viewer', 'mcp')", guard, StringComparison.Ordinal);
+        Assert.Contains("AND membership.admin_option", guard, StringComparison.Ordinal);
+        Assert.Contains("AND NOT holder.rolsuper", guard, StringComparison.Ordinal);
+        Assert.Contains("AND holder.rolname <> current_user", guard, StringComparison.Ordinal);
+        Assert.Contains("AND holder.oid <> (SELECT datdba FROM pg_database WHERE datname = current_database())", guard, StringComparison.Ordinal);
+        Assert.Contains("holds ADMIN OPTION on it", guard, StringComparison.Ordinal);
+
+        /* It runs after the three marker branches, inside the block, so the refusal rolls back a role this run created. */
+        Assert.True(guard.IndexOf("membership.admin_option", StringComparison.Ordinal) > guard.LastIndexOf("IS DISTINCT FROM 'darling-managed'", StringComparison.Ordinal),
+            "the ADMIN OPTION check must come after the marker checks.");
+    }
+
+    /// <summary>An adopted role (it already carries the marker) keeps CREATEROLE, CREATEDB, REPLICATION, BYPASSRLS and
+    /// its memberships in other roles, all of which managed provisioning takes back. The script now mirrors that: for
+    /// a superuser the same attribute list and the same membership revoke, and for any other owner what its own
+    /// privileges allow, with a WARNING for what it cannot remove.</summary>
+    [Fact]
+    public void TheScript_TakesBackWhatManagedProvisioningTakesBack()
+    {
+        var sql = Script();
+        var managed = DarlingManagedRoles.BuildProvisioningSql(
+            ProvisioningTestSecrets.Admin, ProvisioningTestSecrets.Viewer, ProvisioningTestSecrets.Mcp, 15);
+
+        /* The twin's own statements: the attribute list, the membership revoke, its grantor clause and its CASCADE. */
+        const string Attributes = "NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS";
+        Assert.Contains($"LOGIN {Attributes}", managed, StringComparison.Ordinal);
+        Assert.Contains("format('REVOKE %I FROM %I', membership.granted, membership.member)", managed, StringComparison.Ordinal);
+        Assert.Contains("format(' GRANTED BY %I', membership.grantor)", managed, StringComparison.Ordinal);
+        Assert.Contains("|| ' CASCADE'", managed, StringComparison.Ordinal);
+
+        Assert.Contains($"EXECUTE format('ALTER ROLE %I {Attributes}', item.rolname);", sql, StringComparison.Ordinal);
+        Assert.Contains("format('REVOKE %I FROM %I', item.granted, item.member)", sql, StringComparison.Ordinal);
+        Assert.Contains("format(' GRANTED BY %I', item.grantor)", sql, StringComparison.Ordinal);
+        Assert.Contains("|| ' CASCADE'", sql, StringComparison.Ordinal);
+        Assert.Contains("WHERE member.rolname IN ('admin', 'viewer', 'mcp')", sql, StringComparison.Ordinal);
+
+        /* Not a superuser: each attribute the role has is switched off on its own, and a refusal is a WARNING, not an error. */
+        foreach (var attribute in new[] { "SUPERUSER", "CREATEROLE", "CREATEDB", "REPLICATION", "BYPASSRLS" })
+        {
+            Assert.Contains($"THEN '{attribute}' END", sql, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("EXCEPTION WHEN insufficient_privilege THEN", sql, StringComparison.Ordinal);
+        Assert.Contains("RAISE WARNING 'Role \"%\" still has the % attribute", sql, StringComparison.Ordinal);
+        Assert.Contains("RAISE WARNING 'Role \"%\" is still a member of \"%\"", sql, StringComparison.Ordinal);
+
+        /* After the passwords, so the run has re-keyed the roles before it takes anything back. */
+        Assert.True(sql.IndexOf("ALTER ROLE %I NOSUPERUSER", StringComparison.Ordinal) > sql.IndexOf("ALTER ROLE mcp    LOGIN PASSWORD", StringComparison.Ordinal));
+    }
+
+    /// <summary>The README says what a non-superuser owner gets, and the script's step 0 and guard match it: the run
+    /// stops at the guard while utility tracking is on and the owner cannot switch it off, and on PostgreSQL 16 and
+    /// later an owner needs ADMIN OPTION on each role, which it holds only for roles it created itself.</summary>
+    [Fact]
+    public void TheReadme_DescribesTheNonSuperuserOwnersLimits()
+    {
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md");
+        var sql = Script();
+
+        Assert.Contains("GRANT SET ON PARAMETER pg_stat_statements.track_utility", readme, StringComparison.Ordinal);
+        Assert.Contains("`ADMIN OPTION` on each of the three roles", readme, StringComparison.Ordinal);
+        Assert.Contains("only for a role it created itself", readme, StringComparison.Ordinal);
+        Assert.Contains("stops at the guard", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("and still gets the roles and every grant it can make", readme, StringComparison.Ordinal);
+
+        Assert.Contains("GRANT SET ON PARAMETER", sql, StringComparison.Ordinal);
+        Assert.Contains("AN OWNER WHO IS NOT A SUPERUSER", sql, StringComparison.Ordinal);
     }
 }

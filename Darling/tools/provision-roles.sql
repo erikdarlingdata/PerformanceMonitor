@@ -78,19 +78,43 @@
 -- same-named role without that marker makes this script FAIL LOUD (rename or drop the other role first,
 -- or use a dedicated cluster/database for the Darling store). That includes the roles the service
 -- provisions on the compose store, which carry 'darling-compose' instead.
+--
+-- The marker is a public string, so it does not show who made a role. From PostgreSQL 16 a role with CREATEROLE
+-- holds ADMIN OPTION on every role it creates, which lets it reset that role's password and grant it onward. So
+-- a marked role is refused too (the same stop as above) while a role that is not a superuser, not the database
+-- owner and not the role running this script holds ADMIN OPTION on it. Revoke that option or drop the role, then
+-- run the script again. A plain membership (GRANT viewer TO some_analyst) is not refused.
+--
+-- AN OWNER WHO IS NOT A SUPERUSER can run this script, with these limits:
+--   * It needs CREATEROLE. From PostgreSQL 16 it also needs ADMIN OPTION on each of the three roles to set a
+--     password or take back an attribute, and it holds that option only on a role it created itself. A role a
+--     superuser made needs GRANT <role> TO <owner> WITH ADMIN OPTION from a superuser first.
+--   * pg_stat_statements: while the module is loaded with utility tracking on, step 0 fails for this owner, and
+--     the guard in step 1 then stops the run before any password is sent. Either GRANT SET ON PARAMETER
+--     pg_stat_statements.track_utility TO <owner> (PostgreSQL 15 and later), so step 0 can turn it off for this
+--     session, or turn it off for the cluster (step 1b).
+--   * The superuser-only lines (temp_file_limit, log_min_duration_statement, log_parameter_max_length) fail, and
+--     psql carries on. SUPERUSER, and REPLICATION, BYPASSRLS and CREATEDB unless the owner holds that attribute
+--     itself, are not switched off, and a role membership the owner is not allowed to revoke stays. Step 1 prints
+--     a WARNING for each of those, so read psql's output.
 -- ============================================================================================
 
 -- 0. Keep this script's own role DDL out of pg_stat_statements (#3899). Step 1 sends each password as an
 --    ALTER ROLE ... PASSWORD literal, and while pg_stat_statements is loaded with utility tracking on (the
 --    module's default), it records that statement VERBATIM, password included, where any superuser or
 --    pg_read_all_stats member (a monitoring agent's pg_monitor login, say) can read it. This covers this
---    session only; step 1b says how to turn it off for good. Harmless when the module is not loaded, and
---    superuser-only when it is, like the rest of this script.
+--    session only; step 1b says how to turn it off for good. Harmless when the module is not loaded. When it is
+--    loaded, this SET needs a superuser, or an owner that was granted SET on the parameter (PostgreSQL 15 and
+--    later): for any other owner it fails, and the first statement of the guard in step 1 then stops the run
+--    before a password is sent.
 SET pg_stat_statements.track_utility = off;
 
 -- 1. Roles (CREATE ROLE has no IF NOT EXISTS -> guard with a DO block). Idempotent: re-running
 --    this script re-asserts the password below, so it doubles as a password rotation. A fresh role
 --    is stamped 'darling-managed'; an unmarked same-named role fails loud (never repurposed).
+--    The guard carries no password. A statement that fails is written to the server log with its whole text,
+--    and the guard is the statement that fails when it stops the run, so it creates each role without one and the
+--    ALTER ROLE lines after it set them.
 -- Stop on an error for this guard alone (#4746): a script-wide stop would end a non-superuser owner before any grant.
 -- The caller's own ON_ERROR_STOP (psql -v ON_ERROR_STOP=1, or psqlrc) is saved first and put back after the guard,
 -- not forced off. From psql 10 an unset ON_ERROR_STOP reads as off, so the saved value is always on or off. In psql 9.6
@@ -99,31 +123,121 @@ SET pg_stat_statements.track_utility = off;
 \set darling_saved_stop :ON_ERROR_STOP
 \set ON_ERROR_STOP on
 DO $$
+DECLARE
+   squatter record;
 BEGIN
+   -- First, before any role is touched: with utility tracking still on for this session, pg_stat_statements would
+   -- record the password statements below verbatim, so stop. NULL (the module is not loaded) passes.
+   IF current_setting('pg_stat_statements.track_utility', true) = 'on' THEN
+      RAISE EXCEPTION 'pg_stat_statements.track_utility is on for this session. pg_stat_statements records the password statements of this script verbatim, and any pg_read_all_stats member can read them. The script created and changed nothing. Do one of these three things, then run the script again. Run GRANT SET ON PARAMETER pg_stat_statements.track_utility TO <owner> as a superuser (PostgreSQL 15 and later). Then step 0 can turn it off for this session. Or set pg_stat_statements.track_utility = off in postgresql.conf and reload, which turns it off for the whole cluster (step 1b). Or run this script as a superuser.';
+   END IF;
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
-      CREATE ROLE admin LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
+      CREATE ROLE admin LOGIN NOSUPERUSER;
       COMMENT ON ROLE admin IS 'darling-managed';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = 'admin'), 'pg_authid') IS DISTINCT FROM 'darling-managed' THEN
       RAISE EXCEPTION 'Role "admin" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'viewer') THEN
-      CREATE ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
+      CREATE ROLE viewer LOGIN NOSUPERUSER;
       COMMENT ON ROLE viewer IS 'darling-managed';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = 'viewer'), 'pg_authid') IS DISTINCT FROM 'darling-managed' THEN
       RAISE EXCEPTION 'Role "viewer" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mcp') THEN
-      CREATE ROLE mcp LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';
+      CREATE ROLE mcp LOGIN NOSUPERUSER;
       COMMENT ON ROLE mcp IS 'darling-managed';
    ELSIF shobj_description((SELECT oid FROM pg_roles WHERE rolname = 'mcp'), 'pg_authid') IS DISTINCT FROM 'darling-managed' THEN
       RAISE EXCEPTION 'Role "mcp" already exists and was not created by Darling (missing the ''darling-managed'' marker comment). Rename or drop it before provisioning so Darling does not repurpose an unrelated login.';
    END IF;
+   -- The marker does not show who made a role, so a marked role is also refused while a role that is not a
+   -- superuser, not the role running this script and not the database owner holds ADMIN OPTION on it: that role
+   -- could reset its password and grant it onward. (A role this run created has no holder but the one running it.)
+   -- Plain memberships do not count, and neither does the owner of a first run that a superuser then rotates.
+   FOR squatter IN
+      SELECT granted.rolname AS role_name, string_agg(quote_ident(holder.rolname), ', ' ORDER BY holder.rolname) AS holders
+      FROM pg_auth_members AS membership
+      JOIN pg_roles AS granted ON granted.oid = membership.roleid
+      JOIN pg_roles AS holder ON holder.oid = membership.member
+      WHERE granted.rolname IN ('admin', 'viewer', 'mcp')
+        AND membership.admin_option
+        AND NOT holder.rolsuper
+        AND holder.rolname <> current_user
+        AND holder.oid <> (SELECT datdba FROM pg_database WHERE datname = current_database())
+      GROUP BY granted.rolname
+      ORDER BY granted.rolname
+   LOOP
+      RAISE EXCEPTION 'Role "%" carries the ''darling-managed'' marker, but another login holds ADMIN OPTION on it: %. That login is not a superuser, not the database owner and not the role running this script. It can reset the password of the role or grant the role to other roles, and the marker does not show who made the role. Revoke that ADMIN OPTION or drop the role before provisioning.', squatter.role_name, squatter.holders;
+   END LOOP;
 END $$;
 \set ON_ERROR_STOP :darling_saved_stop
 
-ALTER ROLE admin  LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
-ALTER ROLE viewer LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
-ALTER ROLE mcp    LOGIN NOSUPERUSER PASSWORD 'CHANGE_ME_MCP_PASSWORD';
+-- The passwords. Each ALTER names LOGIN and the password only: NOSUPERUSER here would fail for an owner that is
+-- not a superuser (it needs one for any change to that attribute), and a run that fails these three lines rotates
+-- nothing while psql still exits 0. The roles were created NOSUPERUSER; the next block takes the attributes back.
+ALTER ROLE admin  LOGIN PASSWORD 'CHANGE_ME_ADMIN_PASSWORD';
+ALTER ROLE viewer LOGIN PASSWORD 'CHANGE_ME_VIEWER_PASSWORD';
+ALTER ROLE mcp    LOGIN PASSWORD 'CHANGE_ME_MCP_PASSWORD';
+
+-- Attributes and memberships (managed mode's step 1b and section 11). A role this script ADOPTS (it already
+-- carries the marker) keeps whatever was granted to it since: CREATEROLE, CREATEDB, REPLICATION or BYPASSRLS on
+-- viewer or mcp would outrank every grant below, and so would a membership (pg_read_all_data undoes the
+-- secret-column carve, and a membership in the owner is every privilege the owner has). So every one is taken
+-- back, every run.
+--   As a superuser these are managed mode's statements exactly: every attribute off by name, and every membership
+--   in which one of the roles is the MEMBER revoked, GRANTED BY the recorded grantor (since PostgreSQL 16 a plain
+--   REVOKE removes only the grants the bootstrap superuser made), with CASCADE (a grant the member itself made
+--   with an ADMIN OPTION depends on the membership).
+--   Otherwise it goes as far as the owner's privileges allow: SUPERUSER needs a superuser, REPLICATION, BYPASSRLS
+--   and CREATEDB need the owner to hold that attribute itself (PostgreSQL 16 and later), and a membership can be
+--   revoked only with ADMIN OPTION on the role it is in. What remains draws a WARNING, and the run carries on.
+DO $$
+DECLARE
+   as_superuser boolean := (SELECT rolsuper FROM pg_roles WHERE rolname = current_user);
+   item record;
+   attribute text;
+BEGIN
+   FOR item IN
+      SELECT rolname, rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls
+      FROM pg_roles
+      WHERE rolname IN ('admin', 'viewer', 'mcp')
+      ORDER BY rolname
+   LOOP
+      IF as_superuser THEN
+         EXECUTE format('ALTER ROLE %I NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS', item.rolname);
+      ELSE
+         FOREACH attribute IN ARRAY array_remove(ARRAY[
+               CASE WHEN item.rolsuper THEN 'SUPERUSER' END,
+               CASE WHEN item.rolcreaterole THEN 'CREATEROLE' END,
+               CASE WHEN item.rolcreatedb THEN 'CREATEDB' END,
+               CASE WHEN item.rolreplication THEN 'REPLICATION' END,
+               CASE WHEN item.rolbypassrls THEN 'BYPASSRLS' END], NULL)
+         LOOP
+            BEGIN
+               EXECUTE format('ALTER ROLE %I NO%s', item.rolname, attribute);
+            EXCEPTION WHEN insufficient_privilege THEN
+               RAISE WARNING 'Role "%" still has the % attribute: switching it off needs a superuser, or an owner that holds % itself.', item.rolname, attribute, attribute;
+            END;
+         END LOOP;
+      END IF;
+   END LOOP;
+
+   FOR item IN
+      SELECT granted.rolname AS granted, member.rolname AS member, grantor.rolname AS grantor
+      FROM pg_auth_members AS membership
+      JOIN pg_roles AS granted ON granted.oid = membership.roleid
+      JOIN pg_roles AS member ON member.oid = membership.member
+      LEFT JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
+      WHERE member.rolname IN ('admin', 'viewer', 'mcp')
+   LOOP
+      BEGIN
+         EXECUTE format('REVOKE %I FROM %I', item.granted, item.member)
+            || CASE WHEN as_superuser AND item.grantor IS NOT NULL THEN format(' GRANTED BY %I', item.grantor) ELSE '' END
+            || ' CASCADE';
+      EXCEPTION WHEN insufficient_privilege THEN
+         RAISE WARNING 'Role "%" is still a member of "%": revoking that needs a superuser, or ADMIN OPTION on "%".', item.member, item.granted, item.granted;
+      END;
+   END LOOP;
+END $$;
 
 -- 1a. statement_timeout backstop on viewer and mcp (Custom Views v2, #1563): the web dashboard's compose surface
 --     and the MCP custom-view tools run network-reachable aggregations over a raw, no-rollup store, so this caps
@@ -185,6 +299,13 @@ ALTER ROLE mcp    SET log_parameter_max_length = 0;
 --    holds no secrets, so admin+viewer read all of it. config: admin (the writer, and the Settings
 --    window's identity) reads every column; viewer reads all config tables too -- MINUS the secret columns
 --    carved in step 2b. mcp gets viewer's read surface in its own statements, carved the same way.
+--    Steps 2 to 2c are ONE transaction (managed mode sends the same statements as one batch, which is one
+--    implicit transaction): the blanket config grants below give viewer and mcp table-wide SELECT on the secret
+--    columns until the carve takes it back, and committed on their own they would leave that window open on every
+--    run, and for good if a statement in the carve failed. Now they commit together or not at all, so an error
+--    anywhere in the carve leaves the read roles with no read access, never a blanket grant. psql rolls the
+--    transaction back at the COMMIT after an error, with ON_ERROR_STOP off, and at exit with it on.
+BEGIN;
 GRANT USAGE ON SCHEMA collect, config TO admin, viewer;
 GRANT SELECT ON ALL TABLES IN SCHEMA collect TO admin, viewer;
 GRANT SELECT ON ALL TABLES IN SCHEMA config  TO admin, viewer;
@@ -235,10 +356,21 @@ GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_re
 -- same names, so the same carve applies: the webhook URLs and the PagerDuty routing key are bearer secrets and
 -- are deliberately NOT granted. configured_channels is a GENERATED presence column (which channels a route
 -- sets, never their values) that exists so this carve can still answer "what does route 3 configure".
--- Created by V131, so re-run this script AFTER the service has migrated your store to V131.
+-- Created by V131, so re-run this script AFTER the service has migrated your store to V131. On a store below V131
+-- the pair below is skipped (the table does not exist yet), so the rest of the carve still commits; unguarded, its
+-- error would abort the transaction and roll back the grants above with it. It runs as EXECUTE of a dollar-quoted
+-- string, so the statements are sent only when the table exists. If they fail on a store that has the table, the
+-- whole transaction rolls back and the read roles keep no access.
+DO $$
+BEGIN
+   IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
+      EXECUTE $v131$
 REVOKE SELECT ON config.config_notification_routes FROM viewer;
 GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at)
     ON config.config_notification_routes TO viewer;
+$v131$;
+   END IF;
+END $$;
 
 -- 2c. The SAME carve for mcp (#3914): it reads exactly what viewer reads, so it is denied exactly the same
 --     secret columns -- the column lists are identical to 2b's, and the drift test holds both to the C# list.
@@ -259,9 +391,18 @@ GRANT SELECT (id, smtp_host, smtp_port, smtp_use_ssl, smtp_from_address, smtp_re
               email_cooldown_minutes, teams_proxy, slack_proxy, modified_at,
               generic_body_template, generic_proxy, pagerduty_use_eu_region, pagerduty_proxy)
     ON config.config_notification TO mcp;
+-- V131 again, guarded the same way (see 2b).
+DO $$
+BEGIN
+   IF to_regclass('config.config_notification_routes') IS NOT NULL THEN
+      EXECUTE $v131$
 REVOKE SELECT ON config.config_notification_routes FROM mcp;
 GRANT SELECT (route_id, metric_match, smtp_recipients, configured_channels, enabled, modified_at)
     ON config.config_notification_routes TO mcp;
+$v131$;
+   END IF;
+END $$;
+COMMIT;
 
 -- 3. config writes -- admin gets the whole schema.
 GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA config TO admin;
