@@ -137,4 +137,75 @@ public sealed class PgServerLogTailResumeTests
 
         Assert.Equal(Encoding.UTF8.GetByteCount(PgServerLogTail.ResumeRowPrefix), PgServerLogTail.ResumeRowPrefix.Length);
     }
+
+    private static string Lf(string sql) => sql.Replace("\r\n", "\n", StringComparison.Ordinal);
+
+    [Theory]
+    [InlineData("csv", "csvlog", false)]
+    [InlineData("csv", "csvlog", true)]
+    [InlineData("json", "jsonlog", false)]
+    [InlineData("json", "jsonlog", true)]
+    public void TheCsvAndJsonTwins_AreTheStderrTwinsWithOnlyTheFormatTestAndNameFilterSwapped(string ext, string format, bool binary)
+    {
+        var stderr = Lf(binary ? PgServerLogTail.TailCteBinarySql : PgServerLogTail.TailCteSql);
+        var twin = Lf((ext, binary) switch
+        {
+            ("csv", false) => PgServerLogTail.TailCsvCteSql,
+            ("csv", true) => PgServerLogTail.TailCsvCteBinarySql,
+            (_, false) => PgServerLogTail.TailJsonCteSql,
+            _ => PgServerLogTail.TailJsonCteBinarySql,
+        });
+
+        Assert.Equal(
+            stderr
+                .Replace("AND name !~* '\\.(csv|json)$'", "AND name ~* '\\." + ext + "$'", StringComparison.Ordinal)
+                .Replace("AND 'stderr' = ANY", "AND '" + format + "' = ANY", StringComparison.Ordinal),
+            twin);
+    }
+
+    private static CollectorContext FormatContext(bool json, System.Collections.Generic.Dictionary<string, string>? state = null) => new()
+    {
+        ServerId = 1,
+        ServerName = "t",
+        CollectionTime = DateTime.UtcNow,
+        Deltas = new CollectorDeltaCalculator(),
+        Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+        PgLogUsesCsvlog = true,
+        PgLogUsesJsonlog = json,
+        State = state is null ? CollectorContext.NoState : state,
+    };
+
+    [Fact]
+    public void EachFormat_KeepsItsOwnMarkerKey()
+    {
+        Assert.Equal("log_resume", PgServerLogTail.ResumeStateKeyFor(Context()));
+        Assert.Equal("log_resume_csv", PgServerLogTail.ResumeStateKeyFor(FormatContext(false)));
+        Assert.Equal("log_resume_json", PgServerLogTail.ResumeStateKeyFor(FormatContext(true)));
+        Assert.Equal(new[] { "log_resume", "log_resume_csv", "log_resume_json" }, PgServerLogTail.ResumeStateKeys);
+
+        /* A stderr marker on a csv route binds NULL parameters: no marked file, so no "missing" disclosure. */
+        var csv = FormatContext(false, new() { [PgServerLogTail.ResumeStateKey] = "5|f.log" });
+        var bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyFor(csv));
+        Assert.All(bound.Parameters, p => Assert.Null(p.Value));
+
+        csv = FormatContext(false, new() { [PgServerLogTail.ResumeStateKeyCsv] = "5|f.csv" });
+        bound = PgServerLogTail.WithResume(PgServerLogTail.TailCsvCteSql, csv, PgServerLogTail.ResumeStateKeyFor(csv));
+        Assert.Contains(bound.Parameters, p => Equals(p.Value, "f.csv"));
+
+        var staged = Context();
+        Assert.True(PgServerLogTail.TryConsumeResumeRow("pm-log-resume|9|0|0||f.csv", true, true, staged, PgServerLogTail.ResumeStateKeyCsv));
+        Assert.Equal("9|f.csv", staged.PendingState[PgServerLogTail.ResumeStateKeyCsv]);
+        Assert.False(staged.PendingState.ContainsKey(PgServerLogTail.ResumeStateKey));
+    }
+
+    [Fact]
+    public void EveryCsvAndJsonTailTwin_CarriesTheResumeParameters()
+    {
+        foreach (var sql in new[] { PgServerLogTail.TailCsvCteSql, PgServerLogTail.TailCsvCteBinarySql, PgServerLogTail.TailJsonCteSql, PgServerLogTail.TailJsonCteBinarySql })
+        {
+            Assert.Contains("@log_resume_file", sql, StringComparison.Ordinal);
+            Assert.Contains("@log_resume_offset", sql, StringComparison.Ordinal);
+            Assert.Contains("resume AS (", sql, StringComparison.Ordinal);
+        }
+    }
 }

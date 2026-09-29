@@ -225,6 +225,9 @@ LIMIT " + RowLimitLiteral;
        collector-off arm is shared, and the no-file-yet arm is PgNoCsvlogFileException.Marker — never
        PgNoStderrLogFileException's — so the fault message names csvlog rather than stderr. */
     private const string CsvQueryText = PgServerLogTail.TailCsvCteSql + @"
+SELECT " + PgServerLogTail.ResumeRowSql + @" AS log_body, NULL AS log_timezone
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -240,6 +243,9 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        reason BinaryQueryText's own remarks give — a bytea/text UNION mismatch would ask PostgreSQL to parse
        the marker text as bytea input rather than hand back its own UTF-8 bytes. */
     private const string CsvBinaryQueryText = PgServerLogTail.TailCsvCteBinarySql + @"
+SELECT pg_catalog.convert_to(" + PgServerLogTail.ResumeRowSql + @", pg_catalog.current_setting('server_encoding')), NULL
+FROM resume AS r
+UNION ALL
 SELECT tail.body AS log_body,
        " + PgServerLogTail.LogTimezoneSql + @" AS log_timezone
 FROM tail
@@ -297,7 +303,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
 
     public override CollectorQuery BuildQuery(CollectorContext context) =>
         context.PgLogUsesCsvlog
-            ? new(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText)
+            ? PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? CsvBinaryQueryText : CsvQueryText, context, PgServerLogTail.ResumeStateKeyCsv)
             : PgServerLogTail.WithResume(context.PgReadBinaryFileGranted ? BinaryQueryText : QueryText, context);
 
     public override IReadOnlyList<CollectorColumn> PayloadColumns { get; } = new[]
@@ -398,7 +404,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
            never examined and the marker must not move past it. The csv route has no LIMIT. */
         if (nextMarker is not null && (context.PgLogUsesCsvlog || rowsRead < RowLimit))
         {
-            context.PendingState[PgServerLogTail.ResumeStateKey] = nextMarker;
+            context.PendingState[PgServerLogTail.ResumeStateKeyFor(context)] = nextMarker;
         }
 
         return rows;
