@@ -106,8 +106,8 @@ public sealed class ServerLocalReadFrameDisciplineTests
            rendering one. */
         ("Darling/PerformanceMonitor.Darling.Analysis/DarlingAnalysisService.cs", 2, false, true,
             "the pass's trace-anchor read (ReconfigureTraceLinesForAttributionSql): the raw event_time projection, converted per line in ServerLocalTimes.TraceLinesInWindow with the server's ServerClock, and both span bounds as an hour-wide pre-filter (#4821)"),
-        ("Lite/Analysis/AnalysisService.cs", 0, true, false,
-            "the Lite pass's trace-anchor read: both span bounds shifted into the server's frame by the one collected offset, then the row de-skewed in C#"),
+        ("Lite/Analysis/AnalysisService.cs", 0, false, true,
+            "the Lite pass's trace-anchor read: both span bounds shifted into the server's frame by the server's ServerClock (opened by an hour, as a first filter), then each row converted in C# with the same clock (#4821)"),
     ];
 
     [Fact]
