@@ -282,8 +282,8 @@ public partial class ViewerServerTab : UserControl
         {
             /* Point the process-wide time helper at THIS server's UTC offset before rendering — only the
                visible tab renders (the viewer's visible-only rule), so its offset wins. Loaded once, cached. */
-            await EnsureServerOffsetLoadedAsync();
-            ApplyServerOffsetToHelper();
+            await RefreshServerClockAsync();
+            ApplyServerClockToHelper();
 
             /* Refresh the toolbar freshness readout in the same pass (after the offset is applied so it renders
                in the active display mode). Non-critical chrome — its own try/catch keeps it off the load path. */
