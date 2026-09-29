@@ -641,7 +641,7 @@ public sealed class DropXeSessionsVerbTests
     [Fact]
     public void TheReadmeNamesEverySessionTheVerbDrops_InItsSectionAndInTheRemoveServerBullet()
     {
-        var readme = RepoFile.ReadRepoFileLf("Darling", "README.md");
+        var readme = RepoFile.ReadRepoFile("Darling", "README.md").Replace("\r\n", "\n", StringComparison.Ordinal);
 
         var start = readme.IndexOf("### Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
         Assert.True(start >= 0, "the README no longer has the --drop-xe-sessions section (#4732)");
