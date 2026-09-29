@@ -207,4 +207,17 @@ public sealed class PgPlanCaptureCsvUnitTests
         public override int GetValues(object[] values) => throw new NotSupportedException();
         public override bool NextResult() => false;
     }
+
+    [Fact]
+    public async Task APg13Record_With24Fields_HasNoQueryIdColumn_SoItYieldsAnOrphanRowNotAForgery()
+    {
+        const string BackendType = "\"client backend\"";
+        var pg13 = RealPlanRecord[..(RealPlanRecord.LastIndexOf(BackendType, System.StringComparison.Ordinal) + BackendType.Length)] + "\n";
+
+        var (rows, _) = await ReadAsync(CutHead + pg13);
+
+        var row = Assert.Single(rows);
+        Assert.Equal(0L, row.QueryId);
+        Assert.Equal(0.020, row.DurationMs);
+    }
 }

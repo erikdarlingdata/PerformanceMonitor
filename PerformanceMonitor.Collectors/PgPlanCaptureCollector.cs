@@ -189,7 +189,7 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
        PgLogEventsCollector reads for its own csvlog pair (#4053 part a1b). Opened on
        PgServerLogTail.TailCsvCteSql/TailCsvCteBinarySql instead of the stderr twins, this collector's own
        regexp_matches is dropped entirely: a csvlog record already carries the plan JSON quoted whole in
-       its own "message" field (see PgServerLogCsvParser's type header for the 26-column shape), so there
+       its own "message" field (see PgServerLogCsvParser's type header for the 24- and 26-column shapes), so there
        is no block to extract with SQL — ReadAsync gets the raw body and calls PgServerLogCsvParser.Parse
        itself, the same shape PgLogEventsCollector's csv branch takes. The marker arms carry
        PgNoCsvlogFileException.Marker, not PgNoStderrLogFileException.Marker, so the fault this route
@@ -439,11 +439,11 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
     /// entries the RDS log API handed it, rather than a second copy of the marker check, the LOG-severity
     /// gate, the query-id and duration guards and <see cref="PgPlanLogParser.FromBlock"/>. Internal, visible
     /// to the Darling service (that caller's assembly) and nothing else (#4053 c3 review).
-    /// <para><b>Precondition: csv-parser entries only.</b> The query id is read from the text after the LAST
-    /// comma of <see cref="PgLogEntry.RawText"/>. That is the unquoted <c>query_id</c> column only because
-    /// <see cref="PgServerLogCsvParser"/> admits a record only with exactly 26 fields. An entry from the stderr
-    /// assembler or the jsonlog parser carries raw line text, whose last comma can sit in client-written
-    /// message text, so a client could choose the query id. Never pass those entries here.</para>
+    /// <para><b>Precondition: csv-parser entries only.</b> The query id is <see cref="PgLogEntry.QueryIdText"/>,
+    /// which only <see cref="PgServerLogCsvParser"/> fills, from the record's own <c>query_id</c> column. It is null
+    /// on a 24-field PostgreSQL 13 record, which has no such column, and null on every entry from the stderr
+    /// assembler or the jsonlog parser too, so an entry from those would read as an unattributable capture. Never
+    /// pass those entries here.</para>
     /// <para>No foreign-zone filter, on either route: plan rows are stamped with the collection time, never a
     /// log timestamp, and the stderr plan routes never filtered either.</para>
     /// </summary>
@@ -510,11 +510,20 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
                csvlog carries no %Q-rendered prefix at all: the identity is PostgreSQL's own column. A
                query id that is not a real value — %Q renders 0 when compute_query_id is off, never an
                unparseable string — marks this record as one this collector cannot attribute. */
-            if (!long.TryParse(
-                    entry.RawText.Length > 0 ? QueryIdFromRawText(entry.RawText) : null,
-                    NumberStyles.Integer | NumberStyles.AllowLeadingSign,
-                    CultureInfo.InvariantCulture,
-                    out var queryId))
+            long queryId;
+
+            if (entry.QueryIdText is null)
+            {
+                /* #4709: a PostgreSQL 13 record has 24 fields and no query_id column at all, so the id is ABSENT, not
+                   forged. 0 is this collector's own "no attribution" value (see Row.QueryId): the capture is real and
+                   only unattributable, stored as an orphan the way a target that never configured %Q is. */
+                queryId = 0;
+            }
+            else if (!long.TryParse(
+                         entry.QueryIdText,
+                         NumberStyles.Integer | NumberStyles.AllowLeadingSign,
+                         CultureInfo.InvariantCulture,
+                         out queryId))
             {
                 forgedCaptures++;
                 continue;
@@ -542,19 +551,6 @@ WHERE " + PgServerLogTail.NoStderrLogFileMarkerSql;
         }
 
         return rows;
-    }
-
-    /// <summary>
-    /// Reads the <c>query_id</c> field — the last of the 26 csvlog columns (#4053 part b2) — straight off
-    /// the record's own raw text rather than re-splitting it through <c>PgServerLogCsvParser</c>'s private
-    /// field splitter, which <see cref="PgLogEntry"/> does not expose past field 19 (its own consumers never
-    /// needed the trailing columns). <c>query_id</c> is PostgreSQL's own bigint rendering — never quoted —
-    /// so it is the text after the LAST comma in the record.
-    /// </summary>
-    private static string? QueryIdFromRawText(string rawText)
-    {
-        var lastComma = rawText.LastIndexOf(',');
-        return lastComma < 0 ? null : rawText[(lastComma + 1)..].TrimEnd('\r', '\n');
     }
 
     public override async ValueTask<List<Row>> ReadAsync(DbDataReader reader, CollectorContext context, CancellationToken cancellationToken)
