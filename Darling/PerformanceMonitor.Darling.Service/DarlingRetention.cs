@@ -293,10 +293,36 @@ public static class DarlingRetention
     /// 300,000 constant; a live test can pass a small cap (e.g. 1,000) to exercise a multi-batch drain
     /// without seeding hundreds of thousands of rows.
     /// </param>
+    /// <param name="paceWal">
+    /// True paces the purge's WAL (#4823): each batch's WAL is measured and the purge waits, through a
+    /// <see cref="RetentionWalPacer"/>, so the WAL rate stays at half of what the store's own checkpoint
+    /// schedule absorbs. The daily sweep passes true. The default false is for the on-demand
+    /// <c>purge_now</c> command, which runs on the command loop and must return quickly, and for tests: it
+    /// never reads <c>pg_settings</c> and never waits.
+    /// </param>
     public static async Task<PurgeSummary> PurgeAsync(
         NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
         Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
-        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap)
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, bool paceWal = false)
+    {
+        /* One pacer per run, its rate read once from the store's own checkpoint settings before the first
+           table is touched. */
+        var walPacer = paceWal ? await RetentionWalPacer.CreateAsync(postgres, logger, cancellationToken) : null;
+
+        return await PurgeWithPacerAsync(
+            postgres, timescaleAvailable, logger, cancellationToken, retentionDaysFor, planContentRetentionDays,
+            livenessTouchedTablePruneRowCap, walPacer);
+    }
+
+    /// <summary>
+    /// The sweep behind <see cref="PurgeAsync"/>, with its <see cref="RetentionWalPacer"/> supplied instead of
+    /// built: null runs unpaced. Split out so a test can hand it a pacer with a tiny rate and a delay that
+    /// does not sleep (#4823's live test) while the public entry point keeps one simple switch.
+    /// </summary>
+    internal static async Task<PurgeSummary> PurgeWithPacerAsync(
+        NpgsqlDataSource postgres, bool timescaleAvailable, ILogger? logger, CancellationToken cancellationToken,
+        Func<string, int>? retentionDaysFor = null, int planContentRetentionDays = 0,
+        int livenessTouchedTablePruneRowCap = LivenessTouchedTablePruneRowCap, RetentionWalPacer? walPacer = null)
     {
         /* Clamp at the destructive sink, like retentionDaysFor's clamp below (review catch): the value
            arrives pre-clamped only when a store read succeeded and ApplyToConfig ran. On a
@@ -994,7 +1020,8 @@ public static class DarlingRetention
     /// Pure so the SUCCESS/WARNING branch and the message text are unit-testable without a live store.
     /// </summary>
     internal static (string Status, string Message) BuildRunRecordSummary(
-        int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed)
+        int tablesPurged, int totalRowsDeleted, int totalChunksDropped, int tablesFailed,
+        bool paced = false, long walBytes = 0, double pacedSeconds = 0)
     {
         var status = tablesFailed == 0 ? "SUCCESS" : "WARNING";
         var message = tablesFailed == 0
@@ -1568,6 +1595,24 @@ public static class DarlingRetention
     }
 
     /// <summary>
+    /// The drain loop with pacing (#4823): the executor also reports the WAL its batch wrote, and
+    /// <paramref name="pacer"/> waits after every batch. Inert until the next commit.
+    /// </summary>
+    internal static async Task<int> DrainBatchesAsync(
+        Func<CancellationToken, Task<(int Deleted, int Cap, long WalBytes)>> executeBatch,
+        RetentionWalPacer? pacer,
+        CancellationToken cancellationToken)
+    {
+        return await DrainBatchesAsync(
+            async ct =>
+            {
+                var (deleted, cap, _) = await executeBatch(ct);
+                return (deleted, cap);
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
     /// Floor for the plan dimension's adaptive batch cap (#4130): a batch that still times out at this cap
     /// stops being retried and fails the table for the day, exactly as every batch did before this fix. At
     /// the slowest rate the field failure measured (~330 rows/sec, see <see cref="PlanDimDeleteRowCap"/>'s
@@ -1594,7 +1639,9 @@ public static class DarlingRetention
     /// the 50k ceiling) never needs to shrink at all. Pure so the shrink/grow/hold arithmetic is testable
     /// without a timer or a store.
     /// </summary>
-    internal static int NextPlanDimBatchCap(int lastCap, double lastBatchSeconds, int floorCap, int ceilingCap)
+    internal static int NextPlanDimBatchCap(
+        int lastCap, double lastBatchSeconds, int floorCap, int ceilingCap,
+        long lastBatchWalBytes = 0, long walTargetBytes = 0)
     {
         if (lastBatchSeconds > PlanDimBatchTargetSeconds)
         {
