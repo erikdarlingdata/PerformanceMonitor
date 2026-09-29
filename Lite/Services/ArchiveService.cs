@@ -799,6 +799,7 @@ COPY (
            Each group gets its own DuckDB connection so memory is fully released between groups. */
         var totalMerged = 0;
         var totalRemoved = 0;
+        var viewRebuildFailures = 0;
 
         /* Spill directory for the in-memory compaction connections. Set per #935
            so DuckDB has somewhere to page if it chooses to. In practice (see #933)
@@ -893,16 +894,30 @@ COPY (
                    at once. Core, not CreateArchiveViewsAsync: this thread already holds the write lock and
                    the lock does not nest. Blocking on it is safe because DuckDB.NET's async calls complete
                    synchronously, so the thread that took the lock is the one that releases it. */
-                int removed;
                 using (_duckDb.AcquireWriteLock())
                 {
-                    removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
-                    AfterCompactionSwapForTests?.Invoke(table);
-                    _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
-                }
+                    var removed = SwapCompactionOutputs(month, table, sourcePaths, batchOutputs);
 
-                totalMerged++;
-                totalRemoved += removed;
+                    /* The group is compacted from here on: the merged files are in place and the inputs are gone.
+                       It counts now, so a rebuild that throws below is not reported as a compaction that failed. */
+                    totalMerged++;
+                    totalRemoved += removed;
+
+                    AfterCompactionSwapForTests?.Invoke(table);
+
+                    /* A failed rebuild is logged for what it is and does not reach the group's catch below, which
+                       is for a merge or a swap that failed. Both callers rebuild the views again in a finally when
+                       compaction ends, so the views are not left behind for good. */
+                    try
+                    {
+                        _duckDb.CreateArchiveViewsCoreAsync().GetAwaiter().GetResult();
+                    }
+                    catch (Exception rebuildEx)
+                    {
+                        viewRebuildFailures++;
+                        _logger?.LogError(rebuildEx, "Compacted {Month}/{Table} ({Count} files), but the archive views could not be rebuilt; they are rebuilt again when compaction ends", month, table, files.Count);
+                    }
+                }
 
                 if (batches.Count == 1)
                 {
@@ -929,8 +944,16 @@ COPY (
         if (totalMerged > 0)
         {
             var remaining = Directory.GetFiles(_archivePath, "*.parquet").Length;
-            _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining",
-                totalMerged, totalRemoved, remaining);
+            if (viewRebuildFailures > 0)
+            {
+                _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining, view rebuilds failed: {Failures}",
+                    totalMerged, totalRemoved, remaining, viewRebuildFailures);
+            }
+            else
+            {
+                _logger?.LogInformation("Parquet compaction complete: merged {Groups} groups, removed {Removed} files, {Remaining} files remaining",
+                    totalMerged, totalRemoved, remaining);
+            }
         }
     }
 
@@ -1435,9 +1458,10 @@ COPY (
 
             /* Compact per-cycle files into monthly parquet files, then refresh the views over the result.
                This runs after the reset rather than before it, so the files the marker above names still
-               exist under those names until the reset is through. It uses an in-memory DuckDB connection
-               and only touches files on disk, so it does not contend with the collectors now writing to
-               the fresh database. */
+               exist under those names until the reset is through. The merges run on an in-memory DuckDB
+               connection and only touch files on disk, so they do not contend with the collectors now
+               writing to the fresh database; each group's swap and view rebuild briefly hold the write
+               lock (#4720). */
             _logger?.LogInformation("Compacting parquet files into monthly archives");
             try
             {

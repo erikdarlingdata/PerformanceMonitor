@@ -2473,6 +2473,11 @@ public class DuckDbInitializer : IDisposable
         await CreateArchiveViewsCoreAsync();
     }
 
+    /* Test seam (#4720): invoked at the start of every archive-view rebuild, before the connection opens.
+       A test records IsWriteLockHeldForTests in it to see whether the rebuild holds the write lock, or throws
+       from it to stand in for a rebuild that fails. */
+    internal Action? OnArchiveViewRebuildForTests { get; set; }
+
     /// <summary>
     /// The lock-free body of <see cref="CreateArchiveViewsAsync"/> (#4262 round 1 finding 3), split out so
     /// a caller that already holds the write lock can call it directly rather than nesting a read lock —
@@ -2482,6 +2487,10 @@ public class DuckDbInitializer : IDisposable
     /// </summary>
     internal async Task CreateArchiveViewsCoreAsync()
     {
+        /* Runs before anything else, on the caller's thread: a test reads the lock state here, or throws to
+           stand in for a rebuild that fails (#4720). Production leaves it null. */
+        OnArchiveViewRebuildForTests?.Invoke();
+
         using var connection = CreateConnection();
         await connection.OpenAsync();
 

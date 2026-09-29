@@ -9,9 +9,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DuckDB.NET.Data;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitorLite.Database;
 using PerformanceMonitorLite.Services;
 using Xunit;
@@ -95,7 +97,7 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         await ExecAsync("DELETE FROM collection_log");
     }
 
-    private async Task<(DuckDbInitializer Initializer, ArchiveService Service)> SetUpAsync()
+    private async Task<(DuckDbInitializer Initializer, ArchiveService Service)> SetUpAsync(ILogger<ArchiveService>? logger = null)
     {
         var initializer = new DuckDbInitializer(_dbPath);
         await initializer.InitializeAsync();
@@ -109,7 +111,7 @@ INSERT INTO collection_log (log_id, server_id, server_name, collector_name, coll
 SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) MINUTE, 'SUCCESS' FROM range(100, 105) t(i)");
         await initializer.CreateArchiveViewsAsync();
 
-        var service = new ArchiveService(initializer, _archiveDir)
+        var service = new ArchiveService(initializer, _archiveDir, logger)
         {
             /* Every file its own batch: each group's output is two part files, which the views built above
                have no glob for yet. */
@@ -219,6 +221,70 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
         var (count, error) = ReadTheView(initializer);
         Assert.Null(error);
         Assert.Equal(TotalRows, count);
+    }
+
+    /// <summary>
+    /// A rebuild that throws after a group's swap finished must not turn that group into a failed one (#4720).
+    /// The group's files are compacted and its inputs are gone; the views are rebuilt again when compaction ends.
+    /// Before this the group's catch logged "Failed to compact" and left the group out of the totals, which read
+    /// as a compaction that had not happened. The rebuild fails once, at the first group and then at the second.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task AViewRebuildThatFailsAfterASwap_IsLoggedAsThat_AndTheGroupStillCounts(int failingRebuild)
+    {
+        var log = new CapturingLogger();
+        var (initializer, service) = await SetUpAsync(log);
+
+        var rebuilds = 0;
+        initializer.OnArchiveViewRebuildForTests = () =>
+        {
+            if (++rebuilds == failingRebuild)
+            {
+                throw new InvalidOperationException("simulated view rebuild failure");
+            }
+        };
+
+        service.CompactParquetFiles();
+
+        /* One rebuild per group, and both groups swapped: the two per-cycle files of each month are gone. */
+        Assert.Equal(2, rebuilds);
+        Assert.Empty(Directory.GetFiles(_archiveDir, "2026*_0*_collection_log.parquet"));
+
+        /* The failure is logged for what it is, once, and no group is reported as a compaction that failed. */
+        var errors = log.Entries.Where(e => e.Level == LogLevel.Error).ToList();
+        var error = Assert.Single(errors);
+        Assert.Contains("archive views could not be rebuilt", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(log.Entries, e => e.Message.Contains("Failed to compact", StringComparison.Ordinal));
+
+        /* Both groups count, and the summary line says how many rebuilds failed. */
+        var summary = Assert.Single(log.Entries, e => e.Message.StartsWith("Parquet compaction complete", StringComparison.Ordinal));
+        Assert.Contains("merged 2 groups, removed 4 files", summary.Message, StringComparison.Ordinal);
+        Assert.Contains("view rebuilds failed: 1", summary.Message, StringComparison.Ordinal);
+
+        /* The refresh the callers run in a finally after CompactParquetFiles rebuilds the views. */
+        await initializer.CreateArchiveViewsAsync();
+        var (count, readError) = ReadTheView(initializer);
+        Assert.Null(readError);
+        Assert.Equal(TotalRows, count);
+    }
+
+    /// <summary>
+    /// With no rebuild failing, the summary line is the one it always was: no count of failed rebuilds.
+    /// </summary>
+    [Fact]
+    public async Task WhenNoViewRebuildFails_TheSummaryLineHasNoFailureCount()
+    {
+        var log = new CapturingLogger();
+        var (_, service) = await SetUpAsync(log);
+
+        service.CompactParquetFiles();
+
+        Assert.DoesNotContain(log.Entries, e => e.Level == LogLevel.Error);
+        var summary = Assert.Single(log.Entries, e => e.Message.StartsWith("Parquet compaction complete", StringComparison.Ordinal));
+        Assert.Contains("merged 2 groups, removed 4 files", summary.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("rebuilds failed", summary.Message, StringComparison.Ordinal);
     }
 
     private string P(string fileName) => Path.Combine(_archiveDir, fileName).Replace("\\", "/");
@@ -360,5 +426,17 @@ SELECT i, 1, 'S1', 'wait_stats', TIMESTAMP '2026-09-01 00:00:00' + INTERVAL (i) 
 
         Assert.True(finished, "the replay waited for the write lock although there was no journal to replay");
         Assert.Equal(0, replays);
+    }
+
+    private sealed class CapturingLogger : ILogger<ArchiveService>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter) => Entries.Add((logLevel, formatter(state, exception)));
     }
 }
