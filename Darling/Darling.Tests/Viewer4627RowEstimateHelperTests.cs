@@ -228,7 +228,7 @@ public sealed class Viewer4627RowEstimateHelperTests
         Assert.Equal(8_042_010, RowEstimateHelper.GetExpectedRows(node6), 6);
     }
 
-    // ---- helpers ----------------------------------------------------------------------------------
+    // ---- test support ----------------------------------------------------------------------------------
 
     private static (PlanNode Nl, PlanNode Outer, PlanNode Inner) NestedLoops()
     {

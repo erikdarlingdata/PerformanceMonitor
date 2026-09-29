@@ -271,7 +271,7 @@ public partial class PlanViewerControl
             // which multiplies the estimate by ActualExecutions only on the inner side of a Nested Loops
             // join (a real loop count there) and leaves it alone everywhere else (a thread count there,
             // which would inflate the expectation by the DOP). The brush takes its ratio from the same
-            // helper, so an accurate operator is never orange at any DOP (#4627).
+            // RowEstimateHelper, so an accurate operator is never orange at any DOP (#4627).
             var accuracyRatio = RowEstimateHelper.GetRowAccuracyRatio(node);
             var rowBrush = (accuracyRatio < 0.1 || accuracyRatio > 10.0) ? CriticalOrangeBrush : fgBrush;
             stack.Children.Add(new TextBlock

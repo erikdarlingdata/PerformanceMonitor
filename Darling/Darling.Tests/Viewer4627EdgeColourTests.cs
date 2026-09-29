@@ -43,7 +43,8 @@ public sealed class Viewer4627EdgeColourTests
     /// <summary>
     /// An operator under Gather Streams that returned exactly the rows it was estimated to. Its
     /// ActualExecutions is the DOP, because each thread reports one execution. The old code divided by it:
-    /// 1/11 = 0.0909 is under the 0.1 floor, so DOP 11 and up drew Blue (and 1/128 = 0.0078 drew LightBlue).
+    /// 1/11 = 0.0909 is under the 0.1 floor, so DOP 11 and up drew Blue (1/128 = 0.0078 drew LightBlue and
+    /// 1/2000 = 0.0005 drew FluoBlue).
     /// DOP 2, 8 and 10 were inside the band under the old math too, so they pass either way: they mark where
     /// the bug starts, not what fixes it.
     /// </summary>
@@ -56,6 +57,7 @@ public sealed class Viewer4627EdgeColourTests
     [InlineData(32)]
     [InlineData(64)]
     [InlineData(128)]
+    [InlineData(2000)]
     public void ParallelZoneNode_ThatMetItsEstimate_IsNeutralAtAnyDop(int dop)
     {
         var scan = ScanUnderGather(dop, estimateRows: 1000, actualRows: 1000);
@@ -210,7 +212,7 @@ public sealed class Viewer4627EdgeColourTests
         Assert.Equal(PlanEdgeColourKey.FluoOrange, PlanEdgeColour.ForChild(node, Limit));
     }
 
-    // ---- the node overload is the numeric overload fed the helper's expected rows ---------------------
+    // ---- the node overload is the numeric overload fed RowEstimateHelper's expected rows ---------------------
 
     /// <summary>An estimated plan never gets an accuracy colour, whatever its numbers say.</summary>
     [Fact]
@@ -228,7 +230,7 @@ public sealed class Viewer4627EdgeColourTests
     /// way to turn a node into an "expected" figure, and the tiers only ever see that figure.
     /// </summary>
     [Fact]
-    public void NodeOverload_IsTheNumericOverloadFedTheHelpersExpectedRows_ForEveryFixtureNode()
+    public void NodeOverload_IsTheNumericOverloadFedRowEstimateHelperExpectedRows_ForEveryFixtureNode()
     {
         var fixtures = Directory.GetFiles(Path.Combine(AppContext.BaseDirectory, "Fixtures", "OriginPlans"), "*.sqlplan");
         Assert.True(fixtures.Length >= 5, "the origin plan fixtures did not reach the output directory");
@@ -244,7 +246,7 @@ public sealed class Viewer4627EdgeColourTests
                     var viaNumbers = PlanEdgeColour.ForChild(node.HasActualStats, node.ActualRows, RowEstimateHelper.GetExpectedRows(node), limit);
                     Assert.True(viaNode == viaNumbers,
                         $"{Path.GetFileName(fixture)} node {node.NodeId} at limit {limit}: the node overload gave {viaNode}, " +
-                        $"the numeric overload given the helper's expected rows gave {viaNumbers}.");
+                        $"the numeric overload given RowEstimateHelper's expected rows gave {viaNumbers}.");
                     checkedNodes++;
                 }
             }
@@ -281,7 +283,7 @@ public sealed class Viewer4627EdgeColourTests
             RowEstimateHelper.GetRowAccuracyRatio(node));
     }
 
-    // ---- helpers ------------------------------------------------------------------------------------
+    // ---- test support ------------------------------------------------------------------------------------
 
     private static void AssertNestedKeyIsNeutral(PlanNode node)
     {

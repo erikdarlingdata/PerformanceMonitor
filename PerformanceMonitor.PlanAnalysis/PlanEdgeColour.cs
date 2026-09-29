@@ -38,7 +38,7 @@ public enum PlanEdgeColourKey
 }
 
 /// <summary>
-/// Pure helper computing plan-edge color by the actual-vs-expected row-count ratio of the CHILD
+/// Pure logic computing plan-edge color by the actual-vs-expected row-count ratio of the CHILD
 /// operator feeding that edge (colors only actual plans; estimated plans keep the neutral default).
 /// "Expected" is <see cref="RowEstimateHelper.GetExpectedRows"/>, the same basis the analyzer's
 /// row-estimate rules use: the per-execution estimate times ActualExecutions on the inner side of a
