@@ -166,6 +166,9 @@ public sealed class PgLogBurstAndRotationLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenAsync(false, ct);
 
+        /* #4719: a burst on a file that already holds an earlier test's lines can cross log_rotation_size (10 MB by
+           default) in the middle of the burst; start from a fresh file so the test stays inside one file. */
+        await RotateAsync(connection, ct);
         var baseline = await DeadlockCycleAsync(connection, null, false, ct);
         var burst = Tag();
         var after = Tag();
@@ -190,6 +193,9 @@ public sealed class PgLogBurstAndRotationLiveTests
         var ct = TestContext.Current.CancellationToken;
         await using var connection = await OpenAsync(false, ct);
 
+        /* #4719: a burst on a file that already holds an earlier test's lines can cross log_rotation_size (10 MB by
+           default) in the middle of the burst; start from a fresh file so the test stays inside one file. */
+        await RotateAsync(connection, ct);
         var baseline = await DeadlockCycleAsync(connection, null, false, ct);
         var burst = Tag();
         var newest = Tag();
