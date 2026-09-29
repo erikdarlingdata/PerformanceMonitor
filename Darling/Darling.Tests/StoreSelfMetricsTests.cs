@@ -639,6 +639,42 @@ public sealed class StoreSelfMetricsTests
         Assert.Equal("background_job", StoreSelfMetrics.BackgroundJobObjectKind);
     }
 
+    /// <summary>
+    /// #4834: the hour's longest single checkpoint sync rides on the checkpointer row, written by BOTH arms of the
+    /// insert (17+ and the pre-17 bgwriter shape) from the sweep's two parameters, with the types stated because a
+    /// parameter in a SELECT list is otherwise inferred as text.
+    /// </summary>
+    [Theory]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerInsertSql))]
+    [InlineData(nameof(StoreSelfMetrics.CheckpointerBgwriterInsertSql))]
+    public void TheCheckpointerInsertSql_WritesTheHoursLongestSync_FromParametersTwoAndThree(string sqlName)
+    {
+        var sql = ((string)typeof(StoreSelfMetrics)
+            .GetField(sqlName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!
+            .GetValue(null)!).Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        Assert.Contains("checkpoints_timed, checkpoint_longest_sync_ms, checkpoint_longest_sync_at)", sql, StringComparison.Ordinal);
+        Assert.Contains("$2::bigint,\n    $3::timestamp\nFROM ", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("$4", sql, StringComparison.Ordinal);
+    }
+
+    /// <summary>Every other kind leaves the two columns NULL: no other statement the sweep runs names them.</summary>
+    [Fact]
+    public void NoOtherKindsInsert_NamesTheLongestSyncColumns()
+    {
+        var others = typeof(StoreSelfMetrics)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string) && f.Name.EndsWith("Sql", StringComparison.Ordinal))
+            .Where(f => f.Name is not nameof(StoreSelfMetrics.CheckpointerInsertSql) and not nameof(StoreSelfMetrics.CheckpointerBgwriterInsertSql))
+            .Select(f => (f.Name, Sql: (string)f.GetRawConstantValue()!))
+            .ToList();
+
+        Assert.True(others.Count >= 10, "the census of the sweep's statements found too few to mean anything");
+        Assert.All(others, o => Assert.False(
+            o.Sql.Contains("checkpoint_longest_sync", StringComparison.Ordinal),
+            $"{o.Name} names the checkpointer's longest-sync columns, but only the checkpointer row carries them"));
+    }
+
     [Theory]
     [InlineData(nameof(StoreSelfMetrics.HypertableInsertSql))]
     [InlineData(nameof(StoreSelfMetrics.ContinuousAggregateInsertSql))]
@@ -713,7 +749,7 @@ public sealed class StoreSelfMetricsTests
         await TimescaleSupport.ApplyCompressionPolicyAsync(connection, null, ct);
 
         var written = await StoreSelfMetrics.SweepAsync(
-            connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+            connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
         Assert.True(written > 0, "the sweep wrote nothing");
 
         /* One table row per name TableInsertSql carries — the same source the census test
@@ -874,7 +910,7 @@ FROM collect.store_metrics", connection);
         }
 
         var secondSweepAt = DateTime.UtcNow.AddSeconds(2);
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, secondSweepAt, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, secondSweepAt, null, null, null, ct);
 
         var second = await PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.GetCheckpointerAsync(dataSource, ct);
         Assert.Equal(PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.CheckpointerDeltaStatus.Observed, second.Status);
@@ -885,6 +921,14 @@ FROM collect.store_metrics", connection);
         Assert.True(second.Requested is >= 1, $"the forced CHECKPOINT must land in the interval's requested count, not {second.Requested}");
         Assert.Equal(first.CumulativeRequested + second.Requested, second.CumulativeRequested);
         Assert.True(second.IsPressure, "one requested checkpoint in the interval IS the pressure arm");
+
+        /* #4823: the one-column sync-time read the once-a-minute sampler takes, through the shipped statement for this
+           server's major. A value in the same milliseconds the hourly row stores, and never behind the row the sweep
+           just wrote from the same cumulative counter. */
+        var sampledSyncMs = await StoreSelfMetrics.ReadCheckpointerSyncTimeMsAsync(connection, ct);
+        Assert.NotNull(sampledSyncMs);
+        Assert.True(sampledSyncMs >= second.CumulativeSyncMs,
+            $"the sampled sync time {sampledSyncMs} ms cannot be behind the {second.CumulativeSyncMs} ms the sweep stored from the same counter");
 
         /* #4619: the existence check, through the shipped SQL, over the names THIS SWEEP WROTE. Every one must
            resolve back to its object: a kind whose lookup drifted from the sweep's name form (the job name, a
@@ -975,7 +1019,7 @@ LIMIT 1", connection))
         await ExecAsync(connection, $"DROP MATERIALIZED VIEW collect.{retiredView} CASCADE", ct);
 
         var thirdSweepAt = secondSweepAt.AddSeconds(2);
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, thirdSweepAt, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, thirdSweepAt, null, null, null, ct);
 
         async Task<PerformanceMonitor.Darling.Service.Mcp.DarlingStoreMetricsReader.InventoryReconciliation> InventoryNowAsync()
         {
@@ -1110,7 +1154,7 @@ SELECT
         }
 
         /* The sweep. On 2.29+ before #3918 this threw 42703 from the catch-all statement. */
-        var written = await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+        var written = await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
         Assert.True(written > 0, "the sweep wrote nothing");
 
         await using (var identity = new NpgsqlCommand($@"
@@ -1307,7 +1351,7 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
                 $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
         }
 
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow, null, null, null, ct);
 
         /* 10x: one closed chunk, 500k rows. */
         await SeedTickRowsAsync(connection, Table, daysBack: 8, rows: 500_000, ct);
@@ -1325,7 +1369,7 @@ AND   (proc_name LIKE '%compression%' OR proc_name LIKE '%columnstore%')", conne
                 $"\n  what the job did: {await DescribeJobWorkAsync(connection, Table, jobId, ct)}");
         }
 
-        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, ct);
+        await StoreSelfMetrics.SweepAsync(connection, timescaleAvailable: true, DateTime.UtcNow.AddSeconds(2), null, null, null, ct);
 
         /* 1. The escalation is REAL WORK at two different scales — asserted on rows and chunks, which are
            exact, instead of on the two durations, which are a benchmark of somebody else's compression

@@ -255,6 +255,49 @@ ALTER TABLE collect.query_store_stats ADD COLUMN IF NOT EXISTS interval_end_time
 ALTER TABLE collect.query_store_interval_wide ADD COLUMN IF NOT EXISTS interval_end_time_utc timestamp;
 CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
 
+    /// <summary>
+    /// V156 (#4834) — the hour's LONGEST single checkpoint sync on the store's own checkpointer row: two nullable
+    /// columns on <c>collect.store_metrics</c>, <c>checkpoint_longest_sync_ms</c> (<c>bigint</c>) and
+    /// <c>checkpoint_longest_sync_at</c> (<c>timestamp</c>, naive UTC — the sample that saw it, so the minute the
+    /// checkpoint had finished by). No new table, no new hypertable (<c>TimescaleSupport.HypertableCount</c> stays
+    /// 72), no DEFAULT, no backfill, no passthrough refresh, and <b>no Lite twin</b>: Lite stores no
+    /// <c>store_metrics</c>.
+    ///
+    /// <para><b>The gap this closes.</b> Before this rung the hourly checkpointer row held only cumulative counters.
+    /// The pressure rule (<c>CheckpointerReading.IsPressure</c>, read by <c>get_store_metrics</c> and by the Store
+    /// Checkpointer Pressure self-alert through the same reader) differenced the two newest rows to the interval's
+    /// total sync time and averaged it over the checkpoints the interval held (V140, #4037), so the alert and the tool
+    /// agreed, and both were blind to the maximum. An average spreads one long sync over the interval's short ones:
+    /// one 23.5 s sync among four checkpoints averages 5.9 s, under the 10 s bar, so an hour in which a single sync
+    /// stalled every reader read as "no pressure". The worker now samples the checkpointer's cumulative sync time
+    /// once a minute (#4823); this rung stores the largest difference that sample saw in the hour on the row the
+    /// hour's other checkpointer facts already live on, where the tool, the alert and any raw read see the same
+    /// value.</para>
+    ///
+    /// <para><b>Filled on the <c>object_kind = 'checkpointer'</c> row only</b>, NULL on every other kind by the
+    /// table's per-kind convention (V137, V139, V140). NULL on that row too when the sampler took no difference in
+    /// the hour (a service just started, or every read of the window failed): NULL is "no evidence", which the
+    /// reader judges exactly as it judged the row before this rung existed, never as a zero. <c>store_metrics</c> is a
+    /// PLAIN table and must stay one (the sweep's own retention DELETE assumes it), so a nullable, default-less
+    /// <c>ADD COLUMN</c> rewrites nothing; on a compressed hypertable it is the same catalog-only shape V127/V128/V133
+    /// /V137/V138/V139 used, but this rung touches none. It has no <c>v_</c> passthrough (V53; and
+    /// <c>PgSchemaGenerator.AllPassthroughViews</c> agrees), so the V14 frozen-column-list problem cannot arise, and
+    /// it is not a collector table, so no generator walks it and the columns live in this ALTER alone. The stamp is
+    /// written from a naive-UTC parameter, never a bare cast that would render in the session's zone.</para>
+    ///
+    /// <para><b>What this rung deliberately does NOT do.</b> It does not backfill: rows written before it cannot
+    /// know what the sampler saw. It adds no alert, knob or Viewer column. The reader's pressure rule and the tool's
+    /// block change in the same commit, but both are reads of these two columns, not schema.</para>
+    /// </summary>
+    private const string V156Sql = @"
+/* store_metrics is a plain table with no v_ passthrough (V53). Filled on the object_kind = 'checkpointer' row only,
+   NULL on every other kind by the table's per-kind convention, and NULL there too when the sampler took no
+   difference in the hour. Nullable, no DEFAULT, no backfill: a pre-rung row cannot know what the sampler saw, and
+   NULL is what the reader judges as no evidence. The stamp is naive UTC. */
+ALTER TABLE collect.store_metrics
+    ADD COLUMN IF NOT EXISTS checkpoint_longest_sync_ms bigint,
+    ADD COLUMN IF NOT EXISTS checkpoint_longest_sync_at timestamp;";
+
     public static IReadOnlyList<Migration> Scripts { get; } = new[]
     {
         new Migration(1, "collector-tables", PgSchemaGenerator.GenerateFullSchema()),
@@ -448,6 +491,7 @@ CREATE OR REPLACE VIEW v_query_store_stats AS SELECT * FROM query_store_stats;";
         new Migration(153, "interval-tables-first-exec-index", V153Sql),
         new Migration(154, "interval-tables-wide-first-exec-index", V154Sql),
         new Migration(155, "query-store-interval-end", V155Sql),
+        new Migration(156, "checkpoint-longest-sync", V156Sql),
     };
 
     /// <summary>

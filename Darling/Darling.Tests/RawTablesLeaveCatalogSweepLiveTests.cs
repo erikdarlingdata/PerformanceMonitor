@@ -318,9 +318,9 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
 
             var report = await DarlingWorker.BuildRawTablePurgeNowReportAsync(connection, customRetentionDays: 1, passStartUtc, null, default);
 
-            var rawEntry = Assert.Single(report, entry => (string)entry.GetType().GetProperty("relation")!.GetValue(entry)! == Raw);
-            var outcome = (string)rawEntry.GetType().GetProperty("outcome")!.GetValue(rawEntry)!;
-            var note = (string)rawEntry.GetType().GetProperty("note")!.GetValue(rawEntry)!;
+            var rawEntry = Assert.Single(report, entry => entry.Relation == Raw);
+            var outcome = rawEntry.Outcome;
+            var note = rawEntry.Note;
 
             /* THE PIN: the trigger held on the interior hole, and the report says so plainly, plus the
                custom-retention (1 day, shorter than the 4-day gated horizon) note. */
@@ -456,9 +456,9 @@ FROM generate_series(2, 20) AS n", connection) { CommandTimeout = SetupTimeoutSe
 
             var report = await DarlingWorker.BuildRawTablePurgeNowReportAsync(connection, customRetentionDays: null, passStartUtc, null, default);
 
-            var rawEntry = Assert.Single(report, entry => (string)entry.GetType().GetProperty("relation")!.GetValue(entry)! == Raw);
-            var outcome = (string)rawEntry.GetType().GetProperty("outcome")!.GetValue(rawEntry)!;
-            var note = (string)rawEntry.GetType().GetProperty("note")!.GetValue(rawEntry)!;
+            var rawEntry = Assert.Single(report, entry => entry.Relation == Raw);
+            var outcome = rawEntry.Outcome;
+            var note = rawEntry.Note;
 
             /* THE PIN: a real, freshly-written 'ran' record exists, but it predates passStartUtc, so it must
                not be reported as this pass's outcome. */

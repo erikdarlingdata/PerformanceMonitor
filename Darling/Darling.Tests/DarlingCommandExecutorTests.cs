@@ -81,8 +81,8 @@ public sealed class DarlingCommandExecutorTests
         {
             WasCalled = true;
             ReceivedCustomRetentionDays = customRetentionDays;
-            return Task.FromResult(new CommandOutcome(true, "purge complete",
-                "{\"success\":true,\"tablesPurged\":3,\"rowsPurged\":42}"));
+            return Task.FromResult(new CommandOutcome(true, "purge started",
+                "{\"success\":true,\"started\":true,\"customRetentionDays\":null}"));
         }
 
         public Task<CommandOutcome> FetchPlanAsync(int serverId, PlanFetchRequest request, CancellationToken cancellationToken)
