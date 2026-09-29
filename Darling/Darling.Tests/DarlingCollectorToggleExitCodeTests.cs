@@ -61,10 +61,23 @@ public sealed class DarlingCollectorToggleExitCodeTests
     private static string ConnectionString(int port) =>
         $"Host=127.0.0.1;Port={port};Username=darling;Password=x;Database=darlingtest;Timeout=5;SSL Mode=Disable";
 
+    /// <summary>A string Npgsql cannot parse: it does not know this <c>sslmode</c>.</summary>
+    private const string MalformedConnectionString =
+        "Host=127.0.0.1;Port=5432;Username=darling;Password=x;Database=darlingtest;sslmode=NotARealSslMode";
+
     private static string WriteConfig(DirectoryInfo root, string postgresBlock)
     {
         var path = Path.Combine(root.FullName, "darling.json");
         File.WriteAllText(path, "{ \"postgres\": " + postgresBlock + " }");
+        return path;
+    }
+
+    /// <summary>The config <c>--check-settings</c> needs: the collector verbs read only the store section, but
+    /// <c>--check-settings</c> validates the whole file first, which wants a server.</summary>
+    private static string WriteConfigWithAServer(DirectoryInfo root, string postgresBlock)
+    {
+        var path = Path.Combine(root.FullName, "darling.json");
+        File.WriteAllText(path, "{ \"postgres\": " + postgresBlock + ", \"servers\": [ { \"name\": \"SQL2022\", \"host\": \"SQL2022\" } ] }");
         return path;
     }
 
@@ -176,6 +189,107 @@ public sealed class DarlingCollectorToggleExitCodeTests
 
             Assert.Equal(UsageOrConfig, exit);
             Assert.NotEqual(string.Empty, error);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>A connection string Npgsql cannot parse (an <c>sslmode</c> it does not know) is a problem with the
+    /// setting, not a store that could not be reached and not a crash: the verb names the setting and exits with the
+    /// usage-or-config code, instead of letting the parse error escape as an unhandled exception.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ConnectionStringThatDoesNotParse_ExitsWithTheUsageCode(bool enable)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-toggle-4744-badconn-");
+        try
+        {
+            var path = WriteConfig(root, PostgresBlock(MalformedConnectionString));
+
+            var (exit, _, error) = await RunAsync(enable, "wait_stats", "--config", path);
+
+            Assert.Equal(UsageOrConfig, exit);
+            Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>A managed store whose credential file is there but cannot be unprotected is the same kind of
+    /// problem: the file is the setting, and it exits with the usage-or-config code rather than throwing. (Only
+    /// Windows reads the credential, so only there is there anything to fail.)</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ManagedStoreWithACredentialThatCannotBeRead_ExitsWithTheUsageCode(bool enable)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The managed store credential is DPAPI, so only Windows reads it.");
+        var root = Directory.CreateTempSubdirectory("darling-toggle-4744-badcred-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            File.WriteAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory), "this is not a protected credential");
+            var path = WriteConfig(root,
+                "{ \"managed\": true, \"port\": " + GetClosedPort() + ", \"dataDirectory\": " + JsonSerializer.Serialize(dataDirectory) + " }");
+
+            var (exit, _, error) = await RunAsync(enable, "wait_stats", "--config", path);
+
+            Assert.Equal(UsageOrConfig, exit);
+            Assert.Contains("postgres.connectionString could not be used:", error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary><c>--check-settings</c> builds its connection the same way, so it had the same gap: a connection
+    /// string that does not parse now exits with its config code, not an unhandled exception.</summary>
+    [Fact]
+    public async Task CheckSettings_WithAConnectionStringThatDoesNotParse_ExitsWithTheConfigCode()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-checksettings-4744-badconn-");
+        try
+        {
+            var path = WriteConfigWithAServer(root, PostgresBlock(MalformedConnectionString));
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.CheckSettingsAsync(path, json: false, output, error, CancellationToken.None);
+
+            Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.ConfigError, exit);
+            Assert.Contains("postgres.connectionString could not be used:", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    /// <summary>And <c>--check-settings</c> with a managed credential file that cannot be unprotected.</summary>
+    [Fact]
+    public async Task CheckSettings_WithACredentialThatCannotBeRead_ExitsWithTheConfigCode()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "The managed store credential is DPAPI, so only Windows reads it.");
+        var root = Directory.CreateTempSubdirectory("darling-checksettings-4744-badcred-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            File.WriteAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory), "this is not a protected credential");
+            var path = WriteConfigWithAServer(root,
+                "{ \"managed\": true, \"port\": " + GetClosedPort() + ", \"dataDirectory\": " + JsonSerializer.Serialize(dataDirectory) + " }");
+            var output = new StringWriter();
+            var error = new StringWriter();
+
+            var exit = await DarlingCliCommands.CheckSettingsAsync(path, json: false, output, error, CancellationToken.None);
+
+            Assert.Equal(DarlingCliCommands.CheckSettingsExitCode.ConfigError, exit);
+            Assert.Contains("postgres.connectionString could not be used:", error.ToString(), StringComparison.Ordinal);
         }
         finally
         {
