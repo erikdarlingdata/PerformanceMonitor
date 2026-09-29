@@ -461,7 +461,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
 
         /* NULLS LAST is belt-and-braces on the ranked arm: a NULL duration_ms cannot satisfy the floor, so no
            unmeasured run reaches it. Written anyway because DESC sorts NULLs first, so decoupling the filter
@@ -563,7 +563,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         var ordering = minDurationMs is null
             ? "ORDER BY collection_time DESC, duration_ms DESC NULLS LAST"

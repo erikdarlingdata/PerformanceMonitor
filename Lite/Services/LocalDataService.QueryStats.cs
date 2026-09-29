@@ -45,7 +45,7 @@ WHERE d.name = @database_name;", connection);
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -105,7 +105,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 7, out var dbValues);
 
         command.CommandText = @"
@@ -425,7 +425,7 @@ FULL OUTER JOIN baseline_period b
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -555,7 +555,7 @@ ORDER BY collection_time";
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         command.CommandText = @"
 SELECT
     collection_time,
@@ -847,7 +847,7 @@ OPTION(RECOMPILE);',
     {
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = @"
@@ -902,7 +902,7 @@ ORDER BY bucket";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 6, out var dbValues);
 
         command.CommandText = @"
@@ -1189,7 +1189,7 @@ LEFT JOIN LATERAL (
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
@@ -1359,7 +1359,7 @@ LIMIT 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
         var widthParamIndex = 4 + dbValues.Count;
         var bucketMinutes = AutoChartBucketMinutes(startTime, endTime);
@@ -1498,7 +1498,7 @@ ORDER BY 1";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc: null);
         var metricExpr = GetMetricColumn(metric);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 

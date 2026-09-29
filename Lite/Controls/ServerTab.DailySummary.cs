@@ -66,20 +66,18 @@ public partial class ServerTab : UserControl
     /// This reuses the exact mechanism the per-chart drills use — <see cref="SetDrillDownTimeRange"/> sets the
     /// toolbar's custom window, the tab switches run under <see cref="_suppressActiveQueriesAutoRefresh"/> (so
     /// the tab-switch auto-refresh doesn't race the targeted read), then the standard per-sub-tab refresh
-    /// loads that grid over the window. The calendar buckets days in UTC; the reads take server time, so the
-    /// UTC day is shifted by the server offset (mirroring <see cref="GetTimeRange"/>'s inverse).
+    /// loads that grid over the window. The calendar buckets days in UTC and the reads take UTC (#4766), so the
+    /// UTC day goes through as it is.
     /// </summary>
     private async void DailyCalendar_DayDrillRequested(object? sender, PerformanceCalendarDrillEventArgs e)
     {
         try
         {
             var (startUtc, endUtc) = DailyHealthBandCalculator.DayWindowUtc(e.Date);
-            var fromServer = ServerTimeHelper.ToServerTime(startUtc);
-            var toServer = ServerTimeHelper.ToServerTime(endUtc);
 
             // Scope the toolbar to the whole day so the grid the user lands on — and anywhere they navigate
             // next — stays on that day (SetDrillDownTimeRange switches to Custom without triggering a reload).
-            SetDrillDownTimeRange(fromServer, toServer);
+            SetDrillDownTimeRange(startUtc, endUtc);
 
             _suppressActiveQueriesAutoRefresh = true;
             try
@@ -106,7 +104,7 @@ public partial class ServerTab : UserControl
             }
 
             // One targeted load of the tab we just switched to, over the day window (grid + slicer + comparison).
-            await RefreshVisibleTabAsync(GetHoursBack(), fromServer, toServer, subTabOnly: true);
+            await RefreshVisibleTabAsync(GetHoursBack(), startUtc, endUtc, subTabOnly: true);
         }
         catch (Exception ex)
         {

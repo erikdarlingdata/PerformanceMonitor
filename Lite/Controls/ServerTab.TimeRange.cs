@@ -87,29 +87,101 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
-    /// Gets the UTC time range for slicer display, matching GetTimeRange in LocalDataService: a custom range's
-    /// server-local bounds each convert to UTC through the active server's clock
-    /// (<see cref="ServerTimeHelper.ServerTimeToUtc"/>), so each bound uses the offset in force at its own date
-    /// and a range across a daylight saving change is right at both ends (#4766). The pickers behind those
-    /// bounds converted through the selected server's clock too (<c>GetCurrentWindow</c>), so the pair cancels
-    /// in the UTC and Local time display modes. A preset window is the last <paramref name="hoursBack"/> hours
-    /// up to now, in UTC.
+    /// The custom range this tab holds (#4766): two naive-UTC instants, or nothing until one is chosen. The pickers on
+    /// the toolbar are a rendering of it in the display zone (<see cref="RenderCustomRange"/>), not the state: every
+    /// read, slicer, drill and chart window takes its instants from here (<see cref="GetCurrentWindowUtc"/>), and only
+    /// a change the user makes to a picker parses text back into an instant (<see cref="CaptureCustomRangeEdit"/>).
+    /// A display-mode switch therefore changes the text on the pickers and nothing else, and a range in the hour that
+    /// repeats after a fall-back keeps the occurrence it was made for.
     /// </summary>
-    private static (DateTime start, DateTime end) GetSlicerTimeRange(
-        int hoursBack, DateTime? fromDate, DateTime? toDate)
-    {
-        if (fromDate.HasValue && toDate.HasValue)
-        {
-            var startUtc = ServerTimeHelper.ServerTimeToUtc(fromDate.Value);
-            var endUtc = ServerTimeHelper.ServerTimeToUtc(toDate.Value);
-            return (startUtc, endUtc);
-        }
+    private readonly CustomRangeState _customRange = new();
 
-        return (DateTime.UtcNow.AddHours(-hoursBack), DateTime.UtcNow);
+    /// <summary>True while the pickers are written from <see cref="_customRange"/>, so those writes are not read as the user typing.</summary>
+    private bool _renderingCustomRange;
+
+    /// <summary>
+    /// The zone the pickers show and are read in for <paramref name="mode"/>: UTC, this machine's zone, or the tab's OWN
+    /// server clock (<paramref name="tabClock"/>, not the selected tab's, so a tab that is not the selected one keeps
+    /// its own server's zone; a server with no collected clock keeps the fixed offset the connect probe read).
+    /// </summary>
+    internal static TimeZoneInfo PickerZone(TimeDisplayMode mode, ServerClock tabClock) => mode switch
+    {
+        TimeDisplayMode.UTC => TimeZoneInfo.Utc,
+        TimeDisplayMode.LocalTime => TimeZoneInfo.Local,
+        _ => tabClock.AsTimeZone()
+    };
+
+    /// <summary>
+    /// The window a refresh reads, as (hoursBack, fromUtc, toUtc): the held custom range when a custom range is
+    /// selected and one is held, else the preset with no bounds. Pure, so a test drives it without the control.
+    /// </summary>
+    internal static (int hoursBack, DateTime? fromUtc, DateTime? toUtc) CurrentWindowUtc(
+        int hoursBack, bool customSelected, CustomRangeState held) =>
+        customSelected && held.IsCustom ? (hoursBack, held.FromUtc, held.ToUtc) : (hoursBack, null, null);
+
+    private TimeZoneInfo GetPickerZone() => PickerZone(ServerTimeHelper.CurrentDisplayMode, _serverClock);
+
+    private bool IsFromPicker(object? sender) =>
+        ReferenceEquals(sender, FromDatePicker) || ReferenceEquals(sender, FromHourCombo) || ReferenceEquals(sender, FromMinuteCombo);
+
+    /// <summary>
+    /// A typed edit (#4766): the picker the user changed is read as a wall clock in the display zone and becomes that
+    /// side of the held range; the other side keeps its exact instant. With nothing held yet (the pickers were filled
+    /// before any edit) both pickers are read once and the pair is held. Reads the pickers, so it is the only place
+    /// their text is parsed.
+    /// </summary>
+    private void CaptureCustomRangeEdit(object? sender)
+    {
+        var fromWall = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
+        var toWall = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
+        var zone = GetPickerZone();
+        if (_customRange.IsCustom)
+        {
+            var fromSide = IsFromPicker(sender);
+            var wall = fromSide ? fromWall : toWall;
+            if (wall.HasValue)
+            {
+                _customRange.ApplyEdit(wall.Value, fromSide ? BoundSide.From : BoundSide.To, zone);
+            }
+        }
+        else if (fromWall.HasValue && toWall.HasValue)
+        {
+            _customRange.Set(
+                DisplayZone.ToUtcBound(fromWall.Value, zone, BoundSide.From),
+                DisplayZone.ToUtcBound(toWall.Value, zone, BoundSide.To));
+        }
     }
 
     /// <summary>
-    /// The chart axis window in server-local time (#4766): the custom range when one is set, else the last
+    /// Shows the held range on the pickers in the display zone (#4766). Each bound is rendered as its own instant, so a
+    /// switch of zone changes only the text; nothing is parsed back. The picker minutes step in quarter hours, so an
+    /// instant between two steps shows the step below it while the held instant stays exact.
+    /// </summary>
+    private void RenderCustomRange()
+    {
+        if (_customRange.Render(GetPickerZone()) is not { } shown)
+        {
+            return;
+        }
+
+        _renderingCustomRange = true;
+        try
+        {
+            FromDatePicker.SelectedDate = shown.From.Date;
+            FromHourCombo.SelectedIndex = shown.From.Hour;
+            FromMinuteCombo.SelectedIndex = shown.From.Minute / 15;
+            ToDatePicker.SelectedDate = shown.To.Date;
+            ToHourCombo.SelectedIndex = shown.To.Hour;
+            ToMinuteCombo.SelectedIndex = shown.To.Minute / 15;
+        }
+        finally
+        {
+            _renderingCustomRange = false;
+        }
+    }
+
+    /// <summary>
+    /// The chart axis window in server-local time (#4766), from the UTC window the reads take: the custom range when one is set, else the last
     /// <paramref name="hoursBack"/> real hours ending now. The axis spans the same real hours the reads fetch, so
     /// across a daylight saving change its start is the server-local time of the instant <paramref name="hoursBack"/>
     /// hours before now, not the server-local now minus <paramref name="hoursBack"/> of wall clock, which starts an
@@ -264,39 +336,14 @@ public partial class ServerTab : UserControl
         };
         if (mode == ServerTimeHelper.CurrentDisplayMode) return;
 
-        // Re-convert custom range pickers from old display mode to new.
-        // Suppress refreshes while updating pickers to avoid cascading queries.
-        var oldMode = ServerTimeHelper.CurrentDisplayMode;
+        /* The held range is two instants (#4766), so a switch of display zone re-renders the same pair in the new
+           zone and parses nothing back: a range in the repeated hour, or one the pickers cannot spell exactly,
+           returns to exactly the instants it held. Suppress refreshes while updating pickers to avoid cascading queries. */
         _isRefreshing = true;
         try
         {
-            if (IsCustomRange)
-            {
-                var fromPicker = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-                var toPicker = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-                if (fromPicker.HasValue && toPicker.HasValue)
-                {
-                    var fromServer = ServerTimeHelper.DisplayTimeToServerTime(fromPicker.Value, oldMode);
-                    var toServer = ServerTimeHelper.DisplayTimeToServerTime(toPicker.Value, oldMode);
-                    ServerTimeHelper.CurrentDisplayMode = mode;
-                    var fromNew = ServerTimeHelper.ConvertForDisplay(fromServer, mode);
-                    var toNew = ServerTimeHelper.ConvertForDisplay(toServer, mode);
-                    FromDatePicker.SelectedDate = fromNew.Date;
-                    FromHourCombo.SelectedIndex = fromNew.Hour;
-                    FromMinuteCombo.SelectedIndex = fromNew.Minute / 15;
-                    ToDatePicker.SelectedDate = toNew.Date;
-                    ToHourCombo.SelectedIndex = toNew.Hour;
-                    ToMinuteCombo.SelectedIndex = toNew.Minute / 15;
-                }
-                else
-                {
-                    ServerTimeHelper.CurrentDisplayMode = mode;
-                }
-            }
-            else
-            {
-                ServerTimeHelper.CurrentDisplayMode = mode;
-            }
+            ServerTimeHelper.CurrentDisplayMode = mode;
+            RenderCustomRange();
         }
         finally
         {
@@ -416,7 +463,9 @@ public partial class ServerTab : UserControl
 
     private async void CustomDateRange_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || _isRefreshing) return;
+        if (!IsLoaded || _renderingCustomRange) return;
+        CaptureCustomRangeEdit(sender);
+        if (_isRefreshing) return;
         if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
         {
             await RefreshAllDataAsync();
@@ -425,7 +474,9 @@ public partial class ServerTab : UserControl
 
     private async void CustomTimeCombo_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || _isRefreshing) return;
+        if (!IsLoaded || _renderingCustomRange) return;
+        CaptureCustomRangeEdit(sender);
+        if (_isRefreshing) return;
         /* Only refresh if we have valid dates selected */
         if (FromDatePicker?.SelectedDate != null && ToDatePicker?.SelectedDate != null)
         {

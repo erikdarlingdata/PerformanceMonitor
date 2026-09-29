@@ -33,7 +33,7 @@ public partial class LocalDataService
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc, SelectedServerTabServerClock);
+        var (startTime, endTime) = GetTimeRange(hoursBack, fromDate, toDate, asOfUtc);
         var dbClause = BuildDbInClause(databaseNames, "database_name", 4, out var dbValues);
 
         command.CommandText = LongQueryCompletionsSelect + @"
@@ -66,7 +66,7 @@ LIMIT 200";
         using var connection = await OpenConnectionAsync();
         using var command = connection.CreateCommand();
 
-        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc, serverClock: ServerClock.Utc);
+        var (startTime, endTime) = GetTimeRange(hoursBack, null, null, asOfUtc);
 
         command.CommandText = LongQueryCompletionsSelect + @"
 FROM v_long_query_completions

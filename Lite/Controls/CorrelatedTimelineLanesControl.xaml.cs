@@ -122,47 +122,36 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     }
 
     /// <summary>
-    /// #4296: the server-local "current window" the ghost-line comparison is built from and aligned to.
-    /// Under a custom range, fromDate/toDate already are server-local (ServerTab's pickers convert them
-    /// before calling RefreshOverviewAsync). Under a preset range (fromDate/toDate both null), this is the
-    /// server's own local now -- serverClock.ToServerLocal(utcNow), i.e. ServerTimeHelper.ToServerTime(
-    /// utcNow) without touching that class's ambient static state -- NOT a raw UTC now: the correlated
-    /// lanes' reads (GetCpuUtilizationAsync, GetTotalWaitTrendAsync, etc.) treat a supplied fromDate/toDate
-    /// as SERVER-LOCAL, so a UTC fallback shifted the reference window by the server's UTC offset on any
-    /// server not on UTC. #4766: the window converts through the server's clock, not one offset, so a
-    /// preset window across a daylight saving change is hoursBack REAL hours long -- its start is the
-    /// server-local time of utcNow minus hoursBack, not the server-local end minus hoursBack of wall clock.
-    /// When only toDate is given the start is the server-local time of (toDate as a UTC instant) minus
-    /// hoursBack, for the same reason. utcNow/serverClock are explicit parameters (not DateTime.UtcNow/
+    /// #4296: the server-local "current window" the ghost-line comparison is built from and aligned to. The window
+    /// arrives as the tab holds it (#4766): under a custom range fromDate/toDate are naive-UTC instants, and this
+    /// puts each on the server's wall clock, the frame the lanes still plot in. Under a preset range (fromDate/toDate
+    /// both null) it is the server's own local now -- serverClock.ToServerLocal(utcNow), i.e.
+    /// ServerTimeHelper.ToServerTime(utcNow) without touching that class's ambient static state -- NOT a raw UTC now.
+    /// Each end is converted from its own UTC instant, so a window across a daylight saving change is hoursBack REAL
+    /// hours long -- its start is the server-local time of utcNow minus hoursBack, not the server-local end minus
+    /// hoursBack of wall clock. When only toDate is given the start is the server-local time of (toDate minus
+    /// hoursBack), for the same reason. utcNow/serverClock are explicit parameters (not DateTime.UtcNow/
     /// ServerTimeHelper.ActiveServerClock read directly) so a test can drive this deterministically for a
     /// server on either side of UTC or of a clock change, under a preset or a custom range.
     /// </summary>
     internal static (DateTime Start, DateTime End) GetCurrentWindowServerLocal(
         int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, ServerClock serverClock)
     {
-        var end = toDate ?? serverClock.ToServerLocal(utcNow);
-        var start = fromDate ?? serverClock.ToServerLocal(
-            (toDate.HasValue ? serverClock.ToUtc(toDate.Value) : utcNow).AddHours(-hoursBack));
+        var end = serverClock.ToServerLocal(toDate ?? utcNow);
+        var start = serverClock.ToServerLocal(fromDate ?? (toDate ?? utcNow).AddHours(-hoursBack));
         return (start, end);
     }
 
     /// <summary>
     /// #4320: the UTC instant RefreshAsync's baseline lookups (<c>LocalDataService.GetBaselineForLaneAsync</c>
     /// -&gt; <c>BaselineProvider.GetBaselineAsync</c> -&gt; <c>BaselineLocalClock.LocalKey</c>) should key their
-    /// server-local hour/day-of-week from. <c>LocalKey</c> expects UTC and converts it to server-local itself.
-    /// Under a CUSTOM range, fromDate already IS server-local (see <see cref="GetCurrentWindowServerLocal"/>),
-    /// so passing it straight through as if it were UTC shifted the baseline's local-hour lookup a SECOND
-    /// time, by the server's own UTC offset, on any server not on UTC -- converting it back to UTC here
-    /// undoes that. Under a PRESET range (fromDate null) utcNow.AddHours(-hoursBack) is already UTC and
-    /// needs no conversion. #4766: the conversion back is the clock's own <c>ToUtc</c>, which takes the
-    /// offset in force at fromDate, so a custom range that starts on the far side of a daylight saving change
-    /// from today keys the baseline from the right hour. utcNow/serverClock are explicit parameters for the
-    /// same reason <see cref="GetCurrentWindowServerLocal"/>'s are: a test can drive this deterministically
-    /// for a server on either side of UTC or of a clock change, under either range kind.
+    /// server-local hour/day-of-week from. <c>LocalKey</c> expects UTC and converts it to server-local itself. Under a
+    /// CUSTOM range fromDate is already a UTC instant (#4766), so it goes through unchanged; under a PRESET range
+    /// (fromDate null) utcNow.AddHours(-hoursBack) is UTC too.
     /// </summary>
     internal static DateTime GetBaselineReferenceTimeUtc(
-        int hoursBack, DateTime? fromDate, DateTime utcNow, ServerClock serverClock) =>
-        fromDate.HasValue ? serverClock.ToUtc(fromDate.Value) : utcNow.AddHours(-hoursBack);
+        int hoursBack, DateTime? fromDate, DateTime utcNow) =>
+        fromDate ?? utcNow.AddHours(-hoursBack);
 
     /// <summary>
     /// #4296: RefreshOverviewAsync's comparison range for the Overview tab's ghost-line overlay. NOT
@@ -209,9 +198,9 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             var fileIoTask = Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, hoursBack, fromDate, toDate));
 
             // Fetch baselines for band rendering — chart-unit-matched metrics. #4320: GetBaselineReferenceTimeUtc
-            // converts a server-local custom-range fromDate back to UTC before BaselineLocalClock.LocalKey
-            // converts it to server-local again; a preset range's utcNow.AddHours(-hoursBack) is already UTC.
-            var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow, serverClock);
+            // hands BaselineLocalClock.LocalKey a UTC instant, which converts it to server-local itself: a custom
+            // range's fromDate is UTC already (#4766), and so is a preset range's utcNow.AddHours(-hoursBack).
+            var referenceTime = GetBaselineReferenceTimeUtc(hoursBack, fromDate, DateTime.UtcNow);
             var cpuBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.Cpu, referenceTime));
             var waitBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.WaitMsPerSec, referenceTime));
             var ioBaselineTask = Task.Run(() => _dataService.GetBaselineForLaneAsync(_serverId, MetricNames.IoLatency, referenceTime));
@@ -290,17 +279,21 @@ public partial class CorrelatedTimelineLanesControl : UserControl
             {
                 var refFrom = comparisonRange.Value.From;
                 var refTo = comparisonRange.Value.To;
+                /* The comparison window is the server-local current window shifted by whole days, the frame the ghost
+                   lines plot in; the reads take UTC windows (#4766), so it goes to UTC here, through the clock. */
+                var refFromUtc = serverClock.ToUtc(refFrom);
+                var refToUtc = serverClock.ToUtc(refTo);
                 // Time shift: offset to align reference data with current chart X axis. #4296: CurrentFrom
                 // is the SAME server-local current-window start GetOverviewComparisonRange built refFrom
                 // from, so this is exact arithmetic (currentStart - (currentStart - Ndays) = Ndays) rather
                 // than a second, possibly UTC-basis, DateTime.UtcNow sample.
                 var timeShift = comparisonRange.Value.CurrentFrom - refFrom;
 
-                var refCpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, 0, refFrom, refTo));
-                var refWaitTask = Task.Run(() => _dataService.GetTotalWaitTrendAsync(_serverId, 0, refFrom, refTo));
-                var refBlockingTask = Task.Run(() => _dataService.GetBlockingTrendAsync(_serverId, 0, refFrom, refTo));
-                var refMemoryTask = Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, 0, refFrom, refTo));
-                var refIoTask = Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, 0, refFrom, refTo));
+                var refCpuTask = Task.Run(() => _dataService.GetCpuUtilizationAsync(_serverId, 0, refFromUtc, refToUtc));
+                var refWaitTask = Task.Run(() => _dataService.GetTotalWaitTrendAsync(_serverId, 0, refFromUtc, refToUtc));
+                var refBlockingTask = Task.Run(() => _dataService.GetBlockingTrendAsync(_serverId, 0, refFromUtc, refToUtc));
+                var refMemoryTask = Task.Run(() => _dataService.GetMemoryTrendAsync(_serverId, 0, refFromUtc, refToUtc));
+                var refIoTask = Task.Run(() => _dataService.GetFileIoLatencyTrendAsync(_serverId, 0, refFromUtc, refToUtc));
 
                 try { await Task.WhenAll(refCpuTask, refWaitTask, refBlockingTask, refMemoryTask, refIoTask); }
                 catch (Exception ex) { AppLogger.Info("CorrelatedLanes", $"Comparison fetch failed: {ex.Message}"); }
@@ -646,7 +639,7 @@ public partial class CorrelatedTimelineLanesControl : UserControl
     internal static (DateTime Start, DateTime End) GetXAxisWindow(
         int hoursBack, DateTime? fromDate, DateTime? toDate, DateTime utcNow, ServerClock serverClock) =>
         fromDate.HasValue && toDate.HasValue
-            ? (fromDate.Value, toDate.Value)
+            ? GetCurrentWindowServerLocal(hoursBack, fromDate, toDate, utcNow, serverClock)
             : GetCurrentWindowServerLocal(hoursBack, null, null, utcNow, serverClock);
 
     /// <summary>

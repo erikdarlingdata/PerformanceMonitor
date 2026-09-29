@@ -129,18 +129,7 @@ public partial class ServerTab : UserControl
     /// </summary>
     private (DateTime start, DateTime end) GetBlockingServerRange()
     {
-        var hoursBack = GetHoursBack();
-        DateTime? fromDate = null, toDate = null;
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-            {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-            }
-        }
-        return GetSlicerTimeRange(hoursBack, fromDate, toDate);
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
+        return PerformanceMonitor.Ui.TimeWindows.ChartAxis(hoursBack, fromDate, toDate, DateTime.UtcNow);
     }
 }

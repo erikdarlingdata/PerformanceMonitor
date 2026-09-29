@@ -89,18 +89,7 @@ public partial class ServerTab : UserControl
     /// toolbar's current window (mirrors the other tabs' toolbar-driven refresh).</summary>
     private async void ConfigChangesRefresh_Click(object sender, RoutedEventArgs e)
     {
-        var hoursBack = GetHoursBack();
-        DateTime? fromDate = null, toDate = null;
-        if (IsCustomRange)
-        {
-            var fromLocal = GetDateTimeFromPickers(FromDatePicker!, FromHourCombo, FromMinuteCombo);
-            var toLocal = GetDateTimeFromPickers(ToDatePicker!, ToHourCombo, ToMinuteCombo);
-            if (fromLocal.HasValue && toLocal.HasValue)
-            {
-                fromDate = ServerTimeHelper.DisplayTimeToServerTime(fromLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-                toDate = ServerTimeHelper.DisplayTimeToServerTime(toLocal.Value, ServerTimeHelper.CurrentDisplayMode);
-            }
-        }
+        var (hoursBack, fromDate, toDate) = GetCurrentWindowUtc();
 
         await RefreshConfigChangesAsync(hoursBack, fromDate, toDate);
     }

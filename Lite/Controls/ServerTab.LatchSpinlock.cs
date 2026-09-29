@@ -86,8 +86,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value;
-            rangeEnd = toDate.Value;
+            rangeStart = ToServerLocal(fromDate.Value);
+            rangeEnd = ToServerLocal(toDate.Value);
         }
         else
         {
@@ -107,8 +107,8 @@ public partial class ServerTab : UserControl
         DateTime rangeStart, rangeEnd;
         if (fromDate.HasValue && toDate.HasValue)
         {
-            rangeStart = fromDate.Value;
-            rangeEnd = toDate.Value;
+            rangeStart = ToServerLocal(fromDate.Value);
+            rangeEnd = ToServerLocal(toDate.Value);
         }
         else
         {

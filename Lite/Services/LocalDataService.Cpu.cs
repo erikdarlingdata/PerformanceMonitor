@@ -26,7 +26,7 @@ public partial class LocalDataService
     /// <para><b>The WINDOW prefers the stored UTC instant (v63, #3653 item 13, Q7).</b> Since that rung the
     /// collector writes <c>sample_time_utc</c> — the same instant in UTC — beside the local stamp. This read's
     /// window is a UTC question (<paramref name="hoursBack"/> back from <paramref name="asOfUtc"/>, or a
-    /// picker range the caller expressed in server time), and each row answers it on the stamp it has. A row
+    /// custom range the caller holds as UTC instants), and each row answers it on the stamp it has. A row
     /// with a <c>sample_time_utc</c> is compared on it, against the UTC bounds, with no offset involved. A row
     /// collected before that rung has none, and the offset the server had at that row's instant is exactly what
     /// the store never recorded, so it is compared on the only stamp it has: its server-local
@@ -36,7 +36,8 @@ public partial class LocalDataService
     /// NULL AND sample_time BETWEEN localStart AND localEnd)</c>, so a window that spans a daylight saving
     /// change selects both kinds of row exactly on each side of it, where one offset for the whole window would
     /// put every pre-rung row on the other side of the change an hour off (#4766). Nothing is backfilled. Known
-    /// limit (#4766): in the repeated autumn hour a server-local time resolves to its first occurrence. The MCP
+    /// limit (#4766): a pre-rung row stamped in the repeated autumn hour carries a wall time that names two
+    /// instants, so a window with a bound inside that hour compares it on the wall time alone. The MCP
     /// <c>get_cpu_utilization</c> and the WPF chart both come through here, so both windows are honest for
     /// post-rung rows and neither's display frame changes.</para>
     /// </summary>
@@ -54,15 +55,14 @@ public partial class LocalDataService
         using var command = connection.CreateCommand();
 
         /* sample_time is in server local time, not UTC. Both windows are asked for: the UTC bounds, the same
-           instants taken from the one anchor so a preset window is exact (the picker branch converts the
-           server-time range back to UTC exactly as GetTimeRange does, each bound with the offset in force
-           there, #4766), and the server-local bounds this read always computed. A row with a sample_time_utc is
+           instants taken from the one anchor so a preset window is exact (a custom range arrives as UTC and
+           passes through GetTimeRange unchanged, #4766), and the server-local bounds this read always computed. A row with a sample_time_utc is
            compared on it against the UTC bounds; a row without one (collected before v63) is compared on its
            server-local sample_time against the server-local bounds, so neither arm applies one offset to the
            whole window and both are exact on each side of a daylight saving change. */
         var clock = serverClock ?? ServerTimeHelper.ActiveServerClock;
         var anchor = asOfUtc ?? DateTime.UtcNow;
-        var (startUtc, endUtc) = GetTimeRange(hoursBack, fromDate, toDate, anchor, clock);
+        var (startUtc, endUtc) = GetTimeRange(hoursBack, fromDate, toDate, anchor);
         var (startTime, endTime) = GetTimeRangeServerLocal(hoursBack, fromDate, toDate, anchor, clock);
 
         /* #4234: bucketed to TrendBudget.Chart's point budget so the Overview lane and this same read's CPU
