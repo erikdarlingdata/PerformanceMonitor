@@ -291,4 +291,13 @@ public sealed record ForcePlanTarget(
        finding written before the column existed, when raw's 4-day retention already capped the age. The
        unattended bot's age gate reads it (ForcePlanBotPolicy.MaxBestPlanAgeDays). Display and gating only,
        never an execution input; appended with a default for the same wire-compatibility reasons. */
-    System.DateTime? BestPlanLastSeenUtc = null);
+    System.DateTime? BestPlanLastSeenUtc = null,
+
+    /* #4736: how old the best plan was when the finding was built, in days from BestPlanLastSeenUtc to the
+       analysis window's end. That is the reference the advice's "it last ran N days ago" uses
+       (best_plan_age_days), so every target says about itself what the prose says about the worst offender.
+       Null when BestPlanLastSeenUtc is null or the finding carries no window end. Display only: never an
+       execution input and never a blocker (age narrows only the unattended bot, which reads
+       BestPlanLastSeenUtc against its own clock). Appended with a default for the same wire-compatibility
+       reasons. */
+    double? BestPlanAgeDays = null);

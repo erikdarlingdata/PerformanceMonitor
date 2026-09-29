@@ -471,8 +471,10 @@ LIMIT 16", connection)
     /// APC blocker can be added; <c>ForcePlanBotPolicy.Blockers</c>,
     /// <c>PerformanceMonitor.Analysis/ForcePlanBotPolicy.cs</c> ~291-317, adds
     /// <c>apc_enabled_for_database</c> only under <c>state is { ApcIsOn: true }</c> and
-    /// <c>state_unavailable</c> only under <c>state is null</c> or <c>state.IsEmpty</c>). So the two APC
-    /// blockers can never co-occur with <c>state_unavailable</c>, and it is always the final block — a
+    /// <c>state_unavailable</c> only under <c>state is null</c> or <c>state.IsEmpty</c>; the #4736
+    /// <c>apc_names_this_plan_as_regressed</c> needs a non-null <c>state</c> with a recommendation in it, so
+    /// it sits on the same side). So the APC blockers can never co-occur with <c>state_unavailable</c>, and
+    /// it is always the final block — a
     /// sibling-prefix LOOKAHEAD is not needed and is actively unsafe: a pre-#4326 row's raw exception
     /// message is free text and can itself contain <c>"\n" + "apc_owns_it:"</c> (or any other sibling's
     /// exact prefix) by coincidence or by an attacker who controls part of the upstream error message, and

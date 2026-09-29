@@ -477,6 +477,10 @@ public sealed class ForcePlanBotPolicyTests
             .ToArray();
         Assert.DoesNotContain(ForcePlanBotPolicy.ReasonStateUnavailable, shared);
         Assert.DoesNotContain(ForcePlanBotPolicy.ReasonApcEnabledForDatabase, shared);
+
+        /* #4736: the same holds for the regressed-plan blocker, which only the bot carries. */
+        Assert.Equal("apc_names_this_plan_as_regressed", ForcePlanBotPolicy.ReasonApcNamesPlanAsRegressed);
+        Assert.DoesNotContain(ForcePlanBotPolicy.ReasonApcNamesPlanAsRegressed, shared);
     }
 
     [Fact]
@@ -698,11 +702,12 @@ public sealed class ForcePlanBotPolicyTests
         Assert.Equal(3, targets.Count);
 
         using var first = JsonDocument.Parse(JsonSerializer.Serialize(targets[0].Evidence));
-        Assert.Equal(9.125, first.RootElement.GetProperty("best_plan_age_days").GetDouble(), 6);
+        /* Rounded to a tenth of a day on the wire: 9 days 3 hours is 9.125. */
+        Assert.Equal(9.1, first.RootElement.GetProperty("best_plan_age_days").GetDouble(), 6);
         Assert.Equal("2026-08-22T09:00:00Z", first.RootElement.GetProperty("best_plan_last_seen_utc").GetString());
 
         using var second = JsonDocument.Parse(JsonSerializer.Serialize(targets[1].Evidence));
-        Assert.Equal(5.0 / 24.0, second.RootElement.GetProperty("best_plan_age_days").GetDouble(), 6);
+        Assert.Equal(0.2, second.RootElement.GetProperty("best_plan_age_days").GetDouble(), 6);
         Assert.Equal("2026-08-31T07:00:00Z", second.RootElement.GetProperty("best_plan_last_seen_utc").GetString());
 
         using var third = JsonDocument.Parse(JsonSerializer.Serialize(targets[2].Evidence));
