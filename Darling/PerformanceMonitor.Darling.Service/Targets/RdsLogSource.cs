@@ -9,11 +9,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Amazon;
 using Amazon.RDS;
 using Amazon.RDS.Model;
+using Microsoft.Extensions.Logging;
 using PerformanceMonitor.Collectors;
 
 namespace PerformanceMonitor.Darling.Service.Targets;
@@ -74,6 +76,14 @@ public sealed class RdsLogSource
     /// cycle: the position stays where the last committed pass left it and the next cycle carries on.
     /// </summary>
     public const int MaxPassesPerCycle = 4;
+
+    /// <summary>
+    /// #4708: the most pages of <c>DescribeDBLogFiles</c> one listing reads. The API answers in pages once an instance
+    /// holds more log files than one page carries, and every page but the last names the next in a Marker. Bounded so an
+    /// instance with an unreasonable number of files, or a service that never stops handing out new Markers, cannot hold
+    /// a cycle: the read goes on with the files it has and logs a Warning that the listing was cut short.
+    /// </summary>
+    internal const int MaxLogListingPages = 20;
 
     /// <summary>
     /// #4708: runs <paramref name="pass"/> - one fetch, store and commit - and again while it reports
@@ -137,6 +147,8 @@ public sealed class RdsLogSource
 
     private readonly Func<DateTime> _clock;
 
+    private readonly ILogger? _logger;
+
     /// <summary>#4053 review round 2 (item 2): per-instance, when the stale-csv condition (stderr more than
     /// <see cref="StaleCsvThresholdMs"/> newer than the newest .csv) was FIRST seen. Cleared the moment the
     /// condition is gone, so a single wide-but-transient gap between two files rolled by the same syslogger
@@ -150,11 +162,21 @@ public sealed class RdsLogSource
     /// own timestamps.</summary>
     private static readonly TimeSpan StaleCsvDebounce = TimeSpan.FromMinutes(5);
 
-    public RdsLogSource(Func<string, IAmazonRDS>? clientFactory = null, Func<DateTime>? clock = null)
+    /// <summary>#4708: per instance, when the Warning that a listing hit <see cref="MaxLogListingPages"/> last went
+    /// out, so an instance that stays over the cap says so once an hour instead of on every cycle. One table for each
+    /// logger rather than one for each source: the plan, deadlock and log-event ingestors each own a source and all
+    /// log to the runner's one logger, so a table on the source alone would report an instance up to three times an
+    /// hour. A table for each logger also keeps two loggers' reports apart, which is what lets a test read it.</summary>
+    private static readonly ConditionalWeakTable<ILogger, Dictionary<string, DateTime>> ListingCapWarnedUtc = new();
+
+    private static readonly TimeSpan ListingCapWarnInterval = TimeSpan.FromHours(1);
+
+    public RdsLogSource(Func<string, IAmazonRDS>? clientFactory = null, Func<DateTime>? clock = null, ILogger? logger = null)
     {
         _clientFactory = clientFactory
             ?? (region => new AmazonRDSClient(RegionEndpoint.GetBySystemName(region)));
         _clock = clock ?? (() => DateTime.UtcNow);
+        _logger = logger;
     }
 
     /// <param name="Text">Raw log text, to be handed to <c>PgPlanLogParser.Extract</c> unchanged.</param>
@@ -532,6 +554,12 @@ public sealed class RdsLogSource
     /// upgrade and other logs, and sorted by last-written rather than by name — the filename embeds a
     /// timestamp, but sorting text would order 2026-08-9 after 2026-08-10.
     ///
+    /// <para><b>Reads every page of the listing</b> (#4708). <c>DescribeDBLogFiles</c> answers in pages when an
+    /// instance holds more log files than one page carries - three days of hourly stderr and csvlog files is about
+    /// 144 - and the newest file, or the file a saved position names, can be on a later page. <see cref="ListLogFilesAsync"/>
+    /// follows the Marker to the last page, up to <see cref="MaxLogListingPages"/>, and every choice below (the
+    /// name filter, the newest file, the held file, the stale-csv check) is made over the whole list.</para>
+    ///
     /// <para><b>Also filtered to exclude <c>.csv</c>/<c>.json</c> siblings</b> (#3997), the same defect and
     /// the same fix as the self-hosted tail's <c>newest</c> CTE (<see cref="PerformanceMonitor.Collectors.PgServerLogTail"/>).
     /// RDS for PostgreSQL writes a target's <c>csvlog</c> output as the stderr file's own name with
@@ -560,19 +588,13 @@ public sealed class RdsLogSource
     private async Task<List<string>> LogFilesNewestFirstAsync(
         IAmazonRDS client, string instanceId, LogFileKind kind, CancellationToken cancellationToken)
     {
-        var files = await client.DescribeDBLogFilesAsync(
-            new DescribeDBLogFilesRequest
-            {
-                DBInstanceIdentifier = instanceId,
-                FilenameContains = "postgresql",
-            },
-            cancellationToken);
+        var files = await ListLogFilesAsync(client, instanceId, cancellationToken);
 
-        /* The null-conditional is load bearing, as in ResolveWriterAsync above: the SDK omits the
+        /* Guarding the omitted collection is load bearing, as in ResolveWriterAsync above: the SDK omits the
            collection entirely on an answer that carried no file, so ordering a null raises
            ArgumentNullException and buries this branch behind "Value cannot be null. (Parameter
-           'source')". It short-circuits the whole chain, so absent and empty both arrive as null and reach
-           the one message below.
+           'source')". ListLogFilesAsync reads an omitted collection as no files, so absent and empty both
+           arrive here as an empty list and reach the one message below.
 
            The name filter picks the file this READ wants (#4053 part c1): the stderr route excludes the
            .csv/.json siblings (#3997) — see the method's own remarks — while the csvlog route (LogFileKind.Csv)
@@ -597,7 +619,7 @@ public sealed class RdsLogSource
                taking write traffic, one round trip's worth of drift between two files rolled by the same
                syslogger is not this large; a target so idle neither file moves within 5 minutes produces no
                difference to flag at all, so idleness is not a false-positive path. */
-            var newestStderr = files.DescribeDBLogFiles?
+            var newestStderr = files
                 .Where(f => !string.IsNullOrEmpty(f.LogFileName)
                     && !f.LogFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
                     && !f.LogFileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
@@ -607,7 +629,7 @@ public sealed class RdsLogSource
                 .OrderByDescending(w => w)
                 .FirstOrDefault();
 
-            var newestCsv = files.DescribeDBLogFiles?
+            var newestCsv = files
                 .Where(f => !string.IsNullOrEmpty(f.LogFileName)
                     && f.LogFileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
                 .Select(f => f.LastWritten)
@@ -622,8 +644,7 @@ public sealed class RdsLogSource
                makes the throw wait for the SAME instance to read stale on every call across a real 5-minute
                window, not just the one call that happened to see the gap; the moment a call sees the gap
                close, the instance's entry is cleared and the debounce starts over from nothing. */
-            var staleNow = newestStderr.HasValue && newestCsv.HasValue
-                && newestStderr.Value - newestCsv.Value > StaleCsvThresholdMs;
+            var staleNow = newestStderr - newestCsv > StaleCsvThresholdMs;
 
             if (staleNow)
             {
@@ -642,7 +663,7 @@ public sealed class RdsLogSource
             }
         }
 
-        var ordered = files.DescribeDBLogFiles?
+        var ordered = files
             .OrderByDescending(f => f.LastWritten)
             .Select(f => f.LogFileName)
             .Where(name => matchesKind(name))
@@ -668,5 +689,91 @@ public sealed class RdsLogSource
                         + "that is stopped, still being created, or has just rotated its logs answers this way and "
                         + "clears itself on the first cycle that finds a log, while one that keeps answering this "
                         + "way is a target nobody can read and wants a decision rather than silence.");
+    }
+
+    /// <summary>
+    /// #4708: every page of the <c>DescribeDBLogFiles</c> listing for <paramref name="instanceId"/>, gathered into one
+    /// list. Each request repeats the instance and the <c>postgresql</c> name filter and adds only the Marker the
+    /// previous answer returned.
+    ///
+    /// <para>The loop ends when an answer carries no Marker, when it carries the Marker it was asked with (a service
+    /// that keeps answering the same thing must not keep the read asking), or after <see cref="MaxLogListingPages"/>
+    /// pages. A page with no files but a Marker is followed. At the cap the read goes on with the files read so far,
+    /// and <see cref="WarnListingCapReached"/> says so.</para>
+    /// </summary>
+    private async Task<List<DescribeDBLogFilesDetails>> ListLogFilesAsync(
+        IAmazonRDS client, string instanceId, CancellationToken cancellationToken)
+    {
+        var files = new List<DescribeDBLogFilesDetails>();
+        string? marker = null;
+
+        for (var page = 1; ; page++)
+        {
+            var response = await client.DescribeDBLogFilesAsync(
+                new DescribeDBLogFilesRequest
+                {
+                    DBInstanceIdentifier = instanceId,
+                    FilenameContains = "postgresql",
+                    Marker = marker,
+                },
+                cancellationToken);
+
+            /* The SDK omits the collection on an answer that carried no file (see LogFilesNewestFirstAsync), and
+               a page like that can still carry a Marker, so an omitted collection adds nothing and the loop goes on. */
+            if (response.DescribeDBLogFiles is not null)
+            {
+                files.AddRange(response.DescribeDBLogFiles);
+            }
+
+            var next = response.Marker;
+
+            if (string.IsNullOrEmpty(next) || string.Equals(next, marker, StringComparison.Ordinal))
+            {
+                return files;
+            }
+
+            if (page >= MaxLogListingPages)
+            {
+                WarnListingCapReached(instanceId);
+                return files;
+            }
+
+            marker = next;
+        }
+    }
+
+    /// <summary>
+    /// #4708: the listing for <paramref name="instanceId"/> still had a Marker after <see cref="MaxLogListingPages"/>
+    /// pages, so the read went on with the files it had. There is no measurement for this on the collection_log row,
+    /// so the disclosure is a Warning, at most once an hour for each instance (by this source's clock, so a test can
+    /// move it): a target that stays over the cap would otherwise repeat it every cycle. Without a logger there is
+    /// nothing to say it to.
+    /// </summary>
+    private void WarnListingCapReached(string instanceId)
+    {
+        if (_logger is null)
+        {
+            return;
+        }
+
+        var now = _clock();
+        var warned = ListingCapWarnedUtc.GetOrCreateValue(_logger);
+
+        lock (warned)
+        {
+            if (warned.TryGetValue(instanceId, out var last) && now - last < ListingCapWarnInterval)
+            {
+                return;
+            }
+
+            warned[instanceId] = now;
+        }
+
+        _logger.LogWarning(
+            "RDS instance '{InstanceId}' lists more PostgreSQL log files than {PageCap} pages of DescribeDBLogFiles return. "
+            + "The log read used the files from those pages only, so it may open an older file than the newest one. "
+            + "This is logged at most once an hour for each instance.",
+            instanceId,
+            MaxLogListingPages);
     }
 }

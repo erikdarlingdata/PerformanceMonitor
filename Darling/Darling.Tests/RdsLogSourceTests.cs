@@ -8,11 +8,13 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Amazon.RDS;
 using Amazon.RDS.Model;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using PerformanceMonitor.Collectors;
 
@@ -57,6 +59,15 @@ public class RdsLogSourceTests
         /// more than this portion held.</summary>
         public bool Pending { get; set; }
 
+        /// <summary>Every <c>DescribeDBLogFiles</c> request, in call order (#4708 paging): the paging tests read
+        /// the Marker and the filter each page was asked with.</summary>
+        public List<DescribeDBLogFilesRequest> Describes { get; } = new();
+
+        /// <summary>When set, answers every <c>DescribeDBLogFiles</c> call itself, given the request and the
+        /// zero-based number of the call - a listing that comes back in pages with a Marker. Unset, the
+        /// <see cref="LogFileShape"/> answers carry no Marker, as they always did (#4708 paging).</summary>
+        public Func<DescribeDBLogFilesRequest, int, DescribeDBLogFilesResponse>? ListingAnswer { get; set; }
+
         public override Task<DescribeDBClustersResponse> DescribeDBClustersAsync(
             DescribeDBClustersRequest request, CancellationToken cancellationToken = default)
             => Task.FromResult(new DescribeDBClustersResponse
@@ -80,7 +91,15 @@ public class RdsLogSourceTests
 
         public override Task<DescribeDBLogFilesResponse> DescribeDBLogFilesAsync(
             DescribeDBLogFilesRequest request, CancellationToken cancellationToken = default)
-            => Task.FromResult(new DescribeDBLogFilesResponse
+        {
+            Describes.Add(request);
+
+            return Task.FromResult(
+                ListingAnswer is null ? ShapedListing() : ListingAnswer(request, Describes.Count - 1));
+        }
+
+        private DescribeDBLogFilesResponse ShapedListing()
+            => new DescribeDBLogFilesResponse
             {
                 DescribeDBLogFiles = LogFileShape switch
                 {
@@ -136,7 +155,7 @@ public class RdsLogSourceTests
                         new() { LogFileName = LogName, LastWritten = 9999 },
                     },
                 },
-            });
+            };
 
         public override Task<DownloadDBLogFilePortionResponse> DownloadDBLogFilePortionAsync(
             DownloadDBLogFilePortionRequest request, CancellationToken cancellationToken = default)
@@ -151,10 +170,11 @@ public class RdsLogSourceTests
         }
     }
 
-    private static (RdsLogSource Source, FakeRds Client) Build(FakeRds? client = null, Func<DateTime>? clock = null)
+    private static (RdsLogSource Source, FakeRds Client) Build(
+        FakeRds? client = null, Func<DateTime>? clock = null, ILogger? logger = null)
     {
         var fake = client ?? new FakeRds();
-        return (new RdsLogSource(_ => fake, clock), fake);
+        return (new RdsLogSource(_ => fake, clock, logger), fake);
     }
 
     /// <summary>
@@ -697,6 +717,247 @@ public class RdsLogSourceTests
         Assert.True(chunk!.Value.ResumeFileMissing);
         Assert.Null(client.Downloads[0].Marker);
         Assert.True(client.Downloads[0].NumberOfLines > 0);
+    }
+
+    private static DescribeDBLogFilesDetails Log(string name, long lastWritten)
+        => new() { LogFileName = name, LastWritten = lastWritten };
+
+    private static List<DescribeDBLogFilesDetails> Page(params DescribeDBLogFilesDetails[] files)
+        => files.ToList();
+
+    /// <summary>
+    /// A listing that comes back in pages, the way DescribeDBLogFiles does once an instance holds more files
+    /// than one page (#4708): the request's Marker picks the page (no Marker is the first), and every answer
+    /// but the last carries the Marker of the next. A <c>null</c> page is an answer with the file list omitted.
+    /// </summary>
+    private static Func<DescribeDBLogFilesRequest, int, DescribeDBLogFilesResponse> Pages(
+        params List<DescribeDBLogFilesDetails>?[] pages)
+        => (request, _) =>
+        {
+            var index = string.IsNullOrEmpty(request.Marker)
+                ? 0
+                : int.Parse(request.Marker.AsSpan("PAGE-".Length), NumberStyles.None, CultureInfo.InvariantCulture);
+
+            return new DescribeDBLogFilesResponse
+            {
+                DescribeDBLogFiles = pages[index],
+                Marker = index + 1 < pages.Length
+                    ? "PAGE-" + (index + 1).ToString(CultureInfo.InvariantCulture)
+                    : null,
+            };
+        };
+
+    /// <summary>
+    /// #4708, paging: the newest file is on the second page of the listing. The read opens it. Reading only the
+    /// first page, as this used to, opened the newest file of that page - an older file - and never saw the
+    /// newest. The second request carries the first answer's Marker and the same instance and filter.
+    /// </summary>
+    [Fact]
+    public async Task TheNewestLogOnASecondPage_IsTheOneOpened()
+    {
+        var client = new FakeRds();
+        client.ListingAnswer = Pages(
+            Page(Log("error/postgresql.log.2026-08-09-01", 1000), Log("error/postgresql.log.2026-08-09-02", 5000)),
+            Page(Log(client.LogName, 9999)));
+        var (source, _) = Build(client);
+
+        var chunk = await source.ReadNewestAsync(SoloHost);
+
+        Assert.NotNull(chunk);
+        Assert.Equal(client.LogName, client.Downloads[0].LogFileName);
+        Assert.Equal(2, client.Describes.Count);
+        Assert.Null(client.Describes[0].Marker);
+        Assert.Equal("PAGE-1", client.Describes[1].Marker);
+        Assert.All(client.Describes, request =>
+        {
+            Assert.Equal("solo", request.DBInstanceIdentifier);
+            Assert.Equal("postgresql", request.FilenameContains);
+        });
+    }
+
+    /// <summary>
+    /// #4708, paging: a listing with no Marker is asked for once. Every other test in this class relies on it.
+    /// </summary>
+    [Fact]
+    public async Task AListingWithNoMarker_IsRequestedOnce()
+    {
+        var (source, client) = Build();
+
+        await source.ReadNewestAsync(SoloHost);
+
+        var request = Assert.Single(client.Describes);
+        Assert.Null(request.Marker);
+        Assert.Equal("postgresql", request.FilenameContains);
+    }
+
+    /// <summary>
+    /// #4708, paging: the position a restart restored names a file on the second page. The read finds it in the
+    /// whole listing, finishes it from its marker, and only then (after the commit) opens the newest file from its
+    /// first byte. Reading only the first page reported the file missing and jumped to the newest file's tail.
+    /// </summary>
+    [Fact]
+    public async Task AHeldFileOnASecondPage_IsFinishedBeforeTheNewestIsOpened()
+    {
+        const string held = "error/postgresql.log.2026-08-09-01";
+        var client = new FakeRds { NextMarker = "HELD-NEXT" };
+        client.ListingAnswer = Pages(
+            Page(Log(client.LogName, 9999), Log("error/postgresql.log.2026-08-25-17", 8000)),
+            Page(Log(held, 1000)));
+        var (source, _) = Build(client);
+
+        Assert.True(source.RestorePosition(RdsLogSource.LogFileKind.Stderr, "solo", held, "HELD-MARKER"));
+
+        var drain = await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal(held, client.Downloads[0].LogFileName);
+        Assert.Equal("HELD-MARKER", client.Downloads[0].Marker);
+        Assert.Equal(0, client.Downloads[0].NumberOfLines);
+        Assert.True(drain!.Value.ReadAgain);
+        Assert.False(drain.Value.ResumeFileMissing);
+        Assert.Equal(1, drain.Value.FilesSkipped);
+
+        source.CommitResume(drain.Value.Resume);
+
+        var fresh = await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal(client.LogName, client.Downloads[1].LogFileName);
+        Assert.Equal("0", client.Downloads[1].Marker);
+        Assert.True(fresh!.Value.StartsAtFileStart);
+    }
+
+    /// <summary>
+    /// #4708, paging, the csv route: the newest .csv file is on the second page, and it is the one chosen.
+    /// </summary>
+    [Fact]
+    public async Task TheNewestCsvOnASecondPage_IsTheCsvFileOpened()
+    {
+        var client = new FakeRds();
+        client.ListingAnswer = Pages(
+            Page(Log("error/postgresql.log.2026-08-25-17", 8000), Log("error/postgresql.log.2026-08-25-17.csv", 8000)),
+            Page(Log(client.LogName, 9999), Log(client.LogName + ".csv", 9999)));
+        var (source, _) = Build(client);
+
+        await source.ReadNewestAsync(SoloHost, RdsLogSource.LogFileKind.Csv);
+
+        Assert.Equal(client.LogName + ".csv", client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4708, paging: the stale-csv check compares the newest stderr file with the newest .csv file of the WHOLE
+    /// listing. Here the .csv file is on the first page and the stderr file, 10 minutes newer, on the second; a
+    /// first page alone shows no stderr file and so no gap.
+    /// </summary>
+    [Fact]
+    public async Task TheStaleCsvCheck_ComparesTheWholeListing_NotTheFirstPage()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var client = new FakeRds();
+        client.ListingAnswer = Pages(
+            Page(Log(client.LogName + ".csv", 10_000)),
+            Page(Log(client.LogName, 10_000 + (10 * 60 * 1000))));
+        var (source, _) = Build(client, () => now);
+
+        await source.ReadNewestAsync(SoloHost, RdsLogSource.LogFileKind.Csv);
+
+        now = now.AddMinutes(5);
+
+        await Assert.ThrowsAsync<PgNoCsvlogFileException>(
+            () => source.ReadNewestAsync(SoloHost, RdsLogSource.LogFileKind.Csv));
+    }
+
+    /// <summary>
+    /// #4708, paging: a page with no files, or with the list omitted, but with a Marker is followed to the next
+    /// page instead of ending the listing.
+    /// </summary>
+    [Fact]
+    public async Task APageWithNoFilesButAMarker_IsFollowedToTheNextPage()
+    {
+        var client = new FakeRds();
+        client.ListingAnswer = Pages(Page(), null, Page(Log(client.LogName, 9999)));
+        var (source, _) = Build(client);
+
+        await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal(3, client.Describes.Count);
+        Assert.Equal(client.LogName, client.Downloads[0].LogFileName);
+    }
+
+    /// <summary>
+    /// #4708, paging: an answer whose Marker equals the one it was asked with ends the listing, so a service
+    /// that keeps returning the same Marker cannot keep the read asking.
+    /// </summary>
+    [Fact]
+    public async Task AMarkerEqualToThePreviousOne_EndsTheListing()
+    {
+        var client = new FakeRds();
+        client.ListingAnswer = (_, _) => new DescribeDBLogFilesResponse
+        {
+            DescribeDBLogFiles = Page(Log(client.LogName, 9999)),
+            Marker = "STUCK",
+        };
+        var (source, _) = Build(client);
+
+        var chunk = await source.ReadNewestAsync(SoloHost);
+
+        Assert.NotNull(chunk);
+        Assert.Equal(2, client.Describes.Count);
+        Assert.Equal("STUCK", client.Describes[1].Marker);
+    }
+
+    /// <summary>
+    /// #4708, paging: a listing whose answers never stop returning a new Marker is read for 20 pages, then the
+    /// read goes on with the files those pages named and logs one Warning naming the instance and the cap. The
+    /// Warning comes at most once an hour for each instance, whichever source over the same logger reads it.
+    /// </summary>
+    [Fact]
+    public async Task AListingThatNeverEnds_StopsAtTheCap_AndWarnsOncePerInstancePerHour()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var logger = new CapturingTestLogger();
+        var client = new FakeRds();
+        client.ListingAnswer = (_, call) => new DescribeDBLogFilesResponse
+        {
+            DescribeDBLogFiles = Page(Log(
+                "error/postgresql.log.2026-08-09-" + call.ToString("D2", CultureInfo.InvariantCulture), 1000 + call)),
+            Marker = "ENDLESS-" + (call + 1).ToString(CultureInfo.InvariantCulture),
+        };
+        var (source, _) = Build(client, () => now, logger);
+
+        var chunk = await source.ReadNewestAsync(SoloHost);
+
+        Assert.NotNull(chunk);
+        Assert.Equal(20, client.Describes.Count);
+        Assert.Equal("error/postgresql.log.2026-08-09-19", client.Downloads[0].LogFileName);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+
+        var line = Assert.Single(logger.Lines);
+        Assert.Contains("'solo'", line, StringComparison.Ordinal);
+        Assert.Contains("20", line, StringComparison.Ordinal);
+
+        /* Same instance, later in the same hour: it stops at the cap again and says nothing more. */
+        now = now.AddMinutes(59);
+        await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal(40, client.Describes.Count);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+
+        /* The runner's other ingestors each own a source over the same logger and read the same instance:
+           they do not repeat it. */
+        await new RdsLogSource(_ => client, () => now, logger).ReadNewestAsync(SoloHost);
+
+        Assert.Equal(60, client.Describes.Count);
+        Assert.Equal(1, logger.CountAtLevel(LogLevel.Warning));
+
+        /* Another instance has an hour of its own. */
+        await source.ReadNewestAsync("other.abc123.us-east-1.rds.amazonaws.com");
+
+        Assert.Equal(2, logger.CountAtLevel(LogLevel.Warning));
+
+        /* An hour after the first Warning for the first instance, it says so again. */
+        now = now.AddMinutes(1);
+        await source.ReadNewestAsync(SoloHost);
+
+        Assert.Equal(3, logger.CountAtLevel(LogLevel.Warning));
     }
 
     /// <summary>

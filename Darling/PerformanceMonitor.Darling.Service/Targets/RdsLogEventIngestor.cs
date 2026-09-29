@@ -70,7 +70,7 @@ public sealed class RdsLogEventIngestor
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
         _classifier = new PgLogEventClassifier(logHashKey ?? throw new ArgumentNullException(nameof(logHashKey)));
-        _logs = logs ?? new RdsLogSource();
+        _logs = logs ?? new RdsLogSource(logger: logger);
         _logger = logger;
         _resume = resume;
     }

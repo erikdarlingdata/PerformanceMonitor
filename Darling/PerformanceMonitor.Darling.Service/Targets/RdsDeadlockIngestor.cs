@@ -55,7 +55,7 @@ public sealed class RdsDeadlockIngestor
     public RdsDeadlockIngestor(NpgsqlDataSource postgres, RdsLogSource? logs = null, ILogger? logger = null, RdsResumeStore? resume = null)
     {
         _postgres = postgres ?? throw new ArgumentNullException(nameof(postgres));
-        _logs = logs ?? new RdsLogSource();
+        _logs = logs ?? new RdsLogSource(logger: logger);
         _logger = logger;
         _resume = resume;
     }
