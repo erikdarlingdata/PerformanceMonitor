@@ -458,8 +458,10 @@ public sealed class CollectorHealthClassifierTests
 
         Assert.False(PartialDatabaseFailureNote.TryParse(null, out _, out _));
         Assert.False(PartialDatabaseFailureNote.TryParse("", out _, out _));
-        Assert.False(PartialDatabaseFailureNote.TryParse(" of 10 database(s) failed and were skipped", out _, out _));
-        Assert.False(PartialDatabaseFailureNote.TryParse("9 of database(s) failed and were skipped", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($" of 10 {PartialDatabaseFailureNote.Marker}", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($"9 of {PartialDatabaseFailureNote.Marker}", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse(PartialDatabaseFailureNote.Marker, out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($"9 of 10{PartialDatabaseFailureNote.Marker}", out _, out _));
         Assert.Equal(EnumeratedCollectorDriver.PartialDatabaseFailureNoteFormat, PartialDatabaseFailureNote.Format);
     }
 
@@ -477,7 +479,7 @@ public sealed class CollectorHealthClassifierTests
     }
 
     [Fact]
-    public void TheCollectionHealthRead_ProjectsTheNewestRunsNote_LastAtOrdinal30()
+    public void TheCollectionHealthReadSql_ProjectsTheNewestRunsNote()
     {
         Assert.Contains("recency_rank = 1 AND status = 'SUCCESS' THEN error_message END) AS latest_run_note", LocalDataService.CollectionHealthSql, StringComparison.Ordinal);
     }

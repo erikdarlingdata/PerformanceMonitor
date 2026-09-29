@@ -862,7 +862,9 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     {
         var store = new PgMuteRuleStore(postgres);
 
-        /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry. The
+        /* Create — 201 with the STORED rule (re-read after the insert); 400 on a bad body/field/expiry; 409 with
+           status already_exists (and the existing rule's id) when an enabled, unexpired rule already has the same
+           scope, patterns and expiry, so a client retry leaves one rule (#4734). The
            body is one JSON object of the get_mute_rules field shape; {} is legal and creates a rule that mutes
            EVERY alert (the same whole-fleet silence an argument-less create_mute_rule builds — scope fields
            narrow, they are not required). application/json required. */
@@ -957,8 +959,10 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
 
     /// <summary>
     /// Maps a mute-rule verb's returned string onto the HTTP status the web surface answers with, leaving the
-    /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, any other envelope (created / updated /
-    /// unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception envelope
+    /// body untouched: <c>invalid</c> → 400, <c>not_found</c> → 404, <c>already_exists</c> → 409 (#4734: a create
+    /// that repeats a rule already in force is a conflict, the status the views and custom-rule routes give theirs;
+    /// the body is still the verb's envelope, carrying the existing rule's id), any other envelope (created /
+    /// updated / unchanged / deleted) → <paramref name="successStatus"/>; the cores' caught-exception envelope
     /// (<c>McpHelpers.FormatError</c>, <c>{"status":"error", ...}</c>) → 500 (classified by
     /// <see cref="ClassifyToolResponse"/>, like the read surface, and BEFORE the status switch below so the
     /// failure word is never read as a verb outcome); any other bare string is a shape the cores do not produce and maps to the client-correctable
@@ -989,6 +993,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
             {
                 "invalid" => StatusCodes.Status400BadRequest,
                 "not_found" => StatusCodes.Status404NotFound,
+                "already_exists" => StatusCodes.Status409Conflict,
                 _ => successStatus,
             };
         }

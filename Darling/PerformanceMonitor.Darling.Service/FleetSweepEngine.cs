@@ -982,7 +982,6 @@ public static class FleetSweepEngine
     /// the rule is the run count.</summary>
     internal static bool SpanHasData(IEnumerable<DarlingHealthReader.DailySummaryReadRow> rows)
     {
-        ArgumentNullException.ThrowIfNull(rows);
         return rows.Sum(r => r.CollectionRuns) > 0;
     }
 

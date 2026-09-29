@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
 using PerformanceMonitor.Analysis;
+using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Common;
 using PerformanceMonitor.Darling.Analysis;
 using Xunit;
@@ -157,7 +158,62 @@ public sealed class ConfigChangeFamilyReadTests
         Assert.StartsWith("Database configuration changed: `Sales` recovery_model FULL → SIMPLE", FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { fact }.ToFactLookup())!.Headline, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// #4729 from this assembly: Darling's first analysis pass runs within 150 seconds of a connect, so its
+    /// first card for a change has minutes of "after". A rate metric the before half held and those minutes
+    /// lack is presence-only to the banding, which bands it a whole "better" move; the card must not call it
+    /// resolved. It reads "not yet comparable" until the after half reaches an hour, and an after half of
+    /// exactly an hour reads as it always did. The rule lives in the shared engine
+    /// (<c>Lite.Tests/ConfigChangeAttributionTests</c> pins it in full); this is the same case run from this
+    /// tree, so the two SKUs cannot drift on what a young after half means.
+    /// </summary>
+    [Fact]
+    public void AYoungAfterHalf_IsNotYetComparable_AndTheFloorIsInclusive()
+    {
+        var before = new List<Fact> { Cpu(50), Wait("WRITELOG", 0.30) };
+        var after = new List<Fact> { Cpu(51) };
+        var scorer = new FactScorer();
+        scorer.ScoreAll(before);
+        scorer.ScoreAll(after);
+        var compare = ComparisonBanding.Compare(before, after, new Dictionary<string, BaselineBucket>(), coverageCaveat: false);
+        var missing = Assert.Single(compare.Rows, r => r.Key == "WRITELOG");
+        Assert.Equal(ComparisonBanding.BandSourcePresence, missing.BandSource);
+        Assert.Equal(ComparisonBanding.StatusBetter, missing.Status);
+
+        var evt = MaxdopEvent(T0, T0.AddHours(-23));
+        var young = ConfigChangeAttribution.BuildFact(1, evt, 0,
+            ConfigChangeAttribution.WindowsFor(T0, T0.AddMinutes(10)), compare, FullCoverage(14_400_000), FullCoverage(600_000));
+        Assert.False(young.Metadata.ContainsKey(ConfigChangeAttribution.StatusKey("WRITELOG")));
+        Assert.Equal(1, young.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
+        Assert.Equal(0, young.Metadata[ConfigChangeAttribution.MetaBetter]);
+        var youngAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { young }.ToFactLookup())!;
+        Assert.EndsWith("— effect not yet comparable", youngAdvice.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("moved beyond band", youngAdvice.Headline, StringComparison.Ordinal);
+        Assert.DoesNotContain("resolved (better)", youngAdvice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("the after half covers only 10 minutes", youngAdvice.Investigation, StringComparison.Ordinal);
+        Assert.Contains("not yet comparable", youngAdvice.Investigation, StringComparison.Ordinal);
+
+        var atTheFloor = ConfigChangeAttribution.BuildFact(1, evt, 0,
+            ConfigChangeAttribution.WindowsFor(T0, T0.AddHours(ConfigChangeAttribution.MinComparableAfterHours)), compare, FullCoverage(14_400_000), FullCoverage(3_600_000));
+        Assert.Equal(-1, atTheFloor.Metadata[ConfigChangeAttribution.StatusKey("WRITELOG")]);
+        var floorAdvice = FactAdvice.Compose(ConfigChangeAttribution.FactKey, new[] { atTheFloor }.ToFactLookup())!;
+        Assert.Contains("1 metric moved beyond band after it", floorAdvice.Headline, StringComparison.Ordinal);
+        Assert.Contains("WRITELOG resolved (better)", floorAdvice.Investigation, StringComparison.Ordinal);
+        Assert.DoesNotContain("not yet comparable", floorAdvice.Investigation, StringComparison.Ordinal);
+        Assert.Equal(0, atTheFloor.Metadata[ConfigChangeAttribution.MetaNotYetComparable]);
+    }
+
     /* ───────────────────────── helpers ───────────────────────── */
+
+    private static Fact Wait(string type, double fraction) => new()
+    {
+        Source = "waits", Key = type, Value = fraction,
+        Metadata = new Dictionary<string, double> { ["wait_time_ms"] = fraction * 14_400_000, ["period_duration_ms"] = 14_400_000 }
+    };
+
+    private static Fact Cpu(double avgPercent) => new() { Source = "cpu", Key = "CPU_SQL_PERCENT", Value = avgPercent };
+
+    private static WindowCoverage FullCoverage(double nominalMs) => new() { NominalMs = nominalMs, ObservedMs = nominalMs, SampleCount = 16, LargestGapMs = 0 };
 
     private static ConfigChangeAttribution.ChangeEvent MaxdopEvent(DateTime observedAt, DateTime previousCapture)
     {

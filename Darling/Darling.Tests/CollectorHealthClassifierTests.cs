@@ -532,8 +532,10 @@ public sealed class CollectorHealthClassifierTests
 
         Assert.False(PartialDatabaseFailureNote.TryParse(null, out _, out _));
         Assert.False(PartialDatabaseFailureNote.TryParse("", out _, out _));
-        Assert.False(PartialDatabaseFailureNote.TryParse(" of 10 database(s) failed and were skipped", out _, out _));
-        Assert.False(PartialDatabaseFailureNote.TryParse("9 of database(s) failed and were skipped", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($" of 10 {PartialDatabaseFailureNote.Marker}", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($"9 of {PartialDatabaseFailureNote.Marker}", out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse(PartialDatabaseFailureNote.Marker, out _, out _));
+        Assert.False(PartialDatabaseFailureNote.TryParse($"9 of 10{PartialDatabaseFailureNote.Marker}", out _, out _));
         Assert.Equal(EnumeratedCollectorDriver.PartialDatabaseFailureNoteFormat, PartialDatabaseFailureNote.Format);
     }
 
@@ -569,8 +571,8 @@ public sealed class CollectorHealthClassifierTests
         Assert.Contains("AS recency_rank", ViewerDataService.CollectionHealthSql, StringComparison.Ordinal);
         Assert.Contains("AS latest_run_note", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
         Assert.DoesNotContain("ROW_NUMBER()", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("'%database(s) failed and were skipped%'", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
-        Assert.Contains("database(s) failed and were skipped", PartialDatabaseFailureNote.Format, StringComparison.Ordinal);
+        Assert.Contains($"'%{PartialDatabaseFailureNote.Marker}%'", ViewerDataService.FleetCollectionHealthSql, StringComparison.Ordinal);
+        Assert.Contains(PartialDatabaseFailureNote.Marker, PartialDatabaseFailureNote.Format, StringComparison.Ordinal);
     }
 
 }

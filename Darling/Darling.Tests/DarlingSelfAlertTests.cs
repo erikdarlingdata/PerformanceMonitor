@@ -395,6 +395,204 @@ public sealed class DarlingSelfAlertTests
         Assert.True(fired.Muted); /* the deliverer skips channels but still records — same as the engine */
     }
 
+    /* ---------------- collection-stopped across a service restart (#4757) ---------------- */
+
+    /// <summary>
+    /// One collection-stopped pass minus the store read: the judgement and the edge apply that
+    /// <c>EvaluateStoreAlertsAsync</c> runs on the signals it read, fed those signals directly. The default
+    /// recent-run window is ten runs of which nine succeeded, so only the staleness arm can decide it.
+    /// </summary>
+    private static async Task<bool> CollectionStoppedPassAsync(
+        DarlingSelfAlertEvaluator evaluator, DateTime? lastSuccess, int recentRuns = 10, int recentSuccess = 9)
+    {
+        var stopped = evaluator.JudgeCollectionStopped(ServerId, lastSuccess, recentRuns, recentSuccess, out var reason);
+        await evaluator.ApplyCollectionStoppedAsync(ServerId, Name, stopped, reason, Ct);
+        return stopped;
+    }
+
+    private static AlertOutcome SingleCollectionStopped(Harness h) =>
+        Assert.Single(h.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+    [Fact]
+    public async Task CollectionStopped_ServerDownAcrossARestart_FiresOnceTheWindowPassesAfterTheStart()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The server went down three hours before the service restarted and has stayed down. Its recent
+           window still holds old successes, so the failure-streak arm cannot decide: only the staleness arm
+           can fire this one. */
+        var lastSuccess = start.AddHours(-3);
+
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        h.Now = start.AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        var fired = SingleCollectionStopped(h);
+        Assert.Equal(AlertSeverityLevel.Critical, fired.Severity);
+        Assert.StartsWith("No successful collection in 30 minutes", fired.CurrentValue, StringComparison.Ordinal);
+
+        /* Still down a minute later: the cooldown holds the standing alert to the one fire. */
+        h.Now = start.AddMinutes(31);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        SingleCollectionStopped(h);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_HealthyServerWhoseLastSuccessPredatesTheRestart_StaysSilent()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The service was down for 45 minutes, so the server's newest success is 45 minutes older than the
+           start. It is stale only because Darling is the collector and was not running. */
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(-45)));
+
+        /* The first fresh collection lands ten minutes in, and successes keep landing after it. */
+        h.Now = start.AddMinutes(10);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(10)));
+        h.Now = start.AddMinutes(40);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(38)));
+        h.Now = start.AddHours(3);
+        Assert.False(await CollectionStoppedPassAsync(e, start.AddMinutes(178)));
+
+        Assert.Empty(h.Deliverer.Outcomes);
+        Assert.Empty(h.History.Records);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_ServerThatStopsAfterTheRestart_StillFiresFromItsLastSuccess()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The collectors were healthy for an hour after the start, then the server dropped out. The staleness
+           runs from that last success, not from the service start. */
+        var lastSuccess = start.AddMinutes(60);
+        h.Now = start.AddMinutes(89);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess));
+        h.Now = start.AddMinutes(90);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess));
+        Assert.StartsWith("No successful collection in 30 minutes", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_NeverSucceededServer_IsNotFlaggedByTheStalenessArm()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* No success row at all (freshly added, or never reachable): a null last success stays null however
+           long the service has been watching, and the connection-lost alert covers that server. */
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 0, recentSuccess: 0));
+        h.Now = start.AddHours(6);
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 0, recentSuccess: 0));
+        Assert.False(await CollectionStoppedPassAsync(e, null, recentRuns: 3, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_StoredFailureStreak_WaitsForTheFirstOnlineEdge()
+    {
+        var h = new Harness();
+        var e = h.Build();
+
+        /* The last ten STORED runs all failed and no success is on record. Those are pre-restart rows until a
+           fresh run lands, so the streak stays quiet until the service has seen the server online. */
+        var streak = DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold;
+        Assert.False(await CollectionStoppedPassAsync(e, null, streak, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        await e.ApplyConnectionOutcomeAsync(ServerId, Name, online: true, error: null, Ct);
+        Assert.True(await CollectionStoppedPassAsync(e, null, streak, recentSuccess: 0));
+        Assert.StartsWith("The last 10 collector runs all failed", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_DownAcrossARestartWithAStoredFailureStreak_FiresFromTheStalenessArmAtStartPlusTheWindow()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The stored streak is the pre-restart rows again, and the server never comes online, so the streak
+           is never armed. The staleness arm still fires it one window after the start. */
+        var streak = DarlingSelfAlertEvaluator.ConsecutiveFailureThreshold;
+        var lastSuccess = start.AddHours(-3);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        h.Now = start.AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, lastSuccess, streak, recentSuccess: 0));
+        Assert.StartsWith("No successful collection in 30 minutes", SingleCollectionStopped(h).CurrentValue, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CollectionStopped_AfterForget_TheNextPassIsJudgedFromThatPassNotTheOldRows()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        /* The service has been up for two hours when the server is removed and enabled again. It keeps its
+           server_id and its days-old collection_log rows, which must not page CRITICAL the moment it returns. */
+        h.Now = start.AddHours(2);
+        e.Forget(ServerId);
+        var oldRows = start.AddDays(-3);
+
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        h.Now = start.AddHours(2).AddMinutes(29);
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        /* One window after that first pass with nothing collected, it fires. */
+        h.Now = start.AddHours(2).AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, oldRows));
+        SingleCollectionStopped(h);
+
+        /* The tombstone belongs to the forgotten server: a neighbour is still judged from the service start. */
+        Assert.True(e.JudgeCollectionStopped(ServerId + 1, oldRows, 10, 9, out _));
+    }
+
+    [Fact]
+    public async Task ReconcileServers_ServerEnabledWhileTheServiceRuns_IsWatchedFromItsFirstPassNotTheServiceStart()
+    {
+        var h = new Harness();
+        var start = h.Now;
+        var e = h.Build();
+
+        var worker = (DarlingWorker)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(DarlingWorker));
+        typeof(DarlingWorker).GetField("_logger", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, Microsoft.Extensions.Logging.Abstractions.NullLogger<DarlingWorker>.Instance);
+        typeof(DarlingWorker).GetField("_selfAlerts", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(worker, e);
+
+        /* Disabled across a restart, so no removal ever ran Forget in this process, then enabled five hours in. */
+        var loopState = typeof(DarlingWorker).GetNestedType("ServerLoopState", BindingFlags.NonPublic)!;
+        var servers = Activator.CreateInstance(typeof(List<>).MakeGenericType(loopState))!;
+        var enabledLater = new MonitoredServer { Name = Name, Host = "later.invalid", StoredServerId = ServerId };
+        h.Now = start.AddHours(5);
+        typeof(DarlingWorker).GetMethod("ReconcileServers", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(worker, new object[] { servers, new List<MonitoredServer> { enabledLater } });
+
+        var oldRows = start.AddDays(-2);
+        Assert.False(await CollectionStoppedPassAsync(e, oldRows));
+        Assert.Empty(h.Deliverer.Outcomes);
+
+        h.Now = start.AddHours(5).AddMinutes(30);
+        Assert.True(await CollectionStoppedPassAsync(e, oldRows));
+        SingleCollectionStopped(h);
+    }
+
     /* ---------------- capture-down edge ---------------- */
 
     [Fact]
@@ -4550,9 +4748,11 @@ public sealed class DarlingSelfAlertTests
             Assert.True(DarlingSelfAlertEvaluator.IsCollectionStopped(
                 lastSuccess, recentRuns, recentSuccess, DateTime.UtcNow, out _));
 
-            /* Full path: EvaluateStoreAlertsAsync must NOT fire collection-stopped until the server has been
-               online this run (the restart-staleness guard), then must fire once it has. Real-time clock so
-               the 45-minute-old success reads as stale against the seeded rows. */
+            /* Full path (#4757): the seeded 45-minute-old success and the stored failure streak are both
+               pre-restart rows to an evaluator that has just started, so at startup it must stay silent: the
+               staleness is judged from the service start (the later of the two), and the stored streak is
+               not armed until the server has been seen online. Once it has, the streak fires. Real-time
+               clock so the seeded rows read as stale in the store. */
             var h = new Harness { Now = DateTime.UtcNow };
             var evaluator = h.Build();
 
@@ -4562,6 +4762,20 @@ public sealed class DarlingSelfAlertTests
             await evaluator.ApplyConnectionOutcomeAsync(LiveServerId, Name, online: true, error: null, ct); /* arm */
             await evaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: true, ct);
             Assert.Contains(h.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+            /* A second evaluator that never sees the server online is the server that stays down across a
+               restart: silent at the start, fired by the staleness arm once the window has passed since the
+               start. Taken before the capture-down rows below, which add a fresh success. */
+            var hDown = new Harness { Now = DateTime.UtcNow };
+            var downEvaluator = hDown.Build();
+
+            await downEvaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
+            Assert.DoesNotContain(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+
+            hDown.Now = hDown.Now.AddMinutes(31);
+            await downEvaluator.EvaluateStoreAlertsAsync(postgres, LiveServerId, Name, connected: false, ct);
+            var stoppedByStaleness = Assert.Single(hDown.Deliverer.Outcomes, o => o.MetricName == "Collection Stopped");
+            Assert.StartsWith("No successful collection in 31 minutes", stoppedByStaleness.CurrentValue, StringComparison.Ordinal);
 
             /* Capture-down: latest deadlocks run is SESSION_MISSING, latest blocked_process_report is fine. */
             await InsertLogAsync(connection, ct, logId++, "blocked_process_report", utcNow.AddMinutes(-1), "SUCCESS");
