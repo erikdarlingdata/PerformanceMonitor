@@ -27,6 +27,9 @@ namespace PerformanceMonitor.Analysis;
 /// <c>baseline_zero_history</c> z-fact (#3691 lane 41) is the OPPOSITE case and reads as such: the baseline is the
 /// strongest one there is (a month of measured zeros for this hour), the finding is an extremity rather than a
 /// deviation, and still no sigma is printed — the stored one is the display cap, not a measurement. The
+/// ratio facts (the deadlock rate and both wait profiles) read the same stamp BEFORE <c>is_new</c> (#4731): the
+/// detector fires them through the <c>is_new</c> arm on a measured-zero bucket too, and no multiple is printed
+/// against a rate of zero. The
 /// CPU anomaly's number is percent of the CONFIGURED capacity ceiling and the prose says so, with the raw
 /// percent-of-allocated reading beside it as "a core was pinned" and never as the deviation (#3281). The
 /// wait-profile anomaly exists only for the Aurora measured series in v1, so its prose says "the engine
