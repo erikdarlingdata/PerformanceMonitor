@@ -174,8 +174,23 @@ JOIN run_start AS rs
     /// read adds, for the slope → time-to-wall arithmetic; the two counters ride separately because they
     /// are graded against different settings (<c>PostgresAlertInfo</c>'s per-counter argument) and are never
     /// collapsed. <c>$1</c> server_id, <c>$2</c>/<c>$3</c> window (naive UTC).
+    ///
+    /// <para><b>Last seen (#4761).</b> <c>database_gone</c> is the replication reads' rule (#4759) applied to each database:
+    /// its latest row is older than twice the table's effective cadence in the window, (last capture - first capture) /
+    /// (collections - 1) floored at two minutes, measured back from the WINDOW's end (<c>$3</c>). A dropped database keeps
+    /// its last row for the rest of the window; the caller ranks it behind the databases still reporting and the scorer
+    /// grades it nothing.</para>
     /// </summary>
     public const string PgTargetWraparoundSql = @"
+WITH span AS (
+    SELECT MIN(collection_time) AS first_at,
+           MAX(collection_time) AS last_at,
+           COUNT(DISTINCT collection_time) AS collections_in_window
+    FROM pg_wraparound_stats
+    WHERE server_id = $1
+    AND   collection_time >= $2
+    AND   collection_time <= $3
+)
 SELECT DISTINCT ON (database_name)
     database_name,
     collection_time,
@@ -190,8 +205,13 @@ SELECT DISTINCT ON (database_name)
     FIRST_VALUE(frozen_xid_age)   OVER ordered AS first_frozen_xid_age,
     FIRST_VALUE(min_multixid_age) OVER ordered AS first_min_multixid_age,
     FIRST_VALUE(collection_time)  OVER ordered AS first_seen_at,
-    COUNT(*) OVER per_db AS samples_in_window
+    COUNT(*) OVER per_db AS samples_in_window,
+    CASE WHEN sp.collections_in_window > 1
+         THEN $3 - collection_time > GREATEST(2 * ((sp.last_at - sp.first_at) / (sp.collections_in_window - 1)), INTERVAL '2 minutes')
+         ELSE FALSE
+    END AS database_gone
 FROM pg_wraparound_stats
+CROSS JOIN span AS sp
 WHERE server_id = $1
 AND   collection_time >= $2
 AND   collection_time <= $3
@@ -774,6 +794,8 @@ LEFT JOIN modal_source AS ms ON true";
                 var firstMultiAge = reader.IsDBNull(11) ? 0L : ToInt64(reader.GetValue(11));
                 var firstSeenAt = reader.GetDateTime(12);
                 var samples = ToInt64(reader.GetValue(13));
+                /* #4761: a database whose latest row is well before the window's end was dropped. */
+                var databaseGone = !reader.IsDBNull(14) && reader.GetBoolean(14);
 
                 /* #2689: "keeping up" = the latest reading is below the window's peak — the counter has come
                    down at least once inside the window. Latest == peak (including a one-sample window) reads
@@ -790,12 +812,14 @@ LEFT JOIN modal_source AS ms ON true";
                     || (multi.Severity == xid.Severity && multiFraction > xidFraction);
                 var severity = multiWins ? multi.Severity : xid.Severity;
                 var fraction = multiWins ? multiFraction : xidFraction;
-                if (severity > 0) graded++;
+                if (!databaseGone && severity > 0) graded++;
 
-                if (severity < worstSeverity || (severity == worstSeverity && fraction <= worstFraction))
+                /* Databases still reporting rank ahead of a gone one, whatever its last reading was (#4761). */
+                var rank = databaseGone ? -0.5 : severity;
+                if (rank < worstSeverity || (rank == worstSeverity && fraction <= worstFraction))
                     continue;
 
-                worstSeverity = severity;
+                worstSeverity = rank;
                 worstFraction = fraction;
                 worstFreezeMaxAge = freezeMaxAge;
 
@@ -824,6 +848,8 @@ LEFT JOIN modal_source AS ms ON true";
                         [PgTargetScorer.WraparoundMultiXidsRemainingKey] = multiRemaining,
                         [PgTargetScorer.WraparoundArmKey] = multiWins ? multi.Arm : xid.Arm,
                         [PgTargetScorer.WraparoundSamplesKey] = samples,
+                        [PgTargetScorer.WraparoundDatabaseGoneKey] = databaseGone ? 1 : 0,
+                        [PgTargetScorer.WraparoundMinutesSinceLastSeenKey] = (AsNaive(context.TimeRangeEnd) - latestAt).TotalMinutes,
                     },
                 };
 
