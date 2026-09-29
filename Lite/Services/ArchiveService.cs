@@ -49,6 +49,21 @@ public class ArchiveService
     internal Action? BeforeDatabaseResetForTests { get; set; }
     internal long CompactionBatchInputBytes { get; set; } = ParquetCompaction.DefaultBatchInputBytes;
 
+    /* Stand in for a process kill at the two points of the periodic export where one matters (#4720): the first
+       fires after the table's journal is written and before the file is promoted, the second after the file is
+       promoted and before its rows are deleted. A seam throws SimulatedKillException to abort the whole run the
+       way a kill does: the per-table catch below lets it through, so nothing after the seam runs. */
+    internal Action<string>? BeforePromoteForTests { get; set; }
+    internal Action<string>? AfterPromoteForTests { get; set; }
+
+    /* Replaces the minute-resolution file-name prefix, so a test can put two runs in different "minutes"
+       without waiting for the clock. */
+    internal string? TimestampForTests { get; set; }
+
+    internal sealed class SimulatedKillException : Exception
+    {
+    }
+
     /* After a size-triggered archive-and-reset fails, the next attempt waits this long. The size check runs
        every minute, and what fails an export (a full disk, memory pressure, a held file) rarely clears in one;
        retrying every minute would only log the same failure sixty times an hour. */
@@ -69,6 +84,14 @@ public class ArchiveService
        removed when the swap is complete. Found at the start of a later run, it means the previous run did
        not finish, and the run finishes or undoes that swap before merging anything. */
     private const string SwapJournalSuffix = ".swap";
+
+    /* One per table, written once a periodic export's .tmp is complete and before it is promoted, removed after the
+       rows it archived are deleted (#4720). It holds the cutoff (UTC, round-trip format) and the final file name.
+       Found at the start of a later run it means the previous run died somewhere in between: with the file at its
+       final name the promote happened, so the run only has to finish the DELETE; without it nothing was promoted,
+       and the rows are exported afresh. Without it a kill between the promote and the DELETE exported the same
+       rows again on the next run, and the archive held them twice for good. */
+    private const string PendingArchiveSuffix = ".archive-pending";
 
     /* Config tables that must be preserved through ArchiveAllAndResetAsync.
        These hold user configuration (not time-series) and must survive when the
@@ -123,11 +146,12 @@ public class ArchiveService
         try
         {
         await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
+        await RecoverInterruptedArchiveWorkAsync();
 
         var cutoffDate = hotDataHours.HasValue
             ? DateTime.UtcNow.AddHours(-hotDataHours.Value)
             : DateTime.UtcNow.AddDays(-hotDataDays);
-        var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
+        var timestamp = TimestampForTests ?? DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
         _logger?.LogInformation("Archiving data older than {CutoffDate} to Parquet (prefix: {Timestamp})", cutoffDate, timestamp);
 
@@ -146,6 +170,14 @@ public class ArchiveService
         {
             try
             {
+                /* A journal still here after the recovery above is one it could not finish. Exporting the table
+                   anyway would write over it, and with it the record of the rows an earlier file already holds. */
+                if (File.Exists(PendingArchivePath(table)))
+                {
+                    _logger?.LogWarning("Skipping {Table}: the journal of an earlier interrupted export is still there and could not be finished", table);
+                    continue;
+                }
+
                 /* Uniquely-named parquet file — no merging needed. Each archival
                    cycle produces a new file with a timestamp prefix; archive
                    views use glob (*_table.parquet) to pick up all files. */
@@ -186,16 +218,24 @@ public class ArchiveService
 
                 /* Promote the temp only after the COPY has fully succeeded. The name carries this cycle's
                    timestamp, so nothing is at the final name. A move that fails after its retries leaves the
-                   rows in the table (the DELETE below never runs); the temp is removed so it cannot pile up. */
+                   rows in the table (the DELETE below never runs); the temp is removed so it cannot pile up.
+                   The journal goes down first (#4720): a process that dies between the promote and the DELETE
+                   below leaves the rows in the table AND in the promoted file, and the next run reads the
+                   journal to delete them instead of exporting them a second time. */
                 try
                 {
+                    WritePendingArchive(table, cutoffDate, Path.GetFileName(parquetPath));
+                    BeforePromoteForTests?.Invoke(table);
                     MoveWithRetry(tempParquetPath, parquetPath);
                 }
-                catch
+                catch (Exception ex) when (ex is not SimulatedKillException)
                 {
                     try { File.Delete(tempParquetPath); } catch { /* best effort */ }
+                    TryDeletePendingArchive(table);
                     throw;
                 }
+
+                AfterPromoteForTests?.Invoke(table);
 
                 /* Delete the archived rows under the write lock. The DELETE
                    modifies table data and the next CHECKPOINT reorganizes the
@@ -204,30 +244,28 @@ public class ArchiveService
                    DELETE itself is fast, so the UI stall is brief. */
                 try
                 {
-                    using (_duckDb.AcquireWriteLock())
-                    {
-                        using var writeConnection = _duckDb.CreateConnection();
-                        await writeConnection.OpenAsync();
-
-                        using var deleteCmd = writeConnection.CreateCommand();
-                        deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
-                        deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoffDate });
-                        await deleteCmd.ExecuteNonQueryAsync();
-                    }
+                    await DeleteArchivedRowsAsync(table, timeColumn, cutoffDate);
                 }
                 catch
                 {
                     /* The rows are still in the table (DELETE failed), so they aren't lost —
                        discard the archive file we just wrote so the same rows aren't counted in
                        both the table and the parquet (double-counted by v_* views and re-exported
-                       next cycle). */
-                    try { File.Delete(parquetPath); } catch { /* best effort */ }
+                       next cycle). The journal goes with the file; if the file cannot be removed the
+                       journal stays, and the next run finishes the DELETE against it. */
+                    try
+                    {
+                        File.Delete(parquetPath);
+                        TryDeletePendingArchive(table);
+                    }
+                    catch { /* best effort */ }
                     throw;
                 }
 
+                TryDeletePendingArchive(table);
                 _logger?.LogInformation("Archived {Count} rows from {Table} to {Path}", rowCount, table, parquetPath);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not SimulatedKillException)
             {
                 _logger?.LogError(ex, "Failed to archive table {Table}", table);
             }
@@ -243,6 +281,138 @@ public class ArchiveService
         {
             IsArchiving = false;
             s_archiveLock.Release();
+        }
+    }
+
+    /* The DELETE of a periodic export, under the write lock: it modifies table data and the next CHECKPOINT
+       reorganizes the file, so readers must not be mid-query when that happens. Returns the rows deleted. */
+    private async Task<int> DeleteArchivedRowsAsync(string table, string timeColumn, DateTime cutoff)
+    {
+        using (_duckDb.AcquireWriteLock())
+        {
+            using var writeConnection = _duckDb.CreateConnection();
+            await writeConnection.OpenAsync();
+
+            using var deleteCmd = writeConnection.CreateCommand();
+            deleteCmd.CommandText = $"DELETE FROM {table} WHERE {timeColumn} < $1";
+            deleteCmd.Parameters.Add(new DuckDBParameter { Value = cutoff });
+            return await deleteCmd.ExecuteNonQueryAsync();
+        }
+    }
+
+    private string PendingArchivePath(string table) => Path.Combine(_archivePath, table + PendingArchiveSuffix);
+
+    /* Written whole beside the journal and then renamed into place, so a reader never sees a partial journal. */
+    private void WritePendingArchive(string table, DateTime cutoff, string parquetFileName)
+    {
+        var journalPath = PendingArchivePath(table);
+        var tempPath = journalPath + ".tmp";
+        File.WriteAllLines(tempPath,
+        [
+            $"cutoff|{cutoff.ToString("O", CultureInfo.InvariantCulture)}",
+            $"file|{parquetFileName}"
+        ]);
+        File.Move(tempPath, journalPath, overwrite: true);
+    }
+
+    private void TryDeletePendingArchive(string table)
+    {
+        try
+        {
+            File.Delete(PendingArchivePath(table));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Could not remove the archive journal for {Table}; the next run finishes it", table);
+        }
+    }
+
+    /* Null for a journal without a readable cutoff and file name (a truncated or foreign file). */
+    private static (DateTime Cutoff, string FileName)? ReadPendingArchive(string journalPath)
+    {
+        DateTime? cutoff = null;
+        string? fileName = null;
+        foreach (var line in File.ReadAllLines(journalPath))
+        {
+            var parts = line.Split('|');
+            if (parts.Length != 2)
+            {
+                continue;
+            }
+
+            if (parts[0] == "cutoff" && DateTime.TryParse(parts[1], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed))
+            {
+                cutoff = parsed;
+            }
+            else if (parts[0] == "file")
+            {
+                /* A name only: a journal must not point outside the archive folder. */
+                fileName = Path.GetFileName(parts[1]);
+            }
+        }
+
+        return cutoff is null || string.IsNullOrEmpty(fileName) ? null : (cutoff.Value, fileName);
+    }
+
+    /// <summary>
+    /// Finishes or discards what an earlier run left half done, before this run exports, compacts or deletes
+    /// anything. Called once at the start of every entry point that does, after the unfinished-reset-export
+    /// cleanup (#4720).
+    /// </summary>
+    private async Task RecoverInterruptedArchiveWorkAsync()
+    {
+        if (!Directory.Exists(_archivePath))
+        {
+            return;
+        }
+
+        await RecoverPendingArchivesAsync();
+    }
+
+    /// <summary>
+    /// One journal per table whose periodic export did not finish. If its parquet file exists the promote
+    /// happened, so the rows are in the file and this run deletes them from the table (a second DELETE of the same
+    /// rows is harmless). If it does not, the promote never happened and the rows are still only in the table.
+    /// Either way the journal goes, so the export below neither repeats an archived table nor loses one.
+    /// </summary>
+    private async Task RecoverPendingArchivesAsync()
+    {
+        foreach (var journalPath in Directory.GetFiles(_archivePath, "*" + PendingArchiveSuffix).Order(StringComparer.Ordinal))
+        {
+            var journalName = Path.GetFileName(journalPath);
+            var table = journalName[..^PendingArchiveSuffix.Length];
+            try
+            {
+                var timeColumn = ArchivableTables.FirstOrDefault(t => t.Table == table).TimeColumn;
+                var pending = ReadPendingArchive(journalPath);
+                if (timeColumn is null || pending is null)
+                {
+                    _logger?.LogWarning("Removing {Journal}: it does not name an archivable table and a cutoff", journalName);
+                    File.Delete(journalPath);
+                    continue;
+                }
+
+                var (cutoff, fileName) = pending.Value;
+                if (File.Exists(Path.Combine(_archivePath, fileName)))
+                {
+                    var deleted = await DeleteArchivedRowsAsync(table, timeColumn, cutoff);
+                    File.Delete(journalPath);
+                    _logger?.LogInformation(
+                        "Recovered the interrupted archive of {Table}: {File} was already written, so {Count} row(s) older than {Cutoff:o} were deleted from the table",
+                        table, fileName, deleted, cutoff);
+                }
+                else
+                {
+                    File.Delete(journalPath);
+                    _logger?.LogInformation(
+                        "Recovered the interrupted archive of {Table}: {File} was never written, so nothing was deleted (cutoff {Cutoff:o}, 0 rows)",
+                        table, fileName, cutoff);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Could not recover the interrupted archive journal {Journal}; {Table} is skipped until it can be", journalName, table);
+            }
         }
     }
 
@@ -974,6 +1144,7 @@ COPY (
         try
         {
             await RemoveUnfinishedResetExportsAndRefreshViewsAsync();
+            await RecoverInterruptedArchiveWorkAsync();
 
             var timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmm");
 
