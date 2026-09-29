@@ -2774,7 +2774,20 @@ public sealed class PgLogEventsLivePostgresTests
     /// log the login can read (superuser, or the two grants the runbook names) and which has
     /// <c>log_lock_waits</c>, <c>log_connections</c> and <c>log_min_messages</c> at WARNING or lower — with the
     /// store from DARLING_TEST_PG. The rig that ran this on the way in: one <c>timescale/timescaledb:2.28.1-pg18</c>
-    /// container serving as both, with a workload that produced one event of each family first.
+    /// container serving as both.
+    ///
+    /// <para><b>The test makes its own events, after it starts.</b> The collector reads only the newest log
+    /// file's last 4 MB, and PostgreSQL starts a new file at every <c>log_rotation_age</c> boundary (a day by
+    /// default, at midnight in <c>log_timezone</c>). An event written before the test starts, by a workflow
+    /// step or by an earlier test, sits in a file the collector no longer reads once a rotation lands between
+    /// that write and this read, and no amount of polling brings it back (#4699 is the product side of that gap:
+    /// lines written between the last read and a rotation are never collected). So the test drives its events
+    /// itself over unpooled connections: a caught <c>SELECT 1 / 0</c>, and a lock wait made of two sessions on
+    /// one advisory key, held past <c>deadlock_timeout</c>. It then polls the shipped collector query until every
+    /// family shows a row written by one of those backends since the drive began. A rotation seen during the
+    /// poll drives the events once more into the new file. The poll's deadline is <c>deadlock_timeout</c> plus
+    /// 30 s, and on it the test fails naming the missing families, the settings they depend on and the newest
+    /// log file at the start and now.</para>
     /// </summary>
     [Fact]
     public async Task TheSelfHostedCollector_ReadsTheTargetsOwnLog_EndToEnd()
@@ -2796,26 +2809,13 @@ public sealed class PgLogEventsLivePostgresTests
         {
             await DarlingMcpTestData.RegisterServerAsync(storeConnection, ServerId, ServerName, ct);
 
-            var definition = PgLogEventsCollector.Instance;
-            var context = new CollectorContext
-            {
-                LogHashKey = TestLogHashKeys.Fixed,
-                ServerId = ServerId, ServerName = ServerName,
-                CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
-                Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
-            };
+            /* Drive this run's own events on the target, then read them back through the shipped query (the
+               summary says why a workload run before the test cannot be relied on). */
+            var rows = await DriveTheTargetAndReadItsLogAsync(target!, ct);
 
-            List<PgLogEvent> rows;
-            await using (var targetConnection = new NpgsqlConnection(target))
-            {
-                await targetConnection.OpenAsync(ct);
-                await using var command = new NpgsqlCommand(definition.BuildQuery(context).Text, targetConnection);
-                await using var reader = await command.ExecuteReaderAsync(ct);
-                rows = await definition.ReadAsync(reader, context, ct);
-            }
-
-            /* The target's log must hold at least one of each parsed family — the rig's workload put them
-               there — or this is a test of a quiet server. */
+            /* The target's log must hold at least one of each parsed family — this run's drive put them
+               there, and the poll above already matched them to this run's backends — or this is a test of a
+               quiet server. */
             Assert.Contains(rows, r => r.Family == PgLogFamilies.Error);
             Assert.Contains(rows, r => r.Family == PgLogFamilies.Connection);
             Assert.Contains(rows, r => r.Family == PgLogFamilies.LockWait);
@@ -2827,7 +2827,11 @@ public sealed class PgLogEventsLivePostgresTests
             Assert.Equal(rows.Select(r => r.RawLineHash).Distinct().Count(), page.WindowTotal);
 
             var counts = rows.GroupBy(r => r.Family).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
-            var read = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 24, "lock_wait", null, 5);
+            /* The page limit follows the target's own lock-wait count: a reused target keeps every run's lines in
+               its log file (each run adds two: "still waiting" and "acquired"), and a fixed 5 turns into
+               `"truncated": true` on the third run against the same file. */
+            var read = await DarlingMcpPgLogEventTools.GetPgLogEvents(postgres, ServerName, 24, "lock_wait", null,
+                Math.Max(5, counts.GetValueOrDefault(PgLogFamilies.LockWait)));
             JsonAssert.Contains("\"family\": \"lock_wait\"", read);
             JsonAssert.Contains("\"truncated\": false", read);
             System.Console.WriteLine("rig counts per family: " + string.Join(", ", counts.OrderBy(k => k.Key, StringComparer.Ordinal).Select(k => k.Key + "=" + k.Value)));
@@ -2838,6 +2842,245 @@ public sealed class PgLogEventsLivePostgresTests
             await LiveStoreCleanup.RunAsync(store!, bodySucceeded, async (cleanup, cleanupCt) =>
                 await DarlingMcpTestData.ExecAsync(cleanup, cleanupCt, "DELETE FROM pg_log_events WHERE server_id = $1", ServerId));
         }
+    }
+
+    /// <summary>How many times the poll drives the target: the first drive plus two after a rotation.</summary>
+    private const int MaxDrives = 3;
+
+    /// <summary>
+    /// The backends one drive of the target used, and the target's clock when it began. A row is THIS run's when
+    /// one of these backends wrote it no earlier than the drive began: the pid alone would also match a row left
+    /// by an earlier backend that had the same pid, and Windows recycles pids fast.
+    /// </summary>
+    private sealed record DrivenBackends(DateTime StartedUtc, int ErrorPid, int HolderPid, int WaiterPid)
+    {
+        /* The log stamps milliseconds truncated, and the clock read comes just before the first connection. */
+        private static readonly TimeSpan StampSlack = TimeSpan.FromSeconds(1);
+
+        public bool Wrote(PgLogEvent row, int pid) => row.Pid == pid && row.OccurredAtUtc >= StartedUtc - StampSlack;
+
+        public bool WroteAny(PgLogEvent row) => Wrote(row, ErrorPid) || Wrote(row, HolderPid) || Wrote(row, WaiterPid);
+    }
+
+    /// <summary>The target settings the three families depend on, as text for a failure message, and the one the drive needs.</summary>
+    private sealed record TargetLogSettings(string Text, int DeadlockTimeoutMs);
+
+    /// <summary>
+    /// Makes this run's events on the target, then polls the shipped collector query until each family shows a row
+    /// written by one of this run's backends (see <see cref="DrivenBackends"/>). A newest log file that differs from
+    /// the one the latest drive began in means PostgreSQL rotated meanwhile and the events may sit in the old
+    /// file, so the target is driven once more (at most <see cref="MaxDrives"/> drives). Fails at the deadline,
+    /// <c>deadlock_timeout</c> plus 30 s after the latest drive, naming what is missing and what the target says.
+    /// </summary>
+    private static async Task<List<PgLogEvent>> DriveTheTargetAndReadItsLogAsync(string target, CancellationToken ct)
+    {
+        var definition = PgLogEventsCollector.Instance;
+        await using var observer = new NpgsqlConnection(target);
+        await observer.OpenAsync(ct);
+
+        var settings = await ReadTargetLogSettingsAsync(observer, ct);
+        var newestAtStart = await NewestLogFileAsync(observer, ct);
+        var budget = TimeSpan.FromMilliseconds(settings.DeadlockTimeoutMs) + TimeSpan.FromSeconds(30);
+
+        var watching = newestAtStart.Name;
+        var driven = new List<DrivenBackends> { await DriveTargetEventsAsync(observer, target, settings.DeadlockTimeoutMs, ct) };
+        var deadline = DateTime.UtcNow + budget;
+        while (true)
+        {
+            var context = new CollectorContext
+            {
+                LogHashKey = TestLogHashKeys.Fixed,
+                ServerId = ServerId, ServerName = ServerName,
+                CollectionTime = DateTime.SpecifyKind(DateTime.UtcNow, DateTimeKind.Unspecified),
+                Deltas = new CollectorDeltaCalculator(), Target = new CollectorTargetInfo { Engine = CollectorTargetEngine.PostgreSql },
+            };
+
+            List<PgLogEvent> rows;
+            await using (var command = new NpgsqlCommand(definition.BuildQuery(context).Text, observer))
+            await using (var reader = await command.ExecuteReaderAsync(ct))
+            {
+                rows = await definition.ReadAsync(reader, context, ct);
+            }
+
+            var missing = MissingFamilies(rows, driven);
+            if (missing.Count == 0)
+            {
+                return rows;
+            }
+
+            var newest = await NewestLogFileAsync(observer, ct);
+            if (newest.Name != watching && driven.Count < MaxDrives)
+            {
+                watching = newest.Name;
+                driven.Add(await DriveTargetEventsAsync(observer, target, settings.DeadlockTimeoutMs, ct));
+                deadline = DateTime.UtcNow + budget;
+                continue;
+            }
+
+            if (DateTime.UtcNow >= deadline)
+            {
+                Assert.Fail(
+                    $"The target's log did not show this run's {string.Join(" and ", missing)} event(s) within {budget.TotalSeconds:0.#} s of the "
+                    + $"latest drive ({driven.Count} drive(s)). Driven backends by pid (error / lock holder / lock waiter): "
+                    + string.Join("; ", driven.Select(d => $"{d.ErrorPid} / {d.HolderPid} / {d.WaiterPid} from {d.StartedUtc:O}"))
+                    + $". Target settings: {settings.Text}. Newest log file at the start: {newestAtStart.Description}; now: {newest.Description}. "
+                    + $"The last read returned {rows.Count} event(s): "
+                    + string.Join(", ", rows.GroupBy(r => r.Family).OrderBy(g => g.Key, StringComparer.Ordinal).Select(g => $"{g.Key}={g.Count()}")) + ".");
+            }
+
+            await Task.Delay(500, ct);
+        }
+    }
+
+    /// <summary>The families with no row from this run's backends, in the order the test asserts them.</summary>
+    private static List<string> MissingFamilies(IReadOnlyList<PgLogEvent> rows, IReadOnlyList<DrivenBackends> driven)
+    {
+        var missing = new List<string>();
+        if (!rows.Any(r => r.Family == PgLogFamilies.Error && driven.Any(d => d.Wrote(r, d.ErrorPid))))
+        {
+            missing.Add(PgLogFamilies.Error);
+        }
+
+        if (!rows.Any(r => r.Family == PgLogFamilies.Connection && driven.Any(d => d.WroteAny(r))))
+        {
+            missing.Add(PgLogFamilies.Connection);
+        }
+
+        /* The waiter writes both lock-wait lines: "still waiting" when deadlock_timeout passes, "acquired" when it is granted. */
+        if (!rows.Any(r => r.Family == PgLogFamilies.LockWait && driven.Any(d => d.Wrote(r, d.WaiterPid))))
+        {
+            missing.Add(PgLogFamilies.LockWait);
+        }
+
+        return missing;
+    }
+
+    /// <summary>
+    /// One drive: a session that hits a division by zero (the error family, plus its own connection lines), then a
+    /// lock wait: one session holds an advisory transaction lock, a second blocks on the same key, and the holder
+    /// keeps it past <c>deadlock_timeout</c> (the "still waiting" line is the deadlock timer's, and a lock granted
+    /// sooner writes nothing) before releasing it (the waiter then writes "acquired"). Every session is its own
+    /// unpooled backend, so each one writes its connection and disconnection lines.
+    /// </summary>
+    private static async Task<DrivenBackends> DriveTargetEventsAsync(NpgsqlConnection observer, string target, int deadlockTimeoutMs, CancellationToken ct)
+    {
+        var unpooled = new NpgsqlConnectionStringBuilder(target) { Pooling = false }.ConnectionString;
+        var startedUtc = (DateTime)(await ScalarAsync(observer, "SELECT pg_catalog.clock_timestamp()", ct))!;
+
+        int errorPid;
+        await using (var failing = new NpgsqlConnection(unpooled))
+        {
+            await failing.OpenAsync(ct);
+            errorPid = (int)(await ScalarAsync(failing, "SELECT pg_catalog.pg_backend_pid()", ct))!;
+            await using var divide = new NpgsqlCommand("SELECT 1 / 0 AS self_hosted_e2e_error", failing);
+            var thrown = await Assert.ThrowsAsync<PostgresException>(async () => await divide.ExecuteScalarAsync(ct));
+            Assert.Equal("22012", thrown.SqlState);
+        }
+
+        var key = Random.Shared.NextInt64(1, long.MaxValue);
+        await using var holder = new NpgsqlConnection(unpooled);
+        await using var waiter = new NpgsqlConnection(unpooled);
+        await holder.OpenAsync(ct);
+        await waiter.OpenAsync(ct);
+        var holderPid = (int)(await ScalarAsync(holder, "SELECT pg_catalog.pg_backend_pid()", ct))!;
+        var waiterPid = (int)(await ScalarAsync(waiter, "SELECT pg_catalog.pg_backend_pid()", ct))!;
+
+        await using var held = await holder.BeginTransactionAsync(ct);
+        await ScalarAsync(holder, "SELECT pg_catalog.pg_advisory_xact_lock($1)", ct, key);
+
+        await using var block = new NpgsqlCommand("SELECT pg_catalog.pg_advisory_xact_lock($1)", waiter) { Parameters = { new NpgsqlParameter { Value = key } } };
+        Task? waiting = null;
+        var released = false;
+        try
+        {
+            waiting = block.ExecuteNonQueryAsync(ct);
+
+            /* Wait until the target itself says the waiter is blocked, rather than guessing with a sleep. */
+            var giveUp = DateTime.UtcNow.AddSeconds(15);
+            while ((long)(await ScalarAsync(holder,
+                       "SELECT count(*) FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND NOT granted AND pid = $1", ct, waiterPid))! == 0)
+            {
+                if (waiting.IsCompleted)
+                {
+                    await waiting;
+                    Assert.Fail($"The lock waiter (pid {waiterPid}) finished without blocking on advisory key {key}, which the holder (pid {holderPid}) holds.");
+                }
+
+                if (DateTime.UtcNow >= giveUp)
+                {
+                    Assert.Fail($"The lock waiter (pid {waiterPid}) never showed granted = false in pg_locks for advisory key {key} within 15 s.");
+                }
+
+                await Task.Delay(25, ct);
+            }
+
+            await Task.Delay(deadlockTimeoutMs + 500, ct);
+            await held.CommitAsync(ct);
+            released = true;
+            await waiting.WaitAsync(TimeSpan.FromSeconds(30), ct);
+        }
+        catch
+        {
+            /* Whatever failed above, do not leave the lock held or the waiter's statement running on the target.
+               A catch that rethrows, not a finally: this releases a lock on the target, not store state, so it is
+               not the store teardown LiveCleanupConversionRatchetTests (#1902) sweeps finally blocks for. */
+            if (!released)
+            {
+                await held.RollbackAsync(CancellationToken.None);
+            }
+
+            if (waiting is not null)
+            {
+                await Task.WhenAny(waiting, Task.Delay(TimeSpan.FromSeconds(15)));
+            }
+
+            throw;
+        }
+
+        return new DrivenBackends(startedUtc, errorPid, holderPid, waiterPid);
+    }
+
+    private static async Task<TargetLogSettings> ReadTargetLogSettingsAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        var values = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        var deadlockTimeoutMs = 1000;
+        await using var command = new NpgsqlCommand(
+            "SELECT name, pg_catalog.current_setting(name), setting FROM pg_catalog.pg_settings "
+            + "WHERE name IN ('log_lock_waits', 'deadlock_timeout', 'log_rotation_age', 'log_timezone')", target);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            values[reader.GetString(0)] = reader.GetString(1);
+            if (reader.GetString(0) == "deadlock_timeout")
+            {
+                /* pg_settings reports deadlock_timeout in milliseconds. */
+                deadlockTimeoutMs = int.Parse(reader.GetString(2), CultureInfo.InvariantCulture);
+            }
+        }
+
+        return new TargetLogSettings(string.Join(", ", values.Select(v => $"{v.Key}={v.Value}")), deadlockTimeoutMs);
+    }
+
+    /// <summary>The file the collector would read now: <c>TailCteSql</c>'s pick of the newest non-csv, non-json file.</summary>
+    private static async Task<(string Name, string Description)> NewestLogFileAsync(NpgsqlConnection target, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand(
+            @"SELECT name, modification, size FROM pg_catalog.pg_ls_logdir() WHERE name !~* '\.(csv|json)$' ORDER BY modification DESC LIMIT 1", target);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct)
+            ? (reader.GetString(0), $"{reader.GetString(0)} (modified {reader.GetFieldValue<DateTime>(1):O}, {reader.GetInt64(2)} bytes)")
+            : ("(none)", "(none)");
+    }
+
+    private static async Task<object?> ScalarAsync(NpgsqlConnection connection, string sql, CancellationToken ct, params object[] values)
+    {
+        await using var command = new NpgsqlCommand(sql, connection);
+        foreach (var value in values)
+        {
+            command.Parameters.Add(new NpgsqlParameter { Value = value });
+        }
+
+        return await command.ExecuteScalarAsync(ct);
     }
 
     /// <summary>
