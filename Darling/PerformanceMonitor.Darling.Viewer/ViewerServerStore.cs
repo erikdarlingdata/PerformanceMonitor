@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using PerformanceMonitor.Common;
 
@@ -467,21 +468,52 @@ public sealed class ViewerServerStore
     }
 
     /// <summary>
-    /// Whether an entry is the minimal one <see cref="NewFavoriteEntry"/> builds and nothing has been added to.
-    /// A bare Windows-authentication definition looks the same, and is treated the same: with nothing in it
-    /// but the name, there is nothing to lose.
+    /// The properties of a <see cref="ViewerServerEntry"/> that say nothing about which server it is, so an old
+    /// entry may differ from a bare favorite in these and still be treated as one (#4768). Every other public
+    /// property counts, see <see cref="HoldsNothingButAFavoriteFlag"/>.
     /// </summary>
-    private static bool HoldsNothingButAFavoriteFlag(ViewerServerEntry entry) =>
-        entry.ViewFilterDatabases.Count == 0
-        && entry.ExcludedDatabases.Count == 0
-        && string.Equals(entry.DisplayName, entry.ServerName, StringComparison.Ordinal)
-        && entry.AuthenticationType == AuthenticationTypes.Windows
-        && string.IsNullOrEmpty(entry.CredentialProfileId)
-        && string.IsNullOrEmpty(entry.Description)
-        && string.IsNullOrEmpty(entry.DatabaseName)
-        && string.IsNullOrEmpty(entry.UtilityDatabase)
-        && entry.MonthlyCostUsd == 0m
-        && entry.AlertDeliveryModeOverride is null;
+    private static readonly HashSet<string> NotPartOfTheServer = new(StringComparer.Ordinal)
+    {
+        nameof(ViewerServerEntry.Id),            // a generated key for the entry; a bare favorite made now has its own
+        nameof(ViewerServerEntry.CreatedDate),   // when the entry was made, which a bare favorite made now cannot match
+        nameof(ViewerServerEntry.LastConnected), // the same, stamped when the entry was made
+        nameof(ViewerServerEntry.IsFavorite)     // the star being moved, which the caller has just cleared
+    };
+
+    /* Declared after NotPartOfTheServer on purpose: static initializers run in the order they are written. */
+    private static readonly PropertyInfo[] ComparedToABareFavorite = typeof(ViewerServerEntry)
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Where(p => !NotPartOfTheServer.Contains(p.Name))
+        .ToArray();
+
+    /// <summary>
+    /// Whether an entry is what <see cref="NewFavoriteEntry"/> builds for its server name, and nothing has been
+    /// set on it since. It is compared with a fresh one over every public property of
+    /// <see cref="ViewerServerEntry"/> except <see cref="NotPartOfTheServer"/>, found by reflection, so a setting
+    /// added to the entry later is covered without anyone listing it: the entry is removed only when every
+    /// compared property matches. Lists match by count and sequence, everything else by <c>Equals</c>.
+    /// A definition with nothing set beyond its name and the defaults looks the same, and is treated the same:
+    /// there is nothing to lose.
+    /// </summary>
+    private static bool HoldsNothingButAFavoriteFlag(ViewerServerEntry entry)
+    {
+        var bare = NewFavoriteEntry(entry.ServerName);
+        foreach (var property in ComparedToABareFavorite)
+        {
+            var held = property.GetValue(entry);
+            var bareValue = property.GetValue(bare);
+            var same = property.PropertyType == typeof(List<string>)
+                ? (held as List<string> ?? new List<string>()).SequenceEqual(
+                    bareValue as List<string> ?? new List<string>(), StringComparer.Ordinal)
+                : object.Equals(held, bareValue);
+            if (!same)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>#1319: the persisted per-server display database filter (empty list = All / not yet set).</summary>
     public List<string> GetViewFilterDatabases(string serverName)
