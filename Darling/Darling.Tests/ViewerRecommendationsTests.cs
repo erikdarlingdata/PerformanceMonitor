@@ -12,7 +12,6 @@ using System.Linq;
 using System.Threading.Tasks;
 using Npgsql;
 using PerformanceMonitor.Analysis;
-using PerformanceMonitor.Analysis.Baselines;
 using PerformanceMonitor.Darling.Analysis;
 using PerformanceMonitor.Darling.Storage;
 using PerformanceMonitor.Darling.Viewer;
@@ -522,12 +521,12 @@ public sealed class ViewerRecommendationCardTests
             WindowEndUtc = new DateTime(2026, 7, 1, 15, 30, 0, DateTimeKind.Utc),
         };
 
-        // The UTC clock -> the UTC window verbatim (deterministic; the tab passes the selected server's own clock).
-        var utc = new RecommendationCardViewModel(item, ServerClock.Utc).AskAiPrompt;
+        // Offset 0 -> the UTC window verbatim (deterministic; the tab passes the machine-local offset).
+        var utc = new RecommendationCardViewModel(item, utcOffsetMinutes: 0).AskAiPrompt;
         Assert.Contains("14:00–15:30", utc, StringComparison.Ordinal);
 
         // +60 shifts the rendered window an hour forward.
-        var plusOne = new RecommendationCardViewModel(item, ServerClock.FixedOffset(60)).AskAiPrompt;
+        var plusOne = new RecommendationCardViewModel(item, utcOffsetMinutes: 60).AskAiPrompt;
         Assert.Contains("15:00–16:30", plusOne, StringComparison.Ordinal);
     }
 }
@@ -588,7 +587,7 @@ public sealed class ViewerRecommendationGroupingTests
     {
         // data + zero findings -> Empty (the genuine all-clear); the message is empty.
         var vm = RecommendationsViewModel.FromFindings(
-            Array.Empty<ViewerFindingRow>(), "SQL2022",
+            Array.Empty<ViewerFindingRow>(), "SQL2022", utcOffsetMinutes: 0,
             insufficientData: false, insufficientDataMessage: null);
 
         Assert.Equal(RecommendationsState.Empty, vm.State);
@@ -601,7 +600,7 @@ public sealed class ViewerRecommendationGroupingTests
     {
         // insufficient + zero findings -> InsufficientData ("still collecting"), NOT a false all-clear.
         var vm = RecommendationsViewModel.FromFindings(
-            Array.Empty<ViewerFindingRow>(), "SQL2022",
+            Array.Empty<ViewerFindingRow>(), "SQL2022", utcOffsetMinutes: 0,
             insufficientData: true,
             insufficientDataMessage: "Not enough data for reliable analysis. Need 1.0 days, have 3.0 hours.");
 
@@ -617,7 +616,7 @@ public sealed class ViewerRecommendationGroupingTests
         var rows = new List<ViewerFindingRow> { Row(1.6, "CPU is on fire", incidentId: "a") };
 
         var vm = RecommendationsViewModel.FromFindings(
-            rows, "SQL2022", insufficientData: true, insufficientDataMessage: "collecting");
+            rows, "SQL2022", utcOffsetMinutes: 0, insufficientData: true, insufficientDataMessage: "collecting");
 
         Assert.Equal(RecommendationsState.Loaded, vm.State);
         Assert.Single(vm.Sections);
@@ -646,7 +645,7 @@ public sealed class ViewerRecommendationGroupingTests
     {
         // window-empty + zero findings -> WindowEmpty ("collection appears broken"), NOT a false all-clear.
         var vm = RecommendationsViewModel.FromFindings(
-            Array.Empty<ViewerFindingRow>(), "SQL2022",
+            Array.Empty<ViewerFindingRow>(), "SQL2022", utcOffsetMinutes: 0,
             windowEmpty: true,
             windowEmptyMessage: "No facts were collected in the analysis window.");
 
@@ -664,7 +663,7 @@ public sealed class ViewerRecommendationGroupingTests
         var rows = new List<ViewerFindingRow> { Row(1.6, "CPU is on fire", incidentId: "a") };
 
         var vm = RecommendationsViewModel.FromFindings(
-            rows, "SQL2022", windowEmpty: true, windowEmptyMessage: "window empty");
+            rows, "SQL2022", utcOffsetMinutes: 0, windowEmpty: true, windowEmptyMessage: "window empty");
 
         Assert.Equal(RecommendationsState.Loaded, vm.State);
         Assert.Single(vm.Sections);
@@ -708,7 +707,7 @@ public sealed class ViewerRecommendationGroupingTests
         // The writer never sets both (the engine nulls both and sets at most one), but if a skewed
         // store ever did, the span-gate miss is the more fundamental answer.
         var vm = RecommendationsViewModel.FromFindings(
-            Array.Empty<ViewerFindingRow>(), "SQL2022",
+            Array.Empty<ViewerFindingRow>(), "SQL2022", utcOffsetMinutes: 0,
             insufficientData: true, insufficientDataMessage: "collecting",
             windowEmpty: true, windowEmptyMessage: "window empty");
 
