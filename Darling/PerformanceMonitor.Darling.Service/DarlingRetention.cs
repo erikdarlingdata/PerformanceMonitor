@@ -1674,7 +1674,7 @@ public static class DarlingRetention
     }
 
     /// <summary>
-    /// The drain loop with pacing (#4823): the executor also reports the WAL its batch wrote, and
+    /// The drain loop with pacing (#4823): the executor also reports the store's WAL during its batch, and
     /// <paramref name="pacer"/> waits after EVERY batch, the last one of a table included, so the debt of a
     /// table's final batch is paid before the next table starts writing. A null pacer never waits. The wait
     /// comes after the executor returns, so the WAL the executor measured never includes it.
