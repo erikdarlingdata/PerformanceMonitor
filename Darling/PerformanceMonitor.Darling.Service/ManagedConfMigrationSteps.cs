@@ -35,10 +35,15 @@ internal static class ManagedConfMigrationSteps
 
     /// <summary>
     /// Backs up <paramref name="postgresqlConfPath"/> to <c>postgresql.conf.pre-4215.&lt;utcNow&gt;.bak</c> in
-    /// <paramref name="dataDir"/> (rule 1). If a backup matching that pattern already exists — from an earlier
-    /// attempt, however far it got — this makes no second one and returns the existing path unchanged; the
-    /// backup is a one-time snapshot of what the store looked like before #4215 ever touched it, and every
-    /// re-run after the first must converge on that same original, not a mid-migration state.
+    /// <paramref name="dataDir"/> (rule 1) and returns the backup a failed attempt restores from. When the
+    /// NEWEST backup matching that pattern already holds the file's current bytes — an earlier attempt's
+    /// snapshot, restored by that attempt's failure or never overwritten — this makes no second one and
+    /// returns that path, so a re-run converges on the same original, not a mid-migration state. When the
+    /// file differs from the newest backup, the difference is an edit made between attempts, and a restore
+    /// from the old snapshot would throw that edit away: a new backup is taken, and the older ones stay as
+    /// they are. It used to return the OLDEST backup whatever the file held, and a later attempt's failure
+    /// then put the first attempt's snapshot back. A resumed attempt restores from the newest backup for
+    /// the same reason.
     /// </summary>
     internal static string BackupOriginal(string dataDir, string postgresqlConfPath, DateTime utcNow)
     {
@@ -46,12 +51,24 @@ internal static class ManagedConfMigrationSteps
         if (existing.Length > 0)
         {
             Array.Sort(existing, StringComparer.Ordinal);
-            return existing[0];
+            var newest = existing[^1];
+            if (File.ReadAllBytes(newest).AsSpan().SequenceEqual(File.ReadAllBytes(postgresqlConfPath)))
+            {
+                return newest;
+            }
         }
 
-        var backupPath = Path.Combine(
-            dataDir,
-            BackupPrefix + utcNow.ToString(BackupTimestampFormat, System.Globalization.CultureInfo.InvariantCulture) + BackupSuffix);
+        /* The name carries the second. A second attempt inside the same second takes the next free one,
+           so the newest backup still sorts last and is never overwritten. */
+        var stamp = utcNow;
+        string backupPath;
+        while (File.Exists(backupPath = Path.Combine(
+                   dataDir,
+                   BackupPrefix + stamp.ToString(BackupTimestampFormat, System.Globalization.CultureInfo.InvariantCulture) + BackupSuffix)))
+        {
+            stamp = stamp.AddSeconds(1);
+        }
+
         File.Copy(postgresqlConfPath, backupPath, overwrite: false);
         return backupPath;
     }

@@ -224,7 +224,17 @@ SELECT (SELECT is_satisfied FROM readiness) AS auto_explain_loaded,
     /// <summary>
     /// Every statement captured under at least two distinct <c>plan_hash</c> values in the window, with its stored
     /// <c>pg_statement_stats</c> deltas split at the flip — the read behind <c>PG_PLAN_REGRESSION</c>. <c>$1</c>
-    /// server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the row cap (<see cref="PlanFlipCandidateCount"/>).
+    /// server_id, <c>$2</c>/<c>$3</c> window (naive UTC), <c>$4</c> the row cap (<see cref="PlanFlipCandidateCount"/>),
+    /// <c>$5</c>/<c>$6</c>/<c>$7</c> the scorer's bars (calls per side, delta ms, concerning ratio).
+    ///
+    /// <para><b>The rows kept are the ones <see cref="PickRegression"/> would pick from (#4760).</b> The cap keeps 50
+    /// rows, so the order decides which 50 the pick ever sees; by <c>query_id</c> alone a worst regression with a high id
+    /// was dropped, and 50 rows that all failed the call floors reported no regression while dropped rows passed. The
+    /// order is the pick's two tiers: rows with enough calls on both sides, a ratio and the delta and concerning-ratio
+    /// bars first; then rows with enough calls and a ratio; then the rest; each tier by ratio, NULLs last, then
+    /// <c>query_id</c> for a stable page. The means and the ratio are <see cref="PlanFlipRow"/>'s, in the same double
+    /// arithmetic: a mean over no calls is NULL, a ratio over a zero mean is NULL. The bars arrive as parameters, never
+    /// re-declared. <c>COUNT(*) OVER ()</c> still runs before the cap, so the count of flipped statements stays whole.</para>
     ///
     /// <para><b>The plan the window opened with against the plan it closed with.</b> Per (<c>query_id</c>,
     /// <c>plan_hash</c>) the captures collapse to a first-seen time; ordered by first-seen, the FIRST hash is
@@ -310,25 +320,59 @@ sides AS (
     AND   s.collection_time >= $2
     AND   s.collection_time <= $3
     GROUP BY fl.query_id
+),
+measured AS (
+    SELECT fl.query_id,
+           fl.hash_count,
+           fl.hash_before,
+           fl.hash_after,
+           fl.flip_time,
+           fl.first_flip_time,
+           (fl.top_node_before IS DISTINCT FROM fl.top_node_after) AS top_node_changed,
+           fl.nodes_before,
+           fl.nodes_after,
+           CAST(COALESCE(sd.calls_before, 0) AS bigint) AS calls_before,
+           CAST(COALESCE(sd.ms_before, 0) AS bigint)    AS ms_before,
+           CAST(COALESCE(sd.calls_after, 0) AS bigint)  AS calls_after,
+           CAST(COALESCE(sd.ms_after, 0) AS bigint)     AS ms_after
+    FROM flipped AS fl
+    LEFT JOIN sides AS sd
+      ON sd.query_id = fl.query_id
+),
+means AS (
+    SELECT m.*,
+           CASE WHEN m.calls_before > 0 THEN CAST(m.ms_before AS double precision) / m.calls_before END AS mean_before,
+           CASE WHEN m.calls_after  > 0 THEN CAST(m.ms_after  AS double precision) / m.calls_after  END AS mean_after
+    FROM measured AS m
+),
+ratios AS (
+    SELECT s.*,
+           CASE WHEN s.mean_before > 0 AND s.mean_after IS NOT NULL THEN s.mean_after / s.mean_before END AS ratio
+    FROM means AS s
 )
-SELECT fl.query_id,
-       fl.hash_count,
-       fl.hash_before,
-       fl.hash_after,
-       fl.flip_time,
-       fl.first_flip_time,
-       (fl.top_node_before IS DISTINCT FROM fl.top_node_after) AS top_node_changed,
-       fl.nodes_before,
-       fl.nodes_after,
-       CAST(COALESCE(sd.calls_before, 0) AS bigint) AS calls_before,
-       CAST(COALESCE(sd.ms_before, 0) AS bigint)    AS ms_before,
-       CAST(COALESCE(sd.calls_after, 0) AS bigint)  AS calls_after,
-       CAST(COALESCE(sd.ms_after, 0) AS bigint)     AS ms_after,
-       COUNT(*) OVER ()                             AS flipped_statements
-FROM flipped AS fl
-LEFT JOIN sides AS sd
-  ON sd.query_id = fl.query_id
-ORDER BY fl.query_id
+SELECT r.query_id,
+       r.hash_count,
+       r.hash_before,
+       r.hash_after,
+       r.flip_time,
+       r.first_flip_time,
+       r.top_node_changed,
+       r.nodes_before,
+       r.nodes_after,
+       r.calls_before,
+       r.ms_before,
+       r.calls_after,
+       r.ms_after,
+       COUNT(*) OVER () AS flipped_statements
+FROM ratios AS r
+ORDER BY CASE
+             WHEN r.calls_before >= $5 AND r.calls_after >= $5 AND r.ratio IS NOT NULL
+                  AND r.mean_after - r.mean_before >= $6 AND r.ratio >= $7 THEN 0
+             WHEN r.calls_before >= $5 AND r.calls_after >= $5 AND r.ratio IS NOT NULL THEN 1
+             ELSE 2
+         END,
+         r.ratio DESC NULLS LAST,
+         r.query_id
 LIMIT $4";
 
     /// <summary>
@@ -998,6 +1042,10 @@ LIMIT $5";
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeStart));
         cmd.Parameters.AddWithValue(AsNaive(context.TimeRangeEnd));
         cmd.Parameters.AddWithValue(PlanFlipCandidateCount);
+        /* The order of the kept rows follows PickRegression's tiers, with the scorer's own bars (#4760). */
+        cmd.Parameters.AddWithValue(PgTargetScorer.PlanRegressionMinCallsPerSide);
+        cmd.Parameters.AddWithValue(PgTargetScorer.PlanRegressionMinDeltaMs);
+        cmd.Parameters.AddWithValue(PgTargetScorer.PlanRegressionRatioConcerning);
 
         var rows = new List<PlanFlipRow>();
         using var reader = await cmd.ExecuteReaderAsync(context.CancellationToken);

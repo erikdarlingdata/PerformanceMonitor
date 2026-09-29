@@ -174,6 +174,11 @@ public static partial class PgTargetScorer
     public const string WraparoundTimeToWallComputableKey = "time_to_wall_computable";
     public const string WraparoundDatabasesKey = "databases_in_window";
     public const string WraparoundDatabasesGradedKey = "databases_graded";
+    /// <summary>Metadata key (#4761): 1 when the fact's database was GONE by the window's end — its last row older than twice
+    /// the table's cadence before it (a dropped database) — so the fact describes the past and grades nothing.</summary>
+    public const string WraparoundDatabaseGoneKey = "database_gone";
+    /// <summary>Metadata key (#4761): minutes from the fact's database's last row to the window's end.</summary>
+    public const string WraparoundMinutesSinceLastSeenKey = "minutes_since_last_seen";
     public const string WraparoundSamplesKey = "samples_in_window";
     /// <summary>Metadata key: the arm that graded the worst counter — 0 none, 1 relative Warning (at the
     /// setting, not recovering), 2 ceiling Warning (half the space), 3 relative Critical (2× the setting),
@@ -371,6 +376,10 @@ public static partial class PgTargetScorer
     /// </summary>
     private static double ScoreWraparoundTrend(Fact fact)
     {
+        /* #4761: a dropped database's last reading is not a wall the server is heading for. */
+        if (fact.Metadata.GetValueOrDefault(WraparoundDatabaseGoneKey) >= 1)
+            return 0.0;
+
         var xid = GradeWraparoundCounter(
             (long)fact.Metadata.GetValueOrDefault(WraparoundXidAgeKey),
             (long)fact.Metadata.GetValueOrDefault(WraparoundFreezeMaxAgeKey),

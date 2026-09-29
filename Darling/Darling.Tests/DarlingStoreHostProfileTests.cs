@@ -7,6 +7,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using PerformanceMonitor.Darling.Service;
 using Xunit;
@@ -455,5 +456,95 @@ public sealed class DarlingStoreHostProfileTests
     public void IsKnownVerb_IncludesCheckSettings()
     {
         Assert.True(DarlingCliCommands.IsKnownVerb("--check-settings"));
+    }
+
+    /* --------------------------------------------- data volume --------------------------------------------- */
+
+    private const long OneGb = 1024L * 1024 * 1024;
+
+    /// <summary>The volume figures are the anchor's own: the read is asked for the anchor itself, never for the
+    /// drive root above it, so an anchor on a volume mounted at a folder reports that volume's size and free
+    /// space. The filesystem name and readiness still come from the drive letter.</summary>
+    [Fact]
+    public void GatherDataVolume_ReadsTheAnchorItself_NotItsDriveRoot()
+    {
+        var anchor = Directory.CreateTempSubdirectory("pm-host-volume-").FullName;
+        try
+        {
+            var asked = new List<string>();
+
+            var volume = DarlingStoreHostProfile.GatherDataVolume(anchor, path =>
+            {
+                asked.Add(path);
+                return (64 * OneGb, 120 * OneGb);
+            });
+
+            Assert.True(volume.IsReady);
+            Assert.Equal(64 * OneGb, volume.FreeBytes);
+            Assert.Equal(120 * OneGb, volume.TotalBytes);
+            Assert.Equal(new DriveInfo(Path.GetPathRoot(anchor)!).DriveFormat, volume.Filesystem);
+            Assert.Equal(new[] { anchor }, asked);
+        }
+        finally
+        {
+            Directory.Delete(anchor);
+        }
+    }
+
+    /// <summary>An anchor that is not there has no volume to ask, so the profile is not ready, with no figures
+    /// and no filesystem. Asked of the drive letter above it, the same read answers for any path under the
+    /// drive.</summary>
+    [Fact]
+    public void GatherDataVolume_AnchorThatIsNotThere_IsNotReady()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "pm-host-volume-missing-" + Guid.NewGuid().ToString("N"));
+
+        var volume = DarlingStoreHostProfile.GatherDataVolume(missing);
+
+        Assert.Equal(new HostDataVolumeProfile(0, 0, null, false), volume);
+    }
+
+    /// <summary>A read that fails keeps the profile's old answer for a disk it cannot see: not ready, no
+    /// figures, no filesystem, and no exception out of the gather.</summary>
+    [Fact]
+    public void GatherDataVolume_ReadFails_IsNotReady()
+    {
+        var anchor = Directory.CreateTempSubdirectory("pm-host-volume-").FullName;
+        try
+        {
+            var volume = DarlingStoreHostProfile.GatherDataVolume(
+                anchor, _ => throw new IOException("the volume is not ready"));
+
+            Assert.Equal(new HostDataVolumeProfile(0, 0, null, false), volume);
+        }
+        finally
+        {
+            Directory.Delete(anchor);
+        }
+    }
+
+    /// <summary>A UNC anchor is never asked: the profile is not ready and the per-path read is not made,
+    /// because that read would reach out to the share as this process's own identity, the reach
+    /// <see cref="DarlingStoreHostProfile.TryResolveProfileDataDirectory"/> refuses for a data directory.</summary>
+    [Fact]
+    public void GatherDataVolume_UncAnchor_IsNotReady_AndTheReadIsNeverMade()
+    {
+        var volume = DarlingStoreHostProfile.GatherDataVolume(
+            @"\\pm-unc-probe\share\data", path => throw new InvalidOperationException("must not be asked: " + path));
+
+        Assert.Equal(new HostDataVolumeProfile(0, 0, null, false), volume);
+    }
+
+    /// <summary>Left to itself the read answers for a real directory: ready, a positive size, and free space
+    /// that fits inside it.</summary>
+    [Fact]
+    public void GatherDataVolume_RealDirectory_ReportsItsVolume()
+    {
+        var volume = DarlingStoreHostProfile.GatherDataVolume(Path.GetTempPath());
+
+        Assert.True(volume.IsReady);
+        Assert.True(volume.TotalBytes > 0);
+        Assert.InRange(volume.FreeBytes, 0L, volume.TotalBytes);
+        Assert.False(string.IsNullOrEmpty(volume.Filesystem));
     }
 }

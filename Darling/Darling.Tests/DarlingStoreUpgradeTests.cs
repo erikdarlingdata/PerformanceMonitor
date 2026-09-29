@@ -14,6 +14,8 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -262,7 +264,7 @@ public sealed class DarlingStoreUpgradeTests
     public void DecideTransferMode_CopyWhenTheVolumeHasRoomForTwoCopies()
     {
         const long tenGb = 10L * 1024 * 1024 * 1024;
-        var decision = DarlingStoreUpgrade.DecideTransferMode(tenGb, 40L * 1024 * 1024 * 1024, hardLinksSupported: true);
+        var decision = DarlingStoreUpgrade.DecideTransferMode(tenGb, 40L * 1024 * 1024 * 1024, hardLinksSupported: true, dataDirectoryMeasured: true);
 
         Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Copy, decision.Mode);
     }
@@ -273,12 +275,12 @@ public sealed class DarlingStoreUpgradeTests
         const long tenGb = 10L * 1024 * 1024 * 1024;
 
         /* 12 GB free cannot hold a second 10 GB copy plus slack, but easily covers link mode. */
-        var link = DarlingStoreUpgrade.DecideTransferMode(tenGb, 12L * 1024 * 1024 * 1024, hardLinksSupported: true);
+        var link = DarlingStoreUpgrade.DecideTransferMode(tenGb, 12L * 1024 * 1024 * 1024, hardLinksSupported: true, dataDirectoryMeasured: true);
         Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Link, link.Mode);
 
         /* Same space, but the volume cannot make hard links: there is no safe mode left, so do not upgrade.
            An abort keeps the store running on its existing major, which beats a half-finished upgrade. */
-        var abort = DarlingStoreUpgrade.DecideTransferMode(tenGb, 12L * 1024 * 1024 * 1024, hardLinksSupported: false);
+        var abort = DarlingStoreUpgrade.DecideTransferMode(tenGb, 12L * 1024 * 1024 * 1024, hardLinksSupported: false, dataDirectoryMeasured: true);
         Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Abort, abort.Mode);
     }
 
@@ -286,9 +288,602 @@ public sealed class DarlingStoreUpgradeTests
     public void DecideTransferMode_AbortWhenEvenLinkModeCannotFit()
     {
         const long tenGb = 10L * 1024 * 1024 * 1024;
-        var decision = DarlingStoreUpgrade.DecideTransferMode(tenGb, 200L * 1024 * 1024, hardLinksSupported: true);
+        var decision = DarlingStoreUpgrade.DecideTransferMode(tenGb, 200L * 1024 * 1024, hardLinksSupported: true, dataDirectoryMeasured: true);
 
         Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Abort, decision.Mode);
+    }
+
+    /// <summary>A size walk that did not finish is a floor, and a floor cannot prove the room a copy needs:
+    /// with a huge free space and a floor of nothing, the choice is the one too little room gets — link mode
+    /// where the volume supports it, otherwise abort — never copy.</summary>
+    [Fact]
+    public void DecideTransferMode_UnmeasuredDataDirectory_NeverCopies()
+    {
+        const long hundredGb = 100L * 1024 * 1024 * 1024;
+
+        var link = DarlingStoreUpgrade.DecideTransferMode(0, hundredGb, hardLinksSupported: true, dataDirectoryMeasured: false);
+        Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Link, link.Mode);
+        Assert.Contains("could not be fully measured", link.Reason, StringComparison.Ordinal);
+
+        var abort = DarlingStoreUpgrade.DecideTransferMode(0, hundredGb, hardLinksSupported: false, dataDirectoryMeasured: false);
+        Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Abort, abort.Mode);
+        Assert.Contains("could not be fully measured", abort.Reason, StringComparison.Ordinal);
+
+        /* The same numbers from a finished walk are the ordinary copy. */
+        var copy = DarlingStoreUpgrade.DecideTransferMode(0, hundredGb, hardLinksSupported: true, dataDirectoryMeasured: true);
+        Assert.Equal(DarlingStoreUpgrade.FileTransferMode.Copy, copy.Mode);
+    }
+
+    /// <summary>A walk that an error ends reports incomplete, so a caller cannot mistake what it added up
+    /// before the error for the size. A directory that is not there is the error that needs no permissions
+    /// to stage; it used to come back as a complete measurement of zero bytes.</summary>
+    [Fact]
+    public void MeasureDirectoryBytes_WalkEndedByAnError_ReportsIncomplete()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"));
+
+        var bytes = DarlingStoreUpgrade.MeasureDirectoryBytes(missing, deadline: null, out var complete);
+
+        Assert.Equal(0L, bytes);
+        Assert.False(complete);
+    }
+
+    /// <summary>The free space is read for the path itself: a directory that is not there gets no answer,
+    /// where a read from its drive letter reports the letter's free space for any path under it.</summary>
+    [Fact]
+    public void ReadAvailableFreeBytes_AnswersForThePath_NotItsDriveLetter()
+    {
+        Assert.True(DarlingStoreUpgrade.ReadAvailableFreeBytes(Path.GetTempPath()) > 0);
+
+        var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"));
+        Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadAvailableFreeBytes(missing));
+    }
+
+    /// <summary>The volume's size comes from the same call as its free space, so a report that shows both
+    /// describes one volume: free never exceeds the total, and a directory that is not there gets no answer
+    /// for either figure.</summary>
+    [Fact]
+    public void ReadVolumeSpace_AnswersFreeAndTotalForThePath()
+    {
+        var (free, total) = DarlingStoreUpgrade.ReadVolumeSpace(Path.GetTempPath());
+
+        Assert.True(total > 0);
+        Assert.InRange(free, 0L, total);
+
+        var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"));
+        Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadVolumeSpace(missing));
+    }
+
+    /// <summary>The directory is asked first, and the numbers it gives are the answer: the mount point is not
+    /// even looked up. A data directory reached through a directory junction or a symbolic link is read on
+    /// the volume the link points at, which is what the directory read follows and a lookup of the mount
+    /// point from the path alone does not.</summary>
+    [Fact]
+    public void ReadVolumeSpaceVia_DirectoryReadSucceeds_ItsNumbersComeBack_MountPointNeverResolved()
+    {
+        const long oneGb = 1024L * 1024 * 1024;
+        var calls = new List<string>();
+
+        var (free, total) = DarlingStoreUpgrade.ReadVolumeSpaceVia(
+            @"C:\Mnt\Data\pgdata",
+            directory =>
+            {
+                calls.Add("directory " + directory);
+                return (48 * oneGb, 100 * oneGb);
+            },
+            directory =>
+            {
+                calls.Add("resolve " + directory);
+                return @"C:\Mnt\Data\";
+            },
+            mountPoint =>
+            {
+                calls.Add("mount point " + mountPoint);
+                return (64 * oneGb, 120 * oneGb);
+            });
+
+        Assert.Equal(48 * oneGb, free);
+        Assert.Equal(100 * oneGb, total);
+        Assert.Equal(new[] { @"directory C:\Mnt\Data\pgdata" }, calls);
+    }
+
+    /// <summary>A directory that turns the caller away is not the end of the read: the space is then asked of
+    /// the mount point the second step found, and the caller's access to the directory does not come into
+    /// it. Three steps in this order, and never the drive letter.</summary>
+    [Fact]
+    public void ReadVolumeSpaceVia_DirectoryReadDenied_ReadsTheMountPointItResolved()
+    {
+        const long oneGb = 1024L * 1024 * 1024;
+        var calls = new List<string>();
+
+        var (free, total) = DarlingStoreUpgrade.ReadVolumeSpaceVia(
+            @"C:\Mnt\Data\pgdata",
+            directory =>
+            {
+                calls.Add("directory " + directory);
+                return null;
+            },
+            directory =>
+            {
+                calls.Add("resolve " + directory);
+                return @"C:\Mnt\Data\";
+            },
+            mountPoint =>
+            {
+                calls.Add("mount point " + mountPoint);
+                return (64 * oneGb, 120 * oneGb);
+            });
+
+        Assert.Equal(64 * oneGb, free);
+        Assert.Equal(120 * oneGb, total);
+        Assert.Equal(
+            new[] { @"directory C:\Mnt\Data\pgdata", @"resolve C:\Mnt\Data\pgdata", @"mount point C:\Mnt\Data\" },
+            calls);
+    }
+
+    /// <summary>Only "access denied" goes on to the mount point. A directory read that fails another way (a
+    /// directory that is not there, a volume that is not ready) throws as it is, and the mount point is not
+    /// looked up: it would answer with the volume above a directory that is not there.</summary>
+    [Fact]
+    public void ReadVolumeSpaceVia_DirectoryReadFailsAnotherWay_Throws_MountPointNeverResolved()
+    {
+        var calls = new List<string>();
+
+        var thrown = Assert.Throws<IOException>(() => DarlingStoreUpgrade.ReadVolumeSpaceVia(
+            @"C:\Mnt\Data\pgdata",
+            directory =>
+            {
+                calls.Add("directory " + directory);
+                throw new IOException("The volume is not ready.");
+            },
+            directory =>
+            {
+                calls.Add("resolve " + directory);
+                return @"C:\Mnt\Data\";
+            },
+            mountPoint =>
+            {
+                calls.Add("mount point " + mountPoint);
+                return (0L, 0L);
+            }));
+
+        Assert.Equal("The volume is not ready.", thrown.Message);
+        Assert.Equal(new[] { @"directory C:\Mnt\Data\pgdata" }, calls);
+    }
+
+    /// <summary>A folder on the system drive is on that drive's own volume, so its mount point is the drive
+    /// root: finding the mount point changes nothing for the ordinary case, where the drive-root read was
+    /// already right.</summary>
+    [Fact]
+    public void ResolveVolumeMountPoint_FolderOnTheSystemDrive_IsTheDriveRoot()
+    {
+        var folder = Environment.SystemDirectory;
+
+        var mountPoint = DarlingStoreUpgrade.ResolveVolumeMountPoint(folder);
+
+        Assert.Equal(Path.GetPathRoot(folder), mountPoint, ignoreCase: true);
+    }
+
+    /// <summary>A directory that is not there is refused, not answered with the volume above it. The Win32
+    /// call answers for any path under a folder that exists, and a data directory below a volume mounted at a
+    /// folder that is offline would then be judged by the drive letter's free space.</summary>
+    [Fact]
+    public void ResolveVolumeMountPoint_DirectoryThatIsNotThere_IsRefused_NotAnsweredWithTheVolumeAbove()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "pm-upgrade-missing-" + Guid.NewGuid().ToString("N"), "data");
+
+        Assert.Throws<IOException>(() => DarlingStoreUpgrade.ResolveVolumeMountPoint(missing));
+    }
+
+    /// <summary>A folder the current account is shut out of still reads its volume's numbers. A volume's size
+    /// and free space do not depend on the caller's access to one folder on it, and the read that opened the
+    /// folder itself was turned away with "access denied" here: a command prompt that is not elevated, or the
+    /// viewer's own profile, asking about a data directory only the service account can open. With the folder
+    /// above it shut as well, the caller cannot even read the folder's attributes, and it is still on a
+    /// volume: only a folder that is not there is refused.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReadVolumeSpace_FolderTheCallerIsShutOutOf_StillReadsItsVolume(bool folderAboveIsShutToo)
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var above = Directory.CreateTempSubdirectory("pm-volume-shut-");
+        var folder = above.CreateSubdirectory("data");
+        var deny = new FileSystemAccessRule(
+            WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl, AccessControlType.Deny);
+        var folderSecurity = folder.GetAccessControl();
+        var aboveSecurity = above.GetAccessControl();
+        try
+        {
+            folderSecurity.AddAccessRule(deny);
+            folder.SetAccessControl(folderSecurity);
+            if (folderAboveIsShutToo)
+            {
+                aboveSecurity.AddAccessRule(deny);
+                above.SetAccessControl(aboveSecurity);
+            }
+
+            var shut = false;
+            try
+            {
+                _ = Directory.GetFileSystemEntries(folder.FullName);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                shut = true;
+            }
+
+            Assert.SkipUnless(shut, "The folder is still open to this account, so it cannot stand in for one the caller is shut out of.");
+
+            var (free, total) = DarlingStoreUpgrade.ReadVolumeSpace(folder.FullName);
+
+            Assert.Equal(new DriveInfo(Path.GetPathRoot(folder.FullName)!).TotalSize, total);
+            Assert.InRange(free, 0L, total);
+        }
+        finally
+        {
+            aboveSecurity.RemoveAccessRule(deny);
+            above.SetAccessControl(aboveSecurity);
+            folderSecurity.RemoveAccessRule(deny);
+            folder.SetAccessControl(folderSecurity);
+            folder.Delete();
+            above.Delete();
+        }
+    }
+
+    /// <summary>Hard-link mode: a carry that throws after the swap still takes the retained pre-upgrade
+    /// directory with it. It shares its files with the upgraded cluster, so it was never a rollback copy,
+    /// and it used to be left beside the new cluster for two starts whenever a carry threw.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_CarryThrows_RetainedDirectoryIsGone()
+    {
+        var store = PlantStore();
+        var steps = new List<string>();
+        try
+        {
+            await Assert.ThrowsAsync<IOException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
+                () => throw new IOException("postgresql.auto.conf could not be written"),
+                _ => Task.CompletedTask,
+                NullLogger.Instance));
+
+            Assert.False(Directory.Exists(store.Retained));
+            Assert.Equal(new[] { "carry-auto-conf" }, steps);
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>Copy mode: the retained directory IS the rollback copy, and a throwing carry leaves it alone.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_CopyMode_CarryThrows_RetainedDirectoryIsKept()
+    {
+        var store = PlantStore();
+        var steps = new List<string>();
+        try
+        {
+            await Assert.ThrowsAsync<IOException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, steps.Add,
+                () => Task.CompletedTask,
+                _ => throw new IOException("postgresql.conf could not be written"),
+                NullLogger.Instance));
+
+            Assert.True(File.Exists(Path.Combine(store.Retained, "PG_VERSION")));
+            Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>Hard-link mode, both carries return: the directory goes, and the steps ran in order.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_CarriesReturn_RetainedDirectoryIsGone()
+    {
+        var store = PlantStore();
+        var steps = new List<string>();
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
+                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                NullLogger.Instance);
+
+            Assert.False(Directory.Exists(store.Retained));
+            Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>The operator's lines below the darling-managed.conf include exist only in the old
+    /// postgresql.conf, and hard-link mode removes the directory that holds it. The auto.conf carry rethrows
+    /// (a probe timeout, a cancellation at service stop, a failed reset), so the operator-lines carry never
+    /// runs: the file has to be saved beside the new data directory BEFORE either carry, or those lines are
+    /// lost with no copy.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_AutoConfCarryThrows_OperatorLinesSurviveBesideTheNewDataDirectory()
+    {
+        var store = PlantStore(OperatorConf);
+        var steps = new List<string>();
+        try
+        {
+            await Assert.ThrowsAsync<TimeoutException>(() => DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
+                () => throw new TimeoutException("postgres -C did not answer"),
+                _ => Task.CompletedTask,
+                NullLogger.Instance));
+
+            Assert.False(Directory.Exists(store.Retained));
+            Assert.Equal(new[] { "carry-auto-conf" }, steps);
+            Assert.True(File.Exists(store.SavedConf), $"expected the saved postgresql.conf at {store.SavedConf}");
+            Assert.Equal(OperatorConf, await File.ReadAllTextAsync(store.SavedConf));
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>Hard-link mode, the copy cannot be made (a directory sits where the file belongs, so
+    /// File.Copy cannot replace it): the retained directory is kept, with a warning that says so, because it
+    /// holds the only copy of the operator's lines. Both carries still run.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_CopyCannotBeMade_RetainedDirectoryIsKept_CarriesStillRun()
+    {
+        var store = PlantStore(OperatorConf);
+        Directory.CreateDirectory(store.SavedConf);
+        var steps = new List<string>();
+        var log = new CapturingLogger();
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, steps.Add,
+                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                log);
+
+            Assert.Equal(OperatorConf, await File.ReadAllTextAsync(Path.Combine(store.Retained, "postgresql.conf")));
+            Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
+
+            var logText = log.ToString();
+            Assert.Contains("Could not save the pre-upgrade postgresql.conf", logText, StringComparison.Ordinal);
+            Assert.Contains("Kept the pre-upgrade data directory", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Removed the pre-upgrade data directory", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>Copy mode: the old postgresql.conf is saved beside the new data directory too, and the
+    /// retained directory is kept as today (it is the rollback copy).</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_CopyMode_SavesTheOldConfBesideTheNewDataDirectory_RetainedDirectoryIsKept()
+    {
+        var store = PlantStore(OperatorConf);
+        var steps = new List<string>();
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, steps.Add,
+                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                NullLogger.Instance);
+
+            Assert.True(File.Exists(store.SavedConf), $"expected the saved postgresql.conf at {store.SavedConf}");
+            Assert.Equal(OperatorConf, await File.ReadAllTextAsync(store.SavedConf));
+            Assert.Equal(OperatorConf, await File.ReadAllTextAsync(Path.Combine(store.Retained, "postgresql.conf")));
+            Assert.Equal(new[] { "carry-auto-conf", "carry-operator-conf-lines" }, steps);
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>Hard-link mode, and the old data directory holds no postgresql.conf: there is nothing to save,
+    /// nothing is lost by removing it, so it goes as it did before the copy existed.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_NoPostgresqlConfToSave_RetainedDirectoryIsGone_NothingIsSaved()
+    {
+        var store = PlantStore();
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, _ => { },
+                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                NullLogger.Instance);
+
+            Assert.False(Directory.Exists(store.Retained));
+            Assert.False(File.Exists(store.SavedConf));
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>The saved copy is hardened like the auto.conf original: File.Copy gives it the store folder's
+    /// inherited ACL, and HardenFile takes that inheritance off.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_SavedConf_IsHardenedLikeTheAutoConfOriginal()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "ACLs are Windows-only.");
+
+        var store = PlantStore(OperatorConf);
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Copy, store.Retained, store.NewDataDirectory, _ => { },
+                () => Task.CompletedTask,
+                _ => Task.CompletedTask,
+                NullLogger.Instance);
+
+            Assert.True(File.Exists(store.SavedConf), $"expected the saved postgresql.conf at {store.SavedConf}");
+            Assert.True(
+                new FileInfo(store.SavedConf).GetAccessControl().AreAccessRulesProtected,
+                "the saved postgresql.conf still inherits the store folder's ACL");
+        }
+        finally
+        {
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>The operator-lines carry's warnings name where the original line is kept: the saved copy when
+    /// there is one, otherwise the old data directory's own file (which is then kept). They used to name the
+    /// retained pre-upgrade data directory, which hard-link mode removes right after the carries.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task CarryOperatorConfLinesAsync_RejectedLine_WarningNamesWhereTheOriginalIsKept(bool savedCopyExists)
+    {
+        var root = Directory.CreateTempSubdirectory("darling-opconf-kept-");
+        try
+        {
+            var oldDataDirectory = Path.Combine(root.FullName, "old");
+            var newDataDirectory = Path.Combine(root.FullName, "new");
+            Directory.CreateDirectory(oldDataDirectory);
+            Directory.CreateDirectory(newDataDirectory);
+
+            var oldConf = Path.Combine(oldDataDirectory, "postgresql.conf");
+            File.WriteAllText(
+                oldConf,
+                "include 'darling-managed.conf'\n" +
+                "darling_4725_unknown_setting = 'on'\n");
+            File.WriteAllText(Path.Combine(newDataDirectory, "postgresql.conf"), "include 'darling-managed.conf'\n");
+
+            var savedCopy = Path.Combine(root.FullName, DarlingStoreUpgrade.PreUpgradeConfFileName);
+            if (savedCopyExists)
+            {
+                File.Copy(oldConf, savedCopy);
+            }
+
+            var log = new CapturingLogger();
+            var result = await new DarlingStoreUpgrade(log).CarryOperatorConfLinesAsync(
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", savedCopyExists ? savedCopy : null,
+                (exePath, arguments, timeout, token) => Task.FromResult((1, "unrecognized configuration parameter")),
+                CancellationToken.None);
+
+            Assert.Equal(1, result.RejectedCount);
+
+            var logText = log.ToString();
+            Assert.Contains("NOT carried: darling_4725_unknown_setting", logText, StringComparison.Ordinal);
+            Assert.Contains($"The original line is kept in {(savedCopyExists ? savedCopy : oldConf)}.", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("retained pre-upgrade data directory", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A second or later major upgrade: the postgresql.conf.pre-upgrade the EARLIER upgrade saved is
+    /// still beside the new data directory, and this upgrade's copy cannot replace it (the earlier copy is
+    /// read-only, so File.Copy with overwrite throws). This upgrade's lines then exist only in the retained
+    /// directory, which hard-link mode keeps, and the operator-lines carry's warning has to name that file,
+    /// not the earlier copy that is still there and holds the earlier upgrade's lines. Driven through
+    /// CarryConfAfterSwapAsync, so the path the warning names is the one the save step reported.</summary>
+    [Fact]
+    public async Task CarryConfAfterSwapAsync_LinkMode_EarlierCopyCannotBeReplaced_OperatorLinesWarningNamesTheRetainedConf()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "A read-only file blocks File.Copy(overwrite: true) on Windows only.");
+
+        const string EarlierCopyText = "include 'darling-managed.conf'\nwork_mem = '1MB'\n";
+        var store = PlantStore(
+            "include 'darling-managed.conf'\n" +
+            "darling_4725_unknown_setting = 'on'\n");
+        File.WriteAllText(Path.Combine(store.NewDataDirectory, "postgresql.conf"), "include 'darling-managed.conf'\n");
+        File.WriteAllText(store.SavedConf, EarlierCopyText);
+        File.SetAttributes(store.SavedConf, FileAttributes.ReadOnly);
+
+        var retainedConf = Path.Combine(store.Retained, "postgresql.conf");
+        var log = new CapturingLogger();
+        var upgrade = new DarlingStoreUpgrade(log);
+        var rejected = -1;
+        try
+        {
+            await DarlingStoreUpgrade.CarryConfAfterSwapAsync(
+                DarlingStoreUpgrade.FileTransferMode.Link, store.Retained, store.NewDataDirectory, _ => { },
+                () => Task.CompletedTask,
+                async linesPath =>
+                {
+                    var result = await upgrade.CarryOperatorConfLinesAsync(
+                        store.Retained, store.NewDataDirectory, "unused-bin-dir", linesPath,
+                        (exePath, arguments, timeout, token) => Task.FromResult((1, "unrecognized configuration parameter")),
+                        CancellationToken.None);
+                    rejected = result.RejectedCount;
+                },
+                log);
+
+            Assert.Equal(1, rejected);
+            Assert.Equal(EarlierCopyText, await File.ReadAllTextAsync(store.SavedConf));
+
+            /* The save step's own warning names the earlier copy (the copy failed against it), so the
+               assertions read the operator-lines warning's own line, not the whole log. */
+            var logText = log.ToString();
+            Assert.Contains("Could not save the pre-upgrade postgresql.conf", logText, StringComparison.Ordinal);
+            var notCarried = Assert.Single(
+                logText.Split('\n'),
+                line => line.Contains("NOT carried: darling_4725_unknown_setting", StringComparison.Ordinal));
+            Assert.Contains($"The original line is kept in {retainedConf}.", notCarried, StringComparison.Ordinal);
+            Assert.DoesNotContain(store.SavedConf, notCarried, StringComparison.Ordinal);
+
+            Assert.True(Directory.Exists(store.Retained), "the retained directory holds the only copy of the lines, so it is kept");
+            Assert.True(File.Exists(retainedConf));
+            Assert.Contains("Kept the pre-upgrade data directory", logText, StringComparison.Ordinal);
+            Assert.DoesNotContain("Removed the pre-upgrade data directory", logText, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(store.SavedConf))
+            {
+                File.SetAttributes(store.SavedConf, FileAttributes.Normal);
+            }
+
+            TryDeleteTree(store.Root);
+        }
+    }
+
+    /// <summary>The operator's own lines below the darling-managed.conf include, as an old postgresql.conf holds them.</summary>
+    private const string OperatorConf =
+        "max_connections = 200\n" +
+        "include 'darling-managed.conf'\n" +
+        "# operator settings kept from the previous postgresql.conf (#4215)\n" +
+        "log_min_duration_statement = 250\n";
+
+    /// <summary>A store folder as the upgrade leaves it after the directory swap: the new data directory, and
+    /// the retained old one beside it. Neither is a real cluster. <see cref="SavedConf"/> is where the old
+    /// postgresql.conf is kept for good.</summary>
+    private sealed record PlantedStore(string Root, string NewDataDirectory, string Retained)
+    {
+        public string SavedConf => Path.Combine(Root, DarlingStoreUpgrade.PreUpgradeConfFileName);
+    }
+
+    private static PlantedStore PlantStore(string? oldConf = null)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pm-upgrade-store-" + Guid.NewGuid().ToString("N"));
+        var newDataDirectory = Path.Combine(root, "data");
+        var retained = Path.Combine(root, "data-old-17");
+        Directory.CreateDirectory(newDataDirectory);
+        Directory.CreateDirectory(retained);
+        File.WriteAllText(Path.Combine(retained, "PG_VERSION"), "17\n");
+        if (oldConf is not null)
+        {
+            File.WriteAllText(Path.Combine(retained, "postgresql.conf"), oldConf);
+        }
+
+        return new PlantedStore(root, newDataDirectory, retained);
     }
 
     [Fact]
@@ -1528,7 +2123,7 @@ public sealed class DarlingStoreUpgradeTests
 
             var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
             var result = await upgrade.CarryOperatorConfLinesAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir",
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", null,
                 (exePath, arguments, timeout, token) => Task.FromResult((0, string.Empty)),
                 CancellationToken.None);
 
@@ -1589,7 +2184,7 @@ public sealed class DarlingStoreUpgradeTests
             var log = new CapturingLogger();
             var upgrade = new DarlingStoreUpgrade(log);
             var result = await upgrade.CarryOperatorConfLinesAsync(
-                oldDataDirectory, newDataDirectory, "unused-bin-dir", Probe, CancellationToken.None);
+                oldDataDirectory, newDataDirectory, "unused-bin-dir", null, Probe, CancellationToken.None);
 
             Assert.Equal(2, result.CarriedCount);
             Assert.Equal(1, result.RejectedCount);

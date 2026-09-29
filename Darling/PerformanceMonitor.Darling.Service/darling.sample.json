@@ -301,7 +301,8 @@
     "netBenefitRatio": 0.75
   },
 
-  // SMTP alert delivery (optional). Enabled when host + from + to are all set. For an
+  // SMTP alert delivery (optional). Enabled when host + from are set; "to" is the default recipient
+  // list for alerts no notification route covers, and may be blank when routes name the recipients. For an
   // authenticated relay, set username and run --encrypt-password for the password blob.
   //
   // emailCooldownMinutes is NOT email-only despite living here and despite its name: it is the
