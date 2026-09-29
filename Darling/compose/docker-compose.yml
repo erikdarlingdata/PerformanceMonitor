@@ -133,9 +133,9 @@ services:
     # #4733: reports unhealthy once a startup failure has stopped collection for good. The process stays up after
     # such a failure on purpose (exiting would restart a plain config error in a loop), so without this the
     # container shows as running although it never collects. `restart: unless-stopped` does not act on health,
-    # so a stopped service stays up and shows unhealthy (`docker compose ps`) instead of restarting; its logs and
-    # /api/ping say why. It tests for the marker file DARLING_STOPPED_MARKER names, not /api/ping, because this
-    # image has /bin/sh and no curl.
+    # so a stopped service stays up and shows unhealthy (`docker compose ps`) instead of restarting; its logs say
+    # why, and /api/ping too when the web dashboard is enabled. It tests for the marker file DARLING_STOPPED_MARKER
+    # names, not /api/ping, because this image has /bin/sh and no curl.
     healthcheck:
       test: ["CMD-SHELL", "test ! -e /tmp/darling-stopped"]
       interval: 30s
