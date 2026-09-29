@@ -627,7 +627,7 @@ public sealed class DarlingMcpTrendTools
         }
     }
 
-    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). A point with no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut; effective_start says where the answer begins. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over the gap since the PREVIOUS point, so a raw point that is first in the window - with no previous one to difference against - carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
+    [McpServerTool(Name = "get_query_store_duration_trend"), Description("Gets a time-series of Query Store duration and executions per second, summed across every query, each interval counted once, at the hour it ran. not_collected: engine cannot run Query Store. unavailable: never sampled here. empty: quiet on Lite always; on Darling, empty can also be a rollup coverage gap (window predates the corrected rollup, run --backfill-rollups). A point with no earlier point to rate against has null rates, never 0 (unrated_points, unrated_note says why). window_truncated marks the retention floor, not a page cut; effective_start says where the answer begins. <<GUIDE>> Gets a time-series of Query Store duration per second and executions per second over time, summed across every query. Where get_query_duration_trend reads the plan cache and loses everything an eviction or a restart takes with it, this reads Query Store, which persists per interval - so it is the series that survives a failover and the one to reach for when a regression is older than the cache. Each interval is counted once, at the hour the work ran. A rollup point (an hourly bucket the corrected rollup has materialized) is rated over its bucket width, so every rollup point is rated, the window's first bucket included; a raw point (a Query Store interval placed at its start, or a legacy row at its collection time) is rated over its own stored interval, its end minus its start. A raw point with no stored end (a row collected before the end was recorded, and every legacy row) falls back to the gap since the PREVIOUS point, so only such a point, when it is first in the window and has no previous one to difference against, carries null rates: unknowable, never reported as 0 (unrated_points counts them, unrated_note says why)." + McpHelpers.WindowTruncatedDescription + BaselineDiscontinuities.DescriptionSentence)]
     public static async Task<string> GetQueryStoreDurationTrend(
         NpgsqlDataSource postgres,
         [Description("Server name or display name.")] string? server_name = null,
@@ -885,14 +885,15 @@ public sealed class DarlingMcpTrendTools
            against), and — since the plan-cache trends read the STORED interval (#3540 V128 for procedures,
            #3695 / #3653 for query_stats) — a restart collection whose interval the calculator could not
            measure (stored 0 → NULL). The hourly route divides by the bucket width and produces none, and a
-           Query Store rollup bucket is rated over its width too (#3695); only a raw Query Store point is
-           LAG-rated. The note below is the trio's shared sentence on BOTH SKUs (Lite's McpQueryTools carries
+           Query Store rollup bucket is rated over its width too (#3695); a raw Query Store point is rated over
+           its own stored interval, its end less its start (#4765), and is LAG-rated only where it stored no
+           end. The note below is the trio's shared sentence on BOTH SKUs (Lite's McpQueryTools carries
            it byte-identical, pinned by McpMissMessageParityPinTests) and names BOTH ways a denominator goes
            unknowable — the stored-0 restart (#3695 / #3700) and the first-in-window LAG (#3541 A12) — in one
            sentence, because the three tools serialize through this one helper and a per-tool note would put
-           three sentences on one shape. The Query Store trend can only hit the second arm (it stores no
-           interval), and the sentence stays true there: every one of its points is "a collection where no
-           interval was stored". */
+           three sentences on one shape. The Query Store trend can only hit the second arm (it stores no sample interval), and only for a
+           point that stored no end (#4765); the sentence stays true there: that point is the window's first
+           collection where no interval was stored. */
         var unrated = points.Count(p => !p.HasRate);
         var unratedCollections = points.Sum(p => p.UnratedCollections);
         envelope["unrated_points"] = unrated;

@@ -30,6 +30,11 @@ namespace Darling.Tests;
 /// fallback differently, without turning this class red. The arithmetic on a real store is
 /// <see cref="QueryStoreTrendRoutingLiveTests"/>; Lite's DuckDB twin is pinned by running it, in
 /// <c>Lite.Tests</c>.</para>
+///
+/// <para>Every copy truncates the start and the end each to a whole second before it subtracts (the
+/// <c>date_trunc('second', ...)</c> in the pinned expression). Query Store intervals are whole minutes, so nothing
+/// is lost; what a stored fraction of a second does to the length is pinned on a real store by
+/// <c>QueryStoreTrendRoutingLiveTests.DurationTrend_AFractionalSecondLength_IsRatedOverWholeSeconds</c>.</para>
 /// </summary>
 public sealed class QueryStoreTrendIntervalRateTests
 {

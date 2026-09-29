@@ -432,6 +432,77 @@ public sealed class QueryStoreTrendRoutingLiveTests
     }
 
     /// <summary>
+    /// <summary>
+    /// #4765: an interval's length is counted in WHOLE seconds. The read truncates the start and the end each to
+    /// its second before it subtracts, so a stored fraction of a second moves the length by up to a second in
+    /// either direction: a true 3,599.000002 seconds reads 3,600, a true 58.2 reads 59, and a true 0.8 reads 0,
+    /// which leaves the point unrated (a NULL rate, never a divide by zero). Query Store intervals are whole
+    /// minutes, so the product never stores a fraction and the read stays as it is; this pins what it does with
+    /// one, so changing it is a decision and not an accident. The same expression is in all four Darling SQL
+    /// texts (<see cref="QueryStoreTrendIntervalRateTests"/> pins them identical), so the MCP reader's raw read
+    /// stands for them here; Lite's DuckDB twin is pinned by running it, in <c>Lite.Tests</c>. PostgreSQL
+    /// <c>timestamp</c> keeps microseconds, so every seeded instant is a whole number of them.
+    /// </summary>
+    [Fact]
+    public async Task DurationTrend_AFractionalSecondLength_IsRatedOverWholeSeconds()
+    {
+        var baseConnectionString = Environment.GetEnvironmentVariable("DARLING_TEST_PG");
+        Assert.SkipWhen(string.IsNullOrEmpty(baseConnectionString),
+            "Set DARLING_TEST_PG to a Postgres connection string to run the live #4765 fractional-second test (it mints its own scratch database).");
+
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var scratch = await ScratchPostgres.CreateAsync(baseConnectionString!, ct);
+        await using var connection = new NpgsqlConnection(scratch.ConnectionString);
+        await connection.OpenAsync(ct);
+        await PgMigrations.MigrateAsync(connection, ct);
+        await DarlingMcpTestData.RegisterServerAsync(connection, TestServerId, ServerName, ct);
+
+        var hour10 = new DateTime(2026, 3, 4, 10, 0, 0, DateTimeKind.Unspecified);
+        var hour11 = hour10.AddHours(1);
+        var hour12 = hour10.AddHours(2);
+        var hour13 = hour10.AddHours(3);
+
+        /* 3,599.000002 seconds long: starts 0.999999 s past 10:00 and ends 3,600.000001 s past it. The whole
+           seconds are 0 and 3,600, so it reads 3,600. */
+        var start1 = hour10.AddTicks(9_999_990);
+        await SeedSnapshotsAsync(connection, intervalId: 4300, queryId: 90, intervalStart: start1,
+            avgDurationUs: 1_000, [(hour10.AddMinutes(5), 10L), (hour10.AddMinutes(20), 30L)], ct,
+            intervalLength: TimeSpan.FromTicks(35_990_000_020));
+
+        /* 58.2 seconds long: starts 0.9 s past 11:00 and ends 59.1 s past it. The whole seconds are 0 and 59,
+           so it reads 59. */
+        var start2 = hour11.AddTicks(9_000_000);
+        await SeedSnapshotsAsync(connection, intervalId: 4301, queryId: 91, intervalStart: start2,
+            avgDurationUs: 2_000, [(hour11.AddMinutes(5), 40L), (hour11.AddMinutes(20), 118L)], ct,
+            intervalLength: TimeSpan.FromTicks(582_000_000));
+
+        /* 0.8 seconds long: starts 0.1 s past 12:00 and ends 0.9 s past it. Both are second 0, so it reads 0. */
+        var start3 = hour12.AddTicks(1_000_000);
+        await SeedSnapshotsAsync(connection, intervalId: 4302, queryId: 92, intervalStart: start3,
+            avgDurationUs: 3_000, [(hour12.AddMinutes(5), 2L), (hour12.AddMinutes(20), 5L)], ct,
+            intervalLength: TimeSpan.FromTicks(8_000_000));
+
+        await using var postgres = NpgsqlDataSource.Create(scratch.ConnectionString);
+
+        var points = await DarlingTrendReader.GetQueryStoreDurationTrendAsync(
+            postgres, TestServerId, hour10.AddHours(-1), hour13, ct);
+
+        Assert.Equal(3, points.Count);
+
+        /* Over 3,600 whole seconds, not the true 3,599.000002: 30 executions x 1,000us = 30 ms. */
+        Assert.Equal(30d / 3600d, points[0].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(30d / 3600d, points[0].Value!.Value, 6);
+
+        /* Over 59 whole seconds, not the true 58.2: 118 executions x 2,000us = 236 ms. */
+        Assert.Equal(118d / 59d, points[1].ExecutionsPerSecond!.Value, 6);
+        Assert.Equal(236d / 59d, points[1].Value!.Value, 6);
+
+        /* A length that truncates to 0 has no denominator: unrated, and it does NOT fall back to the gap to the
+           previous interval (the length is stored, it is just under a second). */
+        Assert.False(points[2].HasRate);
+    }
+
     /// Plants one interval as explicit (collection time, cumulative count) snapshots — the placement of
     /// snapshots relative to bucket boundaries IS what this class tests, so each is spelled out and the
     /// expectations read straight off the seed. <paramref name="intervalLength"/> stores the interval's end

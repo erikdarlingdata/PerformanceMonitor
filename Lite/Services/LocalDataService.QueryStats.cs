@@ -1610,8 +1610,9 @@ public class HeatmapResult
 /// <summary>
 /// One point of a per-collection rate series. The rates are NULLABLE (#3541 A12): the window's first
 /// collection has no previous one to difference against, so it has no rate — <see cref="HasRate"/> is false
-/// and the three rate members are null, never 0. The MCP tool publishes such a point with the reason; the
-/// charts skip it. Darling's twin is <c>DarlingTrendReader.QueryDurationTrendPoint</c>.
+/// and the three rate members are null, never 0 (a Query Store point that stored its end is rated over its
+/// own length instead, #4765, so only one that stored no end is left unrated this way). The MCP tool publishes
+/// such a point with the reason; the charts skip it. Darling's twin is <c>DarlingTrendReader.QueryDurationTrendPoint</c>.
 /// </summary>
 public class QueryTrendPoint
 {
