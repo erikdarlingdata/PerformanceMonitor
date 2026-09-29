@@ -329,13 +329,20 @@ SELECT (SELECT COUNT(*) FROM v_wait_stats
             using var cmd = connection.CreateCommand();
             /* #3653 A8 option B (lane L4a): one row per target-local hour tile — arg_max replaces the
                ORDER BY … LIMIT 1 peak-time subquery, DuckDB's per-tile twin of Darling's array_agg. $4..$6
-               bind BaselineLocalClock's window clock (map.WindowClock), never the cached baseline clock. */
+               bind BaselineLocalClock's window clock (map.WindowClock), never the cached baseline clock.
+
+               #4731: the peak time orders by value, then collection_time DESC - Darling's
+               array_agg(collection_time ORDER BY value DESC NULLS LAST, collection_time DESC)[1], so two rows
+               tied on the peak report the later time on every run, and a row with no value is never the peak
+               time. The key is a STRUCT; DuckDB compares STRUCTs
+               field by field, and treats a NULL field as LARGER than any value. The FILTER keeps a row with a NULL
+               value out of the aggregate, as arg_max(arg, val) itself always ignored it. */
             cmd.CommandText = @"
 SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        MAX(sqlserver_cpu_utilization) AS peak_cpu,
        AVG(sqlserver_cpu_utilization) AS avg_cpu,
        COUNT(*) AS sample_count,
-       arg_max(collection_time, sqlserver_cpu_utilization) AS peak_time
+       arg_max(collection_time, (sqlserver_cpu_utilization, collection_time)) FILTER (WHERE sqlserver_cpu_utilization IS NOT NULL) AS peak_time
 FROM v_cpu_utilization_stats
 WHERE server_id = $1
 AND   collection_time >= $2 AND collection_time < $3

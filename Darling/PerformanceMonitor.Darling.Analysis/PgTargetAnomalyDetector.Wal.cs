@@ -72,7 +72,7 @@ SELECT " + WindowTiles.LocalHourSql + @" AS local_hour,
        CAST(coalesce(SUM(GREATEST(raw_wal_records, 0)), 0) AS bigint) AS wal_records,
        CAST(count(*) FILTER (WHERE wal_reset_here) AS integer) AS wal_reset_count,
        coalesce(bool_or(wal_tracked), false) AS wal_tracked,
-       (array_agg(collection_time ORDER BY bytes_per_sec DESC NULLS LAST))[1] AS peak_time
+       (array_agg(collection_time ORDER BY bytes_per_sec DESC NULLS LAST, collection_time DESC))[1] AS peak_time
 FROM rated
 GROUP BY " + WindowTiles.LocalHourSql + @"
 ORDER BY " + WindowTiles.LocalHourSql;
