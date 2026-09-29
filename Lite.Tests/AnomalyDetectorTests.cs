@@ -583,6 +583,45 @@ public class AnomalyDetectorTests : IClassFixture<SharedDuckDbFixture>, IDisposa
         Assert.True(cpu.Metadata["mean_deviation_sigma"] >= cpu.Metadata["fire_threshold"], "a fired fact's mean cleared the same cutoff");
     }
 
+    /// <summary>
+    /// #4731: two rows tied on the tile's peak value report the LATER collection time, on every run - the peak
+    /// time orders by value, then collection_time DESC, as Darling's array_agg does. It was arg_max on the value
+    /// alone, so a tie fell to whichever tied row the scan reached first; both storage orders are exercised so
+    /// the answer cannot ride on insertion order.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DetectCpuAnomalies_TwoRowsTiedOnThePeak_ReportTheLaterCollectionTime_WhicheverIsStoredFirst(bool laterRowStoredFirst)
+    {
+        await SeedBaselineCpu(10, variance: 2);
+        for (int i = 0; i < 16; i++)
+            await SeedCpuAsync(_analysisStart.AddMinutes(i * 15), 70);
+
+        // Both tied rows sit inside ONE wall-clock hour tile (the tile is the target-local hour, not the
+        // analysis-window offset), 10 minutes apart, well inside the 4 h window.
+        var hourTop = _analysisStart.AddHours(2);
+        hourTop = hourTop.Date.AddHours(hourTop.Hour);
+        var earlier = hourTop.AddMinutes(10);
+        var later = hourTop.AddMinutes(20);
+        if (laterRowStoredFirst)
+        {
+            await SeedCpuAsync(later, 90);
+            await SeedCpuAsync(earlier, 90);
+        }
+        else
+        {
+            await SeedCpuAsync(earlier, 90);
+            await SeedCpuAsync(later, 90);
+        }
+
+        var anomalies = await _detector.DetectAnomaliesAsync(CreateContext());
+
+        var cpu = Assert.Single(anomalies, f => f.Key == "ANOMALY_CPU_SPIKE");
+        Assert.Equal(90.0, cpu.Metadata["peak_cpu"]);
+        Assert.Equal((double)later.Ticks, cpu.Metadata["peak_time_ticks"]);
+    }
+
     [Fact]
     public async Task DetectIoAnomalies_ReadsThePeakAndMeanPair_OneHotFileRowDoesNotFire_ASustainedWindowDoes()
     {
