@@ -133,7 +133,8 @@ public sealed class QueryStoreTrendRoutingLiveTests
            #3653 A8: a rollup point is rated over its own bucket width, so the window's first bucket HAS a
            rate — 21 executions over the bucket's 3,600 seconds. Before #3653 this point was unrated (its LAG
            had no predecessor), which was the LAG idiom's rule applied to a point whose denominator was known
-           all along; the raw-only route below still opens unrated, because its first point IS a LAG point. */
+           all along; the raw-only route below still opens unrated, because its first point IS a LAG point (these
+           seeds store no interval end, #4765). */
         Assert.Equal(hour10, points[0].CollectionTime);
         Assert.True(points[0].HasRate);
         Assert.Equal(21d / 3600d, points[0].ExecutionsPerSecond!.Value, 6);
@@ -146,8 +147,7 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.Equal(((40d * 100d + 25d * 200d) / 1000d) / 3600d, points[1].Value!.Value, 6);
 
         /* 12:00 — the raw tail: interval T deduped to its final snapshot (9, not 3+9), placed at its
-           interval start, rated over the seam to the last rollup bucket (the raw class keeps the spacing
-           denominator — query_store_stats stores no interval length). */
+           interval start, rated over the seam to the last rollup bucket (these seeds store no interval end, so the raw class keeps the spacing denominator, #4765). */
         Assert.Equal(hour12, points[2].CollectionTime);
         Assert.Equal(9d / 3600d, points[2].ExecutionsPerSecond!.Value, 6);
 
@@ -432,7 +432,6 @@ public sealed class QueryStoreTrendRoutingLiveTests
     }
 
     /// <summary>
-    /// <summary>
     /// #4765: an interval's length is counted in WHOLE seconds. The read truncates the start and the end each to
     /// its second before it subtracts, so a stored fraction of a second moves the length by up to a second in
     /// either direction: a true 3,599.000002 seconds reads 3,600, a true 58.2 reads 59, and a true 0.8 reads 0,
@@ -503,6 +502,7 @@ public sealed class QueryStoreTrendRoutingLiveTests
         Assert.False(points[2].HasRate);
     }
 
+    /// <summary>
     /// Plants one interval as explicit (collection time, cumulative count) snapshots — the placement of
     /// snapshots relative to bucket boundaries IS what this class tests, so each is spelled out and the
     /// expectations read straight off the seed. <paramref name="intervalLength"/> stores the interval's end
