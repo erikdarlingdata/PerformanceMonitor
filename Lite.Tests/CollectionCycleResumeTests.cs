@@ -245,8 +245,10 @@ public sealed class CollectionCycleResumeTests : IDisposable
         Assert.Equal(new[] { EveryFifteen, EveryFive, EveryMinute }, atClock.Select(r => r.Collector).OrderBy(c => c, StringComparer.Ordinal).ToArray());
 
         /* From the cycle that starts at the clock's reading, a 1-minute collector runs on every minute of the new clock,
-           and each cycle's slot is the clock's own reading. */
-        var settled = runs.Where(r => r.Collector == EveryMinute && r.WallClock >= afterStep && r.Slot == r.WallClock).ToList();
-        Assert.Equal(Enumerable.Range(0, 6).Select(i => afterStep + TimeSpan.FromMinutes(i)).ToArray(), settled.Select(r => r.Slot).ToArray());
+           and each cycle's slot is the clock's own reading. Passes 0-4 ran before the step and pass 5 is the cycle stamped
+           with the slot the loop waited for; passes 6-11 are the six that follow. */
+        var afterTheStep = runs.Where(r => r.Collector == EveryMinute).Skip(5).ToList();
+        var settled = afterTheStep.Where(r => r.Slot == r.WallClock).Select(r => r.Slot).ToArray();
+        Assert.Equal(Enumerable.Range(0, 6).Select(i => afterStep + TimeSpan.FromMinutes(i)).ToArray(), settled);
     }
 }
