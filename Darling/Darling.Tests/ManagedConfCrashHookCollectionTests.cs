@@ -28,9 +28,14 @@ public sealed class ManagedConfCrashHookCollectionTests
 {
     private const string CollectionName = "managed-conf-crash-hook";
 
-    /// <summary>An assignment of anything but <c>null</c> to the hook: the assignment that arms a crash.</summary>
+    /// <summary>
+    /// An assignment of anything but <c>null</c> to the hook: the assignment that arms a crash. <c>(?!=)</c> keeps
+    /// out a comparison (<c>== null</c>). The last lookahead also refuses whitespace, so the run of spaces before
+    /// the value cannot give characters back and let <c>null</c> look like something else: it only passes once
+    /// it has seen past all of them.
+    /// </summary>
     private static readonly Regex ArmsTheHook = new(
-        @"ManagedConfMigrationSteps\s*\.\s*FailBetweenSteps\s*=\s*(?!null\b)",
+        @"ManagedConfMigrationSteps\s*\.\s*FailBetweenSteps\s*=(?!=)\s*(?!\s|null\b)",
         RegexOptions.CultureInvariant);
 
     [Fact]
@@ -92,6 +97,26 @@ public sealed class ManagedConfCrashHookCollectionTests
             "These test files arm ManagedConfMigrationSteps.FailBetweenSteps without "
             + $"[Collection(\"{CollectionName}\")], so they can crash another class's WriteTwoSteps call: "
             + string.Join(", ", offenders));
+    }
+
+    /// <summary>
+    /// The scan's pattern, run on strings. Every test class in the process clears the hook in its constructor
+    /// (<c>= null</c>, however it is spaced), and a comparison (<c>== null</c>) reads it; neither arms a crash, so
+    /// neither may count, or the scan would tell every one of those classes to join the collection. An assignment
+    /// of a lambda arms it, whatever the lambda starts with.
+    /// </summary>
+    [Theory]
+    [InlineData(" = null;", false)]
+    [InlineData("=null;", false)]
+    [InlineData(" =  null;", false)]
+    [InlineData(" =\r\n            null;", false)]
+    [InlineData(" == null", false)]
+    [InlineData(" = () => throw new IOException()", true)]
+    [InlineData(" = _ => throw new IOException()", true)]
+    [InlineData(" =\r\n            () => throw new IOException()", true)]
+    public void ArmsTheHook_MatchesAnAssignmentThatArms_NotOneThatClearsOrComparesTheHook(string afterTheName, bool expected)
+    {
+        Assert.Equal(expected, ArmsTheHook.IsMatch("ManagedConfMigrationSteps.FailBetweenSteps" + afterTheName));
     }
 
     private static string ThisFile([CallerFilePath] string path = "") => path;
