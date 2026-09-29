@@ -1769,11 +1769,12 @@ public sealed class McpPayloadContractCensusTests
     /// </summary>
     public static readonly (string File, string Idiom, int Blocks)[] WindowFloorBlocks =
     [
-        /* Four: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
+        /* Five: get_query_store_top's payload, and (#4057) its module_name miss, which hands back the window it
            read as hints so "no rows matched" is never read as a claim about the part the raw tier no longer
            holds; plus (#4231) get_top_queries_by_cpu's and get_top_procedures_by_cpu's payloads, the same
-           disclosure over query_stats and procedure_stats. */
-        ("DarlingMcpDataTools.cs", "initializer", 4),
+           disclosure over query_stats and procedure_stats; plus get_top_queries_by_cpu's
+           empty min_dop/parallel_only status, which hands back the window it read. */
+        ("DarlingMcpDataTools.cs", "initializer", 6),
         ("DarlingMcpQueryStoreClutterTools.cs", "initializer", 1),
         ("DarlingMcpTrendTools.cs", "envelope", 1),
         ("DarlingMcpTrendTools.cs", "initializer", 1),

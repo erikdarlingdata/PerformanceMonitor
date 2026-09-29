@@ -5039,9 +5039,11 @@ public static class DarlingCliCommands
     /// Renders the <c>add_servers</c> result JSON as operator lines plus an exit code. PURE, so the formatting and
     /// the exit-code policy pin without a store — the same split <see cref="FormatProbeLine"/> uses.
     ///
-    /// <para>Exit 0 requires that something landed and nothing failed. A batch of pure duplicates exits 0: re-running
-    /// the same file is idempotent, not an error. Nothing at all landed (an empty array, or every entry rejected)
-    /// exits 1, because a verb that changed nothing must not report success to a deployment script.</para>
+    /// <para>Exit 0 requires that something landed and that nothing failed and nothing collided. A batch of pure
+    /// duplicates exits 0: re-running the same file is idempotent, not an error. A collided server (#4789) was not
+    /// added and cannot be by retrying, so it exits 1 exactly as a failed one does, even beside servers that
+    /// landed. Nothing at all landed (an empty array, or every entry rejected) exits 1, because a verb that changed
+    /// nothing must not report success to a deployment script.</para>
     /// </summary>
     internal static (IReadOnlyList<string> Lines, int ExitCode) FormatAddServerOutcome(string resultJson)
     {
@@ -5069,6 +5071,8 @@ public static class DarlingCliCommands
                 {
                     "added" => "ADDED",
                     "duplicate" => "SKIP",
+                    "collides" => "COLLIDES",
+                    "not_saved" => "NOT SAVED",
                     "connection_failed" => "FAIL",
                     "invalid" => "INVALID",
                     _ => status.ToUpperInvariant(),
@@ -5080,14 +5084,19 @@ public static class DarlingCliCommands
 
             var added = root.TryGetProperty("added", out var a) ? a.GetInt32() : 0;
             var skipped = root.TryGetProperty("skipped", out var k) ? k.GetInt32() : 0;
+            var collided = root.TryGetProperty("collided", out var c) ? c.GetInt32() : 0;
             var failed = root.TryGetProperty("failed", out var f) ? f.GetInt32() : 0;
 
+            /* Collided is its own number (#4789): the four counters sum to the servers requested, and a collided
+               server was NOT added — it needs a different identity, not a retry — so folding it into another
+               number, or leaving it out, would make the totals line read as a cleaner run than it was. */
             lines.Add(string.Empty);
             lines.Add(string.Format(
                 CultureInfo.InvariantCulture,
-                "{0} added, {1} already registered, {2} failed.",
+                "{0} added, {1} already registered, {2} collided, {3} failed.",
                 added,
                 skipped,
+                collided,
                 failed));
 
             if (added > 0)
@@ -5097,7 +5106,7 @@ public static class DarlingCliCommands
                 lines.Add("The running service picks these up on its next config poll; no restart is needed.");
             }
 
-            return (lines, failed > 0 || (added == 0 && skipped == 0) ? 1 : 0);
+            return (lines, failed > 0 || collided > 0 || (added == 0 && skipped == 0) ? 1 : 0);
         }
         catch (JsonException)
         {

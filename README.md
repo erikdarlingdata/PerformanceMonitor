@@ -18,7 +18,7 @@
 
 **Free, open-source monitoring that replaces the tools charging you thousands per server per year.** Specialized collectors, real-time alerts, and a built-in MCP server for AI analysis. Nothing phones home. Your data stays on your server and your machine.
 
-**Supported:** SQL Server 2016–2025 | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite and Darling) | PostgreSQL, including AWS RDS and Aurora (Darling)
+**Supported:** SQL Server 2016 SP2–2025 (2017 needs CU3 or later) | Azure SQL Managed Instance | AWS RDS for SQL Server | Azure SQL Database (Lite and Darling) | PostgreSQL, including AWS RDS and Aurora (Darling)
 
 ![Fleet overview: nine servers at a glance, one flagged Critical with live blocking and deadlocks](Screenshots/fleet-overview.jpg)
 

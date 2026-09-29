@@ -23,7 +23,8 @@ namespace PerformanceMonitor.Darling.Service;
 /// is written per fired alert regardless of channel outcome — including muted alerts (flagged
 /// muted, channels skipped) and alerts with no channel configured at all, whose row states
 /// <see cref="AlertDelivery.ChannelNoneConfigured"/> (the headless smoke asserts the row exists).
-/// Never throws — a dead SMTP server or Postgres store must not abort the engine's sweep.
+/// Throws only the caller's own cancellation — a dead SMTP server or Postgres store must not abort the
+/// engine's sweep, but a service that is stopping must not be told its abandoned delivery failed.
 ///
 /// <para>The row's disposition comes from <see cref="AlertDelivery.FromFanout"/> with
 /// <c>trayChannelPresent: false</c>. This service is headless: it has no tray icon and no toast code, so
@@ -121,7 +122,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
                         outcome, message.CurrentValue, message.Context,
                         AlertContextBuilders.ContextToDetailText(message.Context),
                         numericCurrentValue: message.NumericValue, numericThresholdValue: outcome.NumericThresholdValue,
-                        deliveryMode: mode);
+                        deliveryMode: mode, cancellationToken: cancellationToken);
                 }
 
                 return null;
@@ -131,7 +132,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
             return await SendAndRecordAsync(
                 outcome, outcome.CurrentValue, outcome.Context, outcome.DetailText,
                 outcome.NumericCurrentValue, outcome.NumericThresholdValue,
-                deliveryMode: mode);
+                deliveryMode: mode, cancellationToken: cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -158,11 +159,19 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
     /// and its history row all describe the same decision, and passed FAITHFULLY on the Per-event split —
     /// those messages must not be aggregated, which is that mode's own contract.
     /// </param>
+    /// <param name="cancellationToken">
+    /// #4752: the token <see cref="DeliverAndReportAsync"/> received, handed to the webhook posts so a service
+    /// that is stopping does not wait out an endpoint that never answers. A cancel from this token comes out of
+    /// here as the <see cref="OperationCanceledException"/> it is, before any row is written:
+    /// <see cref="DeliverAndReportAsync"/> lets it through and records nothing for a delivery the service
+    /// abandoned. A post that merely times out is still that channel's failure, and the row is still written.
+    /// </param>
     /// <returns>The disposition the history row was written with — the same value, so what the caller is
     /// told and what the operator later reads in the alert log cannot disagree (#3580).</returns>
     private async Task<AlertDelivery> SendAndRecordAsync(
         AlertOutcome outcome, string currentValue, AlertContext? context, string? detailText,
-        double? numericCurrentValue, double? numericThresholdValue, AlertNotificationMode deliveryMode)
+        double? numericCurrentValue, double? numericThresholdValue, AlertNotificationMode deliveryMode,
+        CancellationToken cancellationToken)
     {
         /* #2090: the fire site's severity rode AlertOutcome.Severity but the channel builders read
            only Context.SeverityOverride — so every self-alert (fired with Context: null) rendered
@@ -186,7 +195,7 @@ public sealed class DarlingAlertDeliverer : IAlertDeliverer
         var result = await _core.TrySendAsync(
             outcome.MetricName, outcome.ServerName, currentValue, outcome.ThresholdValue,
             outcome.ServerKey, context, attemptChannels: !outcome.Muted, detailText: detailText,
-            displayName: outcome.DisplayName, deliveryMode: deliveryMode);
+            displayName: outcome.DisplayName, deliveryMode: deliveryMode, cancellationToken: cancellationToken);
 
         /* trayChannelPresent: false — this is the HEADLESS service. It has no tray icon and no toast
            code, so the taxonomy's "tray" fallback (which is Lite's, and truthful there) would assert a UI
