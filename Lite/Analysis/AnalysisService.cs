@@ -28,6 +28,13 @@ public class AnalysisService
     private readonly DrillDownCollector _drillDown;
     private readonly AnomalyDetector _anomalyDetector;
     private readonly BaselineProvider _baselineProvider;
+
+    /// <summary>
+    /// #4726: the shared baseline tier this instance was handed (null when it keeps a private one). The MCP host
+    /// builds one service per call, so a test reads this to prove every one of them shares the store's ONE cache.
+    /// </summary>
+    internal BaselineCache? SharedBaselineCache { get; }
+
     /// <summary>
     /// Minimum hours of collected data required before analysis will run.
     /// Short collection windows distort fraction-of-period calculations —
@@ -126,6 +133,7 @@ public class AnalysisService
         BaselineCache? baselineCache = null)
     {
         _duckDb = duckDb;
+        SharedBaselineCache = baselineCache;
         _findingStore = new FindingStore(duckDb);
         _collector = new DuckDbFactCollector(duckDb, collectorFrequencyMinutes);
         _scorer = new FactScorer();

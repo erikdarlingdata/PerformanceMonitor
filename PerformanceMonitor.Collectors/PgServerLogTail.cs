@@ -52,7 +52,15 @@ namespace PerformanceMonitor.Collectors;
 /// <c>{</c>, so a cycle that picked either sibling read nothing a parser recognises and reported a quiet
 /// target instead of a wrong one. The filter mirrors <c>StoreLogSweep.IsStderrLogFile</c> — the store's own
 /// log sweep made the identical call for the identical reason — so there is one rule for "is this file
-/// stderr-format" rather than two that could drift.</para>
+/// stderr-format" rather than two that could drift. The same tie decides a rotation (#4719): a size or age
+/// rotation puts the outgoing file's last write and the incoming file's first write in the same whole second,
+/// and <c>ORDER BY modification DESC LIMIT 1</c> alone could return the OUTGOING file, which the tail then
+/// treated as current, reading nothing new until the new file's mtime moved to a later second. So every
+/// <c>newest</c> orders by <c>modification DESC, name DESC</c>:
+/// name DESC is only a safe tiebreak where log_filename sorts chronologically (default postgresql-%Y-%m-%d_%H%M%S, RDS postgresql.log.YYYY-MM-DD-HH).
+/// Keep it strictly a tiebreak behind modification, never the primary order.
+/// Where a pattern doesn't sort by time a tie was already a coin flip, so nothing gets worse, and
+/// <c>StoreLogSweep</c> breaks ties on name the same way (its listing runs oldest first: <c>l.modification, l.name</c>).</para>
 ///
 /// <para><b>And <c>newest</c> lists nothing unless <c>log_destination</c> includes <c>stderr</c></b> (#4019).
 /// Without stderr as a destination, whatever <c>.log</c> file the directory still holds is stale: the
@@ -342,7 +350,7 @@ listing AS MATERIALIZED (
 newest AS (
     SELECT name, size, modification
     FROM listing
-    ORDER BY modification DESC
+    ORDER BY modification DESC, name DESC
     LIMIT 1
 ),
 marked AS (
@@ -418,7 +426,7 @@ listing AS MATERIALIZED (
 newest AS (
     SELECT name, size, modification
     FROM listing
-    ORDER BY modification DESC
+    ORDER BY modification DESC, name DESC
     LIMIT 1
 ),
 marked AS (
@@ -496,7 +504,7 @@ listing AS MATERIALIZED (
 newest AS (
     SELECT name, size, modification
     FROM listing
-    ORDER BY modification DESC
+    ORDER BY modification DESC, name DESC
     LIMIT 1
 ),
 marked AS (
@@ -569,7 +577,7 @@ listing AS MATERIALIZED (
 newest AS (
     SELECT name, size, modification
     FROM listing
-    ORDER BY modification DESC
+    ORDER BY modification DESC, name DESC
     LIMIT 1
 ),
 marked AS (
@@ -647,7 +655,7 @@ listing AS MATERIALIZED (
 newest AS (
     SELECT name, size, modification
     FROM listing
-    ORDER BY modification DESC
+    ORDER BY modification DESC, name DESC
     LIMIT 1
 ),
 marked AS (
@@ -720,7 +728,7 @@ listing AS MATERIALIZED (
 newest AS (
     SELECT name, size, modification
     FROM listing
-    ORDER BY modification DESC
+    ORDER BY modification DESC, name DESC
     LIMIT 1
 ),
 marked AS (

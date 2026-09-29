@@ -80,8 +80,13 @@ public sealed class SqlServerTargetProvider : ITargetProvider
             return CollectorTargetFault.Unclassified;
         }
 
-        /* Class 20+ is a fatal, connection-level error; -2 is a command timeout. Both force the
-           caller to drop and re-probe the connection rather than just failing one collector. */
+        /* Class 20+ is a fatal, connection-level error: the caller drops the runtime and reconnects.
+           -2 is a command timeout, which is NOT the same thing (#4710): the connection stays open and
+           still runs SELECT 1, and the reconnect re-runs the Extended Events setup and the on-load
+           snapshots, so dropping on every timeout cost a stressed server 75 s or more of collection.
+           The caller probes a fresh connection with a short timeout and drops only when that probe
+           fails (a pre-login timeout on a hung server is also -2). See
+           ConnectionFaultDisposition.ShouldDropRuntimeAsync. */
         if (sql.Class >= 20)
         {
             return CollectorTargetFault.ConnectionFatal;

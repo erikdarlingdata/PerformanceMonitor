@@ -218,7 +218,7 @@ public class CollectionBackgroundService : BackgroundService
                 await RunQueryStoreBackfillIfDueAsync(stoppingToken);
 
                 /* Periodic retention cleanup */
-                RunRetentionIfDue();
+                await RunRetentionIfDueAsync();
 
                 /* Periodic analysis-findings retention (rolling 30-day purge) */
                 await RunFindingsCleanupIfDueAsync();
@@ -378,7 +378,7 @@ public class CollectionBackgroundService : BackgroundService
         }
     }
 
-    private void RunRetentionIfDue()
+    private async Task RunRetentionIfDueAsync()
     {
         if (_retentionService == null || DateTime.UtcNow - _lastRetentionTime < RetentionInterval)
         {
@@ -387,7 +387,11 @@ public class CollectionBackgroundService : BackgroundService
 
         try
         {
-            _retentionService.CleanupOldArchives(retentionMonths: RetentionService.ArchiveRetentionMonths);
+            /* The views must be rebuilt after a delete (see CleanupOldArchivesAndRefreshViewsAsync). */
+            if (_duckDb != null)
+                await _retentionService.CleanupOldArchivesAndRefreshViewsAsync(_duckDb, RetentionService.ArchiveRetentionMonths);
+            else
+                _retentionService.CleanupOldArchives(retentionMonths: RetentionService.ArchiveRetentionMonths);
             _lastRetentionTime = DateTime.UtcNow;
         }
         catch (Exception ex)

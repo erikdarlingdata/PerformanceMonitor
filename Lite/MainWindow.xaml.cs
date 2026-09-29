@@ -1052,6 +1052,15 @@ public partial class MainWindow : Window
         {
             if (_collectorService != null)
             {
+                /* Registered with the reset gate for the whole run, the way the scheduled sweep and the
+                   tab-open sweep are. Unregistered, the size-triggered reset could delete monitor.duckdb
+                   while these collectors held connections to it; connections opened afterwards attach to
+                   the deleted instance, the reset's re-initialization binds to it too, and everything
+                   collected until the next restart is lost. The registration belongs here and not inside
+                   RunCollectorAsync: that method also runs inside the registered sweeps, and a nested
+                   registration there would wait out the reset's drain timeout. */
+                using var collectionScope = await CollectionResetGate.BeginCollectionAsync();
+
                 var onLoadCollectors = _scheduleManager.GetOnLoadCollectorsForServer(server.Id);
                 foreach (var collector in onLoadCollectors)
                 {

@@ -500,6 +500,19 @@ public sealed class DarlingWorker : BackgroundService
     private int _gateDesiredAbsorb;
     private bool _gateAbsorberRunning;
 
+    /* #4710: the gate a connect attempt runs in, instead of the fleet gate above. SqlClient takes about 15 s to
+       fail for every kind of dead server, so an attempt inside the fleet gate held a collection slot for those
+       15 s and about 22 down servers filled the default gate. The attempt reads only the monitored server, never
+       the store, so this fixed-width gate does not spend the store's connection pool. Never scaled with the core
+       count: the fleet gate's ceiling of 16 is tied to that pool. */
+    private readonly SemaphoreSlim _connectProbeGate = new(ServerConnectProbe.GateWidth, ServerConnectProbe.GateWidth);
+
+    /// <summary>Test seam: replaces the connect attempt. Null in production, which connects for real.</summary>
+    internal Func<MonitoredServer, CancellationToken, Task<ServerRuntime>>? ConnectOverride { get; set; }
+
+    /// <summary>Test seam: replaces the fresh-connection probe that settles a command timeout (#4710).</summary>
+    internal Func<ServerRuntime, CancellationToken, Task<bool>>? LivenessProbeOverride { get; set; }
+
     /// <summary>
     /// The sweep gate's width right now (#2170) — the ceiling minus what has been absorbed. Reported by the
     /// queued-behind-the-gate diagnostic, which an operator reads while deciding whether to raise the knob,
@@ -1137,6 +1150,11 @@ public sealed class DarlingWorker : BackgroundService
         public ConcurrentDictionary<string, DateTime> NextDue { get; } = new(StringComparer.OrdinalIgnoreCase);
         public DateTime NextConnectAttempt { get; set; } = DateTime.MinValue;
 
+        /* #4710: failed connect attempts in a row, so the retry delay grows (ServerConnectBackoff) while a
+           server stays down instead of costing a full connect timeout every 60 seconds forever. Zero on a
+           successful connect and on a definition edit. */
+        public int ConsecutiveConnectFailures { get; set; }
+
         /* #2255: the last connect-failure message logged in FULL, so an unchanged cause repeats as one terse
            line instead of its whole explanation every 60 seconds forever. The field report is a DPAPI decrypt
            failure — permanent by construction, since the blob can never become decryptable on this host — and
@@ -1222,12 +1240,13 @@ public sealed class DarlingWorker : BackgroundService
         public bool WarnedThisEpisode { get; set; }
         public bool QueuedInfoThisEpisode { get; set; }
 
-        /* The ONE piece of sweep bookkeeping the BODY writes — and the single reason it is a FIELD rather than a
-           property: Interlocked needs a ref to a field. UTC ticks stamped by the body the moment it acquires the
-           concurrency gate; 0 while it is still QUEUED behind that gate. Written once per episode by the body
+        /* One of the TWO pieces of sweep bookkeeping the BODY writes (the other is ConnectStartedTicks, just
+           below) — and the single reason each is a FIELD rather than a property: Interlocked needs a ref to a
+           field. UTC ticks stamped by the body the moment it acquires the concurrency gate; 0 while it is still
+           QUEUED behind that gate. Written once per episode by the body
            (Interlocked.Exchange) and read by the outer launch loop (Interlocked.Read) — a long is not guaranteed
            atomic on 32-bit, so BOTH sides go through Interlocked rather than assuming it. The existing three
-           fields above keep their outer-thread-only invariant untouched; this is a separate field precisely so
+           fields above keep their outer-thread-only invariant untouched; these are separate fields precisely so
            that invariant does not have to be weakened.
 
            Why it exists: the 60s watchdog is a HANG detector — "the field incident was HANGS, not throws" — but
@@ -1236,6 +1255,16 @@ public sealed class DarlingWorker : BackgroundService
            buried the very signal it exists to raise. Splitting run time out restores it: a body merely waiting
            its turn is reported as CAPACITY, never as a hang. */
         public long RunStartedTicks;
+
+        /* #4710: UTC ticks stamped by the body just before its connect attempt and cleared, in a finally, when
+           the attempt ends (a shutdown cancel included); 0 while the body is not in its connect stage. The
+           attempt runs BEFORE the body asks for a fleet permit, so RunStartedTicks is still 0 for its whole
+           length. Without this field the in-flight check would call a body inside a 15 s connect (or waiting
+           for one of the connect gate's slots) "queued for a slot" and blame the fleet concurrency limit for a
+           slow or unreachable server. Same discipline as RunStartedTicks: written by the body through
+           Interlocked, read by the outer launch loop through Interlocked.Read, and reset at launch before the
+           body starts. The launch loop reads it only for a body that is not running. */
+        public long ConnectStartedTicks;
 
         /* #1581 cold-start stagger: the earliest UTC this server's FIRST post-startup sweep body may launch —
            the captured startup instant plus a deterministic per-server CadencePhaseOffset capped at
@@ -2838,11 +2867,21 @@ public sealed class DarlingWorker : BackgroundService
                         ? (DateTime.UtcNow - new DateTime(runStartedTicks, DateTimeKind.Utc)).TotalSeconds
                         : 0;
 
+                    /* #4710: a body that has not started running is either inside its connect attempt, which runs
+                       BEFORE the fleet permit, or waiting for that permit. Only the first is not the fleet
+                       limit's doing, so its wording must not blame the limit. Read only when the body is not
+                       running: once the permit is held the connect stage is over. */
+                    var connectStartedTicks = running ? 0 : Interlocked.Read(ref server.ConnectStartedTicks);
+                    var connecting = connectStartedTicks != 0;
+                    var connectSeconds = connecting
+                        ? (DateTime.UtcNow - new DateTime(connectStartedTicks, DateTimeKind.Utc)).TotalSeconds
+                        : 0;
+
                     _logger.LogDebug(
                         "[{Server}] collection body still in flight after {Elapsed:F0}s ({State}) — skipping this sweep",
                         server.Config.DisplayName,
                         episodeSeconds,
-                        running ? FormattableString.Invariant($"running {runningSeconds:F0}s") : "queued for a slot");
+                        SweepInFlightWording.DebugState(running, runningSeconds, connecting, connectSeconds));
 
                     switch (ClassifySweepEpisode(
                         episodeSeconds, running, runningSeconds, server.WarnedThisEpisode, server.QueuedInfoThisEpisode))
@@ -2861,12 +2900,16 @@ public sealed class DarlingWorker : BackgroundService
                            Reports the EFFECTIVE width, not the compile-time default (#2170 review catch):
                            this line is what an operator reads while deciding whether to raise the knob, so
                            printing 4 after they raised it to 12 would send them chasing a limit that is no
-                           longer in force. */
+                           longer in force. #4710: a body still inside its connect attempt has not asked for
+                           a slot yet, so it gets the connect stage's wording instead, with the connect
+                           attempt's own clock and the connect gate's width. */
                         case SweepEpisodeSignal.Queued:
                             server.QueuedInfoThisEpisode = true;
                             _logger.LogInformation(
-                                "[{Server}] collection body has waited {Elapsed:F0}s for a free slot (fleet concurrency limit {Limit}) — queued, not stalled; it has not started yet",
-                                server.Config.DisplayName, episodeSeconds, EffectiveSweepWidth);
+                                SweepInFlightWording.NotStartedInfoTemplate(connecting),
+                                server.Config.DisplayName,
+                                connecting ? connectSeconds : episodeSeconds,
+                                connecting ? ServerConnectProbe.GateWidth : EffectiveSweepWidth);
                             break;
                     }
 
@@ -2889,13 +2932,15 @@ public sealed class DarlingWorker : BackgroundService
                 }
 
                 /* Stamp the launch time BEFORE launching — time spent QUEUED on the gate is part of this
-                   episode — and clear the run stamp so this episode starts as QUEUED. The reset must precede the
-                   call: ProcessServerSweepAsync runs synchronously up to its gate WaitAsync, so with a free
-                   permit the body may stamp RunStartedTicks before this statement returns, and resetting after
-                   would erase it. Then fire-and-track: assign the Task to InFlightSweep (so it is observed and
+                   episode — and clear the run and connect stamps so this episode starts as QUEUED. The reset must
+                   precede the call: ProcessServerSweepAsync runs synchronously up to its first await, so with a
+                   free permit the body may stamp RunStartedTicks (or, on its way into a connect attempt,
+                   ConnectStartedTicks) before this statement returns, and resetting after would erase it. Then
+                   fire-and-track: assign the Task to InFlightSweep (so it is observed and
                    the next sweep + the shutdown drain can see it) but do NOT await it here. */
                 server.SweepStartedUtc = DateTime.UtcNow;
                 Interlocked.Exchange(ref server.RunStartedTicks, 0);
+                Interlocked.Exchange(ref server.ConnectStartedTicks, 0);
                 server.InFlightSweep = ProcessServerSweepAsync(
                     server, engine, runner, planFetcher, notificationService, config, serverSweepGate, stoppingToken);
             }
@@ -3431,12 +3476,38 @@ public sealed class DarlingWorker : BackgroundService
         /* Acquire the fleet concurrency gate OUTSIDE the try (the never-faulting-probe idiom): WaitAsync either
            returns having TAKEN a permit — matched by the finally's Release — or THROWS owning nothing (a cancel
            while queued on shutdown), so the finally can never over-release a permit we do not hold. */
+        /* #4710: a disconnected server's connect attempt runs BEFORE the fleet gate, in the small connect gate.
+           Inside the fleet gate it held a collection slot for the 15 s SqlClient needs to fail against any dead
+           server. Only the store-facing work after the attempt (the failure edge, or the on-load snapshots after
+           a success) takes the fleet permit below. Not due, retired or already connected: no attempt. */
+        ConnectAttempt? connectAttempt = null;
+        if (server.Runtime is null && !server.Retired && DateTime.UtcNow >= server.NextConnectAttempt)
+        {
+            /* The attempt runs before the fleet permit, so RunStartedTicks stays 0 through it. Stamp the connect
+               stage on its own field so the in-flight check can say "connecting" rather than blame the fleet
+               limit for a slow server, and clear it in a finally so a shutdown cancel clears it too. */
+            try
+            {
+                Interlocked.Exchange(ref server.ConnectStartedTicks, DateTime.UtcNow.Ticks);
+                connectAttempt = await ServerConnectProbe.AttemptAsync(
+                    server.Config,
+                    ConnectOverride ?? ((target, token) => DarlingServerConnector.ConnectAsync(target, _logger, token)),
+                    _connectProbeGate,
+                    stoppingToken);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref server.ConnectStartedTicks, 0);
+            }
+        }
+
         await gate.WaitAsync(stoppingToken);
 
         /* The permit is held: this body has STOPPED queueing and STARTED running. Stamp the run start so the
            outer launch loop's watchdog can tell a genuine hang from a body that was merely waiting its turn.
-           This is the ONE sweep-bookkeeping field the body writes, via Interlocked (see RunStartedTicks) — the
-           three outer-thread-only fields are deliberately left alone. Placed before the Retired check so a
+           This is one of the TWO sweep-bookkeeping fields the body writes, via Interlocked (see RunStartedTicks;
+           the other is the connect stamp above) — the three outer-thread-only fields are deliberately left
+           alone. Placed before the Retired check so a
            retired body still reports as "running" for the instant it takes to no-op out, rather than looking
            permanently queued. */
         Interlocked.Exchange(ref server.RunStartedTicks, DateTime.UtcNow.Ticks);
@@ -3489,7 +3560,7 @@ public sealed class DarlingWorker : BackgroundService
 
             if (server.Runtime is null)
             {
-                await TryConnectAsync(server, runner, config, stoppingToken);
+                await TryConnectAsync(server, runner, config, connectAttempt, stoppingToken);
                 return;
             }
 
@@ -4622,6 +4693,7 @@ public sealed class DarlingWorker : BackgroundService
                     + "the first pass on the new connection re-baselines (#3653 A5)", desiredServer.DisplayName);
                 state.Runtime = null;
                 state.NextConnectAttempt = DateTime.MinValue;
+                state.ConsecutiveConnectFailures = 0;
                 state.NextDue.Clear();
                 /* #3653 A5 (the adjacency #3540 A4 named and left): a same-id reconnect is a new epoch. The
                    fields ServerDefinitionEquals compares are the ones that decide WHICH instance the
@@ -7444,8 +7516,8 @@ LIMIT 1";
                     if (seamSummary.BucketsRepaired > 0 || seamSummary.BucketsDeferred > 0 || seamSummary.Failures > 0 || seamSummary.DailyBucketsChained > 0)
                     {
                         _logger.LogInformation(
-                            "Retention re-evaluation: seam repair closed {BucketsRepaired} bucket(s) across {HolesRepaired} hole(s) this pass, {BucketsDeferred} bucket(s) left for a later pass (past this pass's per-aggregate cap), {Failures} isolated failure(s), and refreshed {DailyBucketsChained} day(s) of the dependent daily rollup.",
-                            seamSummary.BucketsRepaired, seamSummary.HolesRepaired, seamSummary.BucketsDeferred, seamSummary.Failures, seamSummary.DailyBucketsChained);
+                            "Retention re-evaluation: seam repair closed {BucketsRepaired} bucket(s) across {HolesRepaired} hole(s) this pass, {BucketsDeferred} bucket(s) left for a later pass (past this pass's per-aggregate cap), {Failures} isolated failure(s), {HolesRemaining} bucket(s) still reading as holes after repair, and refreshed {DailyBucketsChained} day(s) of the dependent daily rollup.",
+                            seamSummary.BucketsRepaired, seamSummary.HolesRepaired, seamSummary.BucketsDeferred, seamSummary.Failures, seamSummary.HolesRemaining, seamSummary.DailyBucketsChained);
                     }
                     else
                     {
@@ -9294,17 +9366,42 @@ AND   j.hypertable_name = '{relation}'", connection))
         }
     }
 
-    private async Task TryConnectAsync(ServerLoopState server, DarlingCollectorRunner runner, DarlingConfig config, CancellationToken cancellationToken)
+    private async Task TryConnectAsync(ServerLoopState server, DarlingCollectorRunner runner, DarlingConfig config, ConnectAttempt? attempt, CancellationToken cancellationToken)
     {
-        if (DateTime.UtcNow < server.NextConnectAttempt)
+        /* #4710: the attempt was made before the fleet gate (see ProcessServerSweepAsync), and the due check
+           with it. No attempt means the server was not due for one, or was retired. */
+        if (attempt is null)
         {
+            return;
+        }
+
+        /* #4710: the attempt ran before the fleet permit, and a reload can replace the definition while it
+           ran or while this body waited for the permit. A runtime built from the OLD definition must not be
+           installed on an edited server: ReconcileServers already cleared Runtime and NextConnectAttempt for
+           the edit, so nothing would reconnect and the server would keep collecting from the old target. A
+           failed OLD attempt must not put the NEW definition into backoff either. ServerDefinitionEquals, not
+           reference equality: a cost or alert-delivery edit replaces the held definition too, and that attempt
+           is still good. The failure count is left alone (the edit's reconcile already reset it). */
+        if (!ServerDefinitionEquals(server.Config, attempt.Value.Config))
+        {
+            _logger.LogInformation(
+                "[{Server}] Definition changed during the connect attempt - connecting again with the new one",
+                server.Config.DisplayName);
+            server.NextConnectAttempt = DateTime.MinValue;
             return;
         }
 
         try
         {
-            var runtime = await DarlingServerConnector.ConnectAsync(server.Config, _logger, cancellationToken);
+            if (attempt.Value.Failure is { } connectFailure)
+            {
+                /* Rethrown into the catch below so a failed attempt takes the same path it always did. */
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(connectFailure).Throw();
+            }
+
+            var runtime = attempt.Value.Runtime!;
             server.Runtime = runtime;
+            server.ConsecutiveConnectFailures = 0;
 
             /* #2255: cleared on success so a LATER failure prints in full even when it carries the same
                message as one from before this connect. Without this, a fixed-then-broken-again cause would be
@@ -9494,7 +9591,12 @@ AND   j.hypertable_name = '{relation}'", connection))
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             server.Runtime = null;
-            server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
+            /* #4710: back off while the server stays down (60 s doubling to a 240 s cap, jittered), rather
+               than a fixed 60 s. A definition edit or a successful connect resets the count. */
+            server.ConsecutiveConnectFailures++;
+            var retryDelay = ServerConnectBackoff.NextDelay(server.ConsecutiveConnectFailures, Random.Shared.NextDouble());
+            server.NextConnectAttempt = DateTime.UtcNow.Add(retryDelay);
+            var retrySeconds = (int)Math.Round(retryDelay.TotalSeconds);
             /* #2255: full text on a NEW cause, one line while it persists. A credential that cannot be
                decrypted on this host is not a transient connect failure, so its explanation is worth Error
                once and worth almost nothing on the 1,440th repeat. */
@@ -9510,14 +9612,14 @@ AND   j.hypertable_name = '{relation}'", connection))
                 }
                 else
                 {
-                    _logger.LogWarning("[{Server}] Connect failed, retrying in 60s: {Message}",
-                        server.Config.DisplayName, failure);
+                    _logger.LogWarning("[{Server}] Connect failed, retrying in {Delay}s: {Message}",
+                        server.Config.DisplayName, retrySeconds, failure);
                 }
             }
             else
             {
-                _logger.LogWarning("[{Server}] Connect still failing, retrying in 60s (same cause as logged above)",
-                    server.Config.DisplayName);
+                _logger.LogWarning("[{Server}] Connect still failing, retrying in {Delay}s (same cause as logged above)",
+                    server.Config.DisplayName, retrySeconds);
             }
 
             /* Stage 4: the online->offline connection edge (Server Unreachable) — fires once when a
@@ -11025,8 +11127,9 @@ LIMIT 1";
                this puts the sentence that names the setting and the issue beside it, on the same HostNote channel. */
             result = DarlingCollectorRunner.WithForeignZoneLinesNote(result);
 
-            /* #4699: a log read that fell back or skipped bytes or files says so beside the count. */
-            result = DarlingCollectorRunner.WithLogResumeNotes(result);
+            /* #4699: a log read that fell back or skipped bytes or files says so beside the count. An Aurora or RDS
+               target reads its log through the AWS API, so its two measurements carry the RDS wording (#4708). */
+            result = DarlingCollectorRunner.WithLogResumeNotes(result, runtime.Target.IsAurora || runtime.Target.IsAwsRds);
 
             /* #4058 L1: a plan-capture run that skipped forged captures (a NULL query id or duration out of
                the guarded CASE chain) carries their count; this puts the sentence that names the issue
@@ -11633,19 +11736,29 @@ LIMIT 1";
                cancelled it, and dropping the connection over one would turn a tuning problem into a
                reconnect storm. Only the 08 class and the shutdown/unavailability codes qualify, which is
                exactly what the provider's ConnectionFatal means. */
-            if ((ex is SqlException sqlEx && (sqlEx.Class >= 20 || sqlEx.Number == -2))
-                /* ANY exception on a PostgreSQL target, not just a PostgresException. The pre-filter was the
-                   bug: a dead socket surfaces as a plain NpgsqlException with no SQLSTATE — the provider
-                   already classifies that as ConnectionFatal, and the call site could not reach it. So the
-                   runtime stayed "connected", Server Unreachable never fired, and every collector errored
-                   forever. Asymmetric with the SqlClient arm, which does reach its own classifier. */
-                || (server.Runtime?.Target.Engine == CollectorTargetEngine.PostgreSql
-                    && PostgresTargetProvider.Instance.Classify(ex, yieldsOnLockTimeout: false)
-                       == CollectorTargetFault.ConnectionFatal))
+            /* #4710: a SQL Server command timeout (number -2) no longer drops the runtime by itself. The
+               connection is still good, and the reconnect re-ran the Extended Events setup and every on-load
+               snapshot, so one slow statement cost a stressed server 75 s or more of collection, alerts and
+               analysis. ShouldDropRuntimeAsync settles a timeout with a probe on a fresh connection and drops
+               only when the probe fails (a pre-login timeout on a hung server is also -2). Class 20+ still
+               drops at once. The PostgreSQL arm keeps its rule: ANY exception on a PostgreSQL target, not just
+               a PostgresException, because a dead socket surfaces as a plain NpgsqlException with no SQLSTATE,
+               and the provider already classifies that as ConnectionFatal. */
+            if (await ConnectionFaultDisposition.ShouldDropRuntimeAsync(
+                    ex,
+                    server.Runtime,
+                    LivenessProbeOverride ?? ConnectionFaultDisposition.ProbeFreshConnectionAsync,
+                    cancellationToken))
             {
                 server.Runtime = null;
                 server.NextConnectAttempt = DateTime.UtcNow.AddSeconds(60);
                 _logger.LogWarning("[{Server}] Connection-level failure — will reconnect", server.Config.DisplayName);
+            }
+            else if (ex is SqlException { Number: -2 })
+            {
+                _logger.LogInformation(
+                    "[{Server}] {Collector} timed out, but a fresh connection answered — keeping the connection (#4710)",
+                    server.Config.DisplayName, collectorName);
             }
 
             /* Best-effort store write (#1556): this is also the OutOfMemoryException landing pad (OOM is an

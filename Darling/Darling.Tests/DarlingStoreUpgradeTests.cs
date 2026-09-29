@@ -4520,6 +4520,332 @@ public sealed class DarlingStoreUpgradeTests
         Assert.Contains("+ RetainedDataDirectorySuffix + oldMajor", source, StringComparison.Ordinal);
     }
 
+    /* ==================== a moved-aside store is never mistaken for a fresh install ==================== */
+
+    /// <summary>
+    /// The sweep counts no start against a retained copy while nothing is at the data directory: with the
+    /// store moved aside by a swap that could not move it back, the retained copy IS the store. Its counter
+    /// is planted one short of deletion, so a sweep that still counted would delete it on the first call.
+    /// Once a cluster is back at the data directory the countdown resumes where it stopped.
+    /// </summary>
+    [Fact]
+    public void Sweep_CountsNoStart_WhileNoClusterIsAtTheDataDirectory()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-sweep-displaced-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var retained = PlantRetainedCopy(dataDirectory, 17);
+            var counter = retained + ".starts";
+            File.WriteAllText(counter, "1");
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log);
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+
+            Assert.True(Directory.Exists(retained));
+            Assert.Equal("1", File.ReadAllText(counter));
+            Assert.Contains("no cluster is at the data directory", log.ToString(), StringComparison.Ordinal);
+            Assert.DoesNotContain("Deleted the pre-upgrade store data directory", log.ToString(), StringComparison.Ordinal);
+
+            PlantLiveDataDirectory(root.FullName);
+            upgrade.SweepRetainedDataDirectories(dataDirectory);
+            Assert.False(Directory.Exists(retained));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The siblings a start must refuse initdb for: the retained pre-upgrade copies and the half-built new
+    /// clusters, in that order, and only the ones that hold a cluster. An unrelated neighbour and a copy
+    /// with no PG_VERSION are not the store.
+    /// </summary>
+    [Fact]
+    public void FindDisplacedStoreCopies_NamesTheSiblingsThatHoldACluster_PreUpgradeCopiesFirst()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-displaced-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var staged = dataDirectory + DarlingStoreUpgrade.UpgradeStagingDirectorySuffix + "18";
+            Directory.CreateDirectory(staged);
+            File.WriteAllText(Path.Combine(staged, "PG_VERSION"), "18\n");
+            var retained = PlantRetainedCopy(dataDirectory, 17);
+            Directory.CreateDirectory(DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, 16));
+            var neighbour = Path.Combine(root.FullName, "pgfoo");
+            Directory.CreateDirectory(neighbour);
+            File.WriteAllText(Path.Combine(neighbour, "PG_VERSION"), "18\n");
+
+            Assert.Equal([retained, staged], DarlingStoreUpgrade.FindDisplacedStoreCopies(dataDirectory));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// What is NOT a moved-aside store, so initdb still runs: a fresh install with nothing beside the data
+    /// directory, and the retry after a failed first initdb, where the credential file exists and the data
+    /// directory does not (the credential is written before initdb runs) or is initdb's empty leftover.
+    /// </summary>
+    [Fact]
+    public void FindDisplacedStoreCopies_IsEmpty_ForAFreshInstall_AndForTheRetryAfterAFailedInitdb()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-not-displaced-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "store", "pg");
+            Assert.Empty(DarlingStoreUpgrade.FindDisplacedStoreCopies(dataDirectory));
+
+            Directory.CreateDirectory(Path.Combine(root.FullName, "store"));
+            File.WriteAllText(DarlingManagedPostgres.CredentialPathFor(dataDirectory), "not-a-cluster");
+            Assert.Empty(DarlingStoreUpgrade.FindDisplacedStoreCopies(dataDirectory));
+
+            Directory.CreateDirectory(dataDirectory);
+            Assert.Empty(DarlingStoreUpgrade.FindDisplacedStoreCopies(dataDirectory));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The refusal names every copy, the pre-upgrade one as the one to rename back, and the hard-link
+    /// control-file step only when that rename is pending; and it is a failure the worker never retries.
+    /// </summary>
+    [Fact]
+    public void DescribeDisplacedStore_NamesThePreUpgradeCopy_TheRename_AndTheControlFileStep()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-displaced-text-");
+        try
+        {
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var retained = PlantRetainedCopy(dataDirectory, 17);
+            var staged = dataDirectory + DarlingStoreUpgrade.UpgradeStagingDirectorySuffix + "18";
+            Directory.CreateDirectory(staged);
+            File.WriteAllText(Path.Combine(staged, "PG_VERSION"), "18\n");
+
+            var copies = DarlingStoreUpgrade.FindDisplacedStoreCopies(dataDirectory);
+            var text = DarlingStoreUpgrade.DescribeDisplacedStore(dataDirectory, copies);
+
+            Assert.Contains($"rename {retained} to {dataDirectory}", text, StringComparison.Ordinal);
+            Assert.Contains(staged, text, StringComparison.Ordinal);
+            Assert.DoesNotContain("pg_control.old", text, StringComparison.Ordinal);
+            Assert.False(StartupFailureTriage.IsRetryable(new InvalidOperationException(text)));
+
+            Directory.CreateDirectory(Path.Combine(retained, "global"));
+            File.WriteAllText(Path.Combine(retained, "global", "pg_control.old"), "x");
+            Assert.Contains(
+                "rename global\\pg_control.old inside it back to global\\pg_control",
+                DarlingStoreUpgrade.DescribeDisplacedStore(dataDirectory, copies),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /* ==================== the rescued runtime is the store's own, and is never thrown away ==================== */
+
+    /// <summary>A runtime directory's shape as far as these paths care: a pg_ctl.exe that exists, and a marker.</summary>
+    private static string PlantRuntime(string pgsqlDirectory, string marker)
+    {
+        var bin = Path.Combine(pgsqlDirectory, "bin");
+        Directory.CreateDirectory(bin);
+        File.WriteAllText(Path.Combine(bin, "pg_ctl.exe"), string.Empty);
+        File.WriteAllText(Path.Combine(bin, "runtime.txt"), marker);
+        return bin;
+    }
+
+    /// <summary>A version probe answered from a table, so no binary has to run.</summary>
+    private static Func<string, CancellationToken, Task<string?>> VersionsByBin(params (string Bin, string? Line)[] table)
+        => (bin, _) => Task.FromResult(
+            table.FirstOrDefault(row => string.Equals(row.Bin, bin, StringComparison.OrdinalIgnoreCase)).Line);
+
+    /// <summary>
+    /// After an interrupted upgrade the stamp matches the package, so the runtime advance reports no
+    /// previous runtime; the store's PostgreSQL 17 binaries are nonetheless in the rescued copy. They are
+    /// found there when their major is the store's, and only then: a rescued 18 is not what a 17 store
+    /// needs, binaries that do not run report nothing, and a fresh install has nothing to resume.
+    /// </summary>
+    [Fact]
+    public async Task FindRescuedRuntimeBin_ReturnsTheRescuedCopy_OnlyWhenItsMajorIsTheStores()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-rescued-");
+        try
+        {
+            var runtimeRoot = Path.Combine(root.FullName, "deploy", "pg-runtime");
+            var previousPgsql = Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql");
+            var previousBin = Path.Combine(previousPgsql, "bin");
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17\n");
+
+            var upgrade = new DarlingStoreUpgrade(new CapturingLogger());
+            Assert.Null(await upgrade.FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, CancellationToken.None));
+
+            PlantRuntime(previousPgsql, "rescued");
+
+            upgrade.ReadRuntimeVersionLine = VersionsByBin((previousBin, "pg_ctl (PostgreSQL) 17.6"));
+            Assert.Equal(previousBin, await upgrade.FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, CancellationToken.None));
+
+            upgrade.ReadRuntimeVersionLine = VersionsByBin((previousBin, "pg_ctl (PostgreSQL) 18.4"));
+            Assert.Null(await upgrade.FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, CancellationToken.None));
+
+            upgrade.ReadRuntimeVersionLine = VersionsByBin((previousBin, null));
+            Assert.Null(await upgrade.FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, CancellationToken.None));
+
+            File.Delete(Path.Combine(dataDirectory, "PG_VERSION"));
+            upgrade.ReadRuntimeVersionLine = VersionsByBin((previousBin, "pg_ctl (PostgreSQL) 17.6"));
+            Assert.Null(await upgrade.FindRescuedRuntimeBinAsync(runtimeRoot, dataDirectory, CancellationToken.None));
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>
+    /// The store is still on PostgreSQL 17, the live runtime is 18 and the rescued copy is 17: the shape an
+    /// interrupted upgrade leaves, and the one an operator reaches by deleting the stamp to force a retry
+    /// (the stamp then reads as "the package changed"). The runtime advance used to clear the rescued copy
+    /// to make room for rescuing the live one, deleting the only PostgreSQL 17 on the host. It now keeps
+    /// it, extracts nothing, and reports it as the previous runtime the upgrade resumes from.
+    /// </summary>
+    [Fact]
+    public async Task TryAdvanceRuntime_KeepsTheRescuedRuntime_WhileTheStoreIsStillOnItsMajor()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-keep-rescued-");
+        try
+        {
+            var runtimeRoot = Path.Combine(root.FullName, "deploy", "pg-runtime");
+            var liveBin = PlantRuntime(Path.Combine(runtimeRoot, "pgsql"), "live-18");
+            var previousBin = PlantRuntime(
+                Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql"), "rescued-17");
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            Directory.CreateDirectory(dataDirectory);
+            File.WriteAllText(Path.Combine(dataDirectory, "PG_VERSION"), "17\n");
+
+            /* A package the stamp does not match. Any zip does, since nothing may be extracted from it. */
+            var zipSource = Path.Combine(root.FullName, "zip-source");
+            Directory.CreateDirectory(zipSource);
+            File.WriteAllText(Path.Combine(zipSource, "readme.txt"), "not a runtime");
+            var zipPath = Path.Combine(root.FullName, "deploy", "pg-runtime.zip");
+            ZipFile.CreateFromDirectory(zipSource, zipPath);
+            var stampPath = Path.Combine(runtimeRoot, DarlingStoreUpgrade.RuntimeStampFileName);
+            File.WriteAllText(stampPath, new string('0', 64));
+
+            var log = new CapturingLogger();
+            var upgrade = new DarlingStoreUpgrade(log)
+            {
+                ReadRuntimeVersionLine = VersionsByBin(
+                    (liveBin, "pg_ctl (PostgreSQL) 18.4"),
+                    (previousBin, "pg_ctl (PostgreSQL) 17.6")),
+            };
+
+            var advance = await upgrade.TryAdvanceRuntimeAsync(
+                runtimeRoot, zipPath, dataDirectory, static (_, _) => Task.FromResult(false), CancellationToken.None);
+
+            Assert.False(advance.Swapped);
+            Assert.Equal(previousBin, advance.PreviousBinDirectory);
+            Assert.Equal("rescued-17", File.ReadAllText(Path.Combine(previousBin, "runtime.txt")));
+            Assert.Equal("live-18", File.ReadAllText(Path.Combine(liveBin, "runtime.txt")));
+            Assert.False(File.Exists(Path.Combine(runtimeRoot, "readme.txt")));
+            Assert.Equal(new string('0', 64), File.ReadAllText(stampPath));
+            Assert.Contains("Keeping the rescued Postgres runtime", log.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /* ==================== a failed upgrade that left no startable store stops the start ==================== */
+
+    private static DarlingStoreUpgrade.StoreUpgradeOutcome FailedOutcome(
+        DarlingStoreUpgrade.PreUpgradeDataDirectory data, bool reverted)
+        => new(
+            DarlingStoreUpgrade.StoreUpgradeStatus.Failed, 17, 18, "2.24.0", "2.28.1",
+            "swap-data-directories", "the second rename failed", false, data, reverted);
+
+    /// <summary>
+    /// A data directory that could not be put back stops the start with the rename to do by hand, and the
+    /// runtime step too when the revert did not happen either. Never retried in-process.
+    /// </summary>
+    [Fact]
+    public void DescribeUnrecoveredUpgrade_StopsTheStart_WhenTheDataDirectoryWasNotPutBack()
+    {
+        var root = Directory.CreateTempSubdirectory("darling-unrecovered-");
+        try
+        {
+            var runtimeRoot = Path.Combine(root.FullName, "deploy", "pg-runtime");
+            var dataDirectory = Path.Combine(root.FullName, "pg");
+            var retained = DarlingStoreUpgrade.RetainedDataDirectoryFor(dataDirectory, 17);
+
+            var text = DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(
+                FailedOutcome(DarlingStoreUpgrade.PreUpgradeDataDirectory.NotRestored, reverted: true), dataDirectory, runtimeRoot);
+
+            Assert.NotNull(text);
+            Assert.Contains($"rename {retained} to {dataDirectory}", text, StringComparison.Ordinal);
+            Assert.Contains("swap-data-directories", text, StringComparison.Ordinal);
+            Assert.DoesNotContain("runtime back", text, StringComparison.Ordinal);
+            Assert.False(StartupFailureTriage.IsRetryable(new InvalidOperationException(text)));
+
+            var both = DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(
+                FailedOutcome(DarlingStoreUpgrade.PreUpgradeDataDirectory.NotRestored, reverted: false), dataDirectory, runtimeRoot);
+            Assert.NotNull(both);
+            Assert.Contains("runtime back", both, StringComparison.Ordinal);
+            Assert.Contains(
+                Path.Combine(DarlingStoreUpgrade.PreviousRuntimeRootFor(runtimeRoot), "pgsql"), both, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteTree(root.FullName);
+        }
+    }
+
+    /// <summary>A runtime that could not be reverted stops the start rather than run PostgreSQL 18 binaries on the 17 store.</summary>
+    [Fact]
+    public void DescribeUnrecoveredUpgrade_StopsTheStart_WhenTheRuntimeWasNotReverted()
+    {
+        var runtimeRoot = Path.Combine(Path.GetTempPath(), "darling-unreverted", "pg-runtime");
+        var dataDirectory = Path.Combine(Path.GetTempPath(), "darling-unreverted", "pg");
+
+        var text = DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(
+            FailedOutcome(DarlingStoreUpgrade.PreUpgradeDataDirectory.Untouched, reverted: false), dataDirectory, runtimeRoot);
+
+        Assert.NotNull(text);
+        Assert.Contains("could not be reverted", text, StringComparison.Ordinal);
+        Assert.Contains("PostgreSQL 18 binaries at " + Path.Combine(runtimeRoot, "pgsql"), text, StringComparison.Ordinal);
+        Assert.False(StartupFailureTriage.IsRetryable(new InvalidOperationException(text)));
+    }
+
+    /// <summary>The clean revert, in both of its put-back shapes, and every non-failure still start the store.</summary>
+    [Fact]
+    public void DescribeUnrecoveredUpgrade_IsNull_WhenTheStoreWasPutBackAndTheRuntimeReverted()
+    {
+        var runtimeRoot = Path.Combine(Path.GetTempPath(), "darling-recovered", "pg-runtime");
+        var dataDirectory = Path.Combine(Path.GetTempPath(), "darling-recovered", "pg");
+
+        Assert.Null(DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(
+            FailedOutcome(DarlingStoreUpgrade.PreUpgradeDataDirectory.Untouched, reverted: true), dataDirectory, runtimeRoot));
+        Assert.Null(DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(
+            FailedOutcome(DarlingStoreUpgrade.PreUpgradeDataDirectory.ControlFileRestored, reverted: true), dataDirectory, runtimeRoot));
+        Assert.Null(DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(
+            DarlingStoreUpgrade.StoreUpgradeOutcome.None, dataDirectory, runtimeRoot));
+        Assert.Null(DarlingStoreUpgrade.DescribeUnrecoveredUpgrade(
+            new DarlingStoreUpgrade.StoreUpgradeOutcome(
+                DarlingStoreUpgrade.StoreUpgradeStatus.Succeeded, 17, 18, null, null, null, null, false),
+            dataDirectory, runtimeRoot));
+    }
+
     /// <summary>A live data directory with the one file that makes a directory a cluster.</summary>
     private static string PlantLiveDataDirectory(string root)
     {

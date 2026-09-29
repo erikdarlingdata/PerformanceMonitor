@@ -387,7 +387,10 @@ public sealed class DarlingStoreUpgradeRevertTests
             Assert.Equal(LogLevel.Critical, stranded.Level);
             Assert.Contains(host.RetainedDirectory, stranded.Message, StringComparison.Ordinal);
             Assert.Contains("pg_control.old", stranded.Message, StringComparison.Ordinal);
-            Assert.Contains("EMPTY store", stranded.Message, StringComparison.Ordinal);
+            /* The line promises what the bootstrap now does: no start initializes an empty store in the moved-aside
+               store's place, and the retention sweep does not count starts against it. */
+            Assert.Contains("every start refuses to initialize an empty store", stranded.Message, StringComparison.Ordinal);
+            Assert.Contains("does not count starts against the moved-aside copy", stranded.Message, StringComparison.Ordinal);
 
             Assert.DoesNotContain(log.Entries, entry => entry.Message.Contains("NO data has been lost", StringComparison.Ordinal));
             var last = log.Entries[^1];
