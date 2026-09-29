@@ -3855,6 +3855,13 @@ public sealed class DarlingWorker : BackgroundService
                     "Materialization-hole repair finished with {Failures} failure(s); the repair epoch stays unstamped, so the Periodic raw purge keeps holding until a repair completes cleanly.",
                     summary.Failures);
             }
+
+            /* #4716: the one-time heal of the daily days an earlier hourly repair left short — AFTER the stamp,
+               so nothing the heal does can change the stamp, and on this same connection while
+               _materializationHoleRepairRunning is still true, so no other repair refreshes the same aggregate
+               at the same time and collection never waits on it. Isolated in its own method: a heal failure
+               never changes the stamp above, the summary line above, or the start. */
+            await RunPartialDailyHealAsync(connection, stoppingToken);
         }
         catch (OperationCanceledException)
         {
@@ -3874,6 +3881,37 @@ public sealed class DarlingWorker : BackgroundService
         finally
         {
             _materializationHoleRepairRunning = false;
+        }
+    }
+
+    /// <summary>
+    /// Runs <see cref="PartialDailyHeal.RunAsync"/> (#4716) on the hole repair's own connection, after that
+    /// repair's completion stamp, and writes ONE INFORMATION line whatever it found — a run with nothing to do
+    /// must not look like a run that never happened (#3756). A failure here is logged at WARNING and stops
+    /// nowhere else: the stamp, the repair's summary line and the start are all behind it. A cancelled run says
+    /// so and writes no marker for a daily it had not finished, so the next start walks that daily again.
+    /// </summary>
+    private async Task RunPartialDailyHealAsync(NpgsqlConnection connection, CancellationToken stoppingToken)
+    {
+        try
+        {
+            var summary = await PartialDailyHeal.RunAsync(connection, _logger, DateTime.UtcNow, stoppingToken);
+            _logger.LogInformation(
+                "Partial-daily heal (#4716): {Checked} daily rollup(s) checked, {AlreadyDone} already done, {Compared} day(s) compared, {Partial} partial, {Refreshed} refreshed ({Chained} more chained to dependent dailies), {Failures} failure(s), in {Seconds:F1} s.",
+                summary.DailiesChecked, summary.DailiesAlreadyDone, summary.DaysCompared, summary.DaysPartial,
+                summary.DaysRefreshed, summary.DaysChained, summary.Failures, summary.Elapsed.TotalSeconds);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogInformation(
+                "Partial-daily heal (#4716) was cancelled before it could report — at shutdown that is expected, and a daily it had not finished has no marker, so the next start walks it again.");
+        }
+        catch (Exception ex)
+        {
+            var sqlState = ex is NpgsqlException { SqlState: { Length: > 0 } state } ? state : null;
+            _logger.LogWarning(
+                "Partial-daily heal (#4716) could not run — a daily it had not finished has no marker, so the next start walks it again: {ExceptionType}{SqlState}",
+                ex.GetType().Name, sqlState is null ? "" : $", SQLSTATE {sqlState}");
         }
     }
 

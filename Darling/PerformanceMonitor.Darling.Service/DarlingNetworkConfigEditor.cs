@@ -255,7 +255,7 @@ internal static class DarlingNetworkConfigEditor
                         && NextCodeChar(json, regions, token.End, objectClose) == ':')
                     {
                         var colon = NextCodeIndex(json, regions, token.End, objectClose);
-                        var valueStart = NextCodeIndex(json, regions, colon + 1, objectClose);
+                        var valueStart = NextValueIndex(json, regions, colon + 1, objectClose);
                         if (valueStart < 0)
                         {
                             return null;
@@ -295,10 +295,32 @@ internal static class DarlingNetworkConfigEditor
     /// child indent). If a LIVE <c>network</c> key already exists it is replaced in place; otherwise the
     /// block is appended as the parent's last member (after any surviving commented template), with a
     /// separating comma synthesized only when the previous member lacks a trailing one. If the parent
-    /// section itself is absent it is created at the root (the <c>mcp</c>-omitted case). Pure.
+    /// section itself is absent it is created at the root (the <c>mcp</c>-omitted case).
+    ///
+    /// <para><b>Replacing keeps what the wizard does not own (#4743).</b> The block the wizard builds holds
+    /// only the keys it prompts for, so replacing the old block wholesale silently deleted every other
+    /// member — <c>web.network.tls</c> and <c>web.network.oidc</c> among them, which turned the dashboard
+    /// back into plain HTTP with no SSO after the restart. Every member of the old block whose name is not
+    /// in <paramref name="ownedKeys"/> is copied into the new block verbatim (key through value, plus a
+    /// comment on the same line), so keys added later survive too. Names are compared case-insensitively
+    /// because the config parser is: a kept <c>"Listen"</c> beside the new <c>"listen"</c> would win at
+    /// parse time and undo the operator's answer. The insert path has no old block and ignores
+    /// <paramref name="ownedKeys"/>. Pure.</para>
     /// </summary>
-    internal static string UpsertNetworkBlock(string json, string parentKey, string networkBlock)
+    internal static string UpsertNetworkBlock(
+        string json, string parentKey, string networkBlock, IReadOnlyCollection<string> ownedKeys) =>
+        UpsertNetworkBlock(json, parentKey, networkBlock, ownedKeys, out _);
+
+    /// <summary>
+    /// <see cref="UpsertNetworkBlock(string, string, string, IReadOnlyCollection{string})"/> that also reports
+    /// the names of the old members it kept (document order; empty when nothing was kept or nothing was
+    /// replaced), so the wizard can tell the operator exactly what survived. Pure.
+    /// </summary>
+    internal static string UpsertNetworkBlock(
+        string json, string parentKey, string networkBlock, IReadOnlyCollection<string> ownedKeys,
+        out IReadOnlyList<string> carriedKeys)
     {
+        carriedKeys = [];
         var regions = Classify(json);
         var rootOpen = FindRootObjectOpen(json, regions);
         if (rootOpen < 0)
@@ -335,8 +357,10 @@ internal static class DarlingNetworkConfigEditor
         if (existing is not null)
         {
             /* Replace the existing LIVE block in place. KeyStart already sits after the four-space indent,
-               so the block goes in without a leading indent. */
-            return json[..existing.Value.KeyStart] + networkBlock + json[existing.Value.ValueEnd..];
+               so the block goes in without a leading indent. #4743: members the wizard does not own ride
+               along into the replacement rather than vanishing with the old block. */
+            var replacement = CarryUnownedMembers(json, regions, existing.Value, networkBlock, ownedKeys, out carriedKeys);
+            return json[..existing.Value.KeyStart] + replacement + json[existing.Value.ValueEnd..];
         }
 
         return InsertAsLastMember(json, regions, parentOpen, parentClose, networkBlock, ChildIndent);
@@ -414,6 +438,13 @@ internal static class DarlingNetworkConfigEditor
     }
 
     /// <summary>
+    /// The keys <see cref="BuildStoreNetworkBlock"/> writes (#4743) — exactly the ones the wizard owns in
+    /// <c>postgres.network</c>. Any other member of an old block is the operator's and is kept when the
+    /// block is replaced. Keep in step with the builder; a test pins that every key it writes is listed.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> StoreNetworkOwnedKeys = ["listen", "allowFrom", "role"];
+
+    /// <summary>
     /// The active (uncommented) <c>postgres.network</c> block the wizard writes — a sample-styled block
     /// (per-field trailing comments, no fragile column alignment) whose VALUES are live so the store
     /// resolver picks it up. The values are pre-validated by the wizard through the real resolver; they
@@ -425,6 +456,13 @@ internal static class DarlingNetworkConfigEditor
         FieldIndent + $"\"allowFrom\": {JsonString(allowFrom)},  // pg_hba + firewall CIDR (address family must match listen).\n" +
         FieldIndent + $"\"role\": {JsonString(role)}  // remote pg_hba role(s): viewer (read-only, default), admin (remote writes), or both (\"admin,viewer\").\n" +
         ChildIndent + "}";
+
+    /// <summary>
+    /// The keys <see cref="BuildMcpNetworkBlock"/> writes (#4743). BOTH token keys are owned even though a
+    /// block carries only one: switching a plaintext <c>token</c> to an <c>encryptedToken</c> must not
+    /// leave both behind. A test pins that every key the builder writes is listed.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> McpNetworkOwnedKeys = ["listen", "allowFrom", "token", "encryptedToken"];
 
     /// <summary>
     /// The active (uncommented) <c>mcp.network</c> block the wizard writes. Exactly one of
@@ -448,6 +486,14 @@ internal static class DarlingNetworkConfigEditor
     }
 
     /// <summary>
+    /// The keys <see cref="BuildWebNetworkBlock"/> writes (#4743), with both token keys owned for the reason
+    /// <see cref="McpNetworkOwnedKeys"/> gives. <c>tls</c>, <c>oidc</c> and any key added later are NOT
+    /// listed on purpose: everything the wizard does not own is kept, so this list never has to learn a
+    /// new setting before the wizard stops deleting it.
+    /// </summary>
+    internal static readonly IReadOnlyList<string> WebNetworkOwnedKeys = ["listen", "allowFrom", "token", "encryptedToken"];
+
+    /// <summary>
     /// The active (uncommented) <c>web.network</c> block the wizard writes (#1617) — the web-dashboard twin
     /// of <see cref="BuildMcpNetworkBlock"/>, same exactly-one-of token contract: the wizard prefers
     /// <c>encryptedToken</c> (a DPAPI blob) and only emits a plaintext <c>token</c> when preserving an
@@ -466,6 +512,34 @@ internal static class DarlingNetworkConfigEditor
             FieldIndent + $"\"allowFrom\": {JsonString(allowFrom)},  // in-app RemoteIpAddress check + firewall CIDR (loopback always allowed).\n" +
             tokenLine +
             ChildIndent + "}";
+    }
+
+    /// <summary>
+    /// The one line the wizard prints after writing when
+    /// <see cref="UpsertNetworkBlock(string, string, string, IReadOnlyCollection{string}, out IReadOnlyList{string})"/>
+    /// kept old members (#4743): <c>Kept web.network.tls and web.network.oidc from the existing darling.json.</c>
+    /// Null when nothing was kept, so the caller prints nothing. A repeated path is named once. Pure.
+    /// </summary>
+    internal static string? FormatKeptLine(IReadOnlyList<string> keptPaths)
+    {
+        var distinct = new List<string>(keptPaths.Count);
+        foreach (var path in keptPaths)
+        {
+            if (!distinct.Contains(path))
+            {
+                distinct.Add(path);
+            }
+        }
+
+        if (distinct.Count == 0)
+        {
+            return null;
+        }
+
+        var names = distinct.Count == 1
+            ? distinct[0]
+            : string.Join(", ", distinct.GetRange(0, distinct.Count - 1)) + " and " + distinct[^1];
+        return $"Kept {names} from the existing darling.json.";
     }
 
     /// <summary>
@@ -511,6 +585,195 @@ internal static class DarlingNetworkConfigEditor
         return $"  {surfaceLabel}: loopback-only (secure default)";
     }
 
+    /// <summary>
+    /// The replacement for an old LIVE <c>network</c> object (#4743): <paramref name="newBlock"/> with every
+    /// old member the wizard does not own appended before its closing brace. Each kept member is its text
+    /// from the key through the value, verbatim, plus a comment on the same line; the commas are ours, so
+    /// the last builder member gains one and the last kept member has none. An old value that is not an
+    /// object (<c>"network": null</c>) has nothing to keep. Pure.
+    /// </summary>
+    private static string CarryUnownedMembers(
+        string json, RegionKind[] regions, ObjectMemberSpan oldNetwork, string newBlock,
+        IReadOnlyCollection<string> ownedKeys, out IReadOnlyList<string> carriedKeys)
+    {
+        carriedKeys = [];
+        var open = oldNetwork.ValueStart;
+        var close = oldNetwork.ValueEnd - 1;
+        if (json[open] != '{' || close <= open || json[close] != '}')
+        {
+            return newBlock;
+        }
+
+        var names = new List<string>();
+        var entries = new List<(string Core, string Comment)>();
+        foreach (var member in EnumerateObjectMembers(json, regions, open, close))
+        {
+            if (IsOwned(ownedKeys, member.Name))
+            {
+                continue;
+            }
+
+            names.Add(member.Name);
+            entries.Add((json[member.KeyStart..member.ValueEnd], SameLineComment(json, regions, member.ValueEnd, close)));
+        }
+
+        if (entries.Count == 0)
+        {
+            return newBlock;
+        }
+
+        var blockRegions = Classify(newBlock);
+        var blockOpen = FindRootObjectOpen(newBlock, blockRegions);
+        var blockClose = blockOpen < 0 ? -1 : FindMatchingClose(newBlock, blockRegions, blockOpen);
+        if (blockClose < 0 || newBlock[LineStartOf(newBlock, blockClose)..blockClose].Trim().Length != 0)
+        {
+            throw new InvalidOperationException("The replacement network block must be an object whose closing brace starts its own line.");
+        }
+
+        var lines = new List<string>(entries.Count);
+        for (var i = 0; i < entries.Count; i++)
+        {
+            lines.Add(entries[i].Core + (i < entries.Count - 1 ? "," : "") + entries[i].Comment);
+        }
+
+        carriedKeys = names;
+        return InsertAsLastMember(newBlock, blockRegions, blockOpen, blockClose, string.Join("\n" + FieldIndent, lines), FieldIndent);
+    }
+
+    /// <summary>True when <paramref name="name"/> is one of <paramref name="ownedKeys"/>, ignoring case (the config parser does).</summary>
+    private static bool IsOwned(IReadOnlyCollection<string> ownedKeys, string name)
+    {
+        foreach (var owned in ownedKeys)
+        {
+            if (string.Equals(owned, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Every DIRECT-CHILD member of the object whose braces are <paramref name="objectOpen"/>/<paramref name="objectClose"/>,
+    /// in document order, with the key's unescaped name and its text extent (key start through value end). The
+    /// sibling of <see cref="FindObjectValueSpan"/> that yields all members instead of matching one. Keys and
+    /// braces inside comments and strings are invisible, like everywhere else in this type. Pure.
+    /// </summary>
+    private static List<(string Name, int KeyStart, int ValueEnd)> EnumerateObjectMembers(
+        string json, RegionKind[] regions, int objectOpen, int objectClose)
+    {
+        var members = new List<(string Name, int KeyStart, int ValueEnd)>();
+        var i = objectOpen + 1;
+        while (i < objectClose)
+        {
+            if (regions[i] != RegionKind.StringLiteral)
+            {
+                i++;
+                continue;
+            }
+
+            var token = ReadStringToken(json, regions, i);
+            var colon = NextCodeIndex(json, regions, token.End, objectClose);
+            if (colon < 0 || json[colon] != ':')
+            {
+                i = token.End;
+                continue;
+            }
+
+            var valueStart = NextValueIndex(json, regions, colon + 1, objectClose);
+            if (valueStart < 0)
+            {
+                break;
+            }
+
+            var valueEnd = ValueEndFrom(json, regions, valueStart, objectClose);
+            members.Add((KeyName(json, token), token.Start, valueEnd));
+            i = Math.Max(valueEnd, token.End);
+        }
+
+        return members;
+    }
+
+    /// <summary>The key's name with JSON escapes resolved (a <c>l</c> spelling of <c>listen</c> is still <c>listen</c> to the parser); the raw text if it does not decode.</summary>
+    private static string KeyName(string json, StringToken token)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<string>(json.AsSpan(token.Start, token.End - token.Start)) ?? token.Content;
+        }
+        catch (JsonException)
+        {
+            return token.Content;
+        }
+    }
+
+    /// <summary>
+    /// The comment that trails a member's value on the SAME line, with the whitespace before it and WITHOUT
+    /// the member's own separating comma (the caller places commas): for <c>"tls": {...},  // note</c> this
+    /// returns <c>  // note</c>. Empty when no comment follows on that line. A block comment counts only when
+    /// it ends the line, because otherwise it may belong to the next member. Pure.
+    /// </summary>
+    private static string SameLineComment(string json, RegionKind[] regions, int valueEnd, int limit)
+    {
+        var i = SkipHorizontalSpace(json, valueEnd, limit);
+        var comma = -1;
+        if (i < limit && regions[i] == RegionKind.Code && json[i] == ',')
+        {
+            comma = i;
+            i = SkipHorizontalSpace(json, i + 1, limit);
+        }
+
+        if (i >= limit)
+        {
+            return "";
+        }
+
+        var end = i;
+        if (regions[i] == RegionKind.LineComment)
+        {
+            while (end < limit && regions[end] == RegionKind.LineComment)
+            {
+                end++;
+            }
+
+            while (end > i && json[end - 1] == '\r')
+            {
+                end--;
+            }
+        }
+        else if (regions[i] == RegionKind.BlockComment)
+        {
+            while (end < limit && regions[end] == RegionKind.BlockComment)
+            {
+                end++;
+            }
+
+            var after = SkipHorizontalSpace(json, end, limit);
+            if (json.IndexOf('\n', i, end - i) >= 0 || (after < limit && json[after] != '\r' && json[after] != '\n'))
+            {
+                return "";
+            }
+        }
+        else
+        {
+            return "";
+        }
+
+        return comma < 0 ? json[valueEnd..end] : json[valueEnd..comma] + json[(comma + 1)..end];
+    }
+
+    /// <summary>Index of the first character at or after <paramref name="from"/> (before <paramref name="limit"/>) that is not a space or tab.</summary>
+    private static int SkipHorizontalSpace(string json, int from, int limit)
+    {
+        while (from < limit && (json[from] == ' ' || json[from] == '\t'))
+        {
+            from++;
+        }
+
+        return from;
+    }
+
     /* ------------------------------------------------------------------------------------------------
        Internal scan helpers — all pure, all code-region-aware via the Classify labels.
        ------------------------------------------------------------------------------------------------ */
@@ -544,6 +807,25 @@ internal static class DarlingNetworkConfigEditor
         for (var i = from; i < limit && i < json.Length; i++)
         {
             if (regions[i] == RegionKind.Code && !char.IsWhiteSpace(json[i]))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Index where the value after a colon starts: like <see cref="NextCodeIndex"/> but a string value counts
+    /// too. A string is entirely <see cref="RegionKind.StringLiteral"/> (quotes included), so the code-only
+    /// walk skipped a string value and reported the comma after it — or, for a last member, found nothing (#4743).
+    /// </summary>
+    private static int NextValueIndex(string json, RegionKind[] regions, int from, int limit)
+    {
+        for (var i = from; i < limit && i < json.Length; i++)
+        {
+            if (regions[i] == RegionKind.StringLiteral
+                || (regions[i] == RegionKind.Code && !char.IsWhiteSpace(json[i])))
             {
                 return i;
             }

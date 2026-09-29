@@ -1969,25 +1969,36 @@ public static class DarlingCliCommands
 
         /* Build the edit through the comment-preserving surgeon. */
         var newText = originalText;
+
+        /* #4743: replacing a live network block keeps every member the wizard does not ask about (the web
+           block's tls and oidc among them); the paths of what was kept are collected here and named after
+           the write, so a refusal below never claims anything was kept. */
+        var kept = new List<string>();
         if (store is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "postgres",
-                DarlingNetworkConfigEditor.BuildStoreNetworkBlock(store.Value.Listen, store.Value.AllowFrom, store.Value.Role));
+                DarlingNetworkConfigEditor.BuildStoreNetworkBlock(store.Value.Listen, store.Value.AllowFrom, store.Value.Role),
+                DarlingNetworkConfigEditor.StoreNetworkOwnedKeys, out var keptStore);
+            kept.AddRange(keptStore.Select(key => $"postgres.network.{key}"));
         }
 
         if (mcp is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "mcp",
-                DarlingNetworkConfigEditor.BuildMcpNetworkBlock(mcp.Value.Listen, mcp.Value.AllowFrom, mcp.Value.EncryptedToken, mcp.Value.PlainToken));
+                DarlingNetworkConfigEditor.BuildMcpNetworkBlock(mcp.Value.Listen, mcp.Value.AllowFrom, mcp.Value.EncryptedToken, mcp.Value.PlainToken),
+                DarlingNetworkConfigEditor.McpNetworkOwnedKeys, out var keptMcp);
+            kept.AddRange(keptMcp.Select(key => $"mcp.network.{key}"));
         }
 
         if (web is not null)
         {
             newText = DarlingNetworkConfigEditor.UpsertNetworkBlock(
                 newText, "web",
-                DarlingNetworkConfigEditor.BuildWebNetworkBlock(web.Value.Listen, web.Value.AllowFrom, web.Value.EncryptedToken, web.Value.PlainToken));
+                DarlingNetworkConfigEditor.BuildWebNetworkBlock(web.Value.Listen, web.Value.AllowFrom, web.Value.EncryptedToken, web.Value.PlainToken),
+                DarlingNetworkConfigEditor.WebNetworkOwnedKeys, out var keptWeb);
+            kept.AddRange(keptWeb.Select(key => $"web.network.{key}"));
         }
 
         /* Guard 1: the edited text must PARSE (comments/trailing-commas tolerated). */
@@ -2038,6 +2049,13 @@ public static class DarlingCliCommands
         if (!await WriteWithBackupAsync(resolvedPath, newText, output, error, cancellationToken))
         {
             return 1;
+        }
+
+        /* #4743: one line naming what the rebuilt blocks kept; nothing at all when nothing was kept. */
+        var keptLine = DarlingNetworkConfigEditor.FormatKeptLine(kept);
+        if (keptLine is not null)
+        {
+            output.WriteLine(keptLine);
         }
 
         /* The generated token plaintexts — STDOUT exactly once each; the save-this warning on STDERR so a
