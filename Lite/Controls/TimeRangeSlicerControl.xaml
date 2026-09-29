@@ -54,7 +54,7 @@
                         Background="Transparent" BorderThickness="0"
                         HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
                         Padding="8,4" Cursor="Hand"
-                        Click="Toggle_Click" AutomationProperties.Name="Time Range">
+                        Click="Toggle_Click">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock x:Name="ToggleIcon" Text="▾" FontSize="12"
                                    Foreground="{DynamicResource SlicerToggleBrush}"
