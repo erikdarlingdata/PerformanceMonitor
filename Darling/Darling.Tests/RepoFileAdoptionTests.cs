@@ -164,6 +164,9 @@ public sealed class RepoFileAdoptionTests
         /* Reads the lineage comment blocks above the flipped PostgreSQL bars; a block is several lines and
            is collapsed to one before its citation is matched, so the read has to be LF-normalised first. */
         "PgTargetMeasuredLineageTests.cs",
+        /* #4825: its source pins slice the Collection Health tab's purge members (PurgeNow_Click, StartPurgeWatch,
+           RunPurgeWatchAsync, the unload handler) by brace balance, and compare the order of calls inside them. */
+        "PurgeNowTotalsWatchTests.cs",
         /* #3797: its viewer-surface pins slice regions out of ViewerServerTab.xaml and server-tabs.js between
            anchors several lines apart (the Queries group's sub-tab block, a column array, one DataGrid's
            column list), and its dispatch pin anchors `case QueryStoreClutterSubTabIndex:` on the awaited
@@ -171,7 +174,7 @@ public sealed class RepoFileAdoptionTests
         "QueryStoreClutterViewerSurfacesTests.cs",
         /* #4231: its web source pin counts noteKey: "truncation_note" occurrences across server-tabs.js and
            view-templates.js, which an LF-normalised read makes exact instead of CRLF-fragile. */
-        /* #4427: its wiring pin slices RunPurgeNowAsync's body by brace balance and matches calls that span line breaks. */
+        /* #4427: its wiring pins slice RunPurgeNowBackgroundAsync's body by brace balance and matches calls that span line breaks. */
         "RawPurgeNowWiringTests.cs",
         "RawWindowFloorViewerPortTests.cs",
         /* #3653 item 3: its twin pin extracts the multi-line GetPriorOccurrencesSql const body from BOTH finding
