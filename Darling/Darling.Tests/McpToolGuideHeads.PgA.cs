@@ -266,6 +266,28 @@ public sealed class McpToolGuideHeadsPgPlanTests
         Assert.DoesNotContain("One facet reaches beyond plan capture", tail, StringComparison.Ordinal);
     }
 
+    /// <summary>The <c>get_pg_deadlocks</c> reading guide keeps step with those two facets and with the saved RDS
+    /// position (#4735). Its list of reasons for an empty answer grows a fourth entry, the log line prefix that
+    /// <c>log_line_prefix_readable</c> judges, and says the readiness tool reports both facets. Its sentence on how
+    /// <c>times_seen</c> can exceed 1 on RDS and Aurora no longer claims the resume position lives in memory (#4708
+    /// saves it): a restart resumes where the last read stopped, except while a deadlock report is split across
+    /// two reads, when the saved position waits and that part is read again.</summary>
+    [Fact]
+    public void DeadlockTail_NamesThePrefixFacet_AndSaysTheReadPositionSurvivesARestart()
+    {
+        var tail = McpToolGuideTests.Served("get_pg_deadlocks").Tail!;
+
+        Assert.Contains("There is a fourth precondition", tail, StringComparison.Ordinal);
+        Assert.Contains("The log_line_prefix_readable facet judges it", tail, StringComparison.Ordinal);
+        Assert.Contains("get_pg_plan_capture_readiness reports both facets", tail, StringComparison.Ordinal);
+
+        Assert.Contains("the collector saves its resume position, so a restart resumes where the last read stopped", tail, StringComparison.Ordinal);
+        Assert.Contains("a deadlock report split across two reads, where the saved position waits and a restart reads that part again", tail, StringComparison.Ordinal);
+        Assert.Contains("a window whose write did not land is offered again", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("resume position in memory", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("re-reads a bounded tail", tail, StringComparison.Ordinal);
+    }
+
     /// <summary>D8: no renames, no consolidation — all three still resolve as the same tool names with the same
     /// parameters, just a shorter served head and the over-cap parameters (D2) trimmed to a pointer at the
     /// tool's reading guide.</summary>
