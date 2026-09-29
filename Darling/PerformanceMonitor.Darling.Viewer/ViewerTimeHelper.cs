@@ -39,9 +39,10 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// user preference (persisted in <see cref="ViewerAppSettings.TimeDisplayMode"/>), and
 /// <see cref="ActiveServerClock"/> is set by the active <see cref="ViewerServerTab"/> to ITS server's
 /// clock before that tab renders — only the visible tab renders (the viewer's visible-only rule), so the
-/// visible tab's offset always wins. Charts pre-convert their X values through <see cref="ForDisplay"/>,
-/// so <see cref="UiTimeContext.ConvertForDisplay"/> is deliberately left at its identity default in the
-/// viewer (wiring it would double-convert the already-display-time chart X on hover/crosshair).
+/// visible tab's offset always wins. Charts plot the naive-UTC instant as X (#4766) and draw their tick, hover
+/// and crosshair labels, and the CSV export, in <see cref="CurrentDisplayZone"/>; <see cref="ForDisplay"/> is for
+/// TEXT (grid columns, captions, tooltips). <see cref="UiTimeContext.ConvertForDisplay"/> is deliberately left at its
+/// identity default in the viewer (wiring it would convert the chart X a second time on hover/crosshair).
 /// </para>
 /// </summary>
 public static class ViewerTimeHelper
@@ -162,32 +163,6 @@ public static class ViewerTimeHelper
             ? known
             : ServerClock.FixedOffset((int)machine.GetUtcOffset(utcNow).TotalMinutes);
     }
-
-    /// <summary>
-    /// Inverse of <see cref="ForDisplay"/> for a chart X the user clicked: a wall-clock value in the CURRENT
-    /// display mode, back to the store's naive-UTC instant. The custom-range pickers no longer parse through it
-    /// (they hold the instants, <see cref="CustomRangeState"/>); the chart drill-down still does until the charts
-    /// move to the display zone.
-    /// </summary>
-    public static DateTime DisplayToNaiveUtc(DateTime display) => ConvertFromDisplay(display, CurrentDisplayMode, _serverClock);
-
-    /// <summary>As <see cref="DisplayToNaiveUtc(DateTime)"/> but for an explicit mode (the active offset).</summary>
-    public static DateTime DisplayToNaiveUtc(DateTime display, TimeDisplayMode mode) => ConvertFromDisplay(display, mode, _serverClock);
-
-    /// <summary>Pure (static-free) display → naive-UTC inverse for an explicit mode + fixed offset.</summary>
-    public static DateTime ConvertFromDisplay(DateTime display, TimeDisplayMode mode, int utcOffsetMinutes) =>
-        ConvertFromDisplay(display, mode, ServerClock.FixedOffset(utcOffsetMinutes));
-
-    /// <summary>Pure (static-free) display → naive-UTC inverse for an explicit mode + server clock. A picker
-    /// value in a skipped or repeated server hour is resolved by <see cref="ServerClock.ToUtc"/> and never
-    /// throws.</summary>
-    public static DateTime ConvertFromDisplay(DateTime display, TimeDisplayMode mode, ServerClock clock) => mode switch
-    {
-        TimeDisplayMode.LocalTime =>
-            DateTime.SpecifyKind(DateTime.SpecifyKind(display, DateTimeKind.Local).ToUniversalTime(), DateTimeKind.Unspecified),
-        TimeDisplayMode.ServerTime => clock.ToUtc(display),
-        _ => DateTime.SpecifyKind(display, DateTimeKind.Unspecified), /* UTC — the picker IS naive UTC */
-    };
 
     /// <summary>
     /// A short label naming the zone a time is shown in under <paramref name="mode"/>, for the text that sits

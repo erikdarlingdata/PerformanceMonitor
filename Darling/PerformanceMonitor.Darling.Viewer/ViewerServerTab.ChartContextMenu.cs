@@ -270,8 +270,8 @@ public partial class ViewerServerTab
         {
             var (startUtc, endUtc) = GetWindowUtc();
             chart.Plot.Axes.SetLimitsX(
-                ViewerTimeHelper.ForDisplay(startUtc).ToOADate(),
-                ViewerTimeHelper.ForDisplay(endUtc).ToOADate());
+                startUtc.ToOADate(),
+                endUtc.ToOADate());
             chart.Plot.Axes.AutoScaleY();
         }
 
@@ -293,6 +293,7 @@ public partial class ViewerServerTab
         try
         {
             var sep = ViewerExportSettings.CsvSeparator;
+            var zone = ViewerTimeHelper.CurrentDisplayZone();
             var sb = new StringBuilder();
             sb.AppendLine(ChartCsvHeaderLine(sep));
 
@@ -314,7 +315,8 @@ public partial class ViewerServerTab
                             continue;
                         }
 
-                        sb.AppendLine(FormatChartCsvLine(DateTime.FromOADate(point.X), seriesName, point.Y, sep));
+                        /* The chart X is the UTC instant; the file shows it in the display zone, like the chart's own labels (#4766). */
+                        sb.AppendLine(FormatChartCsvLine(DisplayZone.ToDisplay(DateTime.FromOADate(point.X), zone), seriesName, point.Y, sep));
                     }
 
                     seriesIndex++;

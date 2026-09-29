@@ -23,8 +23,8 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// (<c>UpdateMemorySummary</c> / <c>UpdateMemoryChart</c> / <c>UpdateMemoryGrantCharts</c> /
 /// <c>UpdateMemoryPressureEventsChart</c>) and the clerk picker from Lite's <c>ServerTab.Pickers.cs</c>
 /// (<c>PopulateMemoryClerkPicker</c> … <c>UpdateMemoryClerksChartFromPickerAsync</c>), reads rewired to
-/// <see cref="ViewerDataService"/> Postgres. The only render-body changes: the time axis runs every point
-/// through <see cref="ViewerTimeHelper.ForDisplay"/> (where Lite shifts by its per-server
+/// <see cref="ViewerDataService"/> Postgres. The only render-body changes: the time axis plots every point
+/// at its naive-UTC instant and labels it in <see cref="ViewerTimeHelper.CurrentDisplayZone"/> (where Lite shifts by its per-server
 /// <c>UtcOffsetMinutes</c>), and Lite's per-chart context menu / "Show Active Queries at This Time"
 /// drill-down + <c>Task.Run</c> query wrappers are dropped (the viewer's reads are genuinely async and it
 /// has no drill-down surfaces yet); the hover tooltips are kept. The clerk picker mirrors the wait/perfmon
@@ -39,7 +39,7 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// LOCAL wall clock and needs the per-batch de-skew (#1262), the pressure <c>sample_time</c> is naive UTC —
 /// <c>MemoryPressureEventsCollector</c> stamps it from <c>SYSUTCDATETIME()</c> and
 /// <c>CollectorTimestampFrameTests</c> pins that it must. So the chart windows AND plots on raw
-/// <c>sample_time</c> through <see cref="ViewerTimeHelper.ForDisplay"/>, which takes naive-UTC input, and
+/// <c>sample_time</c> as the UTC instant (it is naive UTC already), and
 /// needs no de-skew of its own: the CPU read's correction assumes the newest sample is ~1 minute old, true
 /// for the dense CPU ring buffer and not for the sparse resource-monitor one, and would be wrong here even
 /// if the frame called for it.</para>
@@ -77,11 +77,11 @@ public partial class ViewerServerTab
         ApplyTheme(MemoryPressureEventsChart);
         MemoryPressureEventsChart.Refresh();
 
-        _memoryHover = new ChartHoverHelper(MemoryChart, "GB");
-        _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB");
-        _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB");
-        _memoryGrantActivityHover = new ChartHoverHelper(MemoryGrantActivityChart, "");
-        _memoryPressureEventsHover = new ChartHoverHelper(MemoryPressureEventsChart, "events");
+        _memoryHover = new ChartHoverHelper(MemoryChart, "GB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _memoryClerksHover = new ChartHoverHelper(MemoryClerksChart, "MB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _memoryGrantSizingHover = new ChartHoverHelper(MemoryGrantSizingChart, "MB", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _memoryGrantActivityHover = new ChartHoverHelper(MemoryGrantActivityChart, "", displayZone: ViewerTimeHelper.CurrentDisplayZone);
+        _memoryPressureEventsHover = new ChartHoverHelper(MemoryPressureEventsChart, "events", displayZone: ViewerTimeHelper.CurrentDisplayZone);
     }
 
     /// <summary>
@@ -160,7 +160,7 @@ public partial class ViewerServerTab
     /// <summary>
     /// The Overview memory trend — Lite's <c>UpdateMemoryChart</c>: Total Server Memory, Target Memory
     /// (dashed), Buffer Pool, and the Memory Grants overlay, all MB→GB. The grant overlay draws a flat
-    /// zero line when no grant data exists. Times run through <see cref="ViewerTimeHelper.ForDisplay"/>.
+    /// zero line when no grant data exists. Times are plotted as the UTC instant.
     /// </summary>
     private void RenderMemoryChart(List<MemoryTrendPoint> data, List<MemoryGrantTrendPoint> grantData, DateTime startUtc, DateTime endUtc)
     {
@@ -168,19 +168,19 @@ public partial class ViewerServerTab
         _memoryHover?.Clear();
         ApplyTheme(MemoryChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
-            MemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             MemoryChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
             ReapplyAxisColors(MemoryChart);
             MemoryChart.Refresh();
             return;
         }
 
-        var times = data.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+        var times = data.Select(d => d.CollectionTime.ToOADate()).ToArray();
         var totalMem = data.Select(d => d.TotalServerMemoryMb / 1024.0).ToArray();
         var targetMem = data.Select(d => d.TargetServerMemoryMb / 1024.0).ToArray();
         var bufferPool = data.Select(d => d.BufferPoolMb / 1024.0).ToArray();
@@ -208,7 +208,7 @@ public partial class ViewerServerTab
         double[] grantTimes, grantMb;
         if (grantData.Count > 0)
         {
-            grantTimes = grantData.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            grantTimes = grantData.Select(d => d.CollectionTime.ToOADate()).ToArray();
             grantMb = grantData.Select(d => d.TotalGrantedMb / 1024.0).ToArray();
         }
         else
@@ -223,7 +223,7 @@ public partial class ViewerServerTab
         ChartStyle.StyleScatter(grantPlot);
         _memoryHover?.Add(grantPlot, "Memory Grants");
 
-        MemoryChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(MemoryChart);
         MemoryChart.Plot.YLabel("Memory (GB)");
@@ -238,8 +238,8 @@ public partial class ViewerServerTab
     /// <summary>
     /// The Memory Grants sub-tab's two charts — Lite's <c>UpdateMemoryGrantCharts</c>: sizing
     /// (available/granted/used MB) and activity (grantees/waiters/timeouts/forced grants) per resource
-    /// pool, each pool×metric on a cycling <c>SeriesColors</c> color. Times run through
-    /// <see cref="ViewerTimeHelper.ForDisplay"/>.
+    /// pool, each pool×metric on a cycling <c>SeriesColors</c> color. Times are plotted as the UTC
+    /// instant.
     /// </summary>
     private void RenderMemoryGrantCharts(List<MemoryGrantChartPoint> data, DateTime startUtc, DateTime endUtc)
     {
@@ -250,14 +250,14 @@ public partial class ViewerServerTab
         ApplyTheme(MemoryGrantSizingChart);
         ApplyTheme(MemoryGrantActivityChart);
 
-        var rangeStart = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        var rangeEnd = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        var rangeStart = startUtc.ToOADate();
+        var rangeEnd = endUtc.ToOADate();
 
         if (data.Count == 0)
         {
             foreach (var c in new[] { MemoryGrantSizingChart, MemoryGrantActivityChart })
             {
-                c.Plot.Axes.DateTimeTicksBottomDateChange();
+                c.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
                 c.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
                 ReapplyAxisColors(c);
                 c.Refresh();
@@ -285,7 +285,7 @@ public partial class ViewerServerTab
         foreach (var poolId in poolIds)
         {
             var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
-            var times = poolData.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = poolData.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             foreach (var metric in sizingMetrics)
             {
@@ -304,7 +304,7 @@ public partial class ViewerServerTab
             }
         }
 
-        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryGrantSizingChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryGrantSizingChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(MemoryGrantSizingChart);
         MemoryGrantSizingChart.Plot.YLabel("Memory (MB)");
@@ -326,7 +326,7 @@ public partial class ViewerServerTab
         foreach (var poolId in poolIds)
         {
             var poolData = data.Where(d => d.PoolId == poolId).OrderBy(d => d.CollectionTime).ToList();
-            var times = poolData.Select(d => ViewerTimeHelper.ForDisplay(d.CollectionTime).ToOADate()).ToArray();
+            var times = poolData.Select(d => d.CollectionTime.ToOADate()).ToArray();
 
             foreach (var metric in activityMetrics)
             {
@@ -342,7 +342,7 @@ public partial class ViewerServerTab
             }
         }
 
-        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryGrantActivityChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryGrantActivityChart.Plot.Axes.SetLimitsX(rangeStart, rangeEnd);
         ReapplyAxisColors(MemoryGrantActivityChart);
         MemoryGrantActivityChart.Plot.YLabel("Count");
@@ -355,8 +355,8 @@ public partial class ViewerServerTab
     /// The Memory Pressure Events sub-tab — Lite's <c>UpdateMemoryPressureEventsChart</c>: hour-bucketed
     /// stacked bars of pressure events, SQL Server (process) vs OS (system) side-by-side and stacked by
     /// severity (medium = indicator 2, severe = indicator ≥ 3). Bar geometry copied verbatim from Lite;
-    /// the X range is the toolbar's settable window and every bar/bound runs through
-    /// <see cref="ViewerTimeHelper.ForDisplay"/> (see the class remarks on pressure sample_time).
+    /// the X range is the toolbar's settable window and every bar/bound is the UTC
+    /// instant (see the class remarks on pressure sample_time).
     /// </summary>
     private void RenderMemoryPressureEventsChart(List<MemoryPressureEventRow> data)
     {
@@ -365,8 +365,8 @@ public partial class ViewerServerTab
         ApplyTheme(MemoryPressureEventsChart);
 
         var (startUtc, endUtc) = GetWindowUtc();
-        double xMin = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-        double xMax = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+        double xMin = startUtc.ToOADate();
+        double xMax = endUtc.ToOADate();
 
         /* Only count rows where SQL Server reported actual pressure (indicator >= 2 matches sp_pressuredetector). */
         var pressureRows = data
@@ -404,7 +404,7 @@ public partial class ViewerServerTab
                 int sqlSevere = g.Count(d => d.MemoryIndicatorsProcess >= 3);
                 int osMedium = g.Count(d => d.MemoryIndicatorsSystem == 2);
                 int osSevere = g.Count(d => d.MemoryIndicatorsSystem >= 3);
-                double x = ViewerTimeHelper.ForDisplay(g.Key).ToOADate();
+                double x = g.Key.ToOADate();
 
                 if (sqlMedium > 0)
                     sqlMediumBars.Add(new ScottPlot.Bar { Position = x - barOffset, ValueBase = 0, Value = sqlMedium, Size = barSize, FillColor = sqlMediumColor, LineWidth = 0 });
@@ -452,7 +452,7 @@ public partial class ViewerServerTab
             }
         }
 
-        MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomDateChange();
+        MemoryPressureEventsChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
         MemoryPressureEventsChart.Plot.Axes.SetLimitsX(xMin, xMax);
         ReapplyAxisColors(MemoryPressureEventsChart);
         MemoryPressureEventsChart.Plot.YLabel("Pressure Events per Hour");
@@ -559,14 +559,14 @@ public partial class ViewerServerTab
             _memoryClerksHover?.Clear();
 
             var (startUtc, endUtc) = GetWindowUtc();
-            double xMin = ViewerTimeHelper.ForDisplay(startUtc).ToOADate();
-            double xMax = ViewerTimeHelper.ForDisplay(endUtc).ToOADate();
+            double xMin = startUtc.ToOADate();
+            double xMax = endUtc.ToOADate();
 
             if (selected.Count == 0)
             {
                 MemoryClerksTotalText.Text = "--";
                 MemoryClerksTopText.Text = "--";
-                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
+                MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
                 MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
                 ReapplyAxisColors(MemoryClerksChart);
                 MemoryClerksChart.Refresh();
@@ -587,7 +587,7 @@ public partial class ViewerServerTab
             {
                 if (!trendsByType.TryGetValue(selected[i].DisplayName, out var trend) || trend.Count == 0) continue;
 
-                var times = trend.Select(t => ViewerTimeHelper.ForDisplay(t.CollectionTime).ToOADate()).ToArray();
+                var times = trend.Select(t => t.CollectionTime.ToOADate()).ToArray();
                 var values = trend.Select(t => t.MemoryMb).ToArray();
 
                 var plot = MemoryClerksChart.Plot.Add.TimeSeries(times, values);
@@ -611,7 +611,7 @@ public partial class ViewerServerTab
                 }
             }
 
-            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomDateChange();
+            MemoryClerksChart.Plot.Axes.DateTimeTicksBottomUtc(ViewerTimeHelper.CurrentDisplayZone);
             MemoryClerksChart.Plot.Axes.SetLimitsX(xMin, xMax);
             ReapplyAxisColors(MemoryClerksChart);
             MemoryClerksChart.Plot.YLabel("Memory (MB)");

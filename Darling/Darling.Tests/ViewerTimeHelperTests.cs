@@ -18,9 +18,9 @@ namespace Darling.Tests;
 /// Pins <see cref="ViewerTimeHelper"/> — the viewer's port of Lite's ServerTimeHelper and the single
 /// chokepoint every rendered timestamp routes through. The store is naive-UTC, so: UTC = raw, Local =
 /// machine-local (SpecifyKind(Utc).ToLocalTime()), Server = UTC + the server's collected offset. Also pins
-/// the inverse used by the custom-range pickers and the per-server offset read SQL. The conversion core is
-/// exercised through the pure <c>ConvertToDisplay</c>/<c>ConvertFromDisplay</c> overloads so the process-
-/// wide statics are not mutated; two focused tests confirm the static <c>ForDisplay</c>/<c>DisplayToNaiveUtc</c>
+/// the zone the charts draw in and the custom-range pickers read in, and the per-server offset read SQL. The
+/// conversion core is exercised through the pure <c>ConvertToDisplay</c>/<c>DisplayZoneFor</c> overloads so the
+/// process-wide statics are not mutated; two focused tests confirm the static <c>ForDisplay</c>/<c>CurrentDisplayZone</c>
 /// delegate to them (saving/restoring the statics).
 /// </summary>
 /* Serialized: these classes flip the process-wide ViewerTimeHelper.CurrentDisplayMode static (each
@@ -64,11 +64,11 @@ public sealed class ViewerTimeHelperTests
     [InlineData(TimeDisplayMode.UTC)]
     [InlineData(TimeDisplayMode.LocalTime)]
     [InlineData(TimeDisplayMode.ServerTime)]
-    public void ConvertFromDisplay_InvertsConvertToDisplay(TimeDisplayMode mode)
+    public void DisplayZoneRead_InvertsConvertToDisplay(TimeDisplayMode mode)
     {
         const int offset = -300;
         var display = ViewerTimeHelper.ConvertToDisplay(NaiveUtc, mode, offset);
-        var backToStore = ViewerTimeHelper.ConvertFromDisplay(display, mode, offset);
+        var backToStore = DisplayZone.ToUtcBound(display, ViewerTimeHelper.DisplayZoneFor(mode, ServerClock.FixedOffset(offset)), BoundSide.From);
 
         /* Round-trips to the original naive-UTC store value, re-stamped Unspecified (the kind the reads send). */
         Assert.Equal(NaiveUtc, backToStore);
@@ -76,12 +76,13 @@ public sealed class ViewerTimeHelperTests
     }
 
     [Fact]
-    public void ConvertFromDisplay_Server_SubtractsOffset()
+    public void DisplayZoneRead_Server_SubtractsOffset()
     {
         /* A picker value the user typed in Server time maps back to the naive-UTC window bound. */
         var serverWallClock = new DateTime(2026, 7, 1, 7, 0, 0);   // 07:00 on a -05:00 server
         var expectedUtc = DateTime.SpecifyKind(new DateTime(2026, 7, 1, 12, 0, 0), DateTimeKind.Unspecified);
-        Assert.Equal(expectedUtc, ViewerTimeHelper.ConvertFromDisplay(serverWallClock, TimeDisplayMode.ServerTime, -300));
+        var zone = ViewerTimeHelper.DisplayZoneFor(TimeDisplayMode.ServerTime, ServerClock.FixedOffset(-300));
+        Assert.Equal(expectedUtc, DisplayZone.ToUtcBound(serverWallClock, zone, BoundSide.From));
     }
 
     // ── GetTimezoneLabel: the zone named beside a rendered time (#4766) ────────────────────────────────
@@ -170,7 +171,7 @@ public sealed class ViewerTimeHelperTests
     }
 
     [Fact]
-    public void DisplayToNaiveUtc_ReadsProcessWideStatics_AndRoundTripsForDisplay()
+    public void CurrentDisplayZone_ReadsProcessWideStatics_AndRoundTripsForDisplay()
     {
         var savedMode = ViewerTimeHelper.CurrentDisplayMode;
         var savedOffset = ViewerTimeHelper.UtcOffsetMinutes;
@@ -180,7 +181,9 @@ public sealed class ViewerTimeHelperTests
             ViewerTimeHelper.CurrentDisplayMode = TimeDisplayMode.ServerTime;
 
             var display = ViewerTimeHelper.ForDisplay(NaiveUtc);
-            Assert.Equal(NaiveUtc, ViewerTimeHelper.DisplayToNaiveUtc(display));
+            var zone = ViewerTimeHelper.CurrentDisplayZone();
+            Assert.Equal(display, DisplayZone.ToDisplay(NaiveUtc, zone));
+            Assert.Equal(NaiveUtc, DisplayZone.ToUtcBound(display, zone, BoundSide.From));
         }
         finally
         {

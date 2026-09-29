@@ -58,8 +58,8 @@ public sealed class ViewerServerClockTests
     {
         /* The user types a range on the server's wall clock: 08:00 on 2026-10-31 (daylight) to 08:00 on
            2026-11-02 (standard). The two bounds are 12:00Z and 13:00Z. */
-        var from = ViewerTimeHelper.ConvertFromDisplay(Naive(2026, 10, 31, 8), TimeDisplayMode.ServerTime, Eastern);
-        var to = ViewerTimeHelper.ConvertFromDisplay(Naive(2026, 11, 2, 8), TimeDisplayMode.ServerTime, Eastern);
+        var from = Eastern.ToUtc(Naive(2026, 10, 31, 8));
+        var to = Eastern.ToUtc(Naive(2026, 11, 2, 8));
 
         Assert.Equal(Naive(2026, 10, 31, 12), from);
         Assert.Equal(Naive(2026, 11, 2, 13), to);
@@ -70,19 +70,16 @@ public sealed class ViewerServerClockTests
     public void ServerMode_ASkippedPickerTime_DoesNotThrow_AndAFixedOffsetStillWorks()
     {
         /* 02:30 on 2026-03-08 never happened on the server. TimeZoneInfo.ConvertTimeToUtc throws on it. */
-        Assert.Equal(Naive(2026, 3, 8, 7, 30),
-            ViewerTimeHelper.ConvertFromDisplay(Naive(2026, 3, 8, 2, 30), TimeDisplayMode.ServerTime, Eastern));
+        Assert.Equal(Naive(2026, 3, 8, 7, 30), Eastern.ToUtc(Naive(2026, 3, 8, 2, 30)));
 
         /* A server with no zone id keeps the old fixed-offset arithmetic. */
-        Assert.Equal(Naive(2026, 3, 8, 7, 30),
-            ViewerTimeHelper.ConvertFromDisplay(Naive(2026, 3, 8, 2, 30), TimeDisplayMode.ServerTime, -300));
+        Assert.Equal(Naive(2026, 3, 8, 7, 30), ServerClock.FixedOffset(-300).ToUtc(Naive(2026, 3, 8, 2, 30)));
     }
 
     [Fact]
     public void ServerMode_ARepeatedPickerTime_TakesTheFirstOccurrence()
     {
-        Assert.Equal(Naive(2026, 11, 1, 5, 30),
-            ViewerTimeHelper.ConvertFromDisplay(Naive(2026, 11, 1, 1, 30), TimeDisplayMode.ServerTime, Eastern));
+        Assert.Equal(Naive(2026, 11, 1, 5, 30), Eastern.ToUtc(Naive(2026, 11, 1, 1, 30)));
     }
 
     [Theory]
@@ -95,9 +92,10 @@ public sealed class ViewerServerClockTests
         Assert.Equal(
             ViewerTimeHelper.ConvertToDisplay(instant, mode, ServerClock.FixedOffset(-300)),
             ViewerTimeHelper.ConvertToDisplay(instant, mode, Eastern));
-        Assert.Equal(
-            ViewerTimeHelper.ConvertFromDisplay(Naive(2026, 11, 2, 8), mode, ServerClock.FixedOffset(-300)),
-            ViewerTimeHelper.ConvertFromDisplay(Naive(2026, 11, 2, 8), mode, Eastern));
+        /* The zone a typed time is read in (and a chart's labels are drawn in) is the same object either way. */
+        Assert.Same(
+            ViewerTimeHelper.DisplayZoneFor(mode, ServerClock.FixedOffset(-300)),
+            ViewerTimeHelper.DisplayZoneFor(mode, Eastern));
     }
 
     [Fact]
@@ -114,7 +112,7 @@ public sealed class ViewerServerClockTests
     }
 
     [Fact]
-    public void TheProcessWideClock_DrivesForDisplayAndTheInverse()
+    public void TheProcessWideClock_DrivesForDisplayAndTheDisplayZone()
     {
         var savedMode = ViewerTimeHelper.CurrentDisplayMode;
         var savedClock = ViewerTimeHelper.ActiveServerClock;
@@ -125,8 +123,9 @@ public sealed class ViewerServerClockTests
 
             Assert.Equal(Naive(2026, 10, 31, 12), ViewerTimeHelper.ForDisplay(Naive(2026, 10, 31, 16)));
             Assert.Equal(Naive(2026, 11, 2, 11), ViewerTimeHelper.ForDisplay(Naive(2026, 11, 2, 16)));
-            Assert.Equal(Naive(2026, 11, 2, 16), ViewerTimeHelper.DisplayToNaiveUtc(Naive(2026, 11, 2, 11)));
-            Assert.Equal(Naive(2026, 11, 2, 13), ViewerTimeHelper.DisplayToNaiveUtc(Naive(2026, 11, 2, 8), TimeDisplayMode.ServerTime));
+            /* The chart labels are drawn in the same clock: the display zone shows what ForDisplay shows. */
+            Assert.Equal(Naive(2026, 10, 31, 12), DisplayZone.ToDisplay(Naive(2026, 10, 31, 16), ViewerTimeHelper.CurrentDisplayZone()));
+            Assert.Equal(Naive(2026, 11, 2, 11), DisplayZone.ToDisplay(Naive(2026, 11, 2, 16), ViewerTimeHelper.CurrentDisplayZone()));
 
             /* The offset property reads the clock, and setting it installs a fixed offset. */
             Assert.Equal((int)TimeZoneInfo.FindSystemTimeZoneById(EasternWindowsId).GetUtcOffset(DateTime.UtcNow).TotalMinutes, ViewerTimeHelper.UtcOffsetMinutes);
