@@ -10,6 +10,7 @@ using System;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Controls;
+using PerformanceMonitor.Ui;
 using PerformanceMonitorLite.Helpers;
 using PerformanceMonitorLite.Services;
 
@@ -96,6 +97,16 @@ public partial class ServerTab : UserControl
        current UTC window as an argument and has none to give here. */
     private bool IsQueryStatsComparisonActive => CompareToCombo != null && CompareToCombo.SelectedIndex > 0;
 
+    /// <summary>
+    /// The baseline banner's text (#4766): both ends of the baseline window worded in <paramref name="zone"/>, the
+    /// tab's own display zone (<see cref="GetPickerZone"/>). Never the active server's clock: a tab that refreshes
+    /// while another server's tab is selected would put that other server's zone into its own banner.
+    /// </summary>
+    internal static string BaselineBannerText((DateTime From, DateTime To) baseline, TimeZoneInfo zone) =>
+        $"Comparing against baseline: {DisplayZone.Format(baseline.From, zone, BaselineTimeFormat)} → {DisplayZone.Format(baseline.To, zone, BaselineTimeFormat)}";
+
+    private const string BaselineTimeFormat = "yyyy-MM-dd HH:mm:ss";
+
     private void SetQueryStatsComparisonMode(bool active, (DateTime From, DateTime To)? baselineRange = null)
     {
         QueryStatsGrid.Visibility = active ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
@@ -104,9 +115,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            QueryStatsComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            QueryStatsComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 
@@ -144,9 +153,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            ProcStatsComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            ProcStatsComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 
@@ -183,9 +190,7 @@ public partial class ServerTab : UserControl
 
         if (active && baselineRange.HasValue)
         {
-            var from = ServerTimeHelper.FormatServerTime(baselineRange.Value.From);
-            var to = ServerTimeHelper.FormatServerTime(baselineRange.Value.To);
-            QueryStoreComparisonBanner.Text = $"Comparing against baseline: {from} → {to}";
+            QueryStoreComparisonBanner.Text = BaselineBannerText(baselineRange.Value, GetPickerZone());
         }
     }
 

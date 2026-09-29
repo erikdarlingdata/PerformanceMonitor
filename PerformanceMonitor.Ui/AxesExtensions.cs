@@ -75,7 +75,8 @@ internal static class AxesExtensions
                    render surface that skipped the conversion, so the axis under every chart showed
                    server time no matter what the toggle said. The lambda reads the hook at label
                    time, so a mode flip takes effect on the next render with no re-plot needed.
-                   Apps that pre-convert plotted X (the Darling Viewer) leave UiTimeContext at its
+                   Apps that plot the naive-UTC instant and pass their display zone to the tick
+                   generator (the Darling Viewer, DateTimeTicksBottomUtc) leave UiTimeContext at its
                    identity default, making this a no-op there — do NOT also wire the hook in such
                    an app, that double-converts. Lite's converter follows the server's clock by date,
                    so the conversion is not one fixed shift, and converted values can decrease: across

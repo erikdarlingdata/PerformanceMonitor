@@ -65,7 +65,7 @@ public partial class ServerTab : UserControl
         var (fromDate, toDate) = GetDrillWindow(time, 30, 30);
 
         var window = new Windows.WaitDrillDownWindow(
-            _dataService, _serverId, waitType, 1, fromDate, toDate,
+            _dataService, _serverId, waitType, 1, GetPickerZone(), fromDate, toDate,
             _credentialResolver.GetConnectionString(_server));
         window.Owner = Window.GetWindow(this);
         window.ShowDialog();
@@ -124,6 +124,14 @@ public partial class ServerTab : UserControl
     }
 
     /// <summary>
+    /// The live-snapshot indicator's text while a drill-down window is shown (#4766): both ends worded as
+    /// hours and minutes of <paramref name="zone"/>, the tab's own display zone, so the heatmap drill and the generic
+    /// drill read the same and neither claims to be "server time" when the mode shows another zone.
+    /// </summary>
+    internal static string DrillDownIndicatorText(DateTime fromUtc, DateTime toUtc, TimeZoneInfo zone) =>
+        $"Drill-down: {DisplayZone.Format(fromUtc, zone, "HH:mm")} → {DisplayZone.Format(toUtc, zone, "HH:mm")}";
+
+    /// <summary>
     /// Generic "Show Active Queries at This Time" drill-down for resource charts that have no
     /// more specific target (memory clerks/grants/pressure, tempdb size + file I/O, file I/O
     /// latency + throughput, current waits, perfmon).
@@ -136,7 +144,7 @@ public partial class ServerTab : UserControl
         SelectActiveQueriesForDrillDown();
         var snapshots = await System.Threading.Tasks.Task.Run(() => _dataService.GetLatestQuerySnapshotsAsync(_serverId, 0, fromDate, toDate));
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LiveSnapshotIndicator.Text = $"Drill-down: {ServerTimeHelper.FormatServerTime(fromDate, "HH:mm")} → {ServerTimeHelper.FormatServerTime(toDate, "HH:mm")}";
+        LiveSnapshotIndicator.Text = DrillDownIndicatorText(fromDate, toDate, GetPickerZone());
         _ = LoadActiveQueriesSlicerAsync();
     }
 
@@ -178,7 +186,7 @@ public partial class ServerTab : UserControl
         AppLogger.Info("DrillDown", $"Got {snapshots.Count} snapshots");
 
         _querySnapshotsFilterMgr!.UpdateData(snapshots);
-        LiveSnapshotIndicator.Text = $"Drill-down: {ToServerLocal(fromDate):HH:mm} → {ToServerLocal(toDate):HH:mm} (server time)";
+        LiveSnapshotIndicator.Text = DrillDownIndicatorText(fromDate, toDate, GetPickerZone());
         _ = LoadActiveQueriesSlicerAsync();
     }
 

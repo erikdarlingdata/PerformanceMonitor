@@ -364,7 +364,7 @@ public partial class MainWindow : Window
             AvailabilityGroupsContent.Initialize(_dataService);
 
             // Initialize FinOps tab
-            FinOpsContent.Initialize(_dataService, _serverManager);
+            FinOpsContent.Initialize(_dataService, _serverManager, OpenTabClockFor);
 
             // Initialize Recommendations tab (advise-only)
             RecommendationsContent.Initialize(_databaseInitializer, _serverManager, _scheduleManager, OpenTabClockFor);
@@ -1352,14 +1352,6 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// When alerts are cleared from Alert History via "Dismiss All", acknowledge the matching
-    /// server tab badge(s) so the at-a-glance indicator stays consistent with the cleared list
-    /// (issue #1092). The argument is the DB server_id filter that was in effect; null means the
-    /// list spanned all servers, so every open tab is acknowledged. The badge tracks blocking/
-    /// deadlock counts (a separate system from the notification alerts the list shows), so this
-    /// uses the same acknowledge-until-new-event semantics as the badge's own context menu.
-    /// </summary>
-    /// <summary>
     /// The clock of the open server tab for <paramref name="serverId"/> (#4766), or null when that server has no tab
     /// open. It is what the Alerts History and Recommendations lists convert a server's rows on when the store holds
     /// no clock for it yet: the tab keeps the fixed offset its connect probe read until the first collected row
@@ -1379,6 +1371,14 @@ public partial class MainWindow : Window
         return null;
     }
 
+    /// <summary>
+    /// When alerts are cleared from Alert History via "Dismiss All", acknowledge the matching
+    /// server tab badge(s) so the at-a-glance indicator stays consistent with the cleared list
+    /// (issue #1092). The argument is the DB server_id filter that was in effect; null means the
+    /// list spanned all servers, so every open tab is acknowledged. The badge tracks blocking/
+    /// deadlock counts (a separate system from the notification alerts the list shows), so this
+    /// uses the same acknowledge-until-new-event semantics as the badge's own context menu.
+    /// </summary>
     private void OnAlertHistoryDismissed(int? dbServerId)
     {
         foreach (var kvp in _openServerTabs)
