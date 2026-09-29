@@ -32,6 +32,7 @@ public sealed class DropXeSessionsVerbTests
 {
     private const string Deadlock = "PerformanceMonitor_Deadlock";
     private const string Blocked = "PerformanceMonitor_BlockedProcess";
+    private const string LongQuery = "PerformanceMonitor_LongQueryCompletions";
 
     // ---- classification, help and dispatch -----------------------------------------------------------------------------
 
@@ -66,6 +67,22 @@ public sealed class DropXeSessionsVerbTests
         Assert.All(usage, ch => Assert.True(ch < 128, $"usage text must be ASCII; found U+{(int)ch:X4}"));
         Assert.All(DarlingCliCommands.DropXeSessionsUsageText(), ch => Assert.True(ch < 128));
     }
+
+    [Theory]
+    [InlineData(Deadlock)]
+    [InlineData(Blocked)]
+    [InlineData(LongQuery)]
+    public void HelpNamesEverySessionTheVerbDrops(string name)
+    {
+        Assert.Contains(name, DarlingCliCommands.UsageText(), StringComparison.Ordinal);
+        Assert.Contains(name, DarlingCliCommands.DropXeSessionsUsageText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheNamesReadAsOnePhrase() =>
+        Assert.Equal(
+            "PerformanceMonitor_Deadlock, PerformanceMonitor_BlockedProcess and PerformanceMonitor_LongQueryCompletions",
+            DarlingXeSessionCleanup.SessionNamesPhrase());
 
     [Fact]
     public void ProgramDispatchesTheVerb_WithoutAWindowsGuard()
@@ -149,8 +166,10 @@ public sealed class DropXeSessionsVerbTests
     [Theory]
     [InlineData(Deadlock, "server_event_sessions", "ses", "SERVER")]
     [InlineData(Blocked, "server_event_sessions", "ses", "SERVER")]
+    [InlineData(LongQuery, "server_event_sessions", "ses", "SERVER")]
     [InlineData(Deadlock, "database_event_sessions", "des", "DATABASE")]
     [InlineData(Blocked, "database_event_sessions", "des", "DATABASE")]
+    [InlineData(LongQuery, "database_event_sessions", "des", "DATABASE")]
     public void EveryDropIsGuardedByIfExists_AgainstTheCatalogOfItsScope(string name, string view, string alias, string scope)
     {
         var script = DarlingXeSessionCleanup.GuardedDropScript();
@@ -163,20 +182,22 @@ public sealed class DropXeSessionsVerbTests
     }
 
     [Fact]
-    public void TheScriptDropsTwoNamesInTwoScopes_AndNothingElse()
+    public void TheScriptDropsThreeNamesInTwoScopes_AndNothingElse()
     {
         var script = DarlingXeSessionCleanup.GuardedDropScript();
         var code = string.Join('\n', script.Split('\n').Where(l => !l.TrimStart().StartsWith("--", StringComparison.Ordinal)));
 
-        Assert.Equal(4, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
-        Assert.Equal(4, Regex.Matches(code, @"IF EXISTS", RegexOptions.CultureInvariant).Count);
+        Assert.Equal(6, Regex.Matches(code, "DROP EVENT SESSION", RegexOptions.CultureInvariant).Count);
+        Assert.Equal(6, Regex.Matches(code, @"IF EXISTS", RegexOptions.CultureInvariant).Count);
         Assert.Equal(
-            new[] { Blocked, Deadlock },
+            new[] { Blocked, Deadlock, LongQuery },
             Regex.Matches(code, @"PerformanceMonitor_\w+").Select(m => m.Value).Distinct().OrderBy(n => n, StringComparer.Ordinal).ToArray());
         Assert.Equal(
-            new[] { Deadlock, Blocked },
+            new[] { Deadlock, Blocked, LongQuery },
             DarlingXeSessionCleanup.SessionNames.ToArray());
-        Assert.Equal(new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName }, DarlingXeSessionCleanup.SessionNames.ToArray());
+        Assert.Equal(
+            new[] { DeadlocksCollector.XeSessionName, BlockedProcessReportCollector.XeSessionName, LongQueryCompletionsCollector.XeSessionName },
+            DarlingXeSessionCleanup.SessionNames.ToArray());
         foreach (var other in new[] { "CREATE", "ALTER", "DELETE", "TRUNCATE", "EXEC", "sp_", "DROP DATABASE", "DROP TABLE", "ON ALL SERVER" })
         {
             Assert.DoesNotContain(other, code, StringComparison.Ordinal);
@@ -192,16 +213,44 @@ public sealed class DropXeSessionsVerbTests
     }
 
     [Theory]
+    [InlineData(Deadlock)]
+    [InlineData(Blocked)]
+    [InlineData(LongQuery)]
+    public void TheFindQueriesLookForEveryName_InTheCatalogOfTheirScope(string name)
+    {
+        Assert.Matches(
+            new Regex(@"FROM sys\.server_event_sessions AS ses\s+WHERE ses\.name IN \([^)]*N'" + name + @"'[^)]*\);", RegexOptions.CultureInvariant),
+            DarlingXeSessionCleanup.FindServerSessionsSql);
+        Assert.Matches(
+            new Regex(@"FROM sys\.database_event_sessions AS des\s+WHERE des\.name IN \([^)]*N'" + name + @"'[^)]*\);", RegexOptions.CultureInvariant),
+            DarlingXeSessionCleanup.FindDatabaseSessionsSql);
+    }
+
+    [Fact]
+    public void TheFindQueriesLookForNothingElse()
+    {
+        foreach (var sql in new[] { DarlingXeSessionCleanup.FindServerSessionsSql, DarlingXeSessionCleanup.FindDatabaseSessionsSql })
+        {
+            Assert.Equal(
+                new[] { Blocked, Deadlock, LongQuery },
+                Regex.Matches(sql, "N'([^']*)'").Select(m => m.Groups[1].Value).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        }
+    }
+
+    [Theory]
     [InlineData(Deadlock, XeSessionScope.Server, "DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;")]
     [InlineData(Blocked, XeSessionScope.Server, "DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;")]
+    [InlineData(LongQuery, XeSessionScope.Server, "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;")]
     [InlineData(Deadlock, XeSessionScope.Database, "DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON DATABASE;")]
     [InlineData(Blocked, XeSessionScope.Database, "DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON DATABASE;")]
+    [InlineData(LongQuery, XeSessionScope.Database, "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON DATABASE;")]
     public void TheStatementIsBracketQuoted(string name, XeSessionScope scope, string expected) =>
         Assert.Equal(expected, DarlingXeSessionCleanup.DropStatement(name, scope));
 
     [Theory]
     [InlineData("system_health")]
-    [InlineData("PerformanceMonitor_LongQueryCompletions")]
+    [InlineData("PerformanceMonitor_LongQueryCompletion")]
+    [InlineData("performancemonitor_longquerycompletions")]
     [InlineData("performancemonitor_deadlock")]
     [InlineData("PerformanceMonitor_Deadlock]; DROP DATABASE x; --")]
     [InlineData("")]
@@ -221,11 +270,14 @@ public sealed class DropXeSessionsVerbTests
         [
             new ExistingXeSession("system_health", XeSessionScope.Server),
             new ExistingXeSession(Blocked, XeSessionScope.Database, "zeta"),
+            new ExistingXeSession(LongQuery, XeSessionScope.Database, "zeta"),
             new ExistingXeSession(Blocked, XeSessionScope.Server),
+            new ExistingXeSession(LongQuery, XeSessionScope.Server),
             new ExistingXeSession("performancemonitor_deadlock", XeSessionScope.Server),
             new ExistingXeSession(Deadlock, XeSessionScope.Database, "alpha"),
             new ExistingXeSession(Deadlock, XeSessionScope.Server),
             new ExistingXeSession(Deadlock, XeSessionScope.Database, "ALPHA"),
+            new ExistingXeSession("performancemonitor_longquerycompletions", XeSessionScope.Database, "alpha"),
             new ExistingXeSession("'; DROP DATABASE x; --", XeSessionScope.Server),
         ]);
 
@@ -233,11 +285,14 @@ public sealed class DropXeSessionsVerbTests
             [
                 "DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;",
                 "DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;",
+                "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;",
                 "DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON DATABASE;",
+                "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON DATABASE;",
                 "DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON DATABASE;",
+                "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON DATABASE;",
             ],
             plan.Select(p => p.Statement).ToArray());
-        Assert.Equal(new string?[] { null, null, "alpha", "zeta" }, plan.Select(p => p.Session.Database).ToArray());
+        Assert.Equal(new string?[] { null, null, null, "alpha", "alpha", "zeta", "zeta" }, plan.Select(p => p.Session.Database).ToArray());
     }
 
     [Fact]
@@ -292,6 +347,7 @@ public sealed class DropXeSessionsVerbTests
     public async Task ItPrintsEachSessionItFinds_AndDropsIt()
     {
         var target = new FakeTarget();
+        target.Found.Add(new ExistingXeSession(LongQuery, XeSessionScope.Server));
         target.Found.Add(new ExistingXeSession(Blocked, XeSessionScope.Server));
         target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
 
@@ -300,10 +356,16 @@ public sealed class DropXeSessionsVerbTests
         Assert.Equal(0, exit);
         Assert.Equal(string.Empty, error);
         Assert.Equal(
-            ["DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;", "DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;"],
+            [
+                "DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;",
+                "DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;",
+                "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;",
+            ],
             target.Dropped.Select(d => d.Statement).ToArray());
         Assert.Contains($"Found {Deadlock} (server scope)", output, StringComparison.Ordinal);
         Assert.Contains($"[DROPPED] {Blocked} (server scope)", output, StringComparison.Ordinal);
+        Assert.Contains($"Found {LongQuery} (server scope)", output, StringComparison.Ordinal);
+        Assert.Contains($"[DROPPED] {LongQuery} (server scope)", output, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(output, "^WARNING: ", RegexOptions.Multiline));
     }
 
@@ -312,12 +374,15 @@ public sealed class DropXeSessionsVerbTests
     {
         var target = new FakeTarget();
         target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Database, "sales"));
+        target.Found.Add(new ExistingXeSession(LongQuery, XeSessionScope.Database, "sales"));
 
         var (exit, output, _) = await RunAsync(target, dryRun: true);
 
         Assert.Equal(0, exit);
         Assert.Empty(target.Dropped);
         Assert.Contains("[WOULD DROP] DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON DATABASE;", output, StringComparison.Ordinal);
+        Assert.Contains("[WOULD DROP] DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON DATABASE;", output, StringComparison.Ordinal);
+        Assert.Contains($"Found {LongQuery} (database scope, in database sales)", output, StringComparison.Ordinal);
         Assert.Contains("in database sales", output, StringComparison.Ordinal);
         Assert.Contains("Dry run: nothing was dropped.", output, StringComparison.Ordinal);
         Assert.Single(Regex.Matches(output, "^WARNING: ", RegexOptions.Multiline));
@@ -342,6 +407,7 @@ public sealed class DropXeSessionsVerbTests
         var target = new FakeTarget();
         target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
         target.Found.Add(new ExistingXeSession(Blocked, XeSessionScope.Server));
+        target.Found.Add(new ExistingXeSession(LongQuery, XeSessionScope.Server));
         target.Refused.Add("DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;");
 
         var (exit, _, error) = await RunAsync(target, dryRun: false);
@@ -349,7 +415,9 @@ public sealed class DropXeSessionsVerbTests
         Assert.Equal(DarlingCliCommands.DropXeSessionsExitCode.TargetUnavailable, exit);
         Assert.Contains("[FAILED]", error, StringComparison.Ordinal);
         Assert.Contains("permission denied", error, StringComparison.Ordinal);
-        Assert.Equal(["DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;"], target.Dropped.Select(d => d.Statement).ToArray());
+        Assert.Equal(
+            ["DROP EVENT SESSION [PerformanceMonitor_BlockedProcess] ON SERVER;", "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;"],
+            target.Dropped.Select(d => d.Statement).ToArray());
     }
 
     [Fact]
@@ -472,12 +540,15 @@ public sealed class DropXeSessionsVerbTests
         {
             var target = new FakeTarget();
             target.Found.Add(new ExistingXeSession(Deadlock, XeSessionScope.Server));
+            target.Found.Add(new ExistingXeSession(LongQuery, XeSessionScope.Server));
 
             var (exit, output, _, connected) = await RunVerbAsync(["sql2022", "--config", WriteConfig(root)], target);
 
             Assert.Equal(0, exit);
             Assert.Equal(["SQL2022"], connected);
-            Assert.Single(target.Dropped);
+            Assert.Equal(
+                ["DROP EVENT SESSION [PerformanceMonitor_Deadlock] ON SERVER;", "DROP EVENT SESSION [PerformanceMonitor_LongQueryCompletions] ON SERVER;"],
+                target.Dropped.Select(d => d.Statement).ToArray());
             Assert.Contains("[DROPPED]", output, StringComparison.Ordinal);
         }
         finally
@@ -559,6 +630,33 @@ public sealed class DropXeSessionsVerbTests
         Assert.Contains("--drop-xe-sessions", note, StringComparison.Ordinal);
         Assert.Contains("--print-sql", note, StringComparison.Ordinal);
         Assert.Contains("history are kept", note, StringComparison.Ordinal);
+        foreach (var name in new[] { Deadlock, Blocked, LongQuery })
+        {
+            Assert.Contains(name, note, StringComparison.Ordinal);
+        }
+
         Assert.DoesNotContain("--drop-xe-sessions", neverDoc.RootElement.GetProperty("note").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TheReadmeNamesEverySessionTheVerbDrops_InItsSectionAndInTheRemoveServerBullet()
+    {
+        var readme = RepoFile.ReadRepoFileLf("Darling", "README.md");
+
+        var start = readme.IndexOf("### Drop the Extended Events sessions a removed server left behind", StringComparison.Ordinal);
+        Assert.True(start >= 0, "the README no longer has the --drop-xe-sessions section (#4732)");
+        var end = readme.IndexOf("\n---", start, StringComparison.Ordinal);
+        Assert.True(end > start, "the --drop-xe-sessions section no longer ends at a horizontal rule");
+        var section = readme[start..end];
+
+        var bulletAt = readme.IndexOf("`remove_server` (which leaves the server's Extended Events sessions on it", StringComparison.Ordinal);
+        Assert.True(bulletAt >= 0, "the remove_server bullet no longer says what it leaves on the server (#4732)");
+        var bullet = readme[bulletAt..Math.Min(readme.Length, bulletAt + 500)];
+
+        foreach (var name in DarlingXeSessionCleanup.SessionNames)
+        {
+            Assert.Contains(name, section, StringComparison.Ordinal);
+            Assert.Contains(name, bullet, StringComparison.Ordinal);
+        }
     }
 }

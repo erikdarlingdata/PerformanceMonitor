@@ -35,7 +35,7 @@ public sealed record ExistingXeSession(string Name, XeSessionScope Scope, string
 
 /// <summary>
 /// One planned DROP. It is built from a session and nothing else: <see cref="Statement"/> is derived on demand through
-/// <see cref="DarlingXeSessionCleanup.DropStatement"/>, which accepts only Darling's own two names, so no code path can
+/// <see cref="DarlingXeSessionCleanup.DropStatement"/>, which accepts only Darling's own session names, so no code path can
 /// hand the executor a statement that did not come from the allow-list.
 /// </summary>
 public sealed record XeSessionDrop(ExistingXeSession Session)
@@ -69,15 +69,19 @@ public interface IXeSessionCleanupTarget
 /// <para><b>Why an explicit verb and not part of removing a server.</b> The service never drops these sessions when a
 /// server is removed, for two reasons that do not go away: the names are shared with Lite and with any other Darling
 /// service that monitors the same server (dropping them under a monitor that is still running blinds it until its next
-/// connect or cycle), and a server that is unreachable from the service cannot be cleaned at all. The cost of leaving them
-/// is small and bounded (a 4 MB ring buffer each), so an operator who wants them gone runs this deliberately.</para>
+/// connect or cycle), and a server that is unreachable from the service cannot be cleaned at all. The deadlock and
+/// blocked-process sessions cost a 4 MB ring buffer each; the long-query completion session has a 4 MB ring buffer too
+/// and also tests every completed statement and batch against its duration filter, which is why it is opt-in. An
+/// operator who wants them gone runs this deliberately.</para>
 ///
-/// <para><b>Only two names, never one from input.</b> <see cref="SessionNames"/> is the deadlock and blocked-process
-/// sessions the ensure lifecycle in <see cref="DarlingXeSessions"/> creates, taken from the same constants the collectors
+/// <para><b>Only Darling's own names, never one from input.</b> <see cref="SessionNames"/> is the deadlock and
+/// blocked-process sessions the ensure lifecycle in <see cref="DarlingXeSessions"/> creates, and the opt-in long-query
+/// completion session its reconcile creates while that collector is on, all taken from the same constants the collectors
 /// read. <see cref="DropStatement"/> refuses any other name, and <see cref="PlanDrops"/> rewrites a matching name to the
-/// constant before it builds a statement, so what reaches a server is always Darling's own spelling, bracket-quoted. The
-/// opt-in long-query completion session is not in the list: the service drops it itself when its collector is disabled
-/// while the server is still monitored.</para>
+/// constant before it builds a statement, so what reaches a server is always Darling's own spelling, bracket-quoted.
+/// The long-query completion session is in the list because the service drops it itself only for a server it still
+/// monitors, when that collector is turned off (<see cref="DarlingXeSessions.ReconcileLongQueryCompletionsAsync"/>): a
+/// server removed while the collector was on keeps the session, and this verb is the only thing that can drop it.</para>
 ///
 /// <para><b>Plan and executor are separate.</b> <see cref="PlanDrops"/> and <see cref="GuardedDropScript"/> are pure and
 /// pin as text. <see cref="RunAsync"/> is the thin executor over <see cref="IXeSessionCleanupTarget"/>, so tests drive the
@@ -85,40 +89,57 @@ public interface IXeSessionCleanupTarget
 /// </summary>
 public static class DarlingXeSessionCleanup
 {
-    /// <summary>The two sessions this verb may drop, in the order it reports and drops them.</summary>
+    /// <summary>The sessions this verb may drop, in the order it reports and drops them. The find queries, the drop
+    /// statements, the <c>--print-sql</c> script and the help text are all built from this one list.</summary>
     public static IReadOnlyList<string> SessionNames { get; } = new[]
     {
         DeadlocksCollector.XeSessionName,
         BlockedProcessReportCollector.XeSessionName,
+        LongQueryCompletionsCollector.XeSessionName,
     };
+
+    /// <summary>The names as one phrase for console and help text: <c>A, B and C</c>.</summary>
+    public static string SessionNamesPhrase() =>
+        SessionNames.Count < 2
+            ? string.Join(string.Empty, SessionNames)
+            : string.Join(", ", SessionNames.Take(SessionNames.Count - 1)) + " and " + SessionNames[^1];
 
     /// <summary>
     /// The one warning both modes print, without its prefix. It says only what the code does: Lite ensures a missing
     /// session on every collection cycle, and <see cref="DarlingXeSessions.EnsureAllAsync"/> creates a missing session
     /// (server-scoped, or in each database on Azure SQL Database) when a Darling service next connects to the server.
+    /// Both create the long-query completion session only for a server whose collector is turned on.
     /// </summary>
     public const string SharedNamesWarning =
         "a Lite app or another Darling service that still monitors this server uses the same session names and "
-        + "creates a missing session again (Lite on its next collection cycle, Darling on its next connect to the server), "
+        + "creates a missing session again (Lite on its next collection cycle, Darling on its next connect to the server; "
+        + "the long query completions session only where that collector is turned on), "
         + "so run this only once nothing else monitors it.";
 
-    /// <summary>Server-scoped sessions of Darling's two names. Composed from the constants, so no input reaches it.</summary>
+    /// <summary>Server-scoped sessions of Darling's names. Composed from <see cref="SessionNames"/>, so no input reaches it
+    /// and the search can never look for fewer names than the plan accepts. It reads <see cref="SessionNames"/> during
+    /// static initialization, so that property stays declared above it.</summary>
     internal static readonly string FindServerSessionsSql = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorDarling */
     ses.name
 FROM sys.server_event_sessions AS ses
-WHERE ses.name IN (N'{DeadlocksCollector.XeSessionName}', N'{BlockedProcessReportCollector.XeSessionName}');";
+WHERE ses.name IN ({NameLiterals()});";
 
-    /// <summary>Database-scoped sessions of Darling's two names, read inside one Azure SQL Database database.</summary>
+    /// <summary>Database-scoped sessions of Darling's names, read inside one Azure SQL Database database.</summary>
     internal static readonly string FindDatabaseSessionsSql = $@"
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 SELECT /* PerformanceMonitorDarling */
     des.name
 FROM sys.database_event_sessions AS des
-WHERE des.name IN (N'{DeadlocksCollector.XeSessionName}', N'{BlockedProcessReportCollector.XeSessionName}');";
+WHERE des.name IN ({NameLiterals()});";
+
+    /// <summary><c>N'a', N'b', N'c'</c>: the names as Unicode string literals for an <c>IN</c> list. Quotes are doubled, a
+    /// guard against a future rename like <see cref="BracketQuote"/>'s, not a path input takes.</summary>
+    private static string NameLiterals() =>
+        string.Join(", ", SessionNames.Select(n => "N'" + n.Replace("'", "''", StringComparison.Ordinal) + "'"));
 
     /// <summary>Brackets an identifier, doubling any closing bracket. Darling's names contain none, so this is a guard
     /// against a future rename, not a path input takes.</summary>
@@ -145,15 +166,16 @@ WHERE des.name IN (N'{DeadlocksCollector.XeSessionName}', N'{BlockedProcessRepor
         };
     }
 
-    /// <summary>The constant spelling of <paramref name="name"/> when it is one of Darling's two names, else null.</summary>
+    /// <summary>The constant spelling of <paramref name="name"/> when it is one of <see cref="SessionNames"/>, else null.</summary>
     private static string? Canonical(string? name) =>
         SessionNames.FirstOrDefault(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// The drops for the sessions that were found: pure, so "which statements for these existing sessions" pins without a
-    /// server. Anything that is not one of Darling's two names is ignored (a server can hold any number of other
+    /// server. Anything that is not one of <see cref="SessionNames"/> is ignored (a server can hold any number of other
     /// sessions); a name that differs from the constant only by case is planned under the constant. The order is fixed:
-    /// server scope before database scope, databases by name, then deadlock before blocked-process. Duplicates collapse.
+    /// server scope before database scope, databases by name, then the order of <see cref="SessionNames"/> (deadlock,
+    /// blocked-process, long-query completions). Duplicates collapse.
     /// </summary>
     public static IReadOnlyList<XeSessionDrop> PlanDrops(IEnumerable<ExistingXeSession> existing)
     {

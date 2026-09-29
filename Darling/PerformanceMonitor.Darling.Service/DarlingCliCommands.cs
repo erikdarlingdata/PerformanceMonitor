@@ -292,8 +292,8 @@ public static class DarlingCliCommands
         "  PerformanceMonitor.Darling.Service.exe --add-server, --add-servers   Register monitored server(s) from a JSON array on stdin (the add_servers shape); the running service picks them up without a restart." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --enable-collector <name> [--server <server>] [--config <path>]   Turn a collector ON in the store's schedule overrides (fleet-wide by default; --server scopes it to one server) and print the resulting schedule rows. The running service applies it within one sweep." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --disable-collector <name> [--server <server>] [--config <path>]  Turn a collector OFF the same way. Frequency/retention overrides on the row are kept; only enabled changes." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling left on a server that is no longer monitored (the service never drops them when a server is removed); --dry-run lists them and drops nothing." + Environment.NewLine +
-        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for both sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions <server-name> [--dry-run] [--config <path>]   Drop the Extended Events sessions Darling left on a server that is no longer monitored (" + DarlingXeSessionCleanup.SessionNamesPhrase() + ", whichever exist; the service never drops them when a server is removed); --dry-run lists them and drops nothing." + Environment.NewLine +
+        "  PerformanceMonitor.Darling.Service.exe --drop-xe-sessions --print-sql   Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
         "  PerformanceMonitor.Darling.Service.exe --backfill-rollups --dry-run   Show the plan, the disk estimate and the time budget, and change nothing.";
 
     /// <summary>
@@ -5879,10 +5879,10 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
         "Usage:" + Environment.NewLine +
         "  --drop-xe-sessions <server-name> [--dry-run] [--config <path>]" + Environment.NewLine +
         "      Connect to the named server (resolved from the configuration exactly as --validate-config resolves it) and drop the" + Environment.NewLine +
-        $"      Darling Extended Events sessions on it: {string.Join(" and ", DarlingXeSessionCleanup.SessionNames)}, server scope, and on" + Environment.NewLine +
+        $"      Darling Extended Events sessions on it: {DarlingXeSessionCleanup.SessionNamesPhrase()}, server scope, and on" + Environment.NewLine +
         "      Azure SQL Database the database-scoped copies in each monitored database. --dry-run lists them and drops nothing." + Environment.NewLine +
         "  --drop-xe-sessions --print-sql" + Environment.NewLine +
-        "      Print guarded DROP statements for both sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
+        "      Print guarded DROP statements for each of those sessions in both scopes and connect to nothing, for a server that is no longer configured." + Environment.NewLine +
         "Credentials come only from the configuration, never from arguments.";
 
     /// <summary>
@@ -6003,7 +6003,9 @@ ORDER BY cs.server_id NULLS FIRST, server_label, cs.server_id";
     ///
     /// <para><b>Why a verb.</b> The service does not drop these sessions when a server is removed: the names are shared with Lite
     /// and with any other Darling service that monitors the same server, and a server that is unreachable from the service
-    /// cannot be cleaned by it. Leaving them costs a 4 MB ring buffer each. An operator who wants them gone says so here.</para>
+    /// cannot be cleaned by it. Leaving the deadlock and blocked-process sessions costs a 4 MB ring buffer each; the opt-in
+    /// long-query completion session has one too and also tests every completed statement and batch, and the service drops it
+    /// itself only for a server it still monitors. An operator who wants them gone says so here.</para>
     ///
     /// <para><b>Resolution and connection are the pre-flight's.</b> The server is resolved from the store's registry (darling.json's
     /// list when the store cannot be reached) by <see cref="ResolveValidationTargetsAsync"/>, the resolution
