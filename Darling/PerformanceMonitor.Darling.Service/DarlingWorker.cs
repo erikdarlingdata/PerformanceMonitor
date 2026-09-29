@@ -10726,13 +10726,15 @@ LIMIT 1";
         }
 
         /* #4735 item 1: every 22021 that reaches this handler has already been retried with the read start moved forward
-           by 1, 2 and 3 bytes (DarlingCollectorRunner.RunWithSplitCharacterRetryAsync), so the sentence says what the
-           attempts were and does not blame a planted byte alone. A 22P05 is a conversion fault, not a start offset. */
+           by 1, 2 and 3 bytes (DarlingCollectorRunner.RunWithSplitCharacterRetryAsync), either in this cycle or in the
+           cycle that first met it, after which each cycle makes one read until a read succeeds. The sentence says what
+           the attempts were and does not blame a planted byte alone. A 22P05 is a conversion fault, not a start offset. */
         var splitCharacter = pg.SqlState == PgServerLogTail.EncodingRefusalSqlState
             ? "A read with no saved position starts 4 MB before the end of the log, and that start can fall inside a "
               + "multi-byte character, which PostgreSQL refuses the same way. The collector retried the read from 1, 2 and 3 "
-              + "bytes later in this cycle and every attempt was refused. Once a read succeeds, every later read resumes from "
-              + "the start of a full line, so a split character clears by itself. "
+              + "bytes later and every attempt was refused. Until a read succeeds it reads once per cycle and does not retry. "
+              + "Once a read succeeds, every later read resumes from the start of a full line, so a split character clears "
+              + "by itself. "
             : string.Empty;
 
         const string Planted = " A client can plant such a byte with nothing more than a failed login. The role or "

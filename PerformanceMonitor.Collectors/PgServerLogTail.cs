@@ -210,14 +210,19 @@ public static class PgServerLogTail
     public const int MaxSplitCharacterShift = 3;
 
     /// <summary>
+    /// Whether PostgreSQL refused a read for the encoding reason (#4735): <see cref="EncodingRefusalSqlState"/> on the
+    /// text route. A binary-route read returns bytea, which carries no encoding check.
+    /// </summary>
+    public static bool IsEncodingRefusal(string? sqlState, bool binaryRoute) =>
+        !binaryRoute && string.Equals(sqlState, EncodingRefusalSqlState, StringComparison.Ordinal);
+
+    /// <summary>
     /// Whether a text read that PostgreSQL refused is worth repeating from a start moved one byte further
     /// (#4735): the refusal is the encoding one, fewer than <see cref="MaxSplitCharacterShift"/> shifts have been
-    /// tried, and the read was the text route. A binary-route read returns bytea, which carries no encoding check.
+    /// tried, and the read was the text route.
     /// </summary>
     public static bool ShouldRetryFromLaterStart(string? sqlState, int shift, bool binaryRoute) =>
-        !binaryRoute
-        && shift < MaxSplitCharacterShift
-        && string.Equals(sqlState, EncodingRefusalSqlState, StringComparison.Ordinal);
+        shift < MaxSplitCharacterShift && IsEncodingRefusal(sqlState, binaryRoute);
 
     /// <summary>The bound parameter the text tails add to their read start (#4735). Zero is an ordinary read.</summary>
     public const string ReadShiftParameter = "@log_read_shift";

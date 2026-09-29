@@ -465,6 +465,14 @@ public sealed class DarlingCollectorRunner
        first-contact behaviour, not a regression. */
     private readonly ConcurrentDictionary<int, bool> _lastPgLogUsesCsvlogVerdict = new();
 
+    /* #4735: the (target, log-tail collector) pairs whose last cycle used every read start and was refused at each.
+       A start inside a character is cured by one of the later starts. A byte that is invalid in the database
+       encoding, anywhere in the 4 MB window, is refused at all four and would be again on every cycle, so while a
+       pair is here its cycle makes one read at shift 0 and no retries. Only a read that succeeds removes it. Keyed
+       as the binary-file grant is (ReadBinaryFileCacheKey), plus the collector. In memory on purpose, like the
+       caches around it: a restart pays one four-read cycle and sets it again, the safe direction. */
+    private readonly ConcurrentDictionary<(string Target, string Collector), byte> _pgLogRefusedAtEveryShift = new();
+
     /// <summary>The #2111 yield-to-live read side: null when the server has never failed a live
     /// query_store item this process lifetime.</summary>
     public DateTime? LastQueryStoreItemFailureUtc(int serverId)
@@ -1825,6 +1833,13 @@ public sealed class DarlingCollectorRunner
     /// when the start was the cause. The attempts write no ERROR row: only the last refusal leaves this method,
     /// and the general handler records that one as it always did. Recognised by SQLSTATE, on the text route of
     /// the three log-tail collectors, and never for a proven write to the store.
+    ///
+    /// <para><b>Once per cycle while an invalid byte stays in the window.</b> The retries cure a start inside a
+    /// character. A byte that is invalid in the database encoding, anywhere in the 4 MB window, is refused at all
+    /// four starts, on every cycle, so a cycle that used every start and was refused at each is remembered
+    /// (<c>_pgLogRefusedAtEveryShift</c>). Until a read succeeds, that server's collector makes one read at shift 0 and
+    /// no retries, the cost it had before the retries existed. A read that starts inside a character still gets
+    /// its retries the first time it happens, because nothing is remembered until every start has been refused.</para>
     /// </summary>
     private Task<CollectorRunResult> RunWithSplitCharacterRetryAsync<TRow>(
         ICollectorDefinition<TRow> definition,
@@ -1846,25 +1861,59 @@ public sealed class DarlingCollectorRunner
         Func<int, CancellationToken, Task<CollectorRunResult>> runCore,
         CancellationToken cancellationToken)
     {
+        var readsLogTail = ReadsPgServerLogTail(collectorName);
+        var refusedKey = (ReadBinaryFileCacheKey(server), collectorName);
+
+        /* Read once, before the first attempt: this cycle's own refusals set the memory for the NEXT cycle. */
+        var refusedAtEveryShiftLastCycle = readsLogTail && _pgLogRefusedAtEveryShift.ContainsKey(refusedKey);
+
         for (var shift = 0; ; shift++)
         {
             try
             {
-                return await runCore(shift, cancellationToken);
+                var result = await runCore(shift, cancellationToken);
+
+                if (readsLogTail)
+                {
+                    _pgLogRefusedAtEveryShift.TryRemove(refusedKey, out _);
+                }
+
+                return result;
             }
-            catch (PostgresException pg) when (ReadsPgServerLogTail(collectorName)
+            catch (PostgresException pg) when (readsLogTail
+                && !refusedAtEveryShiftLastCycle
                 && !CollectorFaultCopyPhase.IsProvenStoreWrite(pg)
-                && PgServerLogTail.ShouldRetryFromLaterStart(
-                    pg.SqlState, shift,
-                    PgReadBinaryFileCapability.TryGetCachedVerdict(ReadBinaryFileCacheKey(server), out var granted) && granted))
+                && PgServerLogTail.ShouldRetryFromLaterStart(pg.SqlState, shift, PgReadBinaryFileGranted(server)))
             {
                 _logger?.LogDebug(
                     "{Collector} on '{Server}': PostgreSQL refused the log slice as not valid in the database encoding; "
                     + "retrying with the read start moved forward {Shift} byte(s) (#4735)",
                     collectorName, server.Config.DisplayName, shift + 1);
             }
+            catch (PostgresException pg) when (readsLogTail
+                && !CollectorFaultCopyPhase.IsProvenStoreWrite(pg)
+                && PgServerLogTail.IsEncodingRefusal(pg.SqlState, PgReadBinaryFileGranted(server)))
+            {
+                /* Refused and not retried above: either every start was just refused, or the last cycle's memory
+                   held this cycle to its one read. An invalid byte is in the window, and the refusal goes on to the
+                   general handler as it always did. */
+                if (_pgLogRefusedAtEveryShift.TryAdd(refusedKey, 0))
+                {
+                    _logger?.LogDebug(
+                        "{Collector} on '{Server}': PostgreSQL refused the log slice at every read start, so a byte that is "
+                        + "not valid in the database encoding is in the window; later cycles make one read until a read "
+                        + "succeeds (#4735)",
+                        collectorName, server.Config.DisplayName);
+                }
+
+                throw;
+            }
         }
     }
+
+    /// <summary>Whether the cached verdict says the binary route (pg_read_binary_file) is granted, which reads bytea and carries no encoding check.</summary>
+    private static bool PgReadBinaryFileGranted(ServerRuntime server) =>
+        PgReadBinaryFileCapability.TryGetCachedVerdict(ReadBinaryFileCacheKey(server), out var granted) && granted;
 
     private async Task<CollectorRunResult> RunCoreAsync<TRow>(
         ICollectorDefinition<TRow> definition,
