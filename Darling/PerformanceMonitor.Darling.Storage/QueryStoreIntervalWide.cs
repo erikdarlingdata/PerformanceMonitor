@@ -599,16 +599,32 @@ SELECT EXISTS
     /// <param name="ReadStart">The bound the caller's table read binds as its lower bound: the below-floor start
     /// when one exists, else <see cref="ClampedStart"/>.</param>
     /// <param name="BelowFloorStart">Non-null only when the read reaches below raw's floor.</param>
+    /// <param name="StartBound">Which bound set <see cref="ReadStart"/>; a surface names it when the read is
+    /// truncated.</param>
     public readonly record struct WideReadPlan(
         bool UseTable,
         DateTime ClampedStart,
         DateTime ReadStart,
-        DateTime? BelowFloorStart)
+        DateTime? BelowFloorStart,
+        WideStartBound StartBound = WideStartBound.Window)
     {
         /// <summary>Where the table's proven-complete history starts for this read: <see cref="ReadStart"/>
         /// whenever the table serves. NULL when the table does not serve (the gate could not decide), because the
         /// surface then reports the raw tier's own reach.</summary>
         public DateTime? EffectiveStart => UseTable ? ReadStart : null;
+    }
+
+    /// <summary>#4689: which bound set a <c>_wide</c> read's lower bound.</summary>
+    public enum WideStartBound
+    {
+        /// <summary>The window's own start: nothing was cut.</summary>
+        Window,
+        /// <summary>The table's coverage claim (<c>filled_since</c>) starts later than the window.</summary>
+        FilledSince,
+        /// <summary>The 9-day purge edge plus the one-day interval-span margin starts later than the window.</summary>
+        TablePurgeEdge,
+        /// <summary>No exact span below raw's chunk floor: the read is clamped at the floor, as before #4689.</summary>
+        RawFloor,
     }
 
     /// <summary>
@@ -624,7 +640,7 @@ SELECT EXISTS
     /// <item><paramref name="windowStart"/>: never read before the window asked for.</item>
     /// </list>
     /// </summary>
-    public static DateTime? ExactBelowFloorStart(
+    public static (DateTime Start, WideStartBound Bound)? ExactBelowFloorStart(
         DateTime? rawFloor, DateTime windowStart, DateTime filledSince, DateTime? tableFloor)
     {
         if (rawFloor is not DateTime r || r <= windowStart || tableFloor is not DateTime h)
@@ -632,19 +648,23 @@ SELECT EXISTS
             return null;
         }
 
+        /* Ties prefer the coverage claim over the purge edge over the window. */
         var start = windowStart;
-        if (filledSince > start)
-        {
-            start = filledSince;
-        }
-
+        var bound = WideStartBound.Window;
         var retentionSafe = h + IntervalSpanMargin;
-        if (retentionSafe > start)
+        if (retentionSafe >= start)
         {
             start = retentionSafe;
+            bound = WideStartBound.TablePurgeEdge;
         }
 
-        return start < r ? start : null;
+        if (filledSince >= start)
+        {
+            start = filledSince;
+            bound = WideStartBound.FilledSince;
+        }
+
+        return start < r ? (start, bound) : null;
     }
 
     /// <summary>
@@ -768,15 +788,18 @@ SELECT EXISTS
                 }
             }
 
-            var belowFloorStart = useTable
+            var below = useTable
                 ? ExactBelowFloorStart(rawFloor, windowStart, filledSince.Value, tableFloor)
                 : null;
+            var belowFloorStart = below?.Start;
             var readStart = belowFloorStart ?? clampedStart;
+            var startBound = below?.Bound
+                ?? (rawFloor is DateTime rf && rf > windowStart ? WideStartBound.RawFloor : WideStartBound.Window);
 
             logger?.LogDebug(
                 "Query Store wide-table source for server {ServerId}: {Source} (coverage since {FilledSince:o}; applied through {AppliedThrough:o}; raw floor {RawFloor:o}; window {WindowStart:o}-{WindowEnd:o}; literal end {LiteralEnd:o}; table floor {TableFloor:o}; read start {ReadStart:o}; below-floor start {BelowFloorStart:o})",
                 serverId, useTable ? "interval table" : "raw", filledSince, appliedThrough, rawFloor, windowStart, windowEnd, literalWindowEnd, tableFloor, readStart, belowFloorStart);
-            return new WideReadPlan(useTable, clampedStart, readStart, belowFloorStart);
+            return new WideReadPlan(useTable, clampedStart, readStart, belowFloorStart, useTable ? startBound : WideStartBound.Window);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

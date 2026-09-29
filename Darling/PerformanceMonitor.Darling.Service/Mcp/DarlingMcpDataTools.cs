@@ -1024,7 +1024,7 @@ public sealed class DarlingMcpDataTools
                         ? "The window reaches further back than this server's raw query_store_stats retains, so the "
                           + "older part of it was not read. This tool reads the raw tier only: the corrected rollups "
                           + "carry no query_id or plan_id, and plan identity is what it exists to return."
-                        : $"The window reaches further back than the Query Store history this store holds for this server. Nothing older than {effectiveStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them.",
+                        : $"The window reaches further back than the Query Store history this store holds for this server. Nothing older than {effectiveStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. " + TableBoundReason(tablePlan.Value, effectiveStart),
                 queries = result
             }, McpHelpers.JsonOptions);
         }
@@ -1033,6 +1033,18 @@ public sealed class DarlingMcpDataTools
             return McpHelpers.FormatError("get_query_store_top", ex);
         }
     }
+
+    /// <summary>#4689: the sentence that says why an interval-table read starts where it does.</summary>
+    private static string TableBoundReason(QueryStoreIntervalWide.WideReadPlan plan, DateTime effectiveStart) =>
+        plan.StartBound switch
+        {
+            QueryStoreIntervalWide.WideStartBound.FilledSince =>
+                $"The interval table began keeping complete history for this server at {effectiveStart:o}.",
+            QueryStoreIntervalWide.WideStartBound.TablePurgeEdge =>
+                "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
+            _ =>
+                "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
+        };
 
     /* ═══════════════════════════ discovery / health ═══════════════════════════ */
 
