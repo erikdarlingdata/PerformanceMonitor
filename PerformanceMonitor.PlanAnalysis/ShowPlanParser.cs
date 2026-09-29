@@ -648,6 +648,8 @@ public static class ShowPlanParser
                 RequestedMemoryKB = ParseLong(memEl.Attribute("RequestedMemory")?.Value),
                 GrantedMemoryKB = ParseLong(memEl.Attribute("GrantedMemory")?.Value),
                 MaxUsedMemoryKB = ParseLong(memEl.Attribute("MaxUsedMemory")?.Value),
+                HasMaxUsedMemory = long.TryParse(memEl.Attribute("MaxUsedMemory")?.Value,
+                    System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out _),
                 GrantWaitTimeMs = ParseLong(memEl.Attribute("GrantWaitTime")?.Value),
                 LastRequestedMemoryKB = ParseLong(memEl.Attribute("LastRequestedMemory")?.Value),
                 IsMemoryGrantFeedbackAdjusted = memEl.Attribute("IsMemoryGrantFeedbackAdjusted")?.Value
