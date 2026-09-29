@@ -13,6 +13,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
@@ -1615,6 +1616,82 @@ public sealed class DarlingMcpStoreMetricsToolsTests
 
         var source = File.ReadAllText(ReaderSourcePath());
         Assert.Contains("reader.GetDateTime(15)", source, StringComparison.Ordinal);
+    }
+
+    private static DarlingStoreMetricsReader.StoreMetricDailyPoint StoreDayAt(
+        int day, int hour, long? totalBytes, int? servers) => new(
+            "store", "darling", new DateTime(2026, 8, day, 0, 0, 0, DateTimeKind.Unspecified),
+            totalBytes, null, null, null, null, servers,
+            MetricTime: new DateTime(2026, 8, day, hour, 5, 0, DateTimeKind.Unspecified));
+
+    [Fact]
+    public void ComputeDailyGrowth_TodaysPoint_IsMarkedPartial_AndASettledDayIsNot()
+    {
+        var points = new[]
+        {
+            StoreDayAt(1, 23, 1_000, 10),
+            StoreDayAt(2, 23, 1_100, 10),
+            StoreDayAt(3, 9, 1_150, 10),
+        };
+
+        /* Day 3 is still open at 09:30: its point is the morning's last snapshot, not a full day's growth.
+           It is still reported, as what it is. */
+        var midMorning = DarlingStoreMetricsReader.ComputeDailyGrowth(points, new DateTime(2026, 8, 3, 9, 30, 0, DateTimeKind.Utc));
+        Assert.Equal(new[] { false, true }, midMorning.Select(g => g.Partial).ToArray());
+        Assert.Equal(50, midMorning[1].DeltaBytes);
+
+        /* Once the day is over it is a settled day like the rest. */
+        var nextDay = DarlingStoreMetricsReader.ComputeDailyGrowth(points, new DateTime(2026, 8, 4, 0, 0, 1, DateTimeKind.Utc));
+        Assert.All(nextDay, g => Assert.False(g.Partial));
+    }
+
+    [Fact]
+    public void ComputeDailyGrowth_CarriesEachPointsRealSnapshotTime_AndItsSpanInDays()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 22, 1_000, 10), StoreDayAt(2, 23, 1_100, 10), StoreDayAt(3, 21, 1_300, 10) },
+            new DateTime(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        /* The day's last snapshot, not its midnight bucket. */
+        Assert.Equal(new DateTime(2026, 8, 2, 23, 5, 0), growth[0].MetricTime);
+        Assert.Equal(new DateTime(2026, 8, 3, 21, 5, 0), growth[1].MetricTime);
+        Assert.All(growth, g => Assert.Equal(1, g.SpanDays));
+
+        /* A point with no recorded time carries none: the midnight bucket is not a snapshot time. */
+        var untimed = DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5), StoreDay(2, 130, 5) });
+        Assert.Null(untimed.Single().MetricTime);
+    }
+
+    [Fact]
+    public void TheDailyGrowthEntry_CarriesTheDay_TheSnapshotTime_TheSpan_AndThePartialFlag()
+    {
+        var growth = DarlingStoreMetricsReader.ComputeDailyGrowth(
+            new[] { StoreDayAt(1, 22, 1_000, 10), StoreDayAt(2, 9, 1_500, 10) },
+            new DateTime(2026, 8, 2, 9, 30, 0, DateTimeKind.Utc));
+
+        using var timed = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpStoreMetricsTools.DailyGrowthEntry(growth.Single())));
+        var entry = timed.RootElement;
+        Assert.Equal("2026-08-02", entry.GetProperty("day").GetString());
+        Assert.Equal(new DateTime(2026, 8, 2, 9, 5, 0).ToString("o"), entry.GetProperty("metric_time").GetString());
+        Assert.Equal(1, entry.GetProperty("span_days").GetInt32());
+        Assert.True(entry.GetProperty("partial").GetBoolean());
+        Assert.Equal(500L, entry.GetProperty("delta_bytes").GetInt64());
+        Assert.Equal(50.0, entry.GetProperty("per_server_bytes").GetDouble());
+
+        /* No recorded time is null, never the day's midnight. */
+        var untimedGrowth = DarlingStoreMetricsReader.ComputeDailyGrowth(new[] { StoreDay(1, 100, 5), StoreDay(2, 130, 5) });
+        using var untimed = JsonDocument.Parse(JsonSerializer.Serialize(DarlingMcpStoreMetricsTools.DailyGrowthEntry(untimedGrowth.Single())));
+        Assert.Equal(JsonValueKind.Null, untimed.RootElement.GetProperty("metric_time").ValueKind);
+        Assert.False(untimed.RootElement.GetProperty("partial").GetBoolean());
+    }
+
+    [Fact]
+    public void TheDescription_SaysAHoleInTheDailyGrowthIsMissingSnapshots_AndTodaysPointIsPartial()
+    {
+        var description = ToolMethods().Single().GetCustomAttribute<DescriptionAttribute>()?.Description;
+        Assert.NotNull(description);
+        Assert.Matches(@"daily_growth[^;]*metric_time[^;]*span_days[^;]*partial", description!);
+        Assert.Contains("not zero growth", description!, StringComparison.Ordinal);
     }
 }
 
