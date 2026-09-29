@@ -78,15 +78,18 @@ public sealed class McpServiceParameterDiSeatCensusTests
             "argument instead of resolved from DI.");
 
         /* A change worth knowing about even when nothing is missing: today's distinct complex service types are
-           exactly these six (AnalyzerConfig, NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
-           StoreHostProfileCache) — pin the set so a seventh type appearing here is a deliberate, reviewed
-           addition rather than a silent one. StoreHostProfileCache added deliberately (#4214 round-1 review,
+           exactly these seven (AnalyzerConfig, NpgsqlDataSource, PostgresConfig, DarlingAnalysisService, ILogger,
+           StoreHostProfileCache, ReadLatencyRecorder) — pin the set so an eighth type appearing here is a
+           deliberate addition rather than a silent one. StoreHostProfileCache added deliberately (#4214 round-1 review,
            Medium 2): get_store_host's 5-minute shared cache, registered via the typed-generic
            AddSingleton<StoreHostProfileCache> overload this test's own Contains check requires. AnalyzerConfig
            added by #4535: the plan analyzer's per-rule config, registered via the typed-generic
-           AddSingleton<AnalyzerConfig> overload the same way. */
+           AddSingleton<AnalyzerConfig> overload the same way. ReadLatencyRecorder added by #4782:
+           run_custom_view_panel's read-latency seat (the composed-panel run is recorded into the host's
+           accumulator), registered via the typed-generic AddSingleton<ReadLatencyRecorder> overload the same
+           way. */
         Assert.Equal(
-            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "ILogger", "NpgsqlDataSource", "PostgresConfig", "StoreHostProfileCache" },
+            new List<string> { "AnalyzerConfig", "DarlingAnalysisService", "ILogger", "NpgsqlDataSource", "PostgresConfig", "ReadLatencyRecorder", "StoreHostProfileCache" },
             serviceParameterTypeNames);
     }
 

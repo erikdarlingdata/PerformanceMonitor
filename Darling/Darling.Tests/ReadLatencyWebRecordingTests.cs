@@ -36,13 +36,14 @@ namespace Darling.Tests;
 /// loop is supposed to record — not the accumulator's own unit tests, and not a hand-called <c>Record</c>
 /// standing in for the wiring.
 ///
-/// <para><b>Serialization:</b> <see cref="DarlingWebEndpoints"/> keeps the accumulator in a process-lifetime
-/// static (<c>s_readLatency</c>), set by every <see cref="DarlingWebEndpoints.MapAll"/> call. Running this
-/// class's own methods concurrently with each other (xUnit parallelizes across CLASSES by default, not
-/// methods within one) would let one test's <c>MapAll</c> call stomp another's before its request lands, so
-/// every fact in this file has its own accumulator instance CAPTURED before the request — <see cref="BuildServer"/>
-/// returns it — rather than reading the shared static back, which sidesteps that race entirely without
-/// needing a <c>[Collection]</c> lock against any OTHER class's own <c>MapAll</c> call.</para>
+/// <para><b>Why each fact's samples are its own:</b> every <see cref="DarlingWebEndpoints.MapAll"/> call
+/// records into the accumulator IT was given, and the fact drains that same instance, so no other server set up
+/// at the same time (six test classes call <c>MapAll</c>, and xUnit runs classes in parallel) can take its
+/// samples. Until #4782 the endpoints kept the accumulator in a process-wide static that every <c>MapAll</c> call
+/// overwrote. This file captured its own instance and said that sidestepped the race, but the dispatch never
+/// read the captured instance, so a server another class built between <see cref="BuildServer"/> and the request
+/// took the sample. <see cref="ReadLatencyPerServerRecordingTests"/> pins the per-server recording directly,
+/// with no database.</para>
 /// </summary>
 [Collection("live-postgres")]
 public sealed class ReadLatencyWebRecordingTests
