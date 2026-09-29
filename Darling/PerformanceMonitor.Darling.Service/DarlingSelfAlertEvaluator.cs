@@ -785,6 +785,10 @@ internal sealed class DarlingSelfAlertEvaluator
        number this process had in its hand an hour ago, and it would still be a non-measurement on the first
        pass after a restart. */
     private readonly ConcurrentDictionary<string, long> _policyJobFailureBaseline = new(StringComparer.Ordinal);
+
+    /// <summary>Jobs whose last Policy Job Failing alert reached no channel (#4795): the retry is pending until
+    /// the back-dated cooldown stamp opens, and the failure baseline is left alone until then.</summary>
+    private readonly ConcurrentDictionary<string, bool> _policyJobRetryPending = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTime> _lastPolicyJobFailureAlert = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -6640,7 +6644,17 @@ internal sealed class DarlingSelfAlertEvaluator
         {
             var key = job.JobId.ToString(CultureInfo.InvariantCulture);
             var hadBaseline = _policyJobFailureBaseline.TryGetValue(key, out var previous);
-            _policyJobFailureBaseline[key] = job.TotalFailures;
+
+            /* #4795: while this job's last alert reached no channel and its retry is not due yet, the baseline
+               stays where the failed send put it back. A sweep that lands inside a retry delay longer than the
+               hourly check would otherwise advance it, and the retry would find no new failures to report. A
+               delivered alert (no pending retry) advances it exactly as before. */
+            var retryWaiting = _policyJobRetryPending.ContainsKey(key)
+                && !CooldownElapsed(_lastPolicyJobFailureAlert, key, now);
+            if (!retryWaiting)
+            {
+                _policyJobFailureBaseline[key] = job.TotalFailures;
+            }
 
             if (job.Held
                 || !hadBaseline
@@ -6689,8 +6703,14 @@ internal sealed class DarlingSelfAlertEvaluator
             if (AfterSelfFire(PolicyJobFailingMetric, _lastPolicyJobFailureAlert, key, now, SharedCooldown, delivery))
             {
                 /* #4795: the failure count was taken as the baseline before the send. Put it back, so the retry
-                   still sees these failures as new. */
+                   still sees these failures as new, and mark the retry pending so a sweep before it is due
+                   leaves the baseline alone (above). */
                 _policyJobFailureBaseline[key] = previous;
+                _policyJobRetryPending[key] = true;
+            }
+            else
+            {
+                _policyJobRetryPending.TryRemove(key, out _);
             }
         }
     }
