@@ -630,6 +630,34 @@ SELECT EXISTS
         RawFloor,
     }
 
+    /// <summary>#4689: the note a table-served Query Store read carries when the interval table started it later than
+    /// the window. The MCP top-queries table route (one server) and Compose's panel (the servers in scope) both
+    /// take their text from here.</summary>
+    public static string HistoryNote(DateTime effectiveStart, WideStartBound bound, bool manyServers)
+    {
+        var scope = manyServers ? "the servers in scope" : "this server";
+        var reason = bound switch
+        {
+            WideStartBound.FilledSince =>
+                $"The interval table began keeping complete history for {(manyServers ? "these servers" : "this server")} at {effectiveStart:o}.",
+            WideStartBound.TablePurgeEdge =>
+                "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
+            _ =>
+                "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
+        };
+        return $"The window reaches further back than the Query Store history this store holds for {scope}. Nothing older than {effectiveStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
+            + reason;
+    }
+
+    /// <summary>#4689: the short parenthetical a table-served grid banner appends to its "Showing since" line, or
+    /// null when the window's own start or raw's floor set the start.</summary>
+    public static string? BannerReason(WideStartBound bound) => bound switch
+    {
+        WideStartBound.FilledSince => " (interval table complete from then)",
+        WideStartBound.TablePurgeEdge => " (interval table keeps 9 days)",
+        _ => null,
+    };
+
     /// <summary>
     /// The lowest instant below raw's floor from which the table provably equals what raw said before its purge,
     /// or NULL when the read cannot go below the floor (no floor, the floor at or below the window start, an

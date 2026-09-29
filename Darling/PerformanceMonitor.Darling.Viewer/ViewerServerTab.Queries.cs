@@ -238,7 +238,7 @@ public partial class ViewerServerTab
             if (wideTruncated || !string.IsNullOrEmpty(tierSuffix))
             {
                 var text = wideTruncated
-                    ? $"Showing since {ViewerTimeHelper.ForDisplay(wideStart):yyyy-MM-dd HH:mm}{WideStartReason(widePlan.Value.StartBound)}"
+                    ? $"Showing since {ViewerTimeHelper.ForDisplay(wideStart):yyyy-MM-dd HH:mm}{QueryStoreIntervalWide.BannerReason(widePlan.Value.StartBound)}"
                     : $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}";
                 if (wideTruncated && RawWindowFloor.IsTruncated(floor, requestedStartUtc))
                 {
@@ -271,15 +271,6 @@ public partial class ViewerServerTab
             : $"Showing {ViewerTimeHelper.ForDisplay(requestedStartUtc):yyyy-MM-dd HH:mm}{tierSuffix}";
         banner.Visibility = Visibility.Visible;
     }
-
-    /// <summary>The parenthesised reason a table-served grid names for where its rows start, or nothing when the
-    /// window's own start or raw's floor set it.</summary>
-    private static string WideStartReason(QueryStoreIntervalWide.WideStartBound bound) => bound switch
-    {
-        QueryStoreIntervalWide.WideStartBound.FilledSince => " (interval table complete from then)",
-        QueryStoreIntervalWide.WideStartBound.TablePurgeEdge => " (interval table keeps 9 days)",
-        _ => "",
-    };
 
     /// <summary>
     /// Loads the Query Store Regressions grid — the Dashboard's regressions view (baseline-vs-recent Query

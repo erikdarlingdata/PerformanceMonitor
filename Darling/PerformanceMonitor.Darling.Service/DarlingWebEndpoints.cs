@@ -1433,16 +1433,7 @@ internal static readonly IReadOnlySet<string> CancellationAllowlist = new HashSe
     /// <summary>#4689: the note a Compose Query Store panel carries when the interval table served it from a
     /// start later than the window's. Same wording as the MCP top-queries table route.</summary>
     internal static string QueryStoreHistoryNote(DateTime historyStart, QueryStoreIntervalWide.WideStartBound bound) =>
-        $"The window reaches further back than the Query Store history this store holds for the servers in scope. Nothing older than {historyStart:o} was read. Past the raw tier's retention, intervals are read from the per-interval table (kept 9 days), which holds exactly what raw held for them. "
-        + bound switch
-        {
-            QueryStoreIntervalWide.WideStartBound.FilledSince =>
-                $"The interval table began keeping complete history for these servers at {historyStart:o}.",
-            QueryStoreIntervalWide.WideStartBound.TablePurgeEdge =>
-                "The interval table keeps 9 days, and intervals that began before its purge edge are not read.",
-            _ =>
-                "The read is clamped at the raw tier's retention floor: nothing older than it can be shown exactly.",
-        };
+        QueryStoreIntervalWide.HistoryNote(historyStart, bound, manyServers: true);
 
     /// <summary>Maps a failed (non-<see cref="ComposeRunOutcome.Payload"/>) <see cref="ComposeRunOutcome"/> onto
     /// its HTTP answer — factored out of the <c>/api/compose/run</c> route (the <see cref="ToHttpResult"/> /
