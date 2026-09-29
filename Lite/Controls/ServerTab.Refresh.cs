@@ -140,8 +140,11 @@ public partial class ServerTab : UserControl
                the Collection Health tab, which is precisely why it went unnoticed. Badge it from every tab. */
             await RefreshPermissionDeniedBadgeAsync();
 
+            /* #4766: the time is the refresh instant read in the tab's display zone, so it and the label next to it
+               name the same clock in all three display modes (DateTime.Now is this machine's zone, whatever the label). */
             var tz = ServerTimeHelper.GetTimezoneLabel(ServerTimeHelper.CurrentDisplayMode);
-            ConnectionStatusText.Text = $"Last refresh: {DateTime.Now:HH:mm:ss} ({tz})";
+            var refreshedAt = PerformanceMonitor.Ui.DisplayZone.ToDisplay(DateTime.UtcNow, GetPickerZone());
+            ConnectionStatusText.Text = $"Last refresh: {refreshedAt:HH:mm:ss} ({tz})";
         }
         catch (Exception ex)
         {
