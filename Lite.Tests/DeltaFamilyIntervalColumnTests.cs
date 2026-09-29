@@ -184,12 +184,16 @@ public sealed class DeltaFamilyIntervalColumnTests
 
         var source = RepoSource.Read("Lite", "Database", "DuckDbInitializer.cs");
         Assert.Contains("if (fromVersion < 60)", source, StringComparison.Ordinal);
-        Assert.Contains(
-            "foreach (var table in new[] { \"wait_stats\", \"file_io_stats\", \"latch_stats\", \"spinlock_stats\" })",
-            source, StringComparison.Ordinal);
-        Assert.Contains(
-            "$\"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS sample_interval_seconds INTEGER\"",
-            source, StringComparison.Ordinal);
+
+        /* #4727: the entries moved out of the step into DuckDbInitializer.AddedColumns; the step adds its own
+           version's entries through the shared AddMissingColumnsAsync, one idempotent ADD COLUMN per entry. */
+        Assert.Contains("AddMissingColumnsAsync(connection, AddedColumnsForVersion(60))", source, StringComparison.Ordinal);
+        foreach (var table in new[] { "wait_stats", "file_io_stats", "latch_stats", "spinlock_stats" })
+        {
+            Assert.Contains($"(60, \"{table}\", \"sample_interval_seconds\", \"INTEGER\")", source, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("ADD COLUMN IF NOT EXISTS {column} {type}", source, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -207,18 +211,21 @@ public sealed class DeltaFamilyIntervalColumnTests
         var source = RepoSource.Read("Lite", "Database", "DuckDbInitializer.cs");
         var block = source[source.IndexOf("if (fromVersion < 61)", StringComparison.Ordinal)..];
 
-        foreach (var pair in new[]
+        /* #4727: the four entries live in DuckDbInitializer.AddedColumns (INTEGER each); the step adds its own
+           version's entries through the shared AddMissingColumnsAsync. */
+        foreach (var entry in new[]
         {
-            "(\"procedure_stats\", \"sample_interval_seconds\")",
-            "(\"memory_grant_stats\", \"sample_interval_seconds\")",
-            "(\"query_stats\", \"statement_start_offset\")",
-            "(\"query_stats\", \"statement_end_offset\")",
+            "(61, \"procedure_stats\", \"sample_interval_seconds\", \"INTEGER\")",
+            "(61, \"memory_grant_stats\", \"sample_interval_seconds\", \"INTEGER\")",
+            "(61, \"query_stats\", \"statement_start_offset\", \"INTEGER\")",
+            "(61, \"query_stats\", \"statement_end_offset\", \"INTEGER\")",
         })
         {
-            Assert.Contains(pair, block, StringComparison.Ordinal);
+            Assert.Contains(entry, block, StringComparison.Ordinal);
         }
 
-        Assert.Contains("$\"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} INTEGER\"", block, StringComparison.Ordinal);
+        Assert.Contains("AddMissingColumnsAsync(connection, AddedColumnsForVersion(61))", block, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS {column} {type}", block, StringComparison.Ordinal);
 
         /* The offsets' semantics, in the block, in these words: the pair a future reader second-guesses. */
         Assert.Contains("BYTES", block, StringComparison.Ordinal);

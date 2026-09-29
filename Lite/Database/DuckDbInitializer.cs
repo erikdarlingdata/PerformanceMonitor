@@ -816,6 +816,18 @@ public class DuckDbInitializer : IDisposable
                 await ExecuteNonQueryAsync(connection, indexStatement);
             }
 
+            /* #4727: re-apply the columns versions 60 to 65 added on EVERY start of an existing file, after the
+               table and index statements. A step whose ALTER failed (a transient fault during the one start that
+               ran it) is stamped done all the same, and a file can also carry the stamp without the column; without
+               this the table's batches fail on every start from then on. The stamp is not held back: the pass
+               below heals a stamped file, and a column that still cannot be added logs an Error and lets the
+               start continue, so the next start retries it. A fresh file gets the columns from the table
+               statements above. */
+            if (existingVersion > 0)
+            {
+                await AddMissingColumnsAsync(connection, AddedColumns);
+            }
+
             if (existingVersion < CurrentSchemaVersion)
             {
                 await SetSchemaVersionAsync(connection, CurrentSchemaVersion);
@@ -2082,18 +2094,7 @@ public class DuckDbInitializer : IDisposable
                Non-fatal per table, matching v59's posture. */
             _logger?.LogInformation("Running migration to v60: the four naked delta families gain sample_interval_seconds");
 
-            foreach (var table in new[] { "wait_stats", "file_io_stats", "latch_stats", "spinlock_stats" })
-            {
-                try
-                {
-                    await ExecuteNonQueryAsync(connection,
-                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS sample_interval_seconds INTEGER");
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning("Migration to v60 on {Table} encountered an error (non-fatal): {Error}", table, ex.Message);
-                }
-            }
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(60));
         }
 
         if (fromVersion < 61)
@@ -2138,24 +2139,7 @@ public class DuckDbInitializer : IDisposable
                (CreateArchiveViewsAsync, called after this). Non-fatal per statement, matching v59/v60. */
             _logger?.LogInformation("Running migration to v61: every delta family stores its interval, and query_stats stores the statement offsets its delta key is made of");
 
-            foreach (var (table, column) in new[]
-            {
-                ("procedure_stats", "sample_interval_seconds"),
-                ("memory_grant_stats", "sample_interval_seconds"),
-                ("query_stats", "statement_start_offset"),
-                ("query_stats", "statement_end_offset"),
-            })
-            {
-                try
-                {
-                    await ExecuteNonQueryAsync(connection,
-                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} INTEGER");
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning("Migration to v61 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
-                }
-            }
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(61));
         }
 
         if (fromVersion < 62)
@@ -2189,15 +2173,7 @@ public class DuckDbInitializer : IDisposable
                matching v59/v60/v61. */
             _logger?.LogInformation("Running migration to v62: perfmon_stats stores each counter's type, so gauges are no longer differenced");
 
-            try
-            {
-                await ExecuteNonQueryAsync(connection,
-                    "ALTER TABLE perfmon_stats ADD COLUMN IF NOT EXISTS cntr_type INTEGER");
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning("Migration to v62 on perfmon_stats.cntr_type encountered an error (non-fatal): {Error}", ex.Message);
-            }
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(62));
         }
 
         if (fromVersion < 63)
@@ -2251,22 +2227,7 @@ public class DuckDbInitializer : IDisposable
                (CreateArchiveViewsAsync, called after this). Non-fatal per statement, matching v59–v62. */
             _logger?.LogInformation("Running migration to v63: cpu_utilization_stats stores each sample's UTC instant beside the server-local one, and server_properties stores the engine's time-zone id beside its offset");
 
-            foreach (var (table, column, type) in new[]
-            {
-                ("cpu_utilization_stats", "sample_time_utc", "TIMESTAMP"),
-                ("server_properties", "time_zone_id", "VARCHAR"),
-            })
-            {
-                try
-                {
-                    await ExecuteNonQueryAsync(connection,
-                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}");
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning("Migration to v63 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
-                }
-            }
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(63));
         }
 
         if (fromVersion < 64)
@@ -2304,22 +2265,7 @@ public class DuckDbInitializer : IDisposable
                Query Store clutter view (#3797) is the consumer. */
             _logger?.LogInformation("Running migration to v64: query_store_health stores each database's Query Store capture modes, so plan churn can be told apart from configuration");
 
-            foreach (var (table, column, type) in new[]
-            {
-                ("query_store_health", "query_capture_mode", "VARCHAR"),
-                ("query_store_health", "wait_stats_capture_mode", "VARCHAR"),
-            })
-            {
-                try
-                {
-                    await ExecuteNonQueryAsync(connection,
-                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}");
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning("Migration to v64 on {Table}.{Column} encountered an error (non-fatal): {Error}", table, column, ex.Message);
-                }
-            }
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(64));
         }
 
         if (fromVersion < 65)
@@ -2348,21 +2294,96 @@ public class DuckDbInitializer : IDisposable
                per statement, matching v59–v64. */
             _logger?.LogInformation("Running migration to v65: ag_replica_states and ag_database_replica_states store each Availability Group's engine-assigned id, closing a replica-name-overlap gap in the distinct-group count");
 
-            foreach (var table in new[]
+            await AddMissingColumnsAsync(connection, AddedColumnsForVersion(65));
+        }
+    }
+
+    /// <summary>
+    /// #4727: the 15 columns that schema versions 60 to 65 add to existing tables, in ONE list. Each migration
+    /// step adds its own version's entries (<see cref="AddedColumnsForVersion"/>), and every start of an existing
+    /// file runs the whole list once more after the table and index statements, so a column whose add failed
+    /// during the one start that ran its step, or a file stamped without it, gets it back on the next start.
+    /// A fresh file gets all of them from the table statements. A later version that adds a column to an
+    /// existing table adds its entries here.
+    /// </summary>
+    internal static readonly (int Version, string Table, string Column, string Type)[] AddedColumns =
+    {
+        (60, "wait_stats", "sample_interval_seconds", "INTEGER"),
+        (60, "file_io_stats", "sample_interval_seconds", "INTEGER"),
+        (60, "latch_stats", "sample_interval_seconds", "INTEGER"),
+        (60, "spinlock_stats", "sample_interval_seconds", "INTEGER"),
+        (61, "procedure_stats", "sample_interval_seconds", "INTEGER"),
+        (61, "memory_grant_stats", "sample_interval_seconds", "INTEGER"),
+        (61, "query_stats", "statement_start_offset", "INTEGER"),
+        (61, "query_stats", "statement_end_offset", "INTEGER"),
+        (62, "perfmon_stats", "cntr_type", "INTEGER"),
+        (63, "cpu_utilization_stats", "sample_time_utc", "TIMESTAMP"),
+        (63, "server_properties", "time_zone_id", "VARCHAR"),
+        (64, "query_store_health", "query_capture_mode", "VARCHAR"),
+        (64, "query_store_health", "wait_stats_capture_mode", "VARCHAR"),
+        (65, "ag_replica_states", "group_id", "VARCHAR"),
+        (65, "ag_database_replica_states", "group_id", "VARCHAR"),
+    };
+
+    internal static IEnumerable<(int Version, string Table, string Column, string Type)> AddedColumnsForVersion(int version) =>
+        AddedColumns.Where(c => c.Version == version);
+
+    /// <summary>
+    /// #4727: adds each listed column its table lacks, one idempotent <c>ADD COLUMN IF NOT EXISTS</c> per
+    /// missing column. The migration steps for versions 60 to 65 call it over their own entries, and
+    /// <see cref="InitializeCoreAsync"/> calls it over <see cref="AddedColumns"/> on every start of an existing
+    /// file. One read finds which tables and columns exist, so a start where nothing is missing runs no ALTER,
+    /// and a table that does not exist yet (a file older than the table: the table statements that follow
+    /// create it with the column) is skipped rather than reported as a failure. ADD COLUMN goes through on a
+    /// table that has an index or a v_ view over it (checked against the bundled DuckDB); only DROP COLUMN and
+    /// ALTER COLUMN hit the Dependency Error, so no index has to be dropped first. A column that still cannot be
+    /// added logs one Error naming the table and column and the loop moves on, so the start continues and the
+    /// next start retries it.
+    /// </summary>
+    internal async Task AddMissingColumnsAsync(DuckDBConnection connection, IEnumerable<(int Version, string Table, string Column, string Type)> columns)
+    {
+        var wanted = columns.ToList();
+        if (wanted.Count == 0)
+            return;
+
+        var tablesPresent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var columnsPresent = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var probe = connection.CreateCommand();
+            probe.CommandText = "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'main' AND table_name IN ("
+                + string.Join(", ", wanted.Select(c => $"'{c.Table}'").Distinct()) + ")";
+            using var reader = await probe.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
             {
-                "ag_replica_states",
-                "ag_database_replica_states",
-            })
+                tablesPresent.Add(reader.GetString(0));
+                columnsPresent.Add(reader.GetString(0) + "." + reader.GetString(1));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError("Could not read which columns exist, so the check for missing schema columns was skipped; the next start retries it: {Error}", ex.Message);
+            return;
+        }
+
+        foreach (var (version, table, column, type) in wanted)
+        {
+            if (!tablesPresent.Contains(table) || columnsPresent.Contains(table + "." + column))
+                continue;
+
+            try
             {
-                try
-                {
-                    await ExecuteNonQueryAsync(connection,
-                        $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS group_id VARCHAR");
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogWarning("Migration to v65 on {Table}.group_id encountered an error (non-fatal): {Error}", table, ex.Message);
-                }
+                /* Not ExecuteNonQueryAsync: that helper logs its own Error with the whole statement before it
+                   rethrows, and a failed add must log exactly ONE Error, the one below that names the column. */
+                using var alter = connection.CreateCommand();
+                alter.CommandText = $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}";
+                await alter.ExecuteNonQueryAsync();
+                _logger?.LogInformation("Added missing column {Table}.{Column} {Type} (schema v{Version})", table, column, type, version);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError("Adding column {Table}.{Column} {Type} (schema v{Version}) failed; the start continues and the next start retries it: {Error}",
+                    table, column, type, version, ex.Message);
             }
         }
     }
