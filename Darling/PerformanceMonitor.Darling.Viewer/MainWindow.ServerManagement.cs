@@ -695,6 +695,7 @@ public partial class MainWindow
             await LoadServersAsync(preserveSelection: true);
             var msg = $"Added {dialog.AddedCount} server(s)";
             if (dialog.SkippedCount > 0) msg += $", skipped {dialog.SkippedCount} duplicate(s)";
+            if (dialog.CollidedCount > 0) msg += $", {dialog.CollidedCount} collided (id matches another server)";
             if (dialog.FailedCount > 0) msg += $", {dialog.FailedCount} failed";
             StatusText.Text = msg + ". The Darling service will start collecting them on its next reload.";
         }
