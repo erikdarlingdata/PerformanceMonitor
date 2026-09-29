@@ -23,9 +23,9 @@ namespace PerformanceMonitor.Darling.Viewer;
 /// <c>sysjobhistory</c> row (a step or the step_id 0 job-outcome). The Darling twin of Lite's
 /// <c>JobHistoryRow</c>: the same duration / step / retry display helpers and the same failure /
 /// long-runtime / retry flags for the grid's color-coding. run_datetime is the monitored server's LOCAL
-/// wall clock, so <see cref="ViewerDataService.GetJobHistoryAsync"/> de-skews it to naive-UTC in SQL
-/// (subtracting <c>server_properties.utc_offset_minutes</c>) before it reaches this row — exactly like the
-/// Default Trace reader — so <see cref="RunTimeLocal"/> renders through the same
+/// wall clock, so <see cref="ViewerDataService.GetJobHistoryAsync"/> converts it to naive-UTC in C# with the
+/// server's <see cref="ServerClock"/> before it reaches this row — exactly like the Default Trace reader
+/// (#4766) — so <see cref="RunTimeLocal"/> renders through the same
 /// <see cref="ViewerTimeHelper.ForDisplay"/> as every other viewer grid and sorts consistently with them.
 /// </summary>
 public sealed class ViewerJobHistoryRow
@@ -228,6 +228,15 @@ WHERE utc_offset_minutes IS NOT NULL
     }
 
     /// <summary>
+    /// <paramref name="serverId"/>'s entry in <paramref name="clocks"/>, else the UTC clock: a server with no
+    /// collected offset has its stored times read as UTC, as the old SQL's <c>COALESCE(..., 0)</c> did (#4766).
+    /// </summary>
+    internal static ServerClock ClockFor(IReadOnlyDictionary<int, ServerClock> clocks, int serverId)
+    {
+        return clocks.TryGetValue(serverId, out var known) ? known : ServerClock.Utc;
+    }
+
+    /// <summary>
     /// Builds <see cref="GetJobHistoryAsync"/>'s SQL text, split out so Darling.Tests can pin both parameter
     /// shapes (fleet-wide and single-server) without a live Postgres. $1 window start (naive UTC); when
     /// <paramref name="scopedToServer"/>, $2 server_id and the floor moves to $3, the limit to $4 — otherwise
@@ -416,7 +425,7 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     internal static ViewerJobHistoryRow ReadJobHistoryRow(DbDataReader reader, IReadOnlyDictionary<int, ServerClock> clocks)
     {
         var serverId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
-        var clock = clocks.TryGetValue(serverId, out var known) ? known : ServerClock.Utc;
+        var clock = ClockFor(clocks, serverId);
 
         return new()
         {
@@ -443,51 +452,17 @@ ORDER BY base.approx_run_utc DESC, base.instance_id DESC";
     /// <summary>
     /// The latest SQL Agent status snapshot per server (issue #1433 Phase 2) — Running/Stopped, startup
     /// type, and next scheduled run — read from the base <c>agent_status</c> table (newest row per server).
-    /// <c>next_scheduled_run</c> is the server's local wall clock (from msdb), so it is de-skewed to
-    /// naive-UTC in SQL (like the job run times) and rendered in the viewer's local time. With no
-    /// <paramref name="serverId"/> it returns one row per server (the fleet header roll-up); with one it
-    /// scopes to that server. The tab header consumes this; the "Agent Not Running" self-alert reads the same
-    /// <c>agent_status</c> data service-side.
+    /// <c>next_scheduled_run</c> is the server's local wall clock (from msdb), so the SQL returns it raw and
+    /// it is converted to naive-UTC in C# with that server's <see cref="ServerClock"/> (like the job run
+    /// times, so a next run on the far side of a daylight-saving change lands at its real UTC time), then
+    /// rendered in the viewer's local time. With no <paramref name="serverId"/> it returns one row per server
+    /// (the fleet header roll-up); with one it scopes to that server. The tab header consumes this; the
+    /// "Agent Not Running" self-alert reads the same <c>agent_status</c> data service-side.
     /// </summary>
     public async Task<List<ViewerAgentStatusRow>> GetAgentStatusAsync(int? serverId = null, CancellationToken cancellationToken = default)
     {
-        var serverFilter = serverId.HasValue ? "WHERE a.server_id = $1" : string.Empty;
-
-        var sql = $@"
-WITH svr AS (
-    SELECT DISTINCT ON (server_id)
-        server_id,
-        utc_offset_minutes
-    FROM server_properties
-    WHERE utc_offset_minutes IS NOT NULL
-    ORDER BY server_id, collection_time DESC
-),
-latest AS (
-    SELECT
-        a.server_id,
-        COALESCE(reg.display_name, a.server_name) AS server_name,
-        a.agent_running,
-        a.agent_status_desc,
-        a.agent_startup_desc,
-        a.next_scheduled_run - make_interval(mins => COALESCE(svr.utc_offset_minutes, 0)) AS next_scheduled_run_utc,
-        ROW_NUMBER() OVER (PARTITION BY a.server_id ORDER BY a.collection_time DESC) AS rn
-    FROM agent_status AS a
-    LEFT JOIN svr ON svr.server_id = a.server_id
-    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
-    {serverFilter}
-)
-SELECT
-    server_id,
-    server_name,
-    agent_running,
-    agent_status_desc,
-    agent_startup_desc,
-    next_scheduled_run_utc
-FROM latest
-WHERE rn = 1
-ORDER BY server_name";
-
-        var rows = new List<ViewerAgentStatusRow>();
+        var sql = BuildAgentStatusSql(serverId.HasValue);
+        var clocks = await GetServerClocksAsync(serverId, cancellationToken);
 
         await using var command = _dataSource.CreateCommand(sql);
         command.CommandTimeout = ViewerCommandDeadlines.CurrentInteractiveReadSeconds;
@@ -497,16 +472,67 @@ ORDER BY server_name";
         }
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await ReadAgentStatusRowsAsync(reader, clocks, cancellationToken);
+    }
+
+    /// <summary>
+    /// Builds <see cref="GetAgentStatusAsync"/>'s SQL text, split out so Darling.Tests can pin both shapes
+    /// (fleet-wide and single-server) without a live Postgres. When <paramref name="scopedToServer"/>, $1 is
+    /// the server_id. The next run leaves as the server's own wall clock (<c>next_scheduled_run_local</c>);
+    /// <see cref="ReadAgentStatusRowsAsync"/> converts it (#4766).
+    /// </summary>
+    internal static string BuildAgentStatusSql(bool scopedToServer)
+    {
+        var serverFilter = scopedToServer ? "WHERE a.server_id = $1" : string.Empty;
+
+        return $@"
+WITH latest AS (
+    SELECT
+        a.server_id,
+        COALESCE(reg.display_name, a.server_name) AS server_name,
+        a.agent_running,
+        a.agent_status_desc,
+        a.agent_startup_desc,
+        a.next_scheduled_run AS next_scheduled_run_local,
+        ROW_NUMBER() OVER (PARTITION BY a.server_id ORDER BY a.collection_time DESC) AS rn
+    FROM agent_status AS a
+    LEFT JOIN servers AS reg ON reg.server_id = a.server_id
+    {serverFilter}
+)
+SELECT
+    server_id,
+    server_name,
+    agent_running,
+    agent_status_desc,
+    agent_startup_desc,
+    next_scheduled_run_local
+FROM latest
+WHERE rn = 1
+ORDER BY server_name";
+    }
+
+    /// <summary>
+    /// Maps <see cref="BuildAgentStatusSql"/>'s result set. The next scheduled run arrives as the server's
+    /// own wall clock and leaves as naive UTC, converted with that row's server clock from
+    /// <paramref name="clocks"/> (UTC when it has none).
+    /// </summary>
+    internal static async Task<List<ViewerAgentStatusRow>> ReadAgentStatusRowsAsync(
+        DbDataReader reader, IReadOnlyDictionary<int, ServerClock> clocks, CancellationToken cancellationToken)
+    {
+        var rows = new List<ViewerAgentStatusRow>();
+
         while (await reader.ReadAsync(cancellationToken))
         {
+            var serverId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0);
+
             rows.Add(new ViewerAgentStatusRow
             {
-                ServerId = reader.IsDBNull(0) ? 0 : reader.GetInt32(0),
+                ServerId = serverId,
                 ServerName = reader.IsDBNull(1) ? "" : reader.GetString(1),
                 AgentRunning = !reader.IsDBNull(2) && reader.GetBoolean(2),
                 AgentStatusDesc = reader.IsDBNull(3) ? null : reader.GetString(3),
                 AgentStartupDesc = reader.IsDBNull(4) ? null : reader.GetString(4),
-                NextScheduledRunUtc = reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+                NextScheduledRunUtc = reader.IsDBNull(5) ? null : ClockFor(clocks, serverId).ToUtc(reader.GetDateTime(5)),
             });
         }
 
@@ -517,7 +543,8 @@ ORDER BY server_name";
 /// <summary>
 /// The latest SQL Agent status snapshot for one server (issue #1433 Phase 2) — the Darling twin of Lite's
 /// <c>AgentStatusRow</c>. Drives the Job History tab header and the "Agent Not Running" self-alert.
-/// next_scheduled_run is de-skewed to naive-UTC in SQL and rendered in the viewer's local time.
+/// next_scheduled_run is converted to naive-UTC in C# with the server's clock and rendered in the viewer's
+/// local time.
 /// </summary>
 public sealed class ViewerAgentStatusRow
 {
