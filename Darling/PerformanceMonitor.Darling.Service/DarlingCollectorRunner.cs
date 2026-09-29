@@ -1538,7 +1538,7 @@ public sealed class DarlingCollectorRunner
     {
         try
         {
-            return await RunCoreAsync(definition, server, cancellationToken);
+            return await RunWithSplitCharacterRetryAsync(definition, server, cancellationToken);
         }
         catch
         {
@@ -1818,9 +1818,43 @@ public sealed class DarlingCollectorRunner
         _databaseWatermarkCache.Advance(server.ServerId, database, staged.BatchMax, staged.CollectionTime);
     }
 
+    /// <summary>
+    /// #4735 item 1: a text read of the log tail that starts inside a multi-byte character is refused by PostgreSQL
+    /// (22021) before this process sees a byte, and it says the same about a real bad byte. The read is repeated in
+    /// the same cycle with its start moved forward by 1, then 2, then 3 bytes, which reaches a character boundary
+    /// when the start was the cause. The attempts write no ERROR row: only the last refusal leaves this method,
+    /// and the general handler records that one as it always did. Recognised by SQLSTATE, on the text route of
+    /// the three log-tail collectors, and never for a proven write to the store.
+    /// </summary>
+    private async Task<CollectorRunResult> RunWithSplitCharacterRetryAsync<TRow>(
+        ICollectorDefinition<TRow> definition,
+        ServerRuntime server,
+        CancellationToken cancellationToken)
+    {
+        for (var shift = 0; ; shift++)
+        {
+            try
+            {
+                return await RunCoreAsync(definition, server, shift, cancellationToken);
+            }
+            catch (PostgresException pg) when (ReadsPgServerLogTail(definition.Name)
+                && !CollectorFaultCopyPhase.IsProvenStoreWrite(pg)
+                && PgServerLogTail.ShouldRetryFromLaterStart(
+                    pg.SqlState, shift,
+                    PgReadBinaryFileCapability.TryGetCachedVerdict(ReadBinaryFileCacheKey(server), out var granted) && granted))
+            {
+                _logger?.LogDebug(
+                    "{Collector} on '{Server}': PostgreSQL refused the log slice as not valid in the database encoding; "
+                    + "retrying with the read start moved forward {Shift} byte(s) (#4735)",
+                    definition.Name, server.Config.DisplayName, shift + 1);
+            }
+        }
+    }
+
     private async Task<CollectorRunResult> RunCoreAsync<TRow>(
         ICollectorDefinition<TRow> definition,
         ServerRuntime server,
+        int pgLogReadShiftBytes,
         CancellationToken cancellationToken)
     {
         /* #3936: nudged forward (by, in practice, a handful of ticks) rather than a bare DateTime.UtcNow
@@ -2018,6 +2052,8 @@ public sealed class DarlingCollectorRunner
                Only this path is gated: FetchRowsAsync below is the on-demand live fetch, which an
                operator asked for by name and which stores nothing, so it always renders. */
             CapturePlanXml = ShouldCapturePlanXmlFor(definition.Name, server.ServerId),
+            /* #4735 item 1: 0 on the first attempt; RunWithSplitCharacterRetryAsync raises it after a 22021. */
+            PgLogReadShiftBytes = pgLogReadShiftBytes,
             /* #2150: ON. query_sql_text is no longer carried on every runtime-stats row — it is fetched once
                per query_id into collect.query_store_text (FetchAndStoreQueryTextAsync, below) and resolved
                back by the readers, all six of which now prefer that table and fall back to the fact row's

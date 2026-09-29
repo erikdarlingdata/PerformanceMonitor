@@ -54,10 +54,12 @@ public sealed class PgLogTailSplitCharacterTests
         if (shifts)
         {
             /* The shifted start feeds BOTH the read and the resume row, so the next offset counts from where the
-               retry actually started. Two uses of the shifted column, none of the unshifted one inside the read. */
+               retry actually started: the read call takes the shifted column, and the tail exposes it as read_from. */
             var readCall = sql[sql.IndexOf("pg_catalog.pg_read_file(", StringComparison.Ordinal)..];
             readCall = readCall[..readCall.IndexOf(") AS body", StringComparison.Ordinal)];
-            Assert.Contains("@log_read_shift", readCall, StringComparison.Ordinal);
+            Assert.Contains("n.read_from + sh.shift", readCall, StringComparison.Ordinal);
+            Assert.Contains("n.read_from + sh.shift AS read_from", sql, StringComparison.Ordinal);
+            Assert.Contains("CAST(@log_read_shift AS bigint) AS shift", sql, StringComparison.Ordinal);
         }
     }
 

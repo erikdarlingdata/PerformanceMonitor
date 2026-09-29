@@ -196,6 +196,33 @@ public static class PgServerLogTail
         + "log_bytes_skipped counts the bytes before it that no read covered (#4699)";
 
     /// <summary>
+    /// The SQLSTATE PostgreSQL gives a <c>pg_read_file</c> slice that is not valid in the database encoding
+    /// (#4735), <c>character_not_in_repertoire</c>. Recognised by this state, never by the message text.
+    /// </summary>
+    public const string EncodingRefusalSqlState = "22021";
+
+    /// <summary>
+    /// How far a text read's start is moved forward, one byte at a time, after PostgreSQL refuses it with
+    /// <see cref="EncodingRefusalSqlState"/> (#4735). A read with no saved position starts <see cref="TailBytes"/>
+    /// before the end of the file, and that byte can be inside a multi-byte character. A UTF-8 character has at
+    /// most three continuation bytes, so a start moved by 1, 2 and 3 bytes reaches a character boundary.
+    /// </summary>
+    public const int MaxSplitCharacterShift = 3;
+
+    /// <summary>
+    /// Whether a text read that PostgreSQL refused is worth repeating from a start moved one byte further
+    /// (#4735): the refusal is the encoding one, fewer than <see cref="MaxSplitCharacterShift"/> shifts have been
+    /// tried, and the read was the text route. A binary-route read returns bytea, which carries no encoding check.
+    /// </summary>
+    public static bool ShouldRetryFromLaterStart(string? sqlState, int shift, bool binaryRoute) =>
+        !binaryRoute
+        && shift < MaxSplitCharacterShift
+        && string.Equals(sqlState, EncodingRefusalSqlState, StringComparison.Ordinal);
+
+    /// <summary>The bound parameter the text tails add to their read start (#4735). Zero is an ordinary read.</summary>
+    public const string ReadShiftParameter = "@log_read_shift";
+
+    /// <summary>
     /// The query for a consumer of the stderr tail: the text plus the two resume parameters, bound from
     /// <see cref="CollectorContext.State"/> (NULL on first contact).
     /// </summary>
@@ -212,11 +239,20 @@ public static class PgServerLogTail
             offset = o;
         }
 
-        return new CollectorQuery(text, new[]
+        var parameters = new List<CollectorParameter>
         {
             new CollectorParameter("@log_resume_file", file, CollectorParameterType.NVarChar260),
             new CollectorParameter("@log_resume_offset", offset, CollectorParameterType.BigInt),
-        });
+        };
+
+        /* #4735: only the text tails move their read start, and only they name the parameter. Binding it for a text
+           that never uses it would hand the server a parameter it has no place for. */
+        if (text.Contains(ReadShiftParameter, StringComparison.Ordinal))
+        {
+            parameters.Add(new CollectorParameter(ReadShiftParameter, (long)context.PgLogReadShiftBytes, CollectorParameterType.BigInt));
+        }
+
+        return new CollectorQuery(text, parameters);
     }
 
     /// <summary>Parses <c>"&lt;offset&gt;|&lt;file name&gt;"</c>; false for anything else.</summary>
@@ -376,12 +412,13 @@ ranges AS (
     LEFT JOIN marked AS m ON true
 ),
 tail AS (
-    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
+    SELECT n.part, n.name, n.read_from + sh.shift AS read_from, n.skipped_bytes,
            pg_catalog.pg_read_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               n.read_from,
+               n.read_from + sh.shift,
                " + TailBytesLiteral + @") AS body
     FROM ranges AS n
+    CROSS JOIN (SELECT CAST(@log_read_shift AS bigint) AS shift) AS sh
 ),
 resume AS (
     SELECT t.name,
@@ -530,12 +567,13 @@ ranges AS (
     LEFT JOIN marked AS m ON true
 ),
 tail AS (
-    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
+    SELECT n.part, n.name, n.read_from + sh.shift AS read_from, n.skipped_bytes,
            pg_catalog.pg_read_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               n.read_from,
+               n.read_from + sh.shift,
                " + TailBytesLiteral + @") AS body
     FROM ranges AS n
+    CROSS JOIN (SELECT CAST(@log_read_shift AS bigint) AS shift) AS sh
 ),
 resume AS (
     SELECT t.name,
@@ -681,12 +719,13 @@ ranges AS (
     LEFT JOIN marked AS m ON true
 ),
 tail AS (
-    SELECT n.part, n.name, n.read_from, n.skipped_bytes,
+    SELECT n.part, n.name, n.read_from + sh.shift AS read_from, n.skipped_bytes,
            pg_catalog.pg_read_file(
                pg_catalog.current_setting('log_directory') || '/' || n.name,
-               n.read_from,
+               n.read_from + sh.shift,
                " + TailBytesLiteral + @") AS body
     FROM ranges AS n
+    CROSS JOIN (SELECT CAST(@log_read_shift AS bigint) AS shift) AS sh
 ),
 resume AS (
     SELECT t.name,
