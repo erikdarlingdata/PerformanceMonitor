@@ -433,6 +433,42 @@ public sealed class ViewerReadOnlyTests
 /// </summary>
 public sealed class ViewerSchemaVersionGateTests
 {
+    /// <summary>
+    /// The Collection Health tab reads the store's schema version once per session (#4767), not on every
+    /// refresh. The version probe is one round trip of about 130 EXISTS arms, and the tab refreshes every 30
+    /// seconds; the Query Store and trend reads already go through <c>_cachedStoreSchemaVersion</c>. There is
+    /// no seam that counts probe round trips without a live store, so this pins the call shape: every call
+    /// to <c>GetStoreSchemaVersionAsync</c> in the tab's read file is the cached-field form, which keeps
+    /// reading again only while the result is null.
+    /// </summary>
+    [Fact]
+    public void TheCollectionHealthTab_ReadsTheSchemaVersionThroughTheCachedField()
+    {
+        var path = Path.GetFullPath(Path.Combine(
+            Path.GetDirectoryName(ThisFile())!, "..", "PerformanceMonitor.Darling.Viewer", "ViewerDataService.CollectionHealth.cs"));
+        var code = CSharpSourceWalker.StripCommentsAndStrings(File.ReadAllText(path));
+
+        var searchFrom = 0;
+        var calls = 0;
+        while (true)
+        {
+            var at = code.IndexOf("GetStoreSchemaVersionAsync(", searchFrom, StringComparison.Ordinal);
+            if (at < 0)
+            {
+                break;
+            }
+
+            calls++;
+            var before = code[Math.Max(0, at - 80)..at];
+            Assert.EndsWith("_cachedStoreSchemaVersion ??= await ", before.TrimEnd() + " ", StringComparison.Ordinal);
+            searchFrom = at + 1;
+        }
+
+        Assert.True(calls > 0, "the tab no longer reads the schema version; retire this pin with the read");
+    }
+
+    private static string ThisFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+
     [Fact]
     public void StoreSchemaProbeSql_ProbesInformationSchema_ForTheV17ToV25Sentinels()
     {

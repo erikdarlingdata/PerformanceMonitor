@@ -922,8 +922,9 @@ public static class FleetSweepEngine
     /// <summary>One server's signals over the span — the shared daily-summary aggregate, summed across
     /// the UTC-day buckets the statement returns (exact: every signal is an additive count over the
     /// same half-open window). A fault is CAUGHT into the reading, because for a per-server read the
-    /// honest rendering is a dead instrument on that server's card, not a lost sweep.</summary>
-    private static async Task<FleetSweepServerReading> ReadServerSignalsAsync(
+    /// honest rendering is a dead instrument on that server's card, not a lost sweep. Internal so the
+    /// live read test can drive it against a scratch store.</summary>
+    internal static async Task<FleetSweepServerReading> ReadServerSignalsAsync(
         NpgsqlDataSource postgres,
         int serverId,
         string serverName,
@@ -940,7 +941,7 @@ public static class FleetSweepEngine
 
             var signals = new DailyHealthSignals
             {
-                HasData = rows.Count > 0,
+                HasData = SpanHasData(rows),
                 Deadlocks = rows.Sum(r => r.DeadlockCount),
                 CollectionErrors = rows.Sum(r => r.CollectionErrors),
                 /* #3539 A2: runs sum exactly as the errors do (additive counts over one half-open window),
@@ -970,6 +971,18 @@ public static class FleetSweepEngine
         {
             return new FleetSweepServerReading(serverId, serverName, default, 0L, ex.Message);
         }
+    }
+
+    /// <summary>Whether a span holds any collection at all (#4747). The day spine that
+    /// <see cref="DailySummarySql.RangeSql"/> returns also holds a day that only has alert rows: a server
+    /// that cannot be reached writes no collection-log row, but its "Collection Stopped" self-alert keeps
+    /// firing, so an outage span comes back as one row with alerts and zero collector runs. Counting that
+    /// row as data banded the outage Warning, counted it in <c>servers_reported</c> and hid the
+    /// collection-stale item. Only collector runs (every status) prove the collectors were running, so
+    /// the rule is the run count.</summary>
+    internal static bool SpanHasData(IEnumerable<DarlingHealthReader.DailySummaryReadRow> rows)
+    {
+        return rows.Sum(r => r.CollectionRuns) > 0;
     }
 
     /// <summary>The deadlock band's tiers from the store's singleton settings row (#3368, V120) — the

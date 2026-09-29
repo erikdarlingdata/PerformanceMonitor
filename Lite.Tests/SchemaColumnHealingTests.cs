@@ -11,13 +11,13 @@ using Xunit;
 namespace PerformanceMonitorLite.Tests;
 
 /// <summary>
-/// #4727 item 2: the columns that schema versions 60 to 65 add are re-applied on every start of an existing
+/// #4727 item 2: the columns that schema versions 60 to 66 add are re-applied on every start of an existing
 /// data file, so a file where one failed to apply (or that was stamped without it) gets it back instead of
 /// failing every batch for that table. The stamp is not held back: the heal does not depend on it.
 /// </summary>
 public sealed class SchemaColumnHealingTests : IDisposable
 {
-    /// <summary>The 15 columns versions 60 to 65 add, spelled out here on purpose so a trimmed production list fails.</summary>
+    /// <summary>The 16 columns versions 60 to 66 add, spelled out here on purpose so a trimmed production list fails.</summary>
     private static readonly (string Table, string Column, string Type)[] NewerColumns =
     {
         ("wait_stats", "sample_interval_seconds", "INTEGER"),
@@ -35,6 +35,7 @@ public sealed class SchemaColumnHealingTests : IDisposable
         ("query_store_health", "wait_stats_capture_mode", "VARCHAR"),
         ("ag_replica_states", "group_id", "VARCHAR"),
         ("ag_database_replica_states", "group_id", "VARCHAR"),
+        ("query_store_stats", "interval_end_time_utc", "TIMESTAMP"),
     };
 
     private readonly string _tempDir;
