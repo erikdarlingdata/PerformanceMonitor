@@ -552,13 +552,17 @@ ORDER BY c.bucket";
     /// threw and was isolated; <see cref="HolesForced"/> the holes the plain refresh left standing and the
     /// forced one had to close. <see cref="Elapsed"/> is the pass's own wall clock from entry to return —
     /// the detect, every probe, every refresh — and not the caller's connection open. <see
-    /// cref="DailyBucketsChained"/> (#4300) is the buckets a repaired successor-hourly range's
-    /// dependent successor DAILY was ALSO refreshed over — added last so every existing construction site
-    /// keeps compiling unchanged; a failed daily chase is not counted here (it is isolated and logged
-    /// separately, never surfaced as a <see cref="Failures"/> of the hourly repair itself). Counted the same
-    /// way whether the closed seam range came from the hourly seam-only repair or the start-path full walk
-    /// (<c>seamOnly: false</c>) — both callers share the one chase. A day the hourly underneath still holds
-    /// a hole for is never counted here: the chase defers rather than chaining a partial day.</para>
+    /// cref="DailyBucketsChained"/> (#4300, #4716) is the DAYS of a dependent daily that a closed repair
+    /// range was ALSO refreshed over — added last so every existing construction site keeps compiling
+    /// unchanged. It sums two things: the days the seam chase refreshes (#4300: the part of a closed seam
+    /// range older than the successor daily's own 3-day window, whether or not the daily held a row yet), and
+    /// the days a closed hourly range (seam OR ordinary loop, #4716) invalidated in a daily that already held
+    /// a bucket for them, plus the dailies chained behind those (interval_daily to daygrain_daily). A failed
+    /// daily refresh is not counted here (it is isolated and logged separately, never surfaced as a <see
+    /// cref="Failures"/> of the hourly repair itself). Counted the same way whether the closed range came
+    /// from the hourly seam-only repair or the start-path full walk (<c>seamOnly: false</c>). A day the
+    /// hourly underneath still holds a hole for is never counted here: the chase defers, and the #4716
+    /// refresh runs only for a range that closed.</para>
     /// </summary>
     public sealed record MaterializationHoleRepairSummary(
         int AggregatesScanned, int AggregatesSkipped, int HolesFound, int BucketsFound, int HolesRepaired, int BucketsRepaired, int HolesDeferred, int BucketsDeferred, int HolesRemaining, int Failures, int HolesForced, TimeSpan Elapsed, int DailyBucketsChained = 0);
@@ -857,6 +861,13 @@ ORDER BY c.bucket";
                             target.View, buckets, start.ToString("O", CultureInfo.InvariantCulture), end.ToString("O", CultureInfo.InvariantCulture),
                             forced ? "a plain refresh left it standing (no invalidation behind it) and one forced refresh" : "one refresh",
                             stopwatch.Elapsed.TotalSeconds);
+
+                        /* #4716: the closed range invalidated the day above it in every dependent daily that already
+                           holds a bucket for that day. Runs for the seam loop AND the ordinary loop (both call this),
+                           only once the range is whole (a range with holes standing is not ready to back a day), and
+                           is failure-isolated inside: it never fails the hourly repair. */
+                        dailyBucketsChained += await RefreshDependentDailiesAsync(
+                            connection, logger, disclosure, target.View, CompleteDaysTouched(start, end, utcNow), cancellationToken);
                     }
                     else
                     {
@@ -1257,6 +1268,144 @@ ORDER BY c.bucket";
         }
 
         return (alignedStart, chainEnd);
+    }
+
+    /// <summary>
+    /// #4716: the non-frozen DAILY rollups built directly on <paramref name="view"/> — <see cref="RollupViews"/>
+    /// rows whose <c>Source</c> is the view and whose width is a day, kept to <see cref="DailyAggregates"/> so a
+    /// frozen legacy daily (which the freeze forbids refreshing) never appears. Derived, never hand-listed.
+    /// <c>query_store_stats_interval_hourly</c> has two (corrected and interval); a daily's own dependents chain
+    /// on (<c>query_store_stats_interval_daily</c> feeds <c>query_store_stats_daygrain_daily</c>); an hourly
+    /// that reads another hourly (<c>query_store_stats_corrected_hourly</c>) is excluded by its width.
+    /// </summary>
+    public static IReadOnlyList<string> DependentDailiesOf(string view) =>
+        RollupViews
+            .Where(r => r.BucketWidth == DailyBucket
+                && string.Equals(r.Source, view, StringComparison.Ordinal)
+                && DailyAggregates.Any(a => string.Equals(a.View, r.View, StringComparison.Ordinal)))
+            .Select(r => r.View)
+            .ToArray();
+
+    /// <summary>
+    /// #4716: the whole days a just-closed repaired range <c>[repairedStart, repairedEnd)</c> touched and that are
+    /// COMPLETE at <paramref name="utcNow"/> — aligned out to whole days, oldest first, dropping any day whose end
+    /// is after <c>AlignDown(utcNow, 1 day)</c> (the day still filling belongs to the daily's own policy). No
+    /// clip to the daily policy's 3-day window: a complete day the daily already holds is refreshed wherever it
+    /// sits. Pure, so the tests can walk it without a live store.
+    /// </summary>
+    public static IReadOnlyList<DateTime> CompleteDaysTouched(DateTime repairedStart, DateTime repairedEnd, DateTime utcNow)
+    {
+        var days = new List<DateTime>();
+        if (repairedEnd <= repairedStart)
+        {
+            return days;
+        }
+
+        var completeBefore = AlignDown(utcNow, DailyBucket);
+        for (var day = AlignDown(repairedStart, DailyBucket); day < repairedEnd; day += DailyBucket)
+        {
+            if (day + DailyBucket <= completeBefore)
+            {
+                days.Add(day);
+            }
+        }
+
+        return days;
+    }
+
+    /// <summary>Does the daily's MATERIALIZATION hypertable hold a bucket for <paramref name="day"/>? Probed on the
+    /// materialization, never the view (a real-time view shows rows that are not materialized), with the same
+    /// <c>OFFSET 0</c> fence the hole scan uses (#3933) so it stays a per-day probe.</summary>
+    private static async Task<bool> DailyRowExistsAsync(
+        NpgsqlConnection connection, (string Schema, string Name) materialization, DateTime day, CancellationToken cancellationToken)
+    {
+        using var probe = new NpgsqlCommand(
+            $"SELECT EXISTS (SELECT 1 FROM {QuoteIdentifier(materialization.Schema)}.{QuoteIdentifier(materialization.Name)} AS m WHERE m.bucket = $1::timestamp OFFSET 0)",
+            connection) { CommandTimeout = SetupTimeoutSeconds };
+        probe.Parameters.AddWithValue(DateTime.SpecifyKind(day, DateTimeKind.Unspecified));
+        return (bool)(await probe.ExecuteScalarAsync(cancellationToken))!;
+    }
+
+    /// <summary>
+    /// #4716: after an hourly range closes, force-refresh the days of every dependent daily that already holds a
+    /// bucket for them. A hole repair invalidates the day above it, but the ordinary repair loop repaired only the
+    /// hourly and the daily chase ran only from the seam loop, so a day older than the daily policy's 3-day window
+    /// stayed partial — and became the only copy when the hourly aged out. Per dependent daily: the complete days
+    /// (<see cref="CompleteDaysTouched"/>) that have a MATERIALIZED row (<see cref="DailyRowExistsAsync"/>), oldest
+    /// first, at most <see cref="MaterializationHoleRepairCapBuckets"/> days for the daily tier per call, each with
+    /// <see cref="RollupBackfill.RepairAsync"/> (plain refresh where the engine has no forced form, SQLSTATE 42883).
+    /// A day with no row is left alone: the daily's own hole scan materializes it. The days refreshed chain on to
+    /// the daily's own dependents (interval_daily to daygrain_daily). Failure-isolated per daily — a throw is
+    /// logged at Warning and never fails the hourly repair whose range just closed. Returns the days refreshed.
+    /// </summary>
+    private static async Task<int> RefreshDependentDailiesAsync(
+        NpgsqlConnection connection, ILogger? logger, RefreshDisclosure disclosure, string closedView,
+        IReadOnlyList<DateTime> touchedDays, CancellationToken cancellationToken)
+    {
+        var refreshedTotal = 0;
+        if (touchedDays.Count == 0)
+        {
+            return refreshedTotal;
+        }
+
+        foreach (var daily in DependentDailiesOf(closedView))
+        {
+            try
+            {
+                var materialization = await ResolveMaterializationAsync(connection, daily, cancellationToken);
+                if (materialization is null)
+                {
+                    continue;
+                }
+
+                var cap = MaterializationHoleRepairCapBuckets(DailyBucket);
+                var kept = new List<DateTime>();
+                foreach (var day in touchedDays)
+                {
+                    if (kept.Count >= cap)
+                    {
+                        break;
+                    }
+
+                    if (await DailyRowExistsAsync(connection, materialization.Value, day, cancellationToken))
+                    {
+                        kept.Add(day);
+                    }
+                }
+
+                if (kept.Count == 0)
+                {
+                    continue;
+                }
+
+                foreach (var day in kept)
+                {
+                    try
+                    {
+                        await RollupBackfill.RepairAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
+                    }
+                    catch (PostgresException ex) when (ex.SqlState == RollupBackfill.UndefinedFunctionSqlState)
+                    {
+                        await RollupBackfill.RunSliceAsync(connection, daily, day, day + DailyBucket, disclosure, cancellationToken);
+                    }
+                }
+
+                refreshedTotal += kept.Count;
+                logger?.LogInformation(
+                    "Materialization-hole repair (#4716): {Hourly}'s repaired range invalidated {Days} day(s) of {Daily} that it already held a bucket for ({FirstDay} to {LastDay}) — refreshed them so a partial day does not stand until the source ages out.",
+                    closedView, kept.Count, daily, kept[0].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), kept[^1].ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+
+                refreshedTotal += await RefreshDependentDailiesAsync(connection, logger, disclosure, daily, kept, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger?.LogWarning(
+                    "Materialization-hole repair (#4716): could not refresh the days of {Daily} that {View}'s repaired range invalidated this run — re-judged on a later run: {Message}",
+                    daily, closedView, ex.Message);
+            }
+        }
+
+        return refreshedTotal;
     }
 
     /// <summary>
